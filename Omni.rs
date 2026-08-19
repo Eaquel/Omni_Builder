@@ -99,6 +99,59 @@
 //!   record in the toolchain lock.
 //! * **Status.** ACCEPTED.
 //!
+//! ### ADR-0005 — CMake is provisioned from upstream, not from the Android SDK
+//!
+//! * **Context.** Directive section 14 pins CMake 4.x, and the chosen point
+//!   release is 4.4.2. `sdkmanager` publishes CMake only up to 4.1.2.
+//! * **Alternatives.** (a) Accept the newest CMake the SDK offers. (b) Let AGP
+//!   choose, which silently installs 3.22.1. (c) Provision 4.4.2 from Kitware and
+//!   point AGP at it with `cmake.dir`.
+//! * **Decision.** (c).
+//! * **Reason.** (b) is an unpinned toolchain, which section 14 forbids outright.
+//!   (a) would quietly rewrite the pin to whatever Google happens to ship. (c)
+//!   keeps the pin exact and the provenance explicit.
+//! * **Tradeoffs.** The build depends on a `cmake.dir` entry in
+//!   `local.properties`, which is host-specific and not committed. The
+//!   `verifyCmakeToolchain` task turns a missing or mismatched entry into a
+//!   precise failure instead of a confusing one. The Kitware archive ships no
+//!   Ninja, so the generator is taken from the SDK's own CMake package.
+//! * **Security impact.** The archive is verified against a recorded SHA-256
+//!   before use (directive section 31); nothing is trusted because it downloaded
+//!   successfully.
+//! * **Performance impact.** None.
+//! * **Migration plan.** When the SDK publishes 4.4.2 or later, the provisioning
+//!   step can be replaced by an `sdkmanager` package and this ADR superseded.
+//! * **Status.** ACCEPTED.
+//!
+//! ### ADR-0006 — Kotlin is pinned by dependency resolution, not by AGP
+//!
+//! * **Context.** From AGP 9.0 the Android plugin carries its own Kotlin and
+//!   offers no DSL to select the version; `android.builtInKotlin` only turns the
+//!   feature on or off. AGP 9.3.0 supplies Kotlin 2.2.10. Directive section 14
+//!   pins 2.4.10, and the pin is not negotiable.
+//! * **Alternatives.** (a) Accept 2.2.10 and record the drift. (b) Set
+//!   `android.builtInKotlin=false`, which also requires `android.newDsl=false`,
+//!   and apply the standalone Kotlin plugin. (c) Force every
+//!   `org.jetbrains.kotlin` module to 2.4.10 through a resolution rule.
+//! * **Decision.** (c).
+//! * **Reason.** (a) leaves the toolchain lock unmet, which section 14 does not
+//!   permit. (b) works today but is removed in AGP 10 and would force this
+//!   project back onto a deprecated DSL. (c) uses the mechanism the Kotlin Build
+//!   Tools API exists for — letting a build system drive a compiler version it
+//!   was not shipped with — and it was verified that
+//!   `kotlin-compiler-embeddable-2.4.10.jar` is the compiler that actually runs,
+//!   not merely the standard library on the classpath.
+//! * **Tradeoffs.** AGP 9.3.0 was not tested by Google against Kotlin 2.4.10, so
+//!   the combination is this project's responsibility. `verifyKotlinToolchain`
+//!   fails the build if the forced version ever stops taking effect, which keeps
+//!   a silent regression impossible.
+//! * **Security impact.** None. Both versions come from the same pinned
+//!   repository.
+//! * **Performance impact.** None measured.
+//! * **Migration plan.** When AGP ships 2.4.10 or later, the resolution rule
+//!   becomes a no-op and can be removed without changing behaviour.
+//! * **Status.** ACCEPTED.
+//!
 //! ### ADR-0004 — C++ owns JNI; Rust exposes a plain C ABI
 //!
 //! * **Context.** Section 46 mandates `Builder.cpp` / `Builder.hpp` next to the
@@ -1328,12 +1381,13 @@ pub mod toolchain {
             source: "https://repo.maven.apache.org/maven2",
             checksum: None,
             observable_on_device: false,
-            note: "Compiles the builder user interface. UNRESOLVED BOOTSTRAP GAP: \
-                   since AGP 9.0 the Kotlin version is chosen by the Android \
-                   Gradle Plugin, which exposes no supported way to select it; \
-                   AGP 9.3.0 delivers 2.2.10, not the pinned 2.4.10. The \
-                   `verifyKotlinToolchain` Gradle task measures and reports the \
-                   real version rather than letting the difference pass silently.",
+            note: "Compiles the builder user interface. AGP 9.3.0 would otherwise \
+                   supply its own Kotlin (2.2.10) and exposes no DSL to change \
+                   that, so the version is pinned where Gradle does have \
+                   authority: a resolution rule forces every org.jetbrains.kotlin \
+                   module to this version, and the Kotlin Build Tools API runs \
+                   the pinned compiler. The `verifyKotlinToolchain` Gradle task \
+                   proves the result rather than assuming it.",
         },
         Pin {
             id: "rust",
@@ -1381,12 +1435,18 @@ pub mod toolchain {
         Pin {
             id: "cmake",
             display_name: "CMake",
-            pinned: "4",
-            requirement: Requirement::Series,
-            source: "Android SDK package cmake;4.x",
-            checksum: None,
+            pinned: "4.4.2",
+            requirement: Requirement::Exact,
+            source: "https://github.com/Kitware/CMake/releases/download/v4.4.2/\
+                     cmake-4.4.2-linux-x86_64.tar.gz",
+            checksum: Some("3ada9a3f5d8a85413579bdd0ea6aa8e8da86efdd6d15c91a1afa517f2021956c"),
             observable_on_device: false,
-            note: "Directive section 14 pins a series, not a point release.",
+            note: "Provisioned from upstream Kitware, not from the Android SDK: \
+                   sdkmanager publishes CMake only up to 4.1.2. The Kitware archive \
+                   ships no Ninja, so the generator is taken from the SDK's own \
+                   CMake package. Pointed at through `cmake.dir` in \
+                   local.properties and checked by the `verifyCmakeToolchain` \
+                   Gradle task, which refuses to build against any other version.",
         },
         Pin {
             id: "minSdk",

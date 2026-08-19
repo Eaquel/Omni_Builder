@@ -35,7 +35,11 @@ val omniBuildToolsVersion = "36.0.0"
 // Directive section 14 pins "CMake 4.x stable". Without an explicit version AGP
 // silently installs and uses its own default (3.22.1), which is exactly the kind
 // of unpinned toolchain the directive forbids.
-val omniCmakeVersion = "4.1.2"
+//
+// The Android SDK only publishes CMake up to 4.1.2, so 4.4.2 is provisioned from
+// upstream Kitware and pointed at through `cmake.dir` in local.properties. The
+// `verifyCmakeToolchain` task below refuses to build if that is not in place.
+val omniCmakeVersion = "4.4.2"
 val omniCompileSdk = 36
 val omniMinSdk = 28
 val omniTargetSdk = 36
@@ -94,6 +98,22 @@ val omniSdkDirectory: String = run {
         )
     }
 }
+
+/**
+ * Reads `cmake.dir` from local.properties, if it is set.
+ *
+ * Directive section 14 pins CMake 4.4.2, which the Android SDK does not publish
+ * (sdkmanager stops at 4.1.2), so the toolchain is provisioned from upstream and
+ * pointed at here. `verifyCmakeToolchain` turns a missing or wrong entry into a
+ * precise failure rather than an AGP error about a package it cannot find.
+ */
+val omniCmakeDirectory: String? = rootProject.file("local.properties")
+    .takeIf { it.isFile }
+    ?.let { file ->
+        val properties = Properties()
+        file.inputStream().use(properties::load)
+        properties.getProperty("cmake.dir")?.takeIf { it.isNotBlank() }
+    }
 
 val omniHostTag: String = when {
     org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "darwin-x86_64"
@@ -281,7 +301,93 @@ kotlin {
 // So the mismatch is measured and reported instead. A major-version drift is
 // treated as fatal, because that changes the language; a minor drift is reported
 // loudly and left for a human to decide on.
+// -----------------------------------------------------------------------------
+// CMake provisioning check (directive sections 14 and 31, ADR-0005)
+// -----------------------------------------------------------------------------
+tasks.register("verifyCmakeToolchain") {
+    group = "verification"
+    description = "Checks that the pinned CMake is provisioned and reachable."
+
+    val cmakeDirectory = omniCmakeDirectory
+    val pinned = omniCmakeVersion
+
+    doLast {
+        val instructions =
+            "Directive section 14 pins CMake $pinned, which the Android SDK does " +
+                "not publish. Provision it from upstream and point the build at it:\n" +
+                "  1. Download\n" +
+                "     https://github.com/Kitware/CMake/releases/download/v$pinned/" +
+                "cmake-$pinned-linux-x86_64.tar.gz\n" +
+                "  2. Verify its SHA-256 against the checksum recorded in the\n" +
+                "     toolchain lock in Omni.rs. Do not skip this step.\n" +
+                "  3. Extract it, and copy a `ninja` binary into its bin directory;\n" +
+                "     the Kitware archive does not ship one.\n" +
+                "  4. Add `cmake.dir=<that directory>` to local.properties."
+
+        if (cmakeDirectory == null) {
+            throw GradleException("`cmake.dir` is not set in local.properties.\n\n$instructions")
+        }
+
+        val cmakeBinary = File(cmakeDirectory, "bin/cmake")
+        if (!cmakeBinary.isFile) {
+            throw GradleException(
+                "No CMake executable at ${cmakeBinary.absolutePath}.\n\n$instructions"
+            )
+        }
+
+        val ninjaBinary = File(cmakeDirectory, "bin/ninja")
+        if (!ninjaBinary.isFile) {
+            throw GradleException(
+                "No Ninja generator at ${ninjaBinary.absolutePath}. The Android " +
+                    "build needs one and the Kitware archive does not ship it.\n\n" +
+                    instructions
+            )
+        }
+
+        // ProcessBuilder rather than a Gradle Exec task: this runs inside a task
+        // action and must not reach back into the build script, which the
+        // configuration cache cannot serialise.
+        val process = ProcessBuilder(cmakeBinary.absolutePath, "--version")
+            .redirectErrorStream(true)
+            .start()
+        val output = process.inputStream.bufferedReader().use { it.readText() }
+        check(process.waitFor() == 0) { "`cmake --version` failed:\n$output" }
+
+        val reported = Regex("""cmake version (\S+)""").find(output)?.groupValues?.get(1)
+            ?: throw GradleException("Could not read a version from:\n$output")
+
+        if (reported != pinned) {
+            throw GradleException(
+                "CMake version mismatch: the toolchain lock pins $pinned, " +
+                    "$cmakeDirectory provides $reported.\n\n$instructions"
+            )
+        }
+
+        logger.lifecycle("CMake toolchain verified: $reported at $cmakeDirectory.")
+    }
+}
+
 val omniKotlinPin = "2.4.10"
+
+// AGP 9.3.0 ships its own Kotlin and offers no DSL to choose the version; the
+// only knob, android.builtInKotlin, turns the feature on or off. The version is
+// therefore pinned where Gradle does have authority: dependency resolution. Every
+// org.jetbrains.kotlin module - the compiler AGP runs through the Kotlin Build
+// Tools API, and the standard library that ends up in the APK - is forced to the
+// pinned version.
+//
+// The Build Tools API exists precisely so that a build system can drive a Kotlin
+// compiler it was not shipped with, so this is the mechanism working as intended
+// rather than a version being smuggled past AGP. `verifyKotlinToolchain` proves
+// the result instead of assuming it.
+configurations.configureEach {
+    resolutionStrategy.eachDependency {
+        if (requested.group == "org.jetbrains.kotlin") {
+            useVersion(omniKotlinPin)
+            because("Directive section 14 pins Kotlin $omniKotlinPin.")
+        }
+    }
+}
 
 // The compile classpath only exists once AGP has created its variants, which is
 // why this is registered from the variant callback rather than at script level.
@@ -352,7 +458,9 @@ tasks.matching { it.name.startsWith("buildCMake") || it.name.startsWith("configu
         dependsOn(cargoTasks)
     }
 
-// The APK is only meaningful if the pins in this file and in the Core agree.
+// The APK is only meaningful if every pin holds: the ones this file and the Core
+// both declare, the CMake that is provisioned outside the SDK, and the Kotlin
+// version AGP would otherwise have chosen for us.
 tasks.matching { it.name.startsWith("assemble") }.configureEach {
-    dependsOn(":verifyToolchainLock")
+    dependsOn(":verifyToolchainLock", "verifyCmakeToolchain", "verifyKotlinToolchain")
 }

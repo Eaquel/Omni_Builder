@@ -24,17 +24,14 @@ plugins {
 // The versions this build is pinned to, mirrored from directive section 14 and
 // from `toolchain::LOCK` in Omni.rs. `verifyToolchainLock` below fails the build
 // if the two ever disagree.
-// Kotlin is deliberately absent from this map. Since AGP 9.0 the Kotlin version
-// is chosen by AGP, not by this build, so pinning it here would assert control
-// this build does not have. The `:Builder:verifyKotlinToolchain` task measures
-// and reports the real version instead.
 val omniPinnedVersions = mapOf(
     "agp" to "9.3.0",
     "gradle" to "9.7.0",
     "ndk" to "29.0.14206865",
     "androidApi" to "36",
     "buildTools" to "36.0.0",
-    "cmake" to "4.1.2",
+    "cmake" to "4.4.2",
+    "kotlin" to "2.4.10",
     "minSdk" to "28",
     "targetSdk" to "36",
     "rust" to "1.97.1",

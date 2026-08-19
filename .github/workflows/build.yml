@@ -13,8 +13,8 @@
 #   1. The Core compiles on the exact pinned Rust version, with no warnings.
 #   2. The Core's tests pass.
 #   3. The Gradle pins and the Core's toolchain lock agree.
-#   4. Drift between the pinned Kotlin version and the one AGP delivers is
-#      reported rather than hidden.
+#   4. The pinned CMake and the pinned Kotlin are the ones actually used, not
+#      whatever the Android Gradle Plugin would have chosen on its own.
 #   5. A debug APK and an unsigned release APK build from source, with the Core
 #      linked into libomni_builder.so for every target ABI.
 #   6. Two clean release builds produce a byte-identical APK.
@@ -51,7 +51,14 @@ env:
   OMNI_NDK_VERSION: "29.0.14206865"
   OMNI_BUILD_TOOLS_VERSION: "36.0.0"
   OMNI_ANDROID_API: "36"
-  OMNI_CMAKE_VERSION: "4.1.2"
+  OMNI_CMAKE_VERSION: "4.4.2"
+  # The Android SDK publishes CMake only up to 4.1.2, so the pinned version comes
+  # from upstream Kitware and is verified against this checksum before it is used
+  # (directive section 31, ADR-0005). Nothing is trusted for having downloaded.
+  OMNI_CMAKE_SHA256: "3ada9a3f5d8a85413579bdd0ea6aa8e8da86efdd6d15c91a1afa517f2021956c"
+  # Installed only to obtain a Ninja binary with clear provenance; the Kitware
+  # archive does not ship one. This version is never used to configure a build.
+  OMNI_SDK_CMAKE_FOR_NINJA: "4.1.2"
 
 jobs:
   core:
@@ -59,7 +66,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install the pinned Rust toolchain
         run: |
@@ -96,10 +103,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install the pinned JDK
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ env.OMNI_JDK_VERSION }}
@@ -119,18 +126,63 @@ jobs:
         run: |
           set -euo pipefail
           sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$sdkmanager" --licenses > /dev/null
+
+          # Not `yes | sdkmanager`. sdkmanager closes stdin once it has read the
+          # answers it needs, `yes` dies of SIGPIPE, and under `pipefail` that
+          # non-zero status fails the whole step even though the licences were
+          # accepted. A here-string has no upstream process to kill, and it keeps
+          # sdkmanager's own exit status meaningful.
+          "$sdkmanager" --licenses > /dev/null <<< "$(printf 'y\n%.0s' $(seq 1 100))"
+
           "$sdkmanager" \
             "platforms;android-$OMNI_ANDROID_API" \
             "build-tools;$OMNI_BUILD_TOOLS_VERSION" \
             "ndk;$OMNI_NDK_VERSION" \
-            "cmake;$OMNI_CMAKE_VERSION"
+            "cmake;$OMNI_SDK_CMAKE_FOR_NINJA"
+
           test -d "$ANDROID_HOME/ndk/$OMNI_NDK_VERSION"
+
+      - name: Provision the pinned CMake from upstream
+        run: |
+          set -euo pipefail
+          archive="cmake-$OMNI_CMAKE_VERSION-linux-x86_64.tar.gz"
+          url="https://github.com/Kitware/CMake/releases/download/v$OMNI_CMAKE_VERSION/$archive"
+
+          curl --fail --silent --show-error --location --output "$archive" "$url"
+          echo "$OMNI_CMAKE_SHA256  $archive" | sha256sum --check --strict
+
+          install --directory "$HOME/cmake-$OMNI_CMAKE_VERSION"
+          tar --extract --gzip --file "$archive" \
+            --directory "$HOME/cmake-$OMNI_CMAKE_VERSION" --strip-components=1
+
+          # The Kitware archive ships no generator. Take the Ninja that Google
+          # publishes with its own CMake package rather than pulling a third
+          # binary from a third source.
+          cp "$ANDROID_HOME/cmake/$OMNI_SDK_CMAKE_FOR_NINJA/bin/ninja" \
+             "$HOME/cmake-$OMNI_CMAKE_VERSION/bin/ninja"
+
+          reported=$("$HOME/cmake-$OMNI_CMAKE_VERSION/bin/cmake" --version | head -1)
+          echo "$reported"
+          test "$reported" = "cmake version $OMNI_CMAKE_VERSION"
+
+      - name: Point the build at the provisioned toolchains
+        run: |
+          set -euo pipefail
+          # local.properties is host-specific and deliberately not committed
+          # (.gitignore), so the runner writes its own.
+          {
+            echo "sdk.dir=$ANDROID_HOME"
+            echo "cmake.dir=$HOME/cmake-$OMNI_CMAKE_VERSION"
+          } > local.properties
+          cat local.properties
+
+      - name: Verify the provisioned CMake
+        run: ./gradlew :Builder:verifyCmakeToolchain --console=plain
 
       - name: Verify the toolchain lock
         run: ./gradlew verifyToolchainLock --console=plain
 
-      - name: Report Kotlin toolchain drift
+      - name: Verify the Kotlin toolchain
         run: ./gradlew :Builder:verifyKotlinToolchain --console=plain
 
       - name: Build the debug APK
@@ -183,7 +235,7 @@ jobs:
           echo "The release APK is byte-identical across clean rebuilds."
 
       - name: Publish the APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: omni-builder-apks
           path: |
