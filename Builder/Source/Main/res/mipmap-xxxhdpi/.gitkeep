@@ -1,0 +1,6 @@
+Directive section 46 fixes this directory in the repository layout.
+
+It is empty on purpose. The launcher icon is a vector adaptive icon in
+res/mipmap/, so no density-specific bitmap is needed. Adding a placeholder
+bitmap here would be a decorative artifact with no build meaning; this file
+exists only so that the directory survives in git.

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Omni_Builder — user-facing strings.
+
+  Every string here describes what the system actually is. Directive section 1
+  forbids wording that implies a capability the build does not have, so there is
+  no "Build", "Compile" or "Export" string: nothing in this tree can do those
+  things yet.
+-->
+<resources>
+    <string name="omni_app_name">Omni_Builder</string>
+
+    <!-- %1$s core version, %2$s core status, %3$d C ABI version -->
+    <string name="omni_core_line">Core %1$s · %2$s · ABI %3$d</string>
+
+    <string name="omni_core_unavailable">Omni Core is not available</string>
+
+    <string name="omni_not_a_builder_yet">This build cannot compile or package
+        anything yet. It is the foundation: the Core, the capability model, the
+        toolchain lock and the plugin contracts. Every subsystem below states its
+        own maturity, and none of them is implemented.</string>
+
+    <string name="omni_section_self_hosting">Self-hosting</string>
+    <string name="omni_section_toolchain">Toolchain lock</string>
+    <string name="omni_section_plugins">Plugins</string>
+    <string name="omni_section_diagnostics">Diagnostics</string>
+
+    <string name="omni_self_hosted">Self-hosted</string>
+    <string name="omni_yes">YES</string>
+    <string name="omni_no">NO</string>
+
+    <!-- %1$d components verified here, %2$d components pinned in total -->
+    <string name="omni_toolchain_summary">%1$d of %2$d pinned components could be
+        verified on this device. The rest run on a build host and are reported as
+        unverifiable rather than assumed.</string>
+
+    <!-- %1$d plugins implemented, %2$d plugins declared -->
+    <string name="omni_plugins_summary">%1$d of %2$d declared plugins are
+        implemented. The others exist as contracts only.</string>
+
+    <string name="omni_no_diagnostics">The Core reported no diagnostics.</string>
+
+    <!-- %1$s the text of the bullet point -->
+    <string name="omni_bullet">•  %1$s</string>
+</resources>

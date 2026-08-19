@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Omni_Builder — application theme.
+
+  The parent is a platform theme, not an AppCompat or Material Components theme,
+  because this module deliberately carries no third-party dependency (ADR-0003
+  in Omni.rs). minSdk 28 makes the platform Material theme available everywhere
+  the application runs.
+-->
+<resources>
+    <style name="Theme.Omni" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/omni_background</item>
+        <item name="android:colorBackground">@color/omni_background</item>
+        <item name="android:textColorPrimary">@color/omni_foreground</item>
+        <item name="android:statusBarColor">@color/omni_background</item>
+        <item name="android:navigationBarColor">@color/omni_background</item>
+    </style>
+</resources>

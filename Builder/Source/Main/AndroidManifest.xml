@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Omni_Builder — application manifest.
+
+  Security note (directive sections 7 and 29): this application declares no
+  permission at all. It reads no file outside its own sandbox, opens no socket
+  and starts no process. When a subsystem eventually needs one of those, the
+  permission is added together with the capability that governs it, an entry in
+  the threat model, and an architectural decision record — never on its own.
+
+  The package name is not declared here. The Android Gradle Plugin takes it from
+  `namespace` in Builder/build.gradle.kts, which keeps a single source of truth.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:extractNativeLibs="false"
+        android:fullBackupContent="false"
+        android:hasFragileUserData="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/omni_app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Omni">
+
+        <activity
+            android:name=".BuilderActivity"
+            android:exported="true"
+            android:label="@string/omni_app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

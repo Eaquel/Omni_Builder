@@ -1,0 +1,192 @@
+# Omni_Builder — build and verification workflow
+#
+# WHY THIS FILE EXISTS
+# -----------------------------------------------------------------------------
+# Directive section 46 does not define a location for continuous integration, but
+# section 51 makes "tests pass", "determinism verified" and "no unresolved
+# critical TODO" gates that something has to actually run. This workflow is that
+# something. It is deliberately the only file outside the layout of section 46
+# besides the Rust manifest and crate root.
+#
+# WHAT IT PROVES
+# -----------------------------------------------------------------------------
+#   1. The Core compiles on the exact pinned Rust version, with no warnings.
+#   2. The Core's tests pass.
+#   3. The Gradle pins and the Core's toolchain lock agree.
+#   4. Drift between the pinned Kotlin version and the one AGP delivers is
+#      reported rather than hidden.
+#   5. A debug APK and an unsigned release APK build from source, with the Core
+#      linked into libomni_builder.so for every target ABI.
+#   6. Two clean release builds produce a byte-identical APK.
+#
+# WHAT IT DOES NOT PROVE
+# -----------------------------------------------------------------------------
+# Nothing here runs the application on a device, and nothing here signs anything.
+# Signing is directive section 25 and roadmap phase 6; no signing identity exists
+# in this repository.
+
+name: Build and verify
+
+on:
+  push:
+    branches:
+      - Main
+      - "claude/**"
+  pull_request:
+  workflow_dispatch:
+
+# The workflow only reads the repository. It publishes nothing and needs no more.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Mirrors the toolchain lock in Omni.rs. Changing a value here without changing
+  # it there makes `verifyToolchainLock` fail, which is the point.
+  OMNI_RUST_VERSION: "1.97.1"
+  OMNI_JDK_VERSION: "25"
+  OMNI_NDK_VERSION: "29.0.14206865"
+  OMNI_BUILD_TOOLS_VERSION: "36.0.0"
+  OMNI_ANDROID_API: "36"
+  OMNI_CMAKE_VERSION: "4.1.2"
+
+jobs:
+  core:
+    name: Core
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$OMNI_RUST_VERSION" \
+            --profile minimal --component rustfmt --component clippy
+          rustup default "$OMNI_RUST_VERSION"
+          rustc --version
+          # The pin is not advisory. Cargo refuses to build below the
+          # rust-version in Cargo.toml, so this failing means the lock is wrong.
+          test "$(rustc --version | cut -d' ' -f2)" = "$OMNI_RUST_VERSION"
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Lint with warnings as errors
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run the Core test suite
+        run: cargo test --locked
+
+      - name: Confirm the Core carries no third-party dependency
+        run: |
+          set -euo pipefail
+          # ADR-0003: the Core's supply-chain surface is meant to be empty, and a
+          # dependency that arrives unnoticed is exactly what section 31 guards
+          # against. Cargo.lock holds one package - the Core itself.
+          packages=$(grep -c '^\[\[package\]\]' Cargo.lock)
+          echo "Packages in Cargo.lock: $packages"
+          test "$packages" -eq 1
+
+  apk:
+    name: Builder APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.OMNI_JDK_VERSION }}
+
+      - name: Install the pinned Rust toolchain and Android targets
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$OMNI_RUST_VERSION" --profile minimal
+          rustup default "$OMNI_RUST_VERSION"
+          rustup target add \
+            aarch64-linux-android \
+            armv7-linux-androideabi \
+            x86_64-linux-android
+          rustc --version
+
+      - name: Install the pinned Android SDK packages
+        run: |
+          set -euo pipefail
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --licenses > /dev/null
+          "$sdkmanager" \
+            "platforms;android-$OMNI_ANDROID_API" \
+            "build-tools;$OMNI_BUILD_TOOLS_VERSION" \
+            "ndk;$OMNI_NDK_VERSION" \
+            "cmake;$OMNI_CMAKE_VERSION"
+          test -d "$ANDROID_HOME/ndk/$OMNI_NDK_VERSION"
+
+      - name: Verify the toolchain lock
+        run: ./gradlew verifyToolchainLock --console=plain
+
+      - name: Report Kotlin toolchain drift
+        run: ./gradlew :Builder:verifyKotlinToolchain --console=plain
+
+      - name: Build the debug APK
+        run: ./gradlew :Builder:assembleDebug --console=plain
+
+      - name: Build the unsigned release APK
+        run: ./gradlew :Builder:assembleRelease --console=plain
+
+      - name: Confirm the Core is linked into every ABI
+        run: |
+          set -euo pipefail
+          apk=Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+          nm="$ANDROID_HOME/ndk/$OMNI_NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          work=$(mktemp -d)
+          unzip -q "$apk" -d "$work"
+
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            so="$work/lib/$abi/libomni_builder.so"
+            test -f "$so" || { echo "missing native library for $abi"; exit 1; }
+
+            # The three JNI entry points and JNI_OnLoad, and nothing else. If the
+            # Core's C ABI ever appears here, --exclude-libs has stopped working
+            # and the shared object is exposing more than it should.
+            exported=$("$nm" -D --defined-only "$so" | wc -l)
+            echo "$abi: $exported exported symbols"
+            test "$exported" -eq 4
+
+            "$nm" -D --defined-only "$so" | grep -q Java_com_omni_builder_Builder_nativeStateReport
+            ! "$nm" -D --defined-only "$so" | grep -q omni_state_report
+          done
+
+      - name: Verify the release APK is byte-reproducible
+        run: |
+          set -euo pipefail
+          apk=Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+          first=$(sha256sum "$apk" | cut -d' ' -f1)
+
+          ./gradlew clean --console=plain
+          cargo clean
+          ./gradlew :Builder:assembleRelease --console=plain
+
+          second=$(sha256sum "$apk" | cut -d' ' -f1)
+          echo "build 1: $first"
+          echo "build 2: $second"
+
+          if [ "$first" != "$second" ]; then
+            echo "The release APK is not reproducible (directive section 12)."
+            exit 1
+          fi
+          echo "The release APK is byte-identical across clean rebuilds."
+
+      - name: Publish the APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: omni-builder-apks
+          path: |
+            Builder/build/outputs/apk/debug/Builder-debug.apk
+            Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+          if-no-files-found: error
