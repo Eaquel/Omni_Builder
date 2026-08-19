@@ -152,6 +152,41 @@
 //!   becomes a no-op and can be removed without changing behaviour.
 //! * **Status.** ACCEPTED.
 //!
+//! ### ADR-0007 — The bootstrap APK is signed by the build, not by a repacker
+//!
+//! * **Context.** An unsigned release APK cannot be installed, and signing it
+//!   with a third-party tool that repacks the archive produced "App not
+//!   installed" with no further explanation. Two independent causes were
+//!   measured. First, an application targeting API 36 is refused at install time
+//!   unless it carries an APK Signature Scheme v2 or later signature, and a
+//!   v1-only JAR signature is still the default in some tools. Second, the
+//!   manifest declares `extractNativeLibs="false"`, so the platform maps each
+//!   native library straight out of the APK; a repacker re-zips the archive,
+//!   turning stored entries into deflated ones, and a deflated library cannot be
+//!   mapped.
+//! * **Alternatives.** (a) Set `extractNativeLibs="true"` so repacking stops
+//!   mattering. (b) Commit a keystore so the build can always sign. (c) Sign from
+//!   the build using a keystore referenced from outside the repository, and check
+//!   the finished APK for both failure modes.
+//! * **Decision.** (c).
+//! * **Reason.** (a) trades a real improvement — smaller installs and libraries
+//!   the platform can map directly, which 16 KB page devices need — for tolerance
+//!   of a tool that should not be in the pipeline at all. (b) is precisely what
+//!   directive section 25 forbids. (c) removes the need for an external signer
+//!   and turns both failures into build errors that say what is wrong.
+//! * **Tradeoffs.** Signing a release requires four settings in
+//!   `local.properties` or the environment. Without them the release artifact
+//!   stays unsigned, which is honest rather than convenient. The debug APK is
+//!   signed by the standard debug key and installs as it always did.
+//! * **Security impact.** No key material enters the repository, the build log or
+//!   any diagnostic (directive sections 25 and 57). A partly configured identity
+//!   fails the build instead of silently producing an unsigned APK.
+//! * **Performance impact.** None.
+//! * **Migration plan.** When the Omni signing subsystem is real (roadmap phase
+//!   12), it replaces the AGP signing config. `Plugins/Sign.rs` stays PLANNED
+//!   until then; this ADR covers bootstrap signing only.
+//! * **Status.** ACCEPTED.
+//!
 //! ### ADR-0004 — C++ owns JNI; Rust exposes a plain C ABI
 //!
 //! * **Context.** Section 46 mandates `Builder.cpp` / `Builder.hpp` next to the

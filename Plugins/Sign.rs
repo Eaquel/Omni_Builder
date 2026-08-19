@@ -50,6 +50,12 @@
 //! Every primitive must be implemented against an official specification and
 //! validated with official test vectors before its status may leave PLANNED.
 //!
+//! The bootstrap APK is signed today by the Android Gradle Plugin, configured in
+//! Builder/build.gradle.kts from a keystore that lives outside the repository
+//! (ADR-0007 in Omni.rs). That is a bootstrap dependency in the sense of
+//! directive section 15, not an implementation of this plugin, and it does not
+//! move this contract off PLANNED.
+//!
 //! ## Acceptance criteria before the status may change
 //!
 //! Directive section 51 applies in full: specification, stable contract,

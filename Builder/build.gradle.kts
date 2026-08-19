@@ -19,6 +19,8 @@
 // produced without the Core actually linked into it.
 
 import java.util.Properties
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 
 plugins {
     // Kotlin support comes from AGP itself (AGP 9.0+). Applying
@@ -100,20 +102,78 @@ val omniSdkDirectory: String = run {
 }
 
 /**
- * Reads `cmake.dir` from local.properties, if it is set.
+ * Host-specific settings, read once.
  *
- * Directive section 14 pins CMake 4.4.2, which the Android SDK does not publish
- * (sdkmanager stops at 4.1.2), so the toolchain is provisioned from upstream and
- * pointed at here. `verifyCmakeToolchain` turns a missing or wrong entry into a
- * precise failure rather than an AGP error about a package it cannot find.
+ * `local.properties` is deliberately not committed (.gitignore), so it is the
+ * right place for machine paths and for a reference to signing material that
+ * must never enter the repository (directive section 25).
  */
-val omniCmakeDirectory: String? = rootProject.file("local.properties")
-    .takeIf { it.isFile }
-    ?.let { file ->
-        val properties = Properties()
-        file.inputStream().use(properties::load)
-        properties.getProperty("cmake.dir")?.takeIf { it.isNotBlank() }
-    }
+val omniLocalProperties: Properties = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use(::load)
+}
+
+/**
+ * Reads a setting from local.properties, falling back to an environment variable.
+ *
+ * The environment is read through Gradle's provider API so the configuration
+ * cache treats it as a tracked input.
+ */
+fun omniSetting(propertyName: String, environmentName: String): String? =
+    omniLocalProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
+        ?: providers.environmentVariable(environmentName).orNull?.takeIf { it.isNotBlank() }
+
+/**
+ * Location of the CMake pinned by directive section 14.
+ *
+ * The Android SDK publishes CMake only up to 4.1.2, so 4.4.2 is provisioned from
+ * upstream and pointed at here. `verifyCmakeToolchain` turns a missing or wrong
+ * entry into a precise failure rather than an AGP error about a package it
+ * cannot find.
+ */
+val omniCmakeDirectory: String? = omniSetting("cmake.dir", "OMNI_CMAKE_DIR")
+
+// -----------------------------------------------------------------------------
+// Bootstrap signing (directive sections 15 and 25)
+// -----------------------------------------------------------------------------
+// This is AGP signing the bootstrap APK, not the Omni signing subsystem. That is
+// directive section 25 and roadmap phase 12; Plugins/Sign.rs stays PLANNED.
+//
+// No key material lives in this repository and none ever will. The keystore is
+// referenced from local.properties, which is not committed, or from the
+// environment. Nothing here is printed, logged or written into a diagnostic.
+//
+// Signing matters for more than provenance: an application targeting API 30 or
+// later is rejected at install time unless it carries an APK Signature Scheme v2
+// or later signature. A v1-only JAR signature - still the default in some
+// third-party signing tools - produces "App not installed" with no further
+// explanation.
+val omniSigningStoreFile = omniSetting("omni.signing.storeFile", "OMNI_SIGNING_STORE_FILE")
+val omniSigningStorePassword =
+    omniSetting("omni.signing.storePassword", "OMNI_SIGNING_STORE_PASSWORD")
+val omniSigningKeyAlias = omniSetting("omni.signing.keyAlias", "OMNI_SIGNING_KEY_ALIAS")
+val omniSigningKeyPassword =
+    omniSetting("omni.signing.keyPassword", "OMNI_SIGNING_KEY_PASSWORD")
+
+val omniSigningSettings = mapOf(
+    "omni.signing.storeFile" to omniSigningStoreFile,
+    "omni.signing.storePassword" to omniSigningStorePassword,
+    "omni.signing.keyAlias" to omniSigningKeyAlias,
+    "omni.signing.keyPassword" to omniSigningKeyPassword,
+)
+
+// All four or none. A half-configured identity would silently produce an
+// unsigned APK, and the person who set three of them would find out at install
+// time instead of at build time.
+val omniSigningConfigured: Boolean = when (omniSigningSettings.count { it.value != null }) {
+    0 -> false
+    omniSigningSettings.size -> true
+    else -> throw GradleException(
+        "Release signing is only partly configured. Missing: " +
+            omniSigningSettings.filterValues { it == null }.keys.joinToString(", ") +
+            "\nSet all four, or none of them. Run `./gradlew :Builder:signingHelp` " +
+            "for the exact commands."
+    )
+}
 
 val omniHostTag: String = when {
     org.gradle.internal.os.OperatingSystem.current().isMacOsX -> "darwin-x86_64"
@@ -224,6 +284,24 @@ android {
         }
     }
 
+    signingConfigs {
+        if (omniSigningConfigured) {
+            create("omniRelease") {
+                storeFile = file(omniSigningStoreFile!!)
+                storePassword = omniSigningStorePassword
+                keyAlias = omniSigningKeyAlias
+                keyPassword = omniSigningKeyPassword
+
+                // minSdk is 28, so every device that can run this application
+                // understands scheme v2. The v1 JAR signature would add weight
+                // and a weaker guarantee for no reader.
+                enableV1Signing = false
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -236,10 +314,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Left unsigned on purpose. Signing is directive section 25 and
-            // roadmap phase 6; no signing identity exists in this repository, and
-            // committing one would be exactly the mistake section 25 warns about.
-            signingConfig = null
+            // Signed when this machine has been told where the keystore is, and
+            // left unsigned otherwise. An unsigned APK is honest; an APK signed
+            // with a key committed to the repository would not be.
+            signingConfig = signingConfigs.findByName("omniRelease")
         }
     }
 
@@ -449,6 +527,191 @@ dependencies {
 }
 
 // -----------------------------------------------------------------------------
+// Installability (directive sections 33, 51 and 55)
+// -----------------------------------------------------------------------------
+// "App not installed" is the least actionable message Android produces: the
+// package manager refuses and explains nothing. Every condition below has already
+// caused it on this project, so each one is checked against the real APK and
+// turned into a build failure that says what is wrong and how to fix it.
+tasks.register("verifyApkInstallability") {
+    group = "verification"
+    description = "Checks that every built APK can actually be installed."
+
+    val apkDirectory = layout.buildDirectory.dir("outputs/apk")
+    val buildTools = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion"
+    val minSdk = omniMinSdk
+    val targetSdk = omniTargetSdk
+
+    doLast {
+        val directory = apkDirectory.get().asFile
+        val packages = directory.walkTopDown().filter { it.extension == "apk" }.sorted().toList()
+        if (packages.isEmpty()) {
+            // This task finalises every assemble task, so it also runs when the
+            // assemble failed. Failing here too would bury the real error under a
+            // second one about a missing file.
+            logger.lifecycle("No APK found under $directory; nothing to check.")
+            return@doLast
+        }
+
+        fun run(vararg command: String): Pair<Int, String> {
+            val process = ProcessBuilder(*command).redirectErrorStream(true).start()
+            val output = process.inputStream.bufferedReader().use { it.readText() }
+            return process.waitFor() to output
+        }
+
+        val problems = mutableListOf<String>()
+
+        for (apk in packages) {
+            val name = apk.name
+            logger.lifecycle("Checking $name")
+
+            // 1. Native libraries must be stored, not deflated.
+            //
+            // AndroidManifest.xml declares android:extractNativeLibs="false", which
+            // means the platform maps each library straight out of the APK instead
+            // of unpacking it. A compressed entry cannot be mapped, and the
+            // installer refuses the package. Re-zipping an APK with an ordinary
+            // archiver - which is what most third-party signing tools do - turns
+            // every stored entry into a deflated one and breaks exactly this.
+            ZipFile(apk).use { zip ->
+                val compressed = zip.entries().toList()
+                    .filter { it.name.startsWith("lib/") && it.name.endsWith(".so") }
+                    .filter { it.method != ZipEntry.STORED }
+                    .map { it.name }
+
+                if (compressed.isNotEmpty()) {
+                    problems += "$name: native libraries are compressed while the " +
+                        "manifest declares extractNativeLibs=\"false\", so the " +
+                        "installer will reject the package: " +
+                        compressed.joinToString(", ") +
+                        "\n    The APK was almost certainly repacked by a tool that " +
+                        "re-zipped it. Sign the APK produced by this build instead " +
+                        "of repacking it, using `apksigner`, which rewrites only " +
+                        "the signature."
+                }
+            }
+
+            // 2. Native libraries must stay 16 KB aligned.
+            //
+            // Devices with 16 KB memory pages cannot map a library that is not
+            // aligned to that boundary, and refuse to install the package.
+            val (alignStatus, alignOutput) = run("$buildTools/zipalign", "-c", "-P", "16", "-v", "4", apk.path)
+            if (alignStatus != 0) {
+                problems += "$name: native libraries are not 16 KB aligned, so the " +
+                    "package will not install on a device with 16 KB pages.\n" +
+                    alignOutput.lines().filter { it.contains("BAD") }.joinToString("\n")
+            }
+
+            // 3. The signature must be one the platform accepts.
+            val (_, verifyOutput) = run(
+                "$buildTools/apksigner", "verify",
+                "--min-sdk-version", minSdk.toString(),
+                "--max-sdk-version", targetSdk.toString(),
+                apk.path,
+            )
+
+            when {
+                verifyOutput.contains("Missing META-INF/MANIFEST.MF") ->
+                    logger.lifecycle(
+                        "  unsigned - this is expected for the release artifact. " +
+                            "It cannot be installed until it is signed; run " +
+                            "`./gradlew :Builder:signingHelp`."
+                    )
+
+                verifyOutput.contains("DOES NOT VERIFY") ->
+                    problems += "$name: the signature is not one this platform " +
+                        "accepts.\n    " +
+                        verifyOutput.lines().filter { it.startsWith("ERROR") }
+                            .joinToString("\n    ") +
+                        "\n    An application targeting API $targetSdk must carry an " +
+                        "APK Signature Scheme v2 or later signature. A v1-only JAR " +
+                        "signature is refused at install time with no explanation. " +
+                        "Run `./gradlew :Builder:signingHelp`."
+
+                else -> logger.lifecycle("  signature accepted for API $minSdk to $targetSdk")
+            }
+        }
+
+        if (problems.isNotEmpty()) {
+            throw GradleException(
+                "These APKs cannot be installed:\n\n" +
+                    problems.joinToString("\n\n") { "  - $it" }
+            )
+        }
+
+        logger.lifecycle("Installability verified for ${packages.size} APK(s).")
+    }
+}
+
+tasks.register("signingHelp") {
+    group = "help"
+    description = "Explains how to sign the release APK without breaking it."
+
+    val configured = omniSigningConfigured
+    val buildTools = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion"
+    val minSdk = omniMinSdk
+    val targetSdk = omniTargetSdk
+
+    doLast {
+        if (configured) {
+            logger.lifecycle(
+                "Release signing is configured. `./gradlew :Builder:assembleRelease` " +
+                    "produces a signed APK with scheme v2 and v3."
+            )
+            return@doLast
+        }
+
+        logger.lifecycle(
+            """
+            |Release signing is not configured, so assembleRelease produces an
+            |unsigned APK. Android will not install an unsigned package.
+            |
+            |Do not sign it with a tool that repacks the archive. An application
+            |targeting API $targetSdk needs an APK Signature Scheme v2 or later
+            |signature, and this APK stores its native libraries uncompressed and
+            |16 KB aligned so the platform can map them directly. A tool that
+            |re-zips the file breaks the second condition even when it gets the
+            |first one right, and the only symptom is "App not installed".
+            |
+            |Option 1 - let this build sign it.
+            |
+            |  Create a key once, outside the repository:
+            |
+            |    keytool -genkeypair -v \
+            |      -keystore ~/omni-release.jks \
+            |      -alias omni -keyalg RSA -keysize 4096 -validity 10000
+            |
+            |  Then add to local.properties, which is never committed:
+            |
+            |    omni.signing.storeFile=/absolute/path/to/omni-release.jks
+            |    omni.signing.storePassword=...
+            |    omni.signing.keyAlias=omni
+            |    omni.signing.keyPassword=...
+            |
+            |  The same four values are also read from the environment as
+            |  OMNI_SIGNING_STORE_FILE, OMNI_SIGNING_STORE_PASSWORD,
+            |  OMNI_SIGNING_KEY_ALIAS and OMNI_SIGNING_KEY_PASSWORD.
+            |
+            |Option 2 - sign the finished APK by hand. apksigner rewrites only the
+            |signature and leaves the archive layout intact:
+            |
+            |    $buildTools/apksigner sign \
+            |      --ks ~/omni-release.jks --ks-key-alias omni \
+            |      --v1-signing-enabled false \
+            |      --v2-signing-enabled true \
+            |      --v3-signing-enabled true \
+            |      --min-sdk-version $minSdk \
+            |      Builder-release-unsigned.apk
+            |
+            |Either way, check the result before installing:
+            |
+            |    ./gradlew :Builder:verifyApkInstallability
+            """.trimMargin()
+        )
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Wiring: CMake must not run before cargo has produced the archive it links.
 // Matching by task name avoids depending on an AGP task class that has moved
 // between major versions.
@@ -463,4 +726,7 @@ tasks.matching { it.name.startsWith("buildCMake") || it.name.startsWith("configu
 // version AGP would otherwise have chosen for us.
 tasks.matching { it.name.startsWith("assemble") }.configureEach {
     dependsOn(":verifyToolchainLock", "verifyCmakeToolchain", "verifyKotlinToolchain")
+    // Checked after the APK exists, so a package that cannot be installed is a
+    // build failure rather than a discovery made on a device.
+    finalizedBy("verifyApkInstallability")
 }

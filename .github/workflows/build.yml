@@ -18,12 +18,16 @@
 #   5. A debug APK and an unsigned release APK build from source, with the Core
 #      linked into libomni_builder.so for every target ABI.
 #   6. Two clean release builds produce a byte-identical APK.
+#   7. Every APK the build produces can actually be installed: native libraries
+#      stored and 16 KB aligned, and a signature the platform accepts.
 #
 # WHAT IT DOES NOT PROVE
 # -----------------------------------------------------------------------------
-# Nothing here runs the application on a device, and nothing here signs anything.
-# Signing is directive section 25 and roadmap phase 6; no signing identity exists
-# in this repository.
+# Nothing here runs the application on a device. The release artifact is left
+# unsigned because no signing identity exists in this repository and none may be
+# committed (directive section 25); the debug artifact carries the standard debug
+# signature and installs. Signing as an Omni subsystem is roadmap phase 12, and
+# Plugins/Sign.rs remains PLANNED.
 
 name: Build and verify
 
@@ -194,7 +198,9 @@ jobs:
       - name: Confirm the Core is linked into every ABI
         run: |
           set -euo pipefail
-          apk=Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+          # The release artifact is named "-unsigned" only while no signing
+          # identity is configured, so resolve it rather than assuming the name.
+          apk=$(ls Builder/build/outputs/apk/release/*.apk)
           nm="$ANDROID_HOME/ndk/$OMNI_NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           work=$(mktemp -d)
           unzip -q "$apk" -d "$work"
@@ -217,13 +223,14 @@ jobs:
       - name: Verify the release APK is byte-reproducible
         run: |
           set -euo pipefail
-          apk=Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+          apk=$(ls Builder/build/outputs/apk/release/*.apk)
           first=$(sha256sum "$apk" | cut -d' ' -f1)
 
           ./gradlew clean --console=plain
           cargo clean
           ./gradlew :Builder:assembleRelease --console=plain
 
+          apk=$(ls Builder/build/outputs/apk/release/*.apk)
           second=$(sha256sum "$apk" | cut -d' ' -f1)
           echo "build 1: $first"
           echo "build 2: $second"
@@ -234,11 +241,14 @@ jobs:
           fi
           echo "The release APK is byte-identical across clean rebuilds."
 
+      - name: Verify that the APKs can be installed
+        run: ./gradlew :Builder:verifyApkInstallability --console=plain --rerun-tasks
+
       - name: Publish the APKs
         uses: actions/upload-artifact@v5
         with:
           name: omni-builder-apks
           path: |
-            Builder/build/outputs/apk/debug/Builder-debug.apk
-            Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+            Builder/build/outputs/apk/debug/*.apk
+            Builder/build/outputs/apk/release/*.apk
           if-no-files-found: error
