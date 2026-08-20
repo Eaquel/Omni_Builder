@@ -1,71 +1,8 @@
-//! # Resources plugin
-//!
-//! Parses, validates and compiles Android resources into a resource table.
-//!
-//! ## Contract (directive section 2)
-//!
-//! * **Module** — `omni.plugin.resources`
-//! * **Purpose** — Own the resource pipeline: from resource source files to
-//!   compiled resources with stable identifiers and resolved references.
-//! * **Inputs** — resource.source, android.manifest
-//! * **Outputs** — resource.table, resource.compiled, resource.ids
-//! * **Capabilities** — FsRead, TempStorage, Cache; everything else denied
-//! * **State** — stateless
-//! * **Determinism** — required for every artifact this plugin emits
-//! * **Status** — `PLANNED` (directive section 22)
-//! * **Roadmap** — PHASE 4 — RESOURCE ENGINE
-//!
-//! ## Target pipeline (directive section 22)
-//!
-//! ```text
-//! Source
-//!   ↓
-//! Validation
-//!   ↓
-//! Parse
-//!   ↓
-//! Resource Model
-//!   ↓
-//! ID Assignment
-//!   ↓
-//! Reference Resolution
-//!   ↓
-//! Table Construction
-//!   ↓
-//! Compiled Resources
-//!   ↓
-//! Verification
-//! ```
-//!
-//! ## Implementation status
-//!
-//! None of the pipeline above is implemented. This file declares the contract
-//! so that the registry, the capability policy and the user interface can
-//! reason about the plugin honestly; [`Plugin::execute`] refuses to run and
-//! says why.
-//!
-//! Planned coverage: values, strings, colors, dimensions, drawables, mipmap,
-//! references, manifest resources, resource identifiers and resource tables.
-//!
-//! Resource identifier assignment must be deterministic, since it feeds the
-//! APK's reproducibility (directive section 12).
-//!
-//! Resource input is untrusted: it comes from the user's project and must be
-//! bounded against path explosion and deep nesting (directive section 60).
-//!
-//! ## Acceptance criteria before the status may change
-//!
-//! Directive section 51 applies in full: specification, stable contract,
-//! real implementation, unit and integration and regression tests, fuzzing
-//! where input is untrusted, security review, determinism verification,
-//! measured performance, diagnostics, documentation and compatibility.
-
 use crate::caps::Capability;
 use crate::diag::Diagnostic;
 use crate::plugin::{unimplemented_diagnostic, Context, Contract, Outcome, Plugin, Version};
 use crate::Status;
 
-/// The declared contract for the Resources plugin.
 pub static CONTRACT: Contract = Contract {
     id: "omni.plugin.resources",
     display_name: "Resources",
@@ -94,10 +31,8 @@ pub static CONTRACT: Contract = Contract {
     roadmap_phase: "PHASE 4 — RESOURCE ENGINE",
 };
 
-/// Zero-sized handle registered in [`crate::plugin::Registry`].
 pub struct ResourcesPlugin;
 
-/// The single instance the registry holds.
 pub static PLUGIN: ResourcesPlugin = ResourcesPlugin;
 
 impl Plugin for ResourcesPlugin {
@@ -105,11 +40,6 @@ impl Plugin for ResourcesPlugin {
         &CONTRACT
     }
 
-    /// Refuses to run.
-    ///
-    /// Directive section 1 forbids a fabricated success. While the contract
-    /// status is [`Status::Planned`], the only correct behaviour is to return
-    /// the diagnostic that explains what is missing and when it is scheduled.
     fn execute(&self, _ctx: &mut Context<'_>) -> Result<Outcome, Diagnostic> {
         Err(unimplemented_diagnostic(&CONTRACT))
     }

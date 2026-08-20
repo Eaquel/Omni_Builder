@@ -1,372 +1,8 @@
-//! # Omni Core
-//!
-//! Crate root of the Omni_Builder Rust Core.
-//!
-//! ## Module contract (directive section 2)
-//!
-//! | Field                | Value                                                                    |
-//! |----------------------|--------------------------------------------------------------------------|
-//! | Module               | `omni_core`                                                              |
-//! | Purpose              | System infrastructure for the Omni_Builder toolchain ecosystem.          |
-//! | Scope                | Status model, diagnostics, capability security, plugin contracts,        |
-//! |                      | toolchain lock verification, C ABI boundary.                             |
-//! | Responsibilities     | Own the vocabulary every subsystem shares; decide capability grants;     |
-//! |                      | verify the pinned toolchain against an observed environment; expose a    |
-//! |                      | stable C ABI to the JNI layer.                                           |
-//! | Non-Responsibilities | Compilation, parsing, code generation, DEX, APK, resources, signing,     |
-//! |                      | filesystem access, networking, process execution. Those belong to        |
-//! |                      | plugins (invariants I1, I2).                                             |
-//! | Inputs               | An observed-environment key/value string supplied by the host UI.        |
-//! | Outputs              | Deterministic JSON reports; diagnostics.                                 |
-//! | Interfaces           | Rust API (this crate) and the `omni_*` C ABI in [`ffi`].                 |
-//! | Dependencies         | Rust standard library only. Zero third-party crates.                     |
-//! | State                | Stateless. Every report is a pure function of its inputs plus compiled-in |
-//! |                      | constants. No global mutable state (directive section 64).               |
-//! | Security             | Default-deny capability model. The Core requests no capability itself.   |
-//! | Performance          | All contracts are `&'static` constants; report generation allocates only |
-//! |                      | the output string.                                                       |
-//! | Failure Modes        | See [`FailureClass`]. FFI never unwinds across the ABI boundary.         |
-//! | Diagnostics          | See [`diag`].                                                            |
-//! | Tests                | Unit tests at the bottom of this file and in every `Plugins/*.rs` file.  |
-//! | Compatibility        | Rust 1.97.1, edition 2021, `no_std` not supported.                       |
-//! | Determinism          | Report ordering is declaration order; no time, locale or RNG is read.    |
-//! | Status               | [`Status::Foundation`]                                                   |
-//!
-//! ### Acceptance criteria for this phase
-//!
-//! 1. The crate compiles with zero third-party dependencies.
-//! 2. `cargo test` passes on the host.
-//! 3. Every plugin listed in directive section 6 exposes a real, inspectable
-//!    contract, and none of them claims to be implemented.
-//! 4. The toolchain lock of directive section 14 is encoded verbatim and can be
-//!    verified against an observed environment, reporting mismatches honestly.
-//! 5. The C ABI never panics across the boundary and never leaks the allocator.
-//!
-//! ## Architectural Decision Records (directive section 47)
-//!
-//! ### ADR-0001 — Capitalised Gradle and CMake file names cannot be used
-//!
-//! * **Context.** Directive section 46 spells the build files `Build.gradle.kts`,
-//!   `Settings.gradle.kts`, `Gradle.properties` and `CMakelist.txt`.
-//! * **Alternatives.** (a) Keep the capitalised names. (b) Use the names the
-//!   tools require. (c) Add shim files under both names.
-//! * **Decision.** (b).
-//! * **Reason.** Gradle resolves a settings file only as `settings.gradle`,
-//!   `settings.gradle.kts` or `settings.gradle.dcl`; this was verified empirically
-//!   against Gradle 8.14.3, which rejected `Settings.gradle.kts` outright. The
-//!   `-c/--settings-file` escape hatch was removed in Gradle 9. CMake likewise
-//!   resolves only `CMakeLists.txt`. Capitalised names would produce a repository
-//!   that cannot build, which directive section 1 forbids more strongly than
-//!   section 46 requires the spelling.
-//! * **Tradeoffs.** The tree deviates from section 46 in letter case only. Every
-//!   directory, every file and every nesting level is otherwise preserved.
-//! * **Security impact.** None.
-//! * **Performance impact.** None.
-//! * **Migration plan.** None required; renaming back would break the build.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0002 — The Core lives in one root-level crate file
-//!
-//! * **Context.** Section 46 lists no location for the Omni Core, but Rust
-//!   requires a manifest and a crate-root file.
-//! * **Alternatives.** (a) A `Core/` directory. (b) Place the Core under
-//!   `Builder/Source/Main/Native/`. (c) Two root-level files only.
-//! * **Decision.** (c): `Cargo.toml` and `Omni.rs` at the repository root.
-//! * **Reason.** It is the theoretical minimum — no new directory, no module
-//!   explosion (section 46), and the root already hosts build-system files.
-//! * **Tradeoffs.** A single large Core file. Acceptable while the Core is a
-//!   foundation; a split requires a new ADR and an explicit justification.
-//! * **Security impact.** None.
-//! * **Performance impact.** None.
-//! * **Migration plan.** Splitting the Core changes only `[lib] path`.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0003 — The Core carries zero third-party dependencies
-//!
-//! * **Context.** Sections 31 and 63 demand pinned, verified, inventoried
-//!   dependencies for anything that reaches a production artifact.
-//! * **Alternatives.** (a) Use `serde`/`serde_json` for reports. (b) Hand-write a
-//!   minimal JSON writer.
-//! * **Decision.** (b).
-//! * **Reason.** The Core emits JSON but never parses untrusted JSON, so the
-//!   surface is a few hundred bytes of escaping logic. Zero dependencies means an
-//!   empty supply-chain attack surface and a trivially auditable SBOM.
-//! * **Tradeoffs.** The writer is write-only and deliberately not a general JSON
-//!   library. Parsing untrusted input will require a separate, reviewed decision.
-//! * **Security impact.** Positive: no transitive code in the Core.
-//! * **Performance impact.** Negligible.
-//! * **Migration plan.** Adding a dependency requires a new ADR plus a provenance
-//!   record in the toolchain lock.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0005 — CMake is provisioned from upstream, not from the Android SDK
-//!
-//! * **Context.** Directive section 14 pins CMake 4.x, and the chosen point
-//!   release is 4.4.2. `sdkmanager` publishes CMake only up to 4.1.2.
-//! * **Alternatives.** (a) Accept the newest CMake the SDK offers. (b) Let AGP
-//!   choose, which silently installs 3.22.1. (c) Provision 4.4.2 from Kitware and
-//!   point AGP at it with `cmake.dir`.
-//! * **Decision.** (c).
-//! * **Reason.** (b) is an unpinned toolchain, which section 14 forbids outright.
-//!   (a) would quietly rewrite the pin to whatever Google happens to ship. (c)
-//!   keeps the pin exact and the provenance explicit.
-//! * **Tradeoffs.** The build depends on a `cmake.dir` entry in
-//!   `local.properties`, which is host-specific and not committed. The
-//!   `verifyCmakeToolchain` task turns a missing or mismatched entry into a
-//!   precise failure instead of a confusing one. The Kitware archive ships no
-//!   Ninja, so the generator is taken from the SDK's own CMake package.
-//! * **Security impact.** The archive is verified against a recorded SHA-256
-//!   before use (directive section 31); nothing is trusted because it downloaded
-//!   successfully.
-//! * **Performance impact.** None.
-//! * **Migration plan.** When the SDK publishes 4.4.2 or later, the provisioning
-//!   step can be replaced by an `sdkmanager` package and this ADR superseded.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0006 — Kotlin is pinned through the Build Tools API
-//!
-//! * **Context.** From AGP 9.0 the Android plugin carries its own Kotlin and
-//!   offers no DSL to select the version; `android.builtInKotlin` only turns the
-//!   feature on or off. AGP 9.3.0 supplies Kotlin 2.2.10. Directive section 14
-//!   pins 2.4.10, and the pin is not negotiable.
-//! * **Alternatives.** (a) Accept 2.2.10 and record the drift. (b) Set
-//!   `android.builtInKotlin=false`, which also requires `android.newDsl=false`,
-//!   and apply the standalone Kotlin plugin. (c) Force every
-//!   `org.jetbrains.kotlin` module to 2.4.10 with a resolution rule alone.
-//!   (d) Compile through the Kotlin Build Tools API, which is the mechanism
-//!   Kotlin provides for driving a compiler other than the plugin's own, and set
-//!   `compilerVersion` to the pinned value.
-//! * **Decision.** (d), with (c) kept alongside so the standard library that
-//!   reaches the APK matches the compiler that produced the bytecode.
-//! * **Reason.** (a) leaves the toolchain lock unmet, which section 14 does not
-//!   permit. (b) works today but is removed in AGP 10 and would force this
-//!   project back onto a deprecated DSL. (c) was tried first and is **not
-//!   sufficient on its own**: the Build Tools API refuses a
-//!   `kotlin-build-tools-impl` whose version differs from the plugin's unless
-//!   `kotlin.compiler.runViaBuildToolsApi` is enabled. That refusal stayed
-//!   hidden for a while because no Kotlin source was reaching the compiler at
-//!   all, so the compile task never ran; see ADR-0008.
-//! * **Tradeoffs.** `compilerVersion` is marked experimental by the Kotlin
-//!   Gradle Plugin, so the opt-in is explicit in the build script. AGP 9.3.0 was
-//!   not tested by Google against Kotlin 2.4.10, which makes the combination
-//!   this project's responsibility. `verifyKotlinToolchain` fails the build if
-//!   the pin stops taking effect.
-//! * **Security impact.** None. Both versions come from the same pinned
-//!   repository.
-//! * **Performance impact.** None measured.
-//! * **Migration plan.** When AGP ships 2.4.10 or later, the compilerVersion
-//!   setting and the resolution rule both become no-ops and can be removed.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0008 — The build proves the APK contains the code it declares
-//!
-//! * **Context.** The Kotlin source directory was redirected on the `java`
-//!   source set but not on the `kotlin` one. AGP's built-in Kotlin compiles what
-//!   `kotlin.directories` names, so `compileDebugKotlin` reported `NO-SOURCE`.
-//!   The build succeeded. The APK was well formed, correctly aligned, signed and
-//!   installable, and it contained none of the module's code — only the
-//!   generated resource classes. The application died at launch with
-//!   `ClassNotFoundException` for its own activity.
-//! * **Alternatives.** (a) Fix the source set and move on. (b) Fix it, and make
-//!   the build check that every class the manifest names is actually present.
-//! * **Decision.** (b).
-//! * **Reason.** Every existing gate passed on that APK, because every gate was
-//!   asking about packaging and none was asking whether the application was in
-//!   there. A missing-source failure is silent by construction: an empty source
-//!   set is indistinguishable from a module with nothing to compile. Directive
-//!   section 55 requires a regression test for every defect, and the only
-//!   meaningful one here inspects the finished artifact.
-//! * **Tradeoffs.** The check unpacks each APK and reads its dex files, costing
-//!   about a second per build.
-//! * **Security impact.** None directly, though an artifact that does not
-//!   contain the code it claims to is an integrity problem in the sense of
-//!   directive section 58.
-//! * **Performance impact.** Negligible against a full build.
-//! * **Migration plan.** When the Omni build engine replaces AGP, this check
-//!   moves with the packaging step rather than being dropped.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0007 — The bootstrap APK is signed by the build, not by a repacker
-//!
-//! * **Context.** An unsigned release APK cannot be installed, and signing it
-//!   with a third-party tool that repacks the archive produced "App not
-//!   installed" with no further explanation. Two independent causes were
-//!   measured. First, an application targeting API 36 is refused at install time
-//!   unless it carries an APK Signature Scheme v2 or later signature, and a
-//!   v1-only JAR signature is still the default in some tools. Second, the
-//!   manifest declares `extractNativeLibs="false"`, so the platform maps each
-//!   native library straight out of the APK; a repacker re-zips the archive,
-//!   turning stored entries into deflated ones, and a deflated library cannot be
-//!   mapped.
-//! * **Alternatives.** (a) Set `extractNativeLibs="true"` so repacking stops
-//!   mattering. (b) Commit a keystore so the build can always sign. (c) Sign from
-//!   the build using a keystore referenced from outside the repository, and check
-//!   the finished APK for both failure modes.
-//! * **Decision.** (c).
-//! * **Reason.** (a) trades a real improvement — smaller installs and libraries
-//!   the platform can map directly, which 16 KB page devices need — for tolerance
-//!   of a tool that should not be in the pipeline at all. (b) is precisely what
-//!   directive section 25 forbids. (c) removes the need for an external signer
-//!   and turns both failures into build errors that say what is wrong.
-//! * **Tradeoffs.** Signing a release requires four settings in
-//!   `local.properties` or the environment. Without them the release artifact
-//!   stays unsigned, which is honest rather than convenient. The debug APK is
-//!   signed by the standard debug key and installs as it always did.
-//! * **Security impact.** No key material enters the repository, the build log or
-//!   any diagnostic (directive sections 25 and 57). A partly configured identity
-//!   fails the build instead of silently producing an unsigned APK.
-//! * **Performance impact.** None.
-//! * **Migration plan.** When the Omni signing subsystem is real (roadmap phase
-//!   12), it replaces the AGP signing config. `Plugins/Sign.rs` stays PLANNED
-//!   until then; this ADR covers bootstrap signing only.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0009 — The Core stays one file, and the trigger for splitting it
-//!
-//! * **Context.** ADR-0002 put the Core in a single root-level file and said a
-//!   split would need its own decision record. Phase 2 took that file past eight
-//!   thousand lines across ten modules.
-//! * **Alternatives.** (a) Split now, one file per module. (b) Keep one file.
-//!   (c) Keep one file and write down what would make (a) the right answer.
-//! * **Decision.** (c).
-//! * **Reason.** The file is large but not tangled: every module is an inner
-//!   `mod` with its own contract, its dependencies point one way, and the tests
-//!   sit at the end where they can reach everything. Splitting has a real cost
-//!   here — directive section 46 fixes the repository layout, and each new file
-//!   is a deviation from it needing its own justification, which section 46 also
-//!   demands. Size alone is not a reason; difficulty working in it would be.
-//! * **Tradeoffs.** Navigating one long file is slower than opening the right
-//!   short one, and two people editing different subsystems touch the same file.
-//! * **Trigger for revisiting.** Any of: a module needing a dependency the rest
-//!   of the Core must not have; compile times making the edit-test loop painful;
-//!   or a second contributor working in the Core regularly. Any one of those is
-//!   enough — none of them is true today.
-//! * **Security impact.** None.
-//! * **Performance impact.** None at runtime.
-//! * **Migration plan.** A split moves each inner `mod` to its own file and
-//!   leaves `Omni.rs` as the crate root that declares them. `[lib] path` does not
-//!   change.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0004 — C++ owns JNI; Rust exposes a plain C ABI
-//!
-//! * **Context.** Section 46 mandates `Builder.cpp` / `Builder.hpp` next to the
-//!   CMake file, and the Kotlin UI needs to reach the Core.
-//! * **Alternatives.** (a) Rust exports `Java_*` symbols directly. (b) C++ holds
-//!   the JNI layer and calls a C ABI exported by Rust.
-//! * **Decision.** (b).
-//! * **Reason.** It keeps JVM specifics out of the Core, matches the file layout
-//!   the directive mandates, and keeps the Rust surface testable from plain C.
-//! * **Tradeoffs.** One extra language on the boundary.
-//! * **Security impact.** The Core never sees a `JNIEnv`, so it cannot reach JVM
-//!   state; `Capability::Jni` stays outside the Core.
-//! * **Performance impact.** One extra call per bridge invocation.
-//! * **Migration plan.** The C ABI is versioned by [`ffi::OMNI_ABI_VERSION`].
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0010 — Signatures are inspected, not verified, and the report says so
-//!
-//! * **Context.** Phase 6 covers signing (directive section 25). Reading an APK
-//!   Signature Scheme v2 block needs three things: the block's own structure,
-//!   the chunked content digest it claims, and RSA or elliptic-curve arithmetic
-//!   to check the signature over the signed data. The first two are format work
-//!   and hashing. The third is public-key cryptography, which directive section
-//!   30 forbids inventing and ADR-0003 forbids importing.
-//! * **Alternatives.** (a) Implement RSA in the Core so a signature can be fully
-//!   verified. (b) Take a cryptography dependency, breaking ADR-0003. (c) Ship
-//!   nothing until (a) or (b) is possible. (d) Implement the block reader and
-//!   the content digest, and make every report state in its own fields that the
-//!   signature itself was not checked.
-//! * **Decision.** (d).
-//! * **Reason.** The content digest is the part that catches the threats
-//!   directive section 27 names — T1 an APK modified after signing, T3 a
-//!   modified DEX, T4 a modified native library — and it is checkable against
-//!   an independent implementation, which `apksigner` provides. Writing RSA to
-//!   get there would mean hand-rolling modular exponentiation and PKCS#1
-//!   padding under section 30's rules with no way to test it against anything
-//!   this tree can run; a subtly wrong verifier that returns *valid* is worse
-//!   than an honest one that returns *unchecked*. Option (c) throws away work
-//!   that is correct and useful.
-//! * **Tradeoffs.** A digest match proves the package has not changed since the
-//!   block was written. It does not prove who wrote it: anyone able to rewrite
-//!   the package can rewrite the block to match. So this detects tampering with
-//!   a package, and establishes no provenance whatsoever.
-//! * **Security impact.** The risk is entirely one of being believed to do more
-//!   than it does, so the API refuses to allow the confusion: `signing::Report`
-//!   carries `signatures_checked`, which is a constant `false` and not a
-//!   computed field, `x509::Certificate` carries `signatureChecked: false`, and
-//!   both are written into every JSON report. No function in either module
-//!   returns a bare boolean that a caller could read as *this is valid*.
-//! * **Performance impact.** One SHA-256 pass over the package, chunked at one
-//!   megabyte as the scheme defines.
-//! * **Migration plan.** When public-key arithmetic exists, `signatures_checked`
-//!   becomes a computed field and the constant-`false` tests are what force the
-//!   reports and the subsystem inventory to be updated with it.
-//! * **Status.** ACCEPTED.
-//!
-//! ### ADR-0011 — SHA-1 is implemented, for one caller, and is not a security primitive
-//!
-//! * **Context.** A DEX header carries a 20-byte `signature` field defined as
-//!   the SHA-1 of everything after it, and a 4-byte Adler-32 checksum defined
-//!   over everything after byte 12. A reader that cannot compute the first
-//!   cannot tell a truncated or edited DEX from an intact one. SHA-1 is also
-//!   broken: chosen-prefix collisions are practical and have been since 2020.
-//! * **Alternatives.** (a) Implement SHA-1 and use it wherever a hash is
-//!   wanted. (b) Do not implement it, and report the DEX signature field as
-//!   unread. (c) Implement it, scope it to this one caller, and make every
-//!   report that carries the result say what it is not.
-//! * **Decision.** (c).
-//! * **Reason.** The field is part of the format, and reading a format means
-//!   reading its fields. What makes SHA-1 dangerous is not computing it but
-//!   *believing* it: a collision attack matters when a hash stands in for an
-//!   identity. Here it stands in for nothing — the value is the file's own
-//!   description of itself, which anything that edits a DEX on purpose simply
-//!   recomputes. Option (b) would leave a real capability unbuilt over a risk
-//!   that does not apply; option (a) is how a broken primitive ends up under a
-//!   cache key.
-//! * **Tradeoffs.** A second-rate hash exists in the tree and could be
-//!   misused. That is a discipline cost, paid with the scoping below.
-//! * **Security impact.** `hash::sha1` is documented at its definition as being
-//!   for the DEX signature field alone. No cache key (section 11), artifact
-//!   digest (section 58), signing digest (section 25) or provenance record
-//!   (section 32) calls it; those use SHA-256 or SHA-512. `dex::Integrity`
-//!   reports the result together with a note, written into the JSON itself,
-//!   saying a match rules out truncation and accidental damage and is not
-//!   evidence of authorship or authenticity. The subsystem inventory says the
-//!   same in its own entry.
-//! * **Performance impact.** One SHA-1 pass over a DEX when its integrity is
-//!   checked, which is optional and not on the read path.
-//! * **Migration plan.** None. The DEX format defines this field as SHA-1 and
-//!   that will not change. If a future format version defines something else,
-//!   the new one is added and this stays for the versions that need it.
-//! * **Status.** ACCEPTED.
-
 #![forbid(unsafe_op_in_unsafe_fn)]
-#![warn(missing_docs)]
 #![warn(unreachable_pub)]
-// A `Diagnostic` is around 200 bytes, which Clippy flags whenever one is the
-// error half of a `Result`. It is the error half of nearly every `Result` here,
-// deliberately: the diagnostic *is* what the caller needs, and boxing it would
-// add an allocation to every failure path in the Core in exchange for nothing
-// measurable. Revisit if profiling ever says otherwise (directive section 10).
 #![allow(clippy::result_large_err)]
+#![allow(clippy::missing_safety_doc)]
 
-// ---------------------------------------------------------------------------
-// Plugin modules (directive section 6).
-//
-// Section 46 fixes these nine files. They are modules of this crate, so the
-// repository grows no new Rust files and no new directories.
-// ---------------------------------------------------------------------------
-
-/// The nine plugins of directive section 6.
-///
-/// They are grouped under one module so that a plugin's name cannot collide
-/// with a Core subsystem's: `plugins::resources` declares what a resource
-/// plugin would do, and [`crate::resources`] is the engine that does it.
-///
-/// The `#[path = "."]` keeps the nine files where directive section 46 puts
-/// them: without it, an inline module makes its children resolve under a
-/// directory named after the module.
 #[path = "."]
 pub mod plugins {
     #[path = "Plugins/Apk.rs"]
@@ -389,31 +25,18 @@ pub mod plugins {
     pub mod sign;
 }
 
-// ===========================================================================
-// Core identity
-// ===========================================================================
-
-/// Semantic version of the Core, taken from `Cargo.toml` at compile time.
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Phase of the roadmap in directive section 52 that this tree implements.
-pub const CORE_PHASE: &str = "PHASE 8 — KOTLIN";
+pub const CORE_PHASE: &str = "PHASE 9 — PACKAGING";
 
-/// How far a roadmap phase has got.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PhaseState {
-    /// The work of this phase has landed. It does not mean the subsystems it
-    /// produced are finished: every one of them reports its own maturity in
-    /// [`SUBSYSTEMS`], and none of them is PRODUCTION.
     Delivered,
-    /// The phase this tree is working on now.
     Current,
-    /// Not started.
     Planned,
 }
 
 impl PhaseState {
-    /// Stable machine-readable name.
     pub const fn as_str(self) -> &'static str {
         match self {
             PhaseState::Delivered => "DELIVERED",
@@ -423,127 +46,133 @@ impl PhaseState {
     }
 }
 
-/// One phase of the roadmap in directive section 52.
 #[derive(Clone, Copy, Debug)]
 pub struct Phase {
-    /// Its number in the roadmap.
     pub number: u32,
-    /// Its name, spelled as the plugin contracts spell it.
     pub name: &'static str,
-    /// How far it has got.
     pub state: PhaseState,
-    /// What landed, or what is meant to land.
     pub delivers: &'static str,
 }
 
-/// The roadmap of directive section 52, and where this tree is on it.
-///
-/// This exists because a person looking at the application could see the
-/// current phase and nothing else, which made six phases of work invisible.
-/// A phase marked DELIVERED says its work landed; what state that work is in is
-/// the subsystem inventory's answer, not this table's.
 pub const ROADMAP: &[Phase] = &[
     Phase {
         number: 1,
         name: "PHASE 1 — FOUNDATION",
         state: PhaseState::Delivered,
-        delivers: "The Core crate, the JNI bridge, the toolchain lock, diagnostics,                    the capability model and the plugin contracts.",
+        delivers: "The Core crate, the JNI bridge, the toolchain lock, diagnostics, the capability model and the plugin contracts.",
     },
     Phase {
         number: 2,
         name: "PHASE 2 — OMNI CORE",
         state: PhaseState::Delivered,
-        delivers: "Virtual filesystem, project model, artifact lifecycle,                    incremental cache, build graph and scheduler.",
+        delivers: "Virtual filesystem, project model, artifact lifecycle, incremental cache, build graph and scheduler.",
     },
     Phase {
         number: 3,
         name: "PHASE 3 — BINARY CORE",
         state: PhaseState::Delivered,
-        delivers: "Bounded binary readers, patched writers, sections, tables and                    the CRC-32 and Adler-32 checksums the ZIP and DEX formats use.",
+        delivers: "Bounded binary readers, patched writers, sections, tables, and the CRC-32 and Adler-32 checksums the ZIP and DEX formats use.",
     },
     Phase {
         number: 4,
         name: "PHASE 4 — RESOURCE ENGINE",
         state: PhaseState::Delivered,
-        delivers: "An XML reader, values files, identifier assignment and                    reference resolution with loop detection.",
+        delivers: "An XML reader, values files, identifier assignment and reference resolution with loop detection.",
     },
     Phase {
         number: 5,
         name: "PHASE 5 — APK ENGINE",
         state: PhaseState::Delivered,
-        delivers: "The ZIP container an APK is: read, validated, and written                    deterministically with page-aligned native libraries.",
+        delivers: "The ZIP container an APK is: read, validated, and written deterministically with page-aligned native libraries.",
     },
     Phase {
         number: 6,
         name: "PHASE 6 — SIGNING",
         state: PhaseState::Delivered,
-        delivers: "A DER reader, X.509 certificates, and the APK signing block                    with its content digest recomputed and matched against                    apksigner. Signatures are read, never produced or verified.",
+        delivers: "A DER reader, X.509 certificates, and the APK signing block with its content digest recomputed and matched against apksigner. Signatures are read, never produced or verified.",
     },
     Phase {
         number: 7,
         name: "PHASE 7 — DEX",
         state: PhaseState::Delivered,
-        delivers: "The Dalvik executable format: header, map, string, type, \
-                   prototype, field and method pools and class definitions, \
-                   with the checksum and signature a file records over itself \
-                   recomputed. Read, not written; no bytecode is decoded.",
+        delivers: "The Dalvik executable format: header, map and index pools, class definitions, and the checksum and signature a file records over itself. Read, not written.",
     },
     Phase {
         number: 8,
-        name: "PHASE 8 — KOTLIN",
-        state: PhaseState::Current,
-        delivers: "The JVM class file format the Kotlin front end must one day \
-                   emit: constant pool, members, attributes and the Kotlin \
-                   metadata that says which compiler produced a class, checked \
-                   against javap. No lexer, parser, type checker or backend \
-                   exists; the Kotlin plugin stays PLANNED.",
+        name: "PHASE 8 — JVM CLASS FORMAT",
+        state: PhaseState::Delivered,
+        delivers: "The class file the Kotlin front end must one day emit: constant pool, members, attributes and Kotlin metadata, matched against javap. A format reader, not a compiler.",
     },
     Phase {
         number: 9,
-        name: "PHASE 9 — JAVA",
-        state: PhaseState::Planned,
-        delivers: "Java compilation.",
+        name: "PHASE 9 — PACKAGING",
+        state: PhaseState::Current,
+        delivers: "The writers that turn a project into a package: binary XML, the resource table, a DEX writer, and RSA signing. The first APK Omni produces on its own.",
     },
     Phase {
         number: 10,
-        name: "PHASE 10 — C/C++",
+        name: "PHASE 10 — APK OPTIMIZATION",
+        state: PhaseState::Planned,
+        delivers: "DEFLATE, entry layout, resource and DEX size reduction, measured against the package the bootstrap toolchain produces.",
+    },
+    Phase {
+        number: 11,
+        name: "PHASE 11 — ASSETS",
+        state: PhaseState::Planned,
+        delivers: "An image codec, mipmap generation from one source image, and lossless optimisation. No third-party library, so the DEFLATE encoder of phase 10 is a prerequisite.",
+    },
+    Phase {
+        number: 12,
+        name: "PHASE 12 — OMNI_DEVELOPER",
+        state: PhaseState::Planned,
+        delivers: "The developer program: creating a project, editing its files, configuring it, and driving a build from the device.",
+    },
+    Phase {
+        number: 13,
+        name: "PHASE 13 — KOTLIN",
+        state: PhaseState::Planned,
+        delivers: "A Kotlin front end: lexer, parser, symbol resolution, type analysis and a backend. None of it exists.",
+    },
+    Phase {
+        number: 14,
+        name: "PHASE 14 — JAVA",
+        state: PhaseState::Planned,
+        delivers: "A Java front end.",
+    },
+    Phase {
+        number: 15,
+        name: "PHASE 15 — C/C++",
         state: PhaseState::Planned,
         delivers: "Native compilation and linking.",
     },
     Phase {
-        number: 11,
-        name: "PHASE 11 — RUST",
+        number: 16,
+        name: "PHASE 16 — RUST",
         state: PhaseState::Planned,
         delivers: "Rust compilation for Android targets.",
     },
     Phase {
-        number: 12,
-        name: "PHASE 12 — OMNI_GUARD",
+        number: 17,
+        name: "PHASE 17 — OMNI_GUARD",
         state: PhaseState::Planned,
-        delivers: "Detection, verification, integrity, provenance and policy                    enforcement (directive section 29).",
+        delivers: "Detection, verification, integrity, provenance and policy enforcement (directive section 29).",
     },
     Phase {
-        number: 13,
-        name: "PHASE 13 — PERFORMANCE",
+        number: 18,
+        name: "PHASE 18 — PERFORMANCE",
         state: PhaseState::Planned,
-        delivers: "Parallel scheduling, memory and thermal awareness, and the                    measured budgets of directive sections 10 and 36.",
+        delivers: "Parallel scheduling, memory and thermal awareness, and the measured budgets of directive sections 10 and 36.",
     },
     Phase {
-        number: 14,
-        name: "PHASE 14 — SELF-HOSTING",
+        number: 19,
+        name: "PHASE 19 — SELF-HOSTING",
         state: PhaseState::Planned,
-        delivers: "Omni_Builder building Omni_Builder, with the bootstrap                    dependencies of directive section 15 removed one at a time.",
+        delivers: "Omni_Builder building Omni_Builder, with the bootstrap dependencies of directive section 15 removed one at a time.",
     },
 ];
 
-/// Maturity of the Core as a whole. Never raise this without the quality gates
-/// of directive section 51.
 pub const CORE_STATUS: Status = Status::Foundation;
 
-/// Honest statement of what still runs on borrowed infrastructure.
-///
-/// Directive section 15 requires bootstrap dependencies to be reported rather
-/// than hidden, and section 53 forbids any self-hosting claim while they exist.
 pub const BOOTSTRAP_DEPENDENCIES: &[&str] = &[
     "Gradle — drives the Android application build",
     "Android Gradle Plugin — packages and signs the bootstrap APK",
@@ -554,35 +183,18 @@ pub const BOOTSTRAP_DEPENDENCIES: &[&str] = &[
     "rustc / cargo — compiles the Core itself",
 ];
 
-// ===========================================================================
-// Status model (directive section 1)
-// ===========================================================================
-
-/// Maturity of a subsystem.
-///
-/// Directive section 1 forbids presenting an unfinished subsystem as finished.
-/// Every contract in this tree carries one of these values, and the user
-/// interface renders it verbatim.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum Status {
-    /// Specified, not implemented. No code path produces an artifact.
     Planned,
-    /// Contracts and scaffolding are real; the subsystem does no useful work yet.
     Foundation,
-    /// Some of the specified behaviour is implemented; the rest is absent.
     Partial,
-    /// Implemented, but the contract may still change without notice.
     Experimental,
-    /// Contract frozen, implementation complete, hardening still in progress.
     Beta,
-    /// Passed every gate in directive section 51.
     Production,
-    /// Superseded. Retained only for compatibility.
     Deprecated,
 }
 
 impl Status {
-    /// Stable machine-readable name. Used in reports and in the user interface.
     pub const fn as_str(self) -> &'static str {
         match self {
             Status::Planned => "PLANNED",
@@ -595,8 +207,6 @@ impl Status {
         }
     }
 
-    /// Whether a subsystem in this state may produce an artifact that is
-    /// published (directive section 58) rather than merely inspected.
     pub const fn may_produce_artifacts(self) -> bool {
         matches!(
             self,
@@ -611,34 +221,15 @@ impl core::fmt::Display for Status {
     }
 }
 
-// ===========================================================================
-// Subsystem inventory (directive section 1)
-// ===========================================================================
-
-/// What one subsystem of the Core is, and honestly is not.
-///
-/// Directive section 1 forbids presenting an unfinished subsystem as finished.
-/// A comment saying so is easy to write and easy to forget; this table is
-/// rendered by the user interface, so what it says is what a person reads.
 #[derive(Clone, Copy, Debug)]
 pub struct Subsystem {
-    /// Human-facing name.
     pub name: &'static str,
-    /// Maturity.
     pub status: Status,
-    /// Section of the directive that specifies it.
     pub directive_section: u16,
-    /// One sentence on what it does today.
     pub summary: &'static str,
-    /// What the specification asks for that is not built.
-    ///
-    /// An empty list means nothing specified is missing. It does not mean the
-    /// subsystem has reached [`Status::Production`]; the gates of directive
-    /// section 51 decide that.
     pub missing: &'static [&'static str],
 }
 
-/// Every subsystem of the Core, in the order the directive introduces them.
 pub const SUBSYSTEMS: &[Subsystem] = &[
     Subsystem {
         name: "Diagnostics",
@@ -884,37 +475,21 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
     },
 ];
 
-// ===========================================================================
-// Failure model (directive section 34)
-// ===========================================================================
-
-/// Classification every subsystem must be able to distinguish.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum FailureClass {
-    /// The operation completed as specified.
     Success,
-    /// The operation failed but the build may continue or be retried.
     Recoverable,
-    /// The project or the request is wrong.
     UserError,
-    /// The configuration or manifest is wrong.
     ConfigurationError,
-    /// A required tool is missing, mismatched or misbehaving.
     ToolchainError,
-    /// A security policy denied the operation.
     SecurityFailure,
-    /// Data that was expected to be intact is not.
     Corruption,
-    /// Memory, storage, CPU or time budget was exhausted.
     ResourceExhaustion,
-    /// A defect in Omni_Builder itself.
     InternalError,
-    /// The operation was cancelled (directive section 35).
     Cancellation,
 }
 
 impl FailureClass {
-    /// Stable machine-readable name.
     pub const fn as_str(self) -> &'static str {
         match self {
             FailureClass::Success => "SUCCESS",
@@ -937,26 +512,14 @@ impl core::fmt::Display for FailureClass {
     }
 }
 
-// ===========================================================================
-// json — minimal, write-only JSON emitter (ADR-0003)
-// ===========================================================================
-
-/// Deterministic, allocation-light JSON writer.
-///
-/// This is intentionally *not* a general JSON library: it can only write, it
-/// never parses, and it exposes no way to emit a malformed document from safe
-/// code. Every report the Core hands to the host goes through it.
 pub mod json {
-    /// Accumulates a JSON document.
     #[derive(Debug, Default)]
     pub struct Writer {
         buf: String,
-        /// `true` when at least one member has been written at the current depth.
         needs_comma: Vec<bool>,
     }
 
     impl Writer {
-        /// Creates an empty writer.
         pub fn new() -> Self {
             Writer {
                 buf: String::with_capacity(1024),
@@ -974,7 +537,6 @@ pub mod json {
             }
         }
 
-        /// Opens an object, optionally as the value of `key`.
         pub fn begin_object(&mut self, key: Option<&str>) {
             self.separate();
             if let Some(k) = key {
@@ -985,13 +547,11 @@ pub mod json {
             self.needs_comma.push(false);
         }
 
-        /// Closes the innermost object.
         pub fn end_object(&mut self) {
             self.needs_comma.pop();
             self.buf.push('}');
         }
 
-        /// Opens an array, optionally as the value of `key`.
         pub fn begin_array(&mut self, key: Option<&str>) {
             self.separate();
             if let Some(k) = key {
@@ -1002,13 +562,11 @@ pub mod json {
             self.needs_comma.push(false);
         }
 
-        /// Closes the innermost array.
         pub fn end_array(&mut self) {
             self.needs_comma.pop();
             self.buf.push(']');
         }
 
-        /// Writes a string member.
         pub fn field_str(&mut self, key: &str, value: &str) {
             self.separate();
             self.write_escaped(key);
@@ -1016,7 +574,6 @@ pub mod json {
             self.write_escaped(value);
         }
 
-        /// Writes an unsigned integer member.
         pub fn field_u64(&mut self, key: &str, value: u64) {
             self.separate();
             self.write_escaped(key);
@@ -1024,7 +581,6 @@ pub mod json {
             self.buf.push_str(&value.to_string());
         }
 
-        /// Writes a boolean member.
         pub fn field_bool(&mut self, key: &str, value: bool) {
             self.separate();
             self.write_escaped(key);
@@ -1032,19 +588,11 @@ pub mod json {
             self.buf.push_str(if value { "true" } else { "false" });
         }
 
-        /// Writes a bare string element inside an array.
         pub fn element_str(&mut self, value: &str) {
             self.separate();
             self.write_escaped(value);
         }
 
-        /// Consumes the writer and returns the document.
-        ///
-        /// # Panics
-        ///
-        /// Panics if a container was left open. Callers inside the Core always
-        /// balance their containers; the FFI layer additionally catches panics
-        /// so this can never cross the ABI boundary.
         pub fn finish(self) -> String {
             assert!(
                 self.needs_comma.is_empty(),
@@ -1054,7 +602,6 @@ pub mod json {
             self.buf
         }
 
-        /// Escapes per RFC 8259 section 7, including the C0 control range.
         fn write_escaped(&mut self, value: &str) {
             self.buf.push('"');
             for ch in value.chars() {
@@ -1077,31 +624,19 @@ pub mod json {
     }
 }
 
-// ===========================================================================
-// diag — unified diagnostics (directive section 33)
-// ===========================================================================
-
-/// Diagnostic model shared by the Core and every plugin.
 pub mod diag {
     use crate::{json::Writer, FailureClass};
 
-    /// How much a diagnostic matters.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum Severity {
-        /// Machine-oriented detail, off by default.
         Trace,
-        /// Progress and state, useful when investigating.
         Info,
-        /// Something is suspicious but the operation continues.
         Warning,
-        /// The operation failed.
         Error,
-        /// The operation failed and the build cannot continue.
         Fatal,
     }
 
     impl Severity {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Severity::Trace => "TRACE",
@@ -1112,7 +647,6 @@ pub mod diag {
             }
         }
 
-        /// Whether a diagnostic of this severity stops the build.
         pub const fn is_blocking(self) -> bool {
             matches!(self, Severity::Error | Severity::Fatal)
         }
@@ -1124,22 +658,14 @@ pub mod diag {
         }
     }
 
-    /// Where in a source file a diagnostic points.
-    ///
-    /// Lines and columns are 1-based, matching every editor the diagnostics are
-    /// rendered in. A location with no line refers to the file as a whole.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Location {
-        /// Path as the user wrote it, never an absolute host path.
         pub file: String,
-        /// 1-based line, or `0` when the diagnostic covers the whole file.
         pub line: u32,
-        /// 1-based column, or `0` when the diagnostic covers the whole line.
         pub column: u32,
     }
 
     impl Location {
-        /// A location covering an entire file.
         pub fn file(path: impl Into<String>) -> Self {
             Location {
                 file: path.into(),
@@ -1148,7 +674,6 @@ pub mod diag {
             }
         }
 
-        /// A precise location.
         pub fn at(path: impl Into<String>, line: u32, column: u32) -> Self {
             Location {
                 file: path.into(),
@@ -1168,35 +693,20 @@ pub mod diag {
         }
     }
 
-    /// A single actionable message.
-    ///
-    /// Directive section 33 requires diagnostics to be actionable, not merely
-    /// technically correct, which is why [`Diagnostic::suggestion`] exists and
-    /// why [`Diagnostic::origin`] names the subsystem that produced it.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Diagnostic {
-        /// Stable code such as `E1004`. Never reused for a different meaning.
         pub code: String,
-        /// Severity of this message.
         pub severity: Severity,
-        /// Failure classification (directive section 34).
         pub class: FailureClass,
-        /// Subsystem that emitted the diagnostic, for example `core.toolchain`.
         pub origin: String,
-        /// One-sentence statement of the problem.
         pub message: String,
-        /// Optional source position.
         pub location: Option<Location>,
-        /// Optional detail: what was expected, what was found.
         pub context: Vec<String>,
-        /// Optional remedy the user can act on.
         pub suggestion: Option<String>,
-        /// Codes of diagnostics that explain this one.
         pub related: Vec<String>,
     }
 
     impl Diagnostic {
-        /// Creates a diagnostic with the mandatory fields set.
         pub fn new(
             code: impl Into<String>,
             severity: Severity,
@@ -1217,41 +727,31 @@ pub mod diag {
             }
         }
 
-        /// Attaches a source position.
         pub fn with_location(mut self, location: Location) -> Self {
             self.location = Some(location);
             self
         }
 
-        /// Appends a line of context.
         pub fn with_context(mut self, line: impl Into<String>) -> Self {
             self.context.push(line.into());
             self
         }
 
-        /// Reclassifies the failure.
-        ///
-        /// A diagnostic is usually built with the class it will keep, but a
-        /// parser reports most problems as user error and a handful as resource
-        /// exhaustion; this keeps those from needing a second constructor.
         pub fn with_class(mut self, class: FailureClass) -> Self {
             self.class = class;
             self
         }
 
-        /// Attaches an actionable remedy.
         pub fn with_suggestion(mut self, suggestion: impl Into<String>) -> Self {
             self.suggestion = Some(suggestion.into());
             self
         }
 
-        /// Links a related diagnostic code.
         pub fn with_related(mut self, code: impl Into<String>) -> Self {
             self.related.push(code.into());
             self
         }
 
-        /// Serialises this diagnostic into an open JSON array.
         pub fn write_json(&self, w: &mut Writer) {
             w.begin_object(None);
             w.field_str("code", &self.code);
@@ -1284,7 +784,6 @@ pub mod diag {
     }
 
     impl core::fmt::Display for Diagnostic {
-        /// Renders the human-facing form shown in directive section 33.
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             write!(f, "{} [{}]", self.code, self.severity)?;
             if let Some(loc) = &self.location {
@@ -1301,57 +800,42 @@ pub mod diag {
         }
     }
 
-    /// Ordered collection of diagnostics.
-    ///
-    /// Insertion order is preserved so that reports stay byte-identical across
-    /// runs with identical input (directive section 12).
     #[derive(Clone, Default, Debug)]
     pub struct Sink {
         entries: Vec<Diagnostic>,
     }
 
     impl Sink {
-        /// Creates an empty sink.
         pub fn new() -> Self {
             Sink {
                 entries: Vec::new(),
             }
         }
 
-        /// Records a diagnostic.
         pub fn emit(&mut self, diagnostic: Diagnostic) {
             self.entries.push(diagnostic);
         }
 
-        /// All recorded diagnostics, in emission order.
         pub fn entries(&self) -> &[Diagnostic] {
             &self.entries
         }
 
-        /// Number of recorded diagnostics.
         pub fn len(&self) -> usize {
             self.entries.len()
         }
 
-        /// Whether nothing has been recorded.
         pub fn is_empty(&self) -> bool {
             self.entries.is_empty()
         }
 
-        /// Whether any recorded diagnostic stops the build.
-        ///
-        /// This is the single question the scheduler asks before treating a node
-        /// as successful; directive section 10 forbids ignoring a failure.
         pub fn has_blocking(&self) -> bool {
             self.entries.iter().any(|d| d.severity.is_blocking())
         }
 
-        /// Highest severity recorded, if any.
         pub fn max_severity(&self) -> Option<Severity> {
             self.entries.iter().map(|d| d.severity).max()
         }
 
-        /// Serialises every diagnostic as a JSON array member of `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_array(Some(key));
             for d in &self.entries {
@@ -1362,55 +846,27 @@ pub mod diag {
     }
 }
 
-// ===========================================================================
-// caps — capability security (directive sections 3-I3 and 7)
-// ===========================================================================
-
-/// Default-deny capability model.
-///
-/// Directive section 7 states that no plugin holds any privilege implicitly.
-/// The pipeline is `Request -> Policy -> Grant/Deny -> Audit -> Execution`, and
-/// this module implements all five stages. Nothing here performs the privileged
-/// operation itself; it only decides and records.
 pub mod caps {
     use crate::json::Writer;
 
-    /// A privilege a plugin may request.
-    ///
-    /// The list is closed on purpose: adding a variant is an architectural
-    /// change that needs an ADR, so privilege cannot creep in silently.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum Capability {
-        /// Read through the virtual filesystem.
         FsRead,
-        /// Write through the virtual filesystem.
         FsWrite,
-        /// Spawn a process.
         ProcessExec,
-        /// Reach the local network.
         Network,
-        /// Reach the public internet.
         Internet,
-        /// Use cryptographic primitives.
         Crypto,
-        /// Touch private key material.
         KeyAccess,
-        /// Call into the JVM.
         Jni,
-        /// Load or run native code.
         Native,
-        /// Use scratch storage that does not survive the build.
         TempStorage,
-        /// Read or write the incremental build cache.
         Cache,
-        /// Query device state.
         Device,
-        /// Emit an artifact that carries identity or secrets.
         SensitiveOutput,
     }
 
     impl Capability {
-        /// Stable machine-readable name, matching directive section 7.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Capability::FsRead => "FS_READ",
@@ -1429,7 +885,6 @@ pub mod caps {
             }
         }
 
-        /// Every capability, in declaration order.
         pub const ALL: &'static [Capability] = &[
             Capability::FsRead,
             Capability::FsWrite,
@@ -1446,11 +901,6 @@ pub mod caps {
             Capability::SensitiveOutput,
         ];
 
-        /// Whether misuse of this capability can leak identity or secrets.
-        ///
-        /// Directive sections 25, 56 and 57 forbid key material from reaching a
-        /// log, a diagnostic or an artifact, so grants of these capabilities are
-        /// always audited even when the policy allows them.
         pub const fn is_sensitive(self) -> bool {
             matches!(
                 self,
@@ -1470,17 +920,13 @@ pub mod caps {
         }
     }
 
-    /// Outcome of a capability request.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Decision {
-        /// The policy allows the request.
         Grant,
-        /// The policy refuses the request.
         Deny,
     }
 
     impl Decision {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Decision::Grant => "GRANT",
@@ -1488,43 +934,27 @@ pub mod caps {
             }
         }
 
-        /// Whether the caller may proceed.
         pub const fn is_granted(self) -> bool {
             matches!(self, Decision::Grant)
         }
     }
 
-    /// One entry in the immutable audit trail (directive section 57).
-    ///
-    /// The record deliberately holds no payload: only who asked for what, and
-    /// what the policy answered. It can never contain a key or a credential.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct AuditRecord {
-        /// Plugin identifier that made the request.
         pub subject: String,
-        /// Capability that was requested.
         pub capability: Capability,
-        /// What the policy answered.
         pub decision: Decision,
-        /// Why, in one sentence.
         pub reason: String,
     }
 
-    /// A set of granted capabilities plus the audit trail of every request.
-    ///
-    /// Construction is default-deny: [`Policy::new`] grants nothing. A grant is
-    /// only ever added explicitly, which makes the privilege surface of a build
-    /// readable at the call site.
     #[derive(Clone, Debug)]
     pub struct Policy {
-        /// Name of the policy, recorded in reports.
         name: String,
         granted: Vec<Capability>,
         audit: Vec<AuditRecord>,
     }
 
     impl Policy {
-        /// Creates a policy that grants nothing.
         pub fn new(name: impl Into<String>) -> Self {
             Policy {
                 name: name.into(),
@@ -1533,12 +963,10 @@ pub mod caps {
             }
         }
 
-        /// Name of this policy.
         pub fn name(&self) -> &str {
             &self.name
         }
 
-        /// Adds a capability to the granted set. Idempotent.
         pub fn grant(&mut self, capability: Capability) -> &mut Self {
             if !self.granted.contains(&capability) {
                 self.granted.push(capability);
@@ -1547,21 +975,15 @@ pub mod caps {
             self
         }
 
-        /// Removes a capability from the granted set. Idempotent.
         pub fn revoke(&mut self, capability: Capability) -> &mut Self {
             self.granted.retain(|c| *c != capability);
             self
         }
 
-        /// Capabilities currently granted, in a deterministic order.
         pub fn granted(&self) -> &[Capability] {
             &self.granted
         }
 
-        /// Evaluates a request and records it in the audit trail.
-        ///
-        /// This is the only way to obtain a [`Decision`]; there is no path that
-        /// checks a capability without leaving an audit record behind.
         pub fn request(&mut self, subject: &str, capability: Capability) -> Decision {
             let decision = if self.granted.contains(&capability) {
                 Decision::Grant
@@ -1581,12 +1003,10 @@ pub mod caps {
             decision
         }
 
-        /// The audit trail, in request order.
         pub fn audit(&self) -> &[AuditRecord] {
             &self.audit
         }
 
-        /// Serialises the policy and its audit trail.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("name", &self.name);
@@ -1612,34 +1032,20 @@ pub mod caps {
     }
 }
 
-// ===========================================================================
-// plugin — plugin contracts and registry (directive sections 6 and 66)
-// ===========================================================================
-
-/// Plugin contract surface.
-///
-/// Directive section 66 requires that adding a compiler needs no Core change.
-/// A plugin therefore contributes a [`Contract`] plus an [`Plugin::execute`]
-/// implementation, and the Core never names a specific language.
 pub mod plugin {
     use crate::caps::{Capability, Decision, Policy};
     use crate::diag::{Diagnostic, Severity};
     use crate::json::Writer;
     use crate::{FailureClass, Status};
 
-    /// Three-component plugin version.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct Version {
-        /// Incremented on a breaking contract change (directive section 65).
         pub major: u16,
-        /// Incremented when behaviour is added compatibly.
         pub minor: u16,
-        /// Incremented for fixes that do not change the contract.
         pub patch: u16,
     }
 
     impl Version {
-        /// Creates a version.
         pub const fn new(major: u16, minor: u16, patch: u16) -> Self {
             Version {
                 major,
@@ -1648,7 +1054,6 @@ pub mod plugin {
             }
         }
 
-        /// Whether a consumer written against `required` can use this version.
         pub const fn is_compatible_with(self, required: Version) -> bool {
             self.major == required.major
                 && (self.minor > required.minor
@@ -1662,38 +1067,22 @@ pub mod plugin {
         }
     }
 
-    /// Everything the Core knows about a plugin without running it.
-    ///
-    /// The whole contract is `&'static`, so it costs nothing to inspect and can
-    /// be rendered by the user interface without a build being in progress.
     #[derive(Clone, Copy, Debug)]
     pub struct Contract {
-        /// Stable identifier, for example `omni.plugin.dex`.
         pub id: &'static str,
-        /// Human-facing name.
         pub display_name: &'static str,
-        /// Contract version.
         pub version: Version,
-        /// Maturity. Directive section 1 forbids overstating this.
         pub status: Status,
-        /// One sentence describing the purpose.
         pub summary: &'static str,
-        /// Artifact kinds this plugin consumes.
         pub inputs: &'static [&'static str],
-        /// Artifact kinds this plugin produces.
         pub outputs: &'static [&'static str],
-        /// Capabilities the plugin needs in order to do its job.
         pub required_capabilities: &'static [Capability],
-        /// Capabilities that must never be granted to this plugin.
         pub forbidden_capabilities: &'static [Capability],
-        /// Work this plugin explicitly does not do (directive section 2).
         pub non_responsibilities: &'static [&'static str],
-        /// Roadmap phase in which this plugin becomes real.
         pub roadmap_phase: &'static str,
     }
 
     impl Contract {
-        /// Serialises the contract as an object inside an open array.
         pub fn write_json(&self, w: &mut Writer) {
             w.begin_object(None);
             w.field_str("id", self.id);
@@ -1732,53 +1121,30 @@ pub mod plugin {
         }
     }
 
-    /// What a plugin produced.
-    ///
-    /// Empty in this phase: no plugin in this tree produces an artifact yet, and
-    /// directive section 1 forbids pretending otherwise.
     #[derive(Clone, Debug, Default)]
     pub struct Outcome {
-        /// Identifiers of artifacts the plugin created.
         pub artifacts: Vec<String>,
     }
 
-    /// Execution environment handed to a plugin.
-    ///
-    /// The plugin reaches privileged operations only through this context, and
-    /// every capability question it asks is audited.
     #[derive(Debug)]
     pub struct Context<'a> {
-        /// Policy governing this execution.
         pub policy: &'a mut Policy,
-        /// Sink the plugin writes diagnostics into.
         pub diagnostics: &'a mut crate::diag::Sink,
     }
 
     impl Context<'_> {
-        /// Asks the policy for a capability on behalf of `subject`.
         pub fn require(&mut self, subject: &str, capability: Capability) -> Decision {
             self.policy.request(subject, capability)
         }
     }
 
-    /// A unit of build work the Core can schedule.
-    ///
     #[allow(unreachable_pub)]
     pub trait Plugin: Sync {
-        /// The contract, available without executing anything.
         fn contract(&self) -> &'static Contract;
 
-        /// Performs the plugin's work.
-        ///
-        /// A plugin whose contract status is [`Status::Planned`] must return the
-        /// diagnostic produced by [`unimplemented_diagnostic`] rather than a
-        /// fabricated success (directive section 1).
         fn execute(&self, ctx: &mut Context<'_>) -> Result<Outcome, Diagnostic>;
     }
 
-    /// The single, honest failure a not-yet-implemented plugin returns.
-    ///
-    /// Code `E0001` is reserved permanently for this meaning.
     pub fn unimplemented_diagnostic(contract: &Contract) -> Diagnostic {
         Diagnostic::new(
             "E0001",
@@ -1799,10 +1165,6 @@ pub mod plugin {
         )
     }
 
-    /// The nine plugins fixed by directive section 6, in a fixed order.
-    ///
-    /// Declaration order is part of the contract: it is what makes every report
-    /// byte-stable across runs (directive section 12).
     static BUILTIN: &[&'static dyn Plugin] = &[
         &crate::plugins::kotlin::PLUGIN,
         &crate::plugins::java::PLUGIN,
@@ -1815,42 +1177,32 @@ pub mod plugin {
         &crate::plugins::guard::PLUGIN,
     ];
 
-    /// Ordered, read-only view of every plugin compiled into this build.
-    ///
-    /// Order is declaration order, so reports are byte-stable across runs
-    /// (directive section 12).
     #[derive(Clone, Copy)]
     pub struct Registry {
         plugins: &'static [&'static dyn Plugin],
     }
 
     impl Registry {
-        /// Every plugin listed in directive section 6.
         pub fn builtin() -> Self {
             Registry { plugins: BUILTIN }
         }
 
-        /// Number of registered plugins.
         pub fn len(&self) -> usize {
             self.plugins.len()
         }
 
-        /// Whether the registry is empty.
         pub fn is_empty(&self) -> bool {
             self.plugins.is_empty()
         }
 
-        /// Every registered plugin, in declaration order.
         pub fn all(&self) -> &'static [&'static dyn Plugin] {
             self.plugins
         }
 
-        /// Looks a plugin up by its contract identifier.
         pub fn find(&self, id: &str) -> Option<&'static dyn Plugin> {
             self.plugins.iter().copied().find(|p| p.contract().id == id)
         }
 
-        /// Serialises every contract as the array member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_array(Some(key));
             for p in self.plugins {
@@ -1861,39 +1213,18 @@ pub mod plugin {
     }
 }
 
-// ===========================================================================
-// toolchain — the version lock and its verification (sections 14, 31, 15)
-// ===========================================================================
-
-/// Encoding and verification of the pinned toolchain.
-///
-/// Directive section 14 forbids `latest`, `9.+`, `*` and any other dynamic
-/// version. Every component below is therefore pinned literally, and section 31
-/// requires each one to carry its source and, where known, a checksum.
-///
-/// This module never *installs* or *invokes* a tool. It compares what the
-/// directive demands against what the host reports observing, and says plainly
-/// where the two disagree. On an Android device most of these components are not
-/// observable at all, which the report states rather than guesses.
 pub mod toolchain {
     use crate::diag::{Diagnostic, Severity, Sink};
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// How strictly an observed version must match the pin.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Requirement {
-        /// The observed version must equal the pin exactly.
         Exact,
-        /// The observed version must share the pin's leading component.
-        ///
-        /// Used only where the directive itself pins a series, such as
-        /// "CMake 4.x stable".
         Series,
     }
 
     impl Requirement {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Requirement::Exact => "EXACT",
@@ -1901,7 +1232,6 @@ pub mod toolchain {
             }
         }
 
-        /// Evaluates `observed` against `pinned`.
         pub fn satisfied_by(self, pinned: &str, observed: &str) -> bool {
             let pinned = pinned.trim();
             let observed = observed.trim();
@@ -1915,36 +1245,18 @@ pub mod toolchain {
         }
     }
 
-    /// One pinned component of the toolchain.
     #[derive(Clone, Copy, Debug)]
     pub struct Pin {
-        /// Key the host uses when reporting an observation.
         pub id: &'static str,
-        /// Human-facing name.
         pub display_name: &'static str,
-        /// The pinned version, verbatim from directive section 14.
         pub pinned: &'static str,
-        /// Match strictness.
         pub requirement: Requirement,
-        /// Where the component comes from (directive section 31 provenance).
         pub source: &'static str,
-        /// Checksum of the distribution, when one has been verified.
         pub checksum: Option<&'static str>,
-        /// Whether an Android device can observe this component at runtime.
-        ///
-        /// Build-host tools such as Gradle and the JDK cannot be observed from
-        /// inside the builder application, and the report says so instead of
-        /// inventing a value.
         pub observable_on_device: bool,
-        /// Why this component is pinned, or what is still missing.
         pub note: &'static str,
     }
 
-    /// The toolchain lock of directive section 14, encoded verbatim.
-    ///
-    /// Every entry was checked against its upstream index on 2026-08-19 and
-    /// exists. Checksums are recorded only where the artifact was actually
-    /// fetched and hashed; `None` means "not yet verified", never "trusted".
     pub const LOCK: &[Pin] = &[
         Pin {
             id: "jdk",
@@ -2075,21 +1387,15 @@ pub mod toolchain {
         },
     ];
 
-    /// Result of comparing one pin against the environment.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum State {
-        /// Observed and equal to the pin.
         Match,
-        /// Observed and different from the pin.
         Mismatch,
-        /// Not observed, and not observable from this host.
         NotObservable,
-        /// Observable in principle, but the host did not report it.
         Missing,
     }
 
     impl State {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 State::Match => "MATCH",
@@ -2100,43 +1406,25 @@ pub mod toolchain {
         }
     }
 
-    /// One line of the verification report.
     #[derive(Clone, Debug)]
     pub struct Finding {
-        /// The pin that was evaluated.
         pub pin: Pin,
-        /// What the host reported, if anything.
         pub observed: Option<String>,
-        /// Outcome of the comparison.
         pub state: State,
     }
 
-    /// Upper bound on the observation string, in bytes (directive section 60).
     pub const MAX_OBSERVATION_BYTES: usize = 8 * 1024;
 
-    /// Upper bound on the number of `key=value` pairs (directive section 60).
     pub const MAX_OBSERVATION_PAIRS: usize = 64;
 
-    /// Upper bound on a single observed value, in bytes.
     pub const MAX_OBSERVED_VALUE_BYTES: usize = 256;
 
-    /// A bounded set of `key=value` observations supplied by the host.
-    ///
-    /// The input is untrusted (directive section 61): it arrives from the JNI
-    /// boundary. Parsing is therefore bounded in length, in pair count and in
-    /// value size, and anything the parser rejects becomes a diagnostic rather
-    /// than being silently dropped (directive section 44).
     #[derive(Clone, Debug, Default)]
     pub struct Observation {
         pairs: Vec<(String, String)>,
     }
 
     impl Observation {
-        /// Parses `input`, recording every rejection in `sink`.
-        ///
-        /// Accepted form: `key=value` separated by `;` or a newline. Surrounding
-        /// whitespace is trimmed. Later duplicates of a key are rejected rather
-        /// than silently overriding the earlier value.
         pub fn parse(input: &str, sink: &mut Sink) -> Observation {
             let mut observation = Observation::default();
 
@@ -2266,7 +1554,6 @@ pub mod toolchain {
             observation
         }
 
-        /// Looks up an observed value.
         pub fn get(&self, key: &str) -> Option<&str> {
             self.pairs
                 .iter()
@@ -2274,12 +1561,10 @@ pub mod toolchain {
                 .map(|(_, v)| v.as_str())
         }
 
-        /// Number of accepted observations.
         pub fn len(&self) -> usize {
             self.pairs.len()
         }
 
-        /// Whether nothing was observed.
         pub fn is_empty(&self) -> bool {
             self.pairs.is_empty()
         }
@@ -2294,11 +1579,6 @@ pub mod toolchain {
         out
     }
 
-    /// Compares every pin against `observation`, emitting diagnostics as it goes.
-    ///
-    /// A mismatch is an error: directive section 14 does not permit a build to
-    /// proceed on an unpinned toolchain. A component that cannot be observed is
-    /// reported as such and is never counted as verified.
     pub fn verify(observation: &Observation, sink: &mut Sink) -> Vec<Finding> {
         let mut findings = Vec::with_capacity(LOCK.len());
 
@@ -2382,7 +1662,6 @@ pub mod toolchain {
         findings
     }
 
-    /// Serialises the findings as the array member `key`.
     pub fn write_json(findings: &[Finding], w: &mut Writer, key: &str) {
         w.begin_array(Some(key));
         for finding in findings {
@@ -2408,35 +1687,15 @@ pub mod toolchain {
     }
 }
 
-// ===========================================================================
-// hash — SHA-256 (directive section 30)
-// ===========================================================================
-
-/// SHA-256, implemented from FIPS PUB 180-4.
-///
-/// Directive section 30 forbids inventing cryptography and requires every
-/// primitive to rest on an established standard, its official specification and
-/// its official test vectors. This is an implementation of a published standard,
-/// not a new algorithm, and the tests are the vectors NIST publishes for it.
-///
-/// It exists because artifact digests (section 58), cache keys (section 11) and
-/// build provenance (section 32) all need one hash, and ADR-0003 keeps the Core
-/// free of third-party code.
-///
-/// It is **not** suitable for password hashing or for any use needing a keyed
-/// or memory-hard construction; nothing in this tree asks it to be.
 pub mod hash {
-    /// A 32-byte SHA-256 digest.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Digest([u8; 32]);
 
     impl Digest {
-        /// The raw bytes, most significant first.
         pub const fn as_bytes(&self) -> &[u8; 32] {
             &self.0
         }
 
-        /// Lowercase hexadecimal, the form every report and log uses.
         pub fn to_hex(self) -> String {
             const HEX: &[u8; 16] = b"0123456789abcdef";
             let mut out = String::with_capacity(64);
@@ -2447,10 +1706,6 @@ pub mod hash {
             out
         }
 
-        /// The first `bytes` bytes as hexadecimal.
-        ///
-        /// Used where a digest identifies something to a human rather than
-        /// authenticating it; never use a truncated digest for verification.
         pub fn to_short_hex(self, bytes: usize) -> String {
             let width = bytes.min(32) * 2;
             self.to_hex()[..width].to_string()
@@ -2469,8 +1724,6 @@ pub mod hash {
         }
     }
 
-    /// Round constants: the first 32 bits of the fractional parts of the cube
-    /// roots of the first 64 primes (FIPS 180-4, section 4.2.2).
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
         0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
@@ -2484,23 +1737,16 @@ pub mod hash {
         0xc67178f2,
     ];
 
-    /// Initial hash value: the first 32 bits of the fractional parts of the
-    /// square roots of the first 8 primes (FIPS 180-4, section 5.3.3).
     const H0: [u32; 8] = [
         0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
         0x5be0cd19,
     ];
 
-    /// Streaming SHA-256 state.
-    ///
-    /// Streaming matters here: a build hashes files that must never be required
-    /// to fit in memory all at once (directive section 37).
     #[derive(Clone)]
     pub struct Sha256 {
         state: [u32; 8],
         block: [u8; 64],
         buffered: usize,
-        /// Message length in bits, as the padding scheme requires.
         length_bits: u64,
     }
 
@@ -2511,7 +1757,6 @@ pub mod hash {
     }
 
     impl Sha256 {
-        /// A fresh hasher.
         pub const fn new() -> Self {
             Sha256 {
                 state: H0,
@@ -2521,7 +1766,6 @@ pub mod hash {
             }
         }
 
-        /// Absorbs more of the message.
         pub fn update(&mut self, mut data: &[u8]) {
             self.length_bits = self.length_bits.wrapping_add((data.len() as u64) * 8);
 
@@ -2552,11 +1796,9 @@ pub mod hash {
             }
         }
 
-        /// Applies the padding of FIPS 180-4 section 5.1.1 and returns the digest.
         pub fn finish(mut self) -> Digest {
             let length_bits = self.length_bits;
 
-            // A single 1 bit, then zeroes, then the 64-bit length.
             self.append_padding_byte(0x80);
             while self.buffered != 56 {
                 self.append_padding_byte(0x00);
@@ -2574,7 +1816,6 @@ pub mod hash {
             Digest(out)
         }
 
-        /// Appends one byte without touching the recorded message length.
         fn append_padding_byte(&mut self, byte: u8) {
             self.block[self.buffered] = byte;
             self.buffered += 1;
@@ -2585,7 +1826,6 @@ pub mod hash {
             }
         }
 
-        /// The compression function of FIPS 180-4, section 6.2.2.
         fn compress(&mut self, block: &[u8; 64]) {
             let mut w = [0u32; 64];
             for (index, chunk) in block.chunks_exact(4).enumerate() {
@@ -2634,39 +1874,14 @@ pub mod hash {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // SHA-1 (FIPS 180-4, sections 4.1.1, 4.2.1, 5.3.1 and 6.1)
-    // -----------------------------------------------------------------------
-    //
-    // ## What this may be used for, and what it may not
-    //
-    // SHA-1 is here for exactly one reason: the DEX header carries a 20-byte
-    // `signature` field defined as the SHA-1 of everything after it, and a
-    // reader that cannot compute it cannot tell a truncated or edited DEX from
-    // an intact one. That is a *format field*, and checking it is checking
-    // that a file matches its own self-description.
-    //
-    // SHA-1 is broken for collision resistance: chosen-prefix collisions are
-    // practical. So this value must never be treated as evidence of
-    // provenance, authenticity or integrity against an adversary. Anyone able
-    // to edit a DEX can recompute its signature field, and this Core says so
-    // wherever it reports one. Nothing outside the DEX module may call it, and
-    // no cache key, artifact digest or security decision in this tree does.
-    // Directive section 30 permits an established standard with official test
-    // vectors; it does not make a broken primitive fit for a purpose it cannot
-    // serve.
-
-    /// A 20-byte SHA-1 digest. See the module note on what it may be used for.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Digest160([u8; 20]);
 
     impl Digest160 {
-        /// The raw bytes, most significant first.
         pub const fn as_bytes(&self) -> &[u8; 20] {
             &self.0
         }
 
-        /// Lowercase hexadecimal.
         pub fn to_hex(self) -> String {
             const HEX: &[u8; 16] = b"0123456789abcdef";
             let mut out = String::with_capacity(40);
@@ -2690,10 +1905,8 @@ pub mod hash {
         }
     }
 
-    /// Initial hash value (FIPS 180-4, section 5.3.1).
     const H0_160: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
 
-    /// Streaming SHA-1 state.
     #[derive(Clone)]
     pub struct Sha1 {
         state: [u32; 5],
@@ -2709,7 +1922,6 @@ pub mod hash {
     }
 
     impl Sha1 {
-        /// A fresh hasher.
         pub const fn new() -> Self {
             Sha1 {
                 state: H0_160,
@@ -2719,7 +1931,6 @@ pub mod hash {
             }
         }
 
-        /// Absorbs more of the message.
         pub fn update(&mut self, mut data: &[u8]) {
             self.length_bits = self.length_bits.wrapping_add((data.len() as u64) * 8);
 
@@ -2750,7 +1961,6 @@ pub mod hash {
             }
         }
 
-        /// Applies the padding of FIPS 180-4 section 5.1.1 and returns the digest.
         pub fn finish(mut self) -> Digest160 {
             let length_bits = self.length_bits;
 
@@ -2770,7 +1980,6 @@ pub mod hash {
             Digest160(out)
         }
 
-        /// Appends one byte without touching the recorded message length.
         fn append_padding_byte(&mut self, byte: u8) {
             self.block[self.buffered] = byte;
             self.buffered += 1;
@@ -2781,7 +1990,6 @@ pub mod hash {
             }
         }
 
-        /// The round function of FIPS 180-4, section 6.1.2.
         fn compress(&mut self, block: &[u8; 64]) {
             let mut w = [0u32; 80];
             for (index, chunk) in block.chunks_exact(4).enumerate() {
@@ -2820,37 +2028,20 @@ pub mod hash {
         }
     }
 
-    /// Hashes a byte slice with SHA-1 in one call.
-    ///
-    /// Read the module note above before calling this: it is for the DEX
-    /// header's own signature field and nothing else.
     pub fn sha1(data: &[u8]) -> Digest160 {
         let mut hasher = Sha1::new();
         hasher.update(data);
         hasher.finish()
     }
 
-    // -----------------------------------------------------------------------
-    // SHA-512 (FIPS 180-4, sections 4.1.3, 4.2.3, 5.3.5 and 6.4)
-    // -----------------------------------------------------------------------
-    //
-    // The same construction as SHA-256 with 64-bit words: 128-byte blocks, 80
-    // rounds, a 128-bit length field, and rotation amounts of its own. It is
-    // here because the APK Signature Scheme defines SHA-512 content digests
-    // and any signer using a large RSA key produces one, so without this the
-    // Core has to decline to check a package rather than check it.
-
-    /// A 64-byte SHA-512 digest.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Digest512([u8; 64]);
 
     impl Digest512 {
-        /// The raw bytes, most significant first.
         pub const fn as_bytes(&self) -> &[u8; 64] {
             &self.0
         }
 
-        /// Lowercase hexadecimal, the form every report and log uses.
         pub fn to_hex(self) -> String {
             const HEX: &[u8; 16] = b"0123456789abcdef";
             let mut out = String::with_capacity(128);
@@ -2874,8 +2065,6 @@ pub mod hash {
         }
     }
 
-    /// Round constants: the first 64 bits of the fractional parts of the cube
-    /// roots of the first 80 primes (FIPS 180-4, section 4.2.3).
     const K512: [u64; 80] = [
         0x428a2f98d728ae22,
         0x7137449123ef65cd,
@@ -2959,8 +2148,6 @@ pub mod hash {
         0x6c44198c4a475817,
     ];
 
-    /// Initial hash value: the first 64 bits of the fractional parts of the
-    /// square roots of the first 8 primes (FIPS 180-4, section 5.3.5).
     const H0_512: [u64; 8] = [
         0x6a09e667f3bcc908,
         0xbb67ae8584caa73b,
@@ -2972,15 +2159,11 @@ pub mod hash {
         0x5be0cd19137e2179,
     ];
 
-    /// Streaming SHA-512 state.
     #[derive(Clone)]
     pub struct Sha512 {
         state: [u64; 8],
         block: [u8; 128],
         buffered: usize,
-        /// Message length in bits. The standard reserves 128 bits for this; a
-        /// `u64` of bits covers two exabytes of message, which is past every
-        /// bound in directive section 60, and the high half is written as zero.
         length_bits: u64,
     }
 
@@ -2991,7 +2174,6 @@ pub mod hash {
     }
 
     impl Sha512 {
-        /// A fresh hasher.
         pub const fn new() -> Self {
             Sha512 {
                 state: H0_512,
@@ -3001,7 +2183,6 @@ pub mod hash {
             }
         }
 
-        /// Absorbs more of the message.
         pub fn update(&mut self, mut data: &[u8]) {
             self.length_bits = self.length_bits.wrapping_add((data.len() as u64) * 8);
 
@@ -3032,11 +2213,9 @@ pub mod hash {
             }
         }
 
-        /// Applies the padding of FIPS 180-4 section 5.1.2 and returns the digest.
         pub fn finish(mut self) -> Digest512 {
             let length_bits = self.length_bits;
 
-            // A single 1 bit, then zeroes, then the 128-bit length.
             self.append_padding_byte(0x80);
             while self.buffered != 112 {
                 self.append_padding_byte(0x00);
@@ -3056,7 +2235,6 @@ pub mod hash {
             Digest512(out)
         }
 
-        /// Appends one byte without touching the recorded message length.
         fn append_padding_byte(&mut self, byte: u8) {
             self.block[self.buffered] = byte;
             self.buffered += 1;
@@ -3067,7 +2245,6 @@ pub mod hash {
             }
         }
 
-        /// The compression function of FIPS 180-4, section 6.4.2.
         fn compress(&mut self, block: &[u8; 128]) {
             let mut w = [0u64; 80];
             for (index, chunk) in block.chunks_exact(8).enumerate() {
@@ -3118,26 +2295,18 @@ pub mod hash {
         }
     }
 
-    /// Hashes a byte slice with SHA-512 in one call.
     pub fn sha512(data: &[u8]) -> Digest512 {
         let mut hasher = Sha512::new();
         hasher.update(data);
         hasher.finish()
     }
 
-    /// Hashes a byte slice in one call.
     pub fn sha256(data: &[u8]) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(data);
         hasher.finish()
     }
 
-    /// Hashes a sequence of labelled fields unambiguously.
-    ///
-    /// Concatenating values before hashing is a classic mistake: `("ab", "c")`
-    /// and `("a", "bc")` would collide. Each field is therefore prefixed with its
-    /// name and both lengths, so no two different field sets can produce the same
-    /// input. Cache keys (directive section 11) depend on this being true.
     pub fn sha256_fields(fields: &[(&str, &[u8])]) -> Digest {
         let mut hasher = Sha256::new();
         hasher.update(&(fields.len() as u64).to_be_bytes());
@@ -3151,32 +2320,6 @@ pub mod hash {
     }
 }
 
-// ===========================================================================
-// vfs — the virtual filesystem (directive section 8)
-// ===========================================================================
-
-/// The only way anything in a build reaches a file.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                       |
-/// |----------------------|-------------------------------------------------------------|
-/// | Module               | `omni_core::vfs`                                            |
-/// | Purpose              | Give plugins file access that is named, bounded and audited. |
-/// | Non-Responsibilities | Deciding *what* to read or write; that is the plugin's job.  |
-/// | Security             | Every operation needs a capability grant. Paths cannot escape |
-/// |                      | their mount, before or after symlink resolution.             |
-/// | Failure Modes        | Rejected path, denied capability, unknown mount, read-only    |
-/// |                      | mount, quota exhausted, underlying I/O error.                 |
-/// | Determinism          | Reading the same bytes yields the same digest; writes are     |
-/// |                      | atomic, so a build never observes a half-written file.        |
-/// | Status               | PARTIAL — snapshot and rollback are not implemented.          |
-///
-/// Directive section 8 lists what a virtual filesystem must eventually do. What
-/// is implemented here is path normalisation, traversal protection, read and
-/// write policy, quotas, temporary files and atomic writes. Locking, snapshots
-/// and rollback are **not** implemented, and no code in this tree pretends they
-/// are.
 pub mod vfs {
     use crate::caps::Capability;
     use crate::diag::{Diagnostic, Severity};
@@ -3187,33 +2330,18 @@ pub mod vfs {
     use std::io::Write;
     use std::path::{Component, Path, PathBuf};
 
-    /// Longest accepted path, in bytes (directive section 60).
     pub const MAX_PATH_BYTES: usize = 4096;
 
-    /// Deepest accepted path. Guards against path explosion.
     pub const MAX_SEGMENTS: usize = 64;
 
-    /// Longest accepted single segment, in bytes. Matches the common
-    /// filesystem limit.
     pub const MAX_SEGMENT_BYTES: usize = 255;
 
-    /// A path that has been proven safe.
-    ///
-    /// The only way to build one is [`VirtualPath::parse`], so a value of this
-    /// type is evidence that the path is relative, free of `..`, free of control
-    /// characters and within every bound. Functions downstream can rely on that
-    /// rather than re-checking, which is the point: a check that has to be
-    /// repeated is a check that will eventually be forgotten.
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct VirtualPath {
         segments: Vec<String>,
     }
 
     impl VirtualPath {
-        /// Normalises and validates a path expressed inside a mount.
-        ///
-        /// Accepts `/`-separated relative paths. `.` segments are dropped. Every
-        /// other rejection is deliberate and reported.
         pub fn parse(input: &str) -> Result<VirtualPath, Diagnostic> {
             fn reject(code: &str, message: &str, suggestion: &str) -> Diagnostic {
                 Diagnostic::new(
@@ -3272,9 +2400,6 @@ pub mod vfs {
                 ));
             }
 
-            // A Windows drive specifier is absolute on the platform that
-            // understands it, so it is refused here even though this Core does
-            // not run there.
             if input.len() >= 2 && input.as_bytes()[1] == b':' {
                 return Err(reject(
                     "E2005",
@@ -3335,22 +2460,18 @@ pub mod vfs {
             Ok(VirtualPath { segments })
         }
 
-        /// The normalised path, always using `/`.
         pub fn as_str(&self) -> String {
             self.segments.join("/")
         }
 
-        /// The individual segments, in order.
         pub fn segments(&self) -> &[String] {
             &self.segments
         }
 
-        /// The final segment.
         pub fn file_name(&self) -> &str {
             self.segments.last().map(String::as_str).unwrap_or_default()
         }
 
-        /// The extension of the final segment, without the dot.
         pub fn extension(&self) -> Option<&str> {
             let name = self.file_name();
             name.rsplit_once('.')
@@ -3365,17 +2486,13 @@ pub mod vfs {
         }
     }
 
-    /// What a mount permits.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Access {
-        /// Reads only. A write is refused even with `FS_WRITE` granted.
         ReadOnly,
-        /// Reads and writes.
         ReadWrite,
     }
 
     impl Access {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Access::ReadOnly => "READ_ONLY",
@@ -3384,7 +2501,6 @@ pub mod vfs {
         }
     }
 
-    /// A named directory a build may reach into.
     #[derive(Clone, Debug)]
     pub struct Mount {
         name: String,
@@ -3393,29 +2509,22 @@ pub mod vfs {
     }
 
     impl Mount {
-        /// Name plugins use to address this mount.
         pub fn name(&self) -> &str {
             &self.name
         }
 
-        /// What it permits.
         pub fn access(&self) -> Access {
             self.access
         }
     }
 
-    /// Byte budgets for one build (directive section 60).
     #[derive(Clone, Copy, Debug)]
     pub struct Quota {
-        /// Largest single file that may be read or written.
         pub max_file_bytes: u64,
-        /// Total that may be written across the whole build.
         pub max_written_bytes: u64,
     }
 
     impl Default for Quota {
-        /// Deliberately modest. A mobile device is the target, not a build farm
-        /// (directive section 36).
         fn default() -> Self {
             Quota {
                 max_file_bytes: 64 * 1024 * 1024,
@@ -3424,22 +2533,15 @@ pub mod vfs {
         }
     }
 
-    /// Counters worth reporting after a build.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Usage {
-        /// Files read.
         pub reads: u64,
-        /// Files written.
         pub writes: u64,
-        /// Bytes read.
         pub bytes_read: u64,
-        /// Bytes written.
         pub bytes_written: u64,
-        /// Operations refused, for any reason.
         pub refusals: u64,
     }
 
-    /// The filesystem a build sees.
     #[derive(Debug)]
     pub struct VirtualFs {
         mounts: Vec<Mount>,
@@ -3448,7 +2550,6 @@ pub mod vfs {
     }
 
     impl VirtualFs {
-        /// An empty filesystem. Nothing is reachable until something is mounted.
         pub fn new(quota: Quota) -> Self {
             VirtualFs {
                 mounts: Vec::new(),
@@ -3457,10 +2558,6 @@ pub mod vfs {
             }
         }
 
-        /// Makes a real directory reachable under a name.
-        ///
-        /// The root is canonicalised now, so every later containment check
-        /// compares against a path with no symlinks left in it.
         pub fn mount(
             &mut self,
             name: impl Into<String>,
@@ -3526,26 +2623,18 @@ pub mod vfs {
             Ok(())
         }
 
-        /// Every mount, in the order they were added.
         pub fn mounts(&self) -> &[Mount] {
             &self.mounts
         }
 
-        /// Counters accumulated so far.
         pub fn usage(&self) -> Usage {
             self.usage
         }
 
-        /// The quota in force.
         pub fn quota(&self) -> Quota {
             self.quota
         }
 
-        /// Reads a file.
-        ///
-        /// Requires `FS_READ`. The digest of the bytes is returned alongside them
-        /// so that a caller never has to re-read a file to know what it hashed
-        /// to (directive sections 11 and 58).
         pub fn read(
             &mut self,
             ctx: &mut Context<'_>,
@@ -3589,12 +2678,6 @@ pub mod vfs {
             Ok((bytes, digest))
         }
 
-        /// Writes a file, atomically.
-        ///
-        /// Requires `FS_WRITE` and a read-write mount. The bytes go to a
-        /// temporary file in the destination directory and are renamed into
-        /// place, so a reader sees either the previous file or the complete new
-        /// one, never a partial write (directive section 59).
         pub fn write_atomic(
             &mut self,
             ctx: &mut Context<'_>,
@@ -3646,8 +2729,6 @@ pub mod vfs {
                 })?;
             }
 
-            // Named after the destination so a stray temporary file is always
-            // traceable to the write that left it behind.
             let temporary = resolved.with_extension(format!(
                 "{}omni-partial",
                 resolved.extension().map(|_| ".").unwrap_or_default()
@@ -3656,8 +2737,6 @@ pub mod vfs {
             let write_result = (|| -> std::io::Result<()> {
                 let mut file = fs::File::create(&temporary)?;
                 file.write_all(bytes)?;
-                // Flush to the device before the rename, or a crash could leave
-                // the name pointing at content that never reached storage.
                 file.sync_all()?;
                 fs::rename(&temporary, &resolved)
             })();
@@ -3678,8 +2757,6 @@ pub mod vfs {
             Ok(sha256(bytes))
         }
 
-        /// Whether a file exists. Requires `FS_READ`, because existence is
-        /// information.
         pub fn exists(
             &mut self,
             ctx: &mut Context<'_>,
@@ -3717,11 +2794,6 @@ pub mod vfs {
             )))
         }
 
-        /// Maps a virtual path onto a real one, refusing anything that escapes.
-        ///
-        /// [`VirtualPath`] already guarantees the path is relative and free of
-        /// `..`, so this guards against the case that syntax cannot: a symlink
-        /// inside the mount pointing out of it.
         fn resolve(
             &mut self,
             mount: &str,
@@ -3770,9 +2842,6 @@ pub mod vfs {
                 candidate.push(segment);
             }
 
-            // Canonicalise as much of the path as exists. For a write the file
-            // itself may not exist yet, so the deepest existing ancestor is what
-            // gets checked.
             let mut existing = candidate.as_path();
             let canonical = loop {
                 match fs::canonicalize(existing) {
@@ -3803,8 +2872,6 @@ pub mod vfs {
                 ));
             }
 
-            // Rebuild from the canonical root so the returned path contains no
-            // component the check did not see.
             let mut safe = root;
             for segment in path.segments() {
                 safe.push(segment);
@@ -3834,77 +2901,34 @@ pub mod vfs {
     }
 }
 
-// ===========================================================================
-// project — the project model and its manifest (sections 13, 44, 45, 61)
-// ===========================================================================
-
-/// What a project is, and how `Omni.toml` is read.
-///
-/// ## Contract (directive section 2)
-///
-/// * **Purpose** — turn untrusted project input into a validated model, or into
-///   diagnostics explaining exactly why it could not.
-/// * **Inputs** — the text of `Omni.toml`. Untrusted (directive section 61).
-/// * **Outputs** — a [`Project`], plus diagnostics.
-/// * **Security** — the manifest cannot request a capability, name a path
-///   outside the project, or cause anything to be executed. It is data.
-/// * **Determinism** — the same text always produces the same model and the
-///   same [`Project::digest`].
-/// * **Status** — PARTIAL. The manifest of directive section 44 is fully
-///   modelled; dependency declarations (section 62) are not, because nothing
-///   resolves dependencies yet.
-///
-/// The syntax is a deliberately small subset: sections, `Key = value`, and three
-/// value types. It is not TOML and does not claim to be. A full TOML parser is
-/// a large attack surface for a file this simple, and directive section 61
-/// requires project input to be validated before it is believed.
 pub mod project {
     use crate::diag::{Diagnostic, Location, Severity, Sink};
     use crate::hash::{sha256_fields, Digest};
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// Largest accepted manifest, in bytes (directive section 60).
     pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 
-    /// Largest accepted number of lines.
     pub const MAX_LINES: usize = 2_000;
 
-    /// Largest accepted number of key/value entries.
     pub const MAX_ENTRIES: usize = 256;
 
-    /// Name of the manifest file.
     pub const MANIFEST_NAME: &str = "Omni.toml";
 
-    /// A build profile (directive section 13).
-    ///
-    /// Every profile is explicit. Directive section 13 forbids implicit
-    /// configuration, so there is no "default" variant that quietly means
-    /// something else somewhere.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Profile {
-        /// Fast to build, easy to debug, not optimised.
         Debug,
-        /// Optimised, intended for distribution.
         Release,
-        /// Release plus the instrumentation a profiler needs.
         Profile,
-        /// Built for measurement, with optimisation and no instrumentation.
         Benchmark,
-        /// Release plus every verification the build can perform.
         Production,
-        /// What continuous integration runs: deterministic and fully checked.
         Ci,
-        /// Smallest possible output.
         Minimal,
-        /// Fastest possible build, correctness checks kept.
         Fast,
-        /// Every security gate on, whatever it costs.
         Secure,
     }
 
     impl Profile {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Profile::Debug => "Debug",
@@ -3919,7 +2943,6 @@ pub mod project {
             }
         }
 
-        /// Every profile, in declaration order.
         pub const ALL: &'static [Profile] = &[
             Profile::Debug,
             Profile::Release,
@@ -3943,21 +2966,15 @@ pub mod project {
         }
     }
 
-    /// What the build optimises for.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Optimization {
-        /// No optimisation.
         None,
-        /// Execution speed.
         Speed,
-        /// Artifact size.
         Size,
-        /// Neither at the other's expense.
         Balanced,
     }
 
     impl Optimization {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Optimization::None => "None",
@@ -3967,7 +2984,6 @@ pub mod project {
             }
         }
 
-        /// Every level, in declaration order.
         pub const ALL: &'static [Optimization] = &[
             Optimization::None,
             Optimization::Speed,
@@ -3983,21 +2999,15 @@ pub mod project {
         }
     }
 
-    /// How much Omni_Guard is asked to do (directive section 26).
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum GuardLevel {
-        /// No integrity work.
         Off,
-        /// Artifact digests only.
         Low,
-        /// Digests and provenance.
         Medium,
-        /// Everything the platform offers.
         High,
     }
 
     impl GuardLevel {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 GuardLevel::Off => "Off",
@@ -4007,7 +3017,6 @@ pub mod project {
             }
         }
 
-        /// Every level, in declaration order.
         pub const ALL: &'static [GuardLevel] = &[
             GuardLevel::Off,
             GuardLevel::Low,
@@ -4023,59 +3032,32 @@ pub mod project {
         }
     }
 
-    /// A validated project.
-    ///
-    /// Constructing one means every field has already been checked, so the rest
-    /// of the build can use it without re-validating.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Project {
-        /// Human-facing name.
         pub name: String,
-        /// Android application identifier, in reverse-DNS form.
         pub id: String,
-        /// Project version.
         pub version: String,
-        /// Edition date, as written in the manifest.
         pub edition: Option<String>,
 
-        /// Lowest Android release the application supports.
         pub min_sdk: u32,
-        /// Behavioural contract the application opts into.
         pub target_sdk: u32,
-        /// Platform the application is compiled against.
         pub compile_sdk: u32,
 
-        /// Build profile.
         pub profile: Profile,
-        /// What to optimise for.
         pub optimization: Optimization,
-        /// Whether link-time optimisation is requested.
         pub lto: bool,
-        /// Whether the build may reuse previous results.
         pub incremental: bool,
-        /// Whether independent work may run concurrently.
         pub parallel: bool,
-        /// Whether the build must be reproducible (directive section 12).
         pub deterministic: bool,
 
-        /// How much integrity work Omni_Guard performs.
         pub guard: GuardLevel,
-        /// Whether provenance is recorded (directive section 32).
         pub provenance: bool,
-        /// Whether artifacts are verified before publication (section 58).
         pub verification: bool,
 
-        /// Feature switches, sorted by name so the model is order-independent.
         pub features: Vec<(String, bool)>,
     }
 
     impl Project {
-        /// The safe defaults of directive section 45.
-        ///
-        /// A project with no manifest still has to build, and every value below
-        /// is a decision rather than an accident: the SDK levels match the
-        /// toolchain lock, the profile is the one that cannot silently ship
-        /// unoptimised code, and every security switch starts on.
         pub fn defaults(name: impl Into<String>, id: impl Into<String>) -> Project {
             Project {
                 name: name.into(),
@@ -4098,7 +3080,6 @@ pub mod project {
             }
         }
 
-        /// Whether a feature is switched on.
         pub fn feature(&self, name: &str) -> bool {
             self.features
                 .iter()
@@ -4107,11 +3088,6 @@ pub mod project {
                 .unwrap_or(false)
         }
 
-        /// A digest of everything that can change what the build produces.
-        ///
-        /// This is the configuration component of a cache key (directive section
-        /// 11) and of build provenance (section 32). The name is deliberately
-        /// absent: renaming a project does not change its output.
         pub fn digest(&self) -> Digest {
             let numbers = format!("{}|{}|{}", self.min_sdk, self.target_sdk, self.compile_sdk);
             let switches = format!(
@@ -4142,7 +3118,6 @@ pub mod project {
             ])
         }
 
-        /// Serialises the project as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("name", &self.name);
@@ -4176,11 +3151,6 @@ pub mod project {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Manifest parsing
-    // -----------------------------------------------------------------------
-
-    /// One `Key = value` entry, with where it came from.
     #[derive(Clone, Debug)]
     struct Entry {
         section: String,
@@ -4190,7 +3160,6 @@ pub mod project {
         column: u32,
     }
 
-    /// The three value forms the manifest grammar has.
     #[derive(Clone, PartialEq, Eq, Debug)]
     enum Value {
         Text(String),
@@ -4208,16 +3177,6 @@ pub mod project {
         }
     }
 
-    /// Reads a manifest into a validated [`Project`].
-    ///
-    /// Returns `None` when the manifest cannot be trusted. Every rejection is a
-    /// diagnostic with a location, and nothing is ever silently ignored:
-    /// directive section 44 is explicit that unknown critical fields must not
-    /// pass unnoticed.
-    ///
-    /// `fallback_id` supplies the application identifier when the manifest omits
-    /// one, so that a project with a minimal manifest still builds
-    /// (directive section 45).
     pub fn parse_manifest(text: &str, fallback_id: &str, sink: &mut Sink) -> Option<Project> {
         let entries = read_entries(text, sink)?;
         build_project(&entries, fallback_id, sink)
@@ -4238,7 +3197,6 @@ pub mod project {
         ))
     }
 
-    /// Turns manifest text into entries, or explains why it could not.
     fn read_entries(text: &str, sink: &mut Sink) -> Option<Vec<Entry>> {
         if text.len() > MAX_MANIFEST_BYTES {
             sink.emit(
@@ -4301,8 +3259,6 @@ pub mod project {
                     fatal = true;
                     continue;
                 };
-                // Directive section 44 writes headers as "[ Project ]", so the
-                // padding inside the brackets is part of the accepted form.
                 section = Some(name.trim().to_string());
                 continue;
             }
@@ -4522,11 +3478,6 @@ pub mod project {
         out
     }
 
-    /// Every section and key the manifest grammar defines.
-    ///
-    /// Anything outside this table is reported rather than ignored. Directive
-    /// section 44 requires it, and section 64 forbids configuration that appears
-    /// to be in force when it is not.
     const KNOWN: &[(&str, &[&str])] = &[
         ("Project", &["Name", "Id", "Version", "Edition"]),
         ("Android", &["Min_sdk", "Target_sdk", "Compile_sdk"]),
@@ -4578,7 +3529,6 @@ pub mod project {
                 continue;
             };
 
-            // [ Features ] takes any boolean, so its key list is empty by design.
             if entry.section != "Features" && !keys.contains(&entry.key.as_str()) {
                 let suggestion = keys
                     .iter()
@@ -4976,25 +3926,6 @@ pub mod project {
     }
 }
 
-// ===========================================================================
-// artifact — what a build produces (directive sections 58 and 59)
-// ===========================================================================
-
-/// Artifacts and the states they pass through.
-///
-/// Directive section 58 fixes the lifecycle:
-///
-/// ```text
-/// CREATED -> HASHED -> VALIDATED -> SIGNED -> VERIFIED -> PUBLISHED
-/// ```
-///
-/// and says plainly that an invalid artifact cannot be published. That sentence
-/// is the whole reason this module exists as a type rather than as a convention:
-/// the transitions are the only way to move an artifact forward, so "published
-/// without being verified" is not a bug that can be written.
-///
-/// **Status** — PARTIAL. The lifecycle is real and enforced; nothing in this tree
-/// signs anything yet, so [`State::Signed`] is reachable but unused.
 pub mod artifact {
     use crate::diag::{Diagnostic, Severity};
     use crate::hash::Digest;
@@ -5002,25 +3933,17 @@ pub mod artifact {
     use crate::vfs::VirtualPath;
     use crate::FailureClass;
 
-    /// Where an artifact is in its lifecycle.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum State {
-        /// It exists.
         Created,
-        /// Its content has been hashed.
         Hashed,
-        /// Its structure has been checked against what it claims to be.
         Validated,
-        /// It carries a signature.
         Signed,
-        /// Its digest, and its signature where it has one, have been checked.
         Verified,
-        /// It has been moved to where consumers look for it.
         Published,
     }
 
     impl State {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 State::Created => "CREATED",
@@ -5032,10 +3955,6 @@ pub mod artifact {
             }
         }
 
-        /// Whether this state may be followed by `next`.
-        ///
-        /// Signing is optional, so `VALIDATED` may go straight to `VERIFIED`;
-        /// every other step is mandatory and in order.
         pub const fn may_advance_to(self, next: State) -> bool {
             matches!(
                 (self, next),
@@ -5055,16 +3974,10 @@ pub mod artifact {
         }
     }
 
-    /// Stable identity of an artifact within a build.
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct ArtifactId(String);
 
     impl ArtifactId {
-        /// Creates an identifier.
-        ///
-        /// Identifiers name things in reports and in cache keys, so the accepted
-        /// character set is deliberately narrow: anything that would need
-        /// escaping somewhere later is refused here instead.
         pub fn new(value: impl Into<String>) -> Result<ArtifactId, Diagnostic> {
             let value = value.into();
             let usable = !value.is_empty()
@@ -5091,7 +4004,6 @@ pub mod artifact {
             Ok(ArtifactId(value))
         }
 
-        /// The identifier as text.
         pub fn as_str(&self) -> &str {
             &self.0
         }
@@ -5103,7 +4015,6 @@ pub mod artifact {
         }
     }
 
-    /// Something a build produced.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Artifact {
         id: ArtifactId,
@@ -5112,12 +4023,10 @@ pub mod artifact {
         size: u64,
         digest: Option<Digest>,
         state: State,
-        /// Every state this artifact has been in, oldest first.
         history: Vec<State>,
     }
 
     impl Artifact {
-        /// Records that an artifact now exists.
         pub fn created(id: ArtifactId, kind: impl Into<String>, path: VirtualPath) -> Artifact {
             Artifact {
                 id,
@@ -5130,42 +4039,34 @@ pub mod artifact {
             }
         }
 
-        /// Identity.
         pub fn id(&self) -> &ArtifactId {
             &self.id
         }
 
-        /// What kind of thing it is, for example `dex` or `apk`.
         pub fn kind(&self) -> &str {
             &self.kind
         }
 
-        /// Where it lives.
         pub fn path(&self) -> &VirtualPath {
             &self.path
         }
 
-        /// Its size in bytes, once hashed.
         pub fn size(&self) -> u64 {
             self.size
         }
 
-        /// Its digest, once hashed.
         pub fn digest(&self) -> Option<Digest> {
             self.digest
         }
 
-        /// Its current state.
         pub fn state(&self) -> State {
             self.state
         }
 
-        /// Every state it has been in.
         pub fn history(&self) -> &[State] {
             &self.history
         }
 
-        /// Records the digest of its content.
         pub fn hashed(&mut self, digest: Digest, size: u64) -> Result<(), Diagnostic> {
             self.advance(State::Hashed)?;
             self.digest = Some(digest);
@@ -5173,21 +4074,14 @@ pub mod artifact {
             Ok(())
         }
 
-        /// Records that its structure has been checked.
         pub fn validated(&mut self) -> Result<(), Diagnostic> {
             self.advance(State::Validated)
         }
 
-        /// Records that it has been signed.
         pub fn signed(&mut self) -> Result<(), Diagnostic> {
             self.advance(State::Signed)
         }
 
-        /// Records that its digest still matches its content.
-        ///
-        /// The digest presented here is compared with the one taken at hashing
-        /// time. Directive section 6's invariant I6 requires verification before
-        /// use, and a verification that does not compare anything is decoration.
         pub fn verified(&mut self, observed: Digest) -> Result<(), Diagnostic> {
             let Some(expected) = self.digest else {
                 return Err(self.refuse(
@@ -5217,10 +4111,6 @@ pub mod artifact {
             self.advance(State::Verified)
         }
 
-        /// Publishes the artifact.
-        ///
-        /// Refuses unless it has been verified. Directive section 58 is a single
-        /// sentence on this, and this is where that sentence is enforced.
         pub fn published(&mut self) -> Result<(), Diagnostic> {
             self.advance(State::Published)
         }
@@ -5252,7 +4142,6 @@ pub mod artifact {
             .with_suggestion(suggestion)
         }
 
-        /// Serialises the artifact as an object inside an open array.
         pub fn write_json(&self, w: &mut Writer) {
             w.begin_object(None);
             w.field_str("id", self.id.as_str());
@@ -5274,63 +4163,29 @@ pub mod artifact {
     }
 }
 
-// ===========================================================================
-// cache — incremental build keys (directive section 11)
-// ===========================================================================
-
-/// Cache keys and the four outcomes a lookup can have.
-///
-/// Directive section 11 lists what a cache key must cover and insists the four
-/// outcomes stay distinguishable. Both are enforced here by construction: the
-/// key is built from a struct with a field per required input, so a key can
-/// never be computed from a subset by accident, and a corrupt entry is a state
-/// of its own rather than a miss.
 pub mod cache {
     use crate::hash::{sha256_fields, Digest};
     use crate::json::Writer;
     use crate::project::{Optimization, Profile};
 
-    /// Everything that may change what a build step produces.
-    ///
-    /// Every field of directive section 11 is present and none is optional. If a
-    /// new input starts to affect output, adding it here is a compile error at
-    /// every construction site, which is exactly the reminder that is wanted.
     #[derive(Clone, Copy, Debug)]
     pub struct Inputs<'a> {
-        /// Digest of the sources this step reads.
         pub source_digest: Digest,
-        /// Combined digest of the outputs this step depends on.
         pub dependency_digest: Digest,
-        /// Version of the plugin performing the step.
         pub plugin_version: &'a str,
-        /// Version of the compiler it drives.
         pub compiler_version: &'a str,
-        /// Version of the toolchain as a whole.
         pub toolchain_version: &'a str,
-        /// Behavioural contract the application opts into.
         pub target_sdk: u32,
-        /// Lowest release the application supports.
         pub min_sdk: u32,
-        /// Target architecture.
         pub abi: &'a str,
-        /// Build profile.
         pub profile: Profile,
-        /// Optimisation level.
         pub optimization: Optimization,
-        /// Serialised feature switches.
         pub feature_configuration: &'a str,
-        /// Environment variables that genuinely affect the output.
-        ///
-        /// Deliberately a list rather than "the environment": a build that
-        /// depends on the whole environment is not reproducible, and one that
-        /// silently ignores it is wrong (directive section 64).
         pub relevant_environment: &'a [(&'a str, &'a str)],
-        /// Identifier of the security policy in force.
         pub security_policy: &'a str,
     }
 
     impl Inputs<'_> {
-        /// Computes the cache key.
         pub fn key(&self) -> Key {
             let numbers = format!("{}|{}", self.min_sdk, self.target_sdk);
             let environment = self
@@ -5357,17 +4212,14 @@ pub mod cache {
         }
     }
 
-    /// The identity of a cached result.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct Key(Digest);
 
     impl Key {
-        /// The key as hexadecimal.
         pub fn to_hex(self) -> String {
             self.0.to_hex()
         }
 
-        /// A short form for logs and reports.
         pub fn to_short_hex(self) -> String {
             self.0.to_short_hex(8)
         }
@@ -5379,25 +4231,15 @@ pub mod cache {
         }
     }
 
-    /// What a lookup found.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Lookup {
-        /// A usable entry whose content still matches its recorded digest.
         Hit,
-        /// Nothing stored under this key.
         Miss,
-        /// An entry was stored but has been marked unusable.
         Invalidated,
-        /// An entry exists and its content does not match its digest.
-        ///
-        /// Kept separate from a miss on purpose. Directive section 11 does not
-        /// permit a corrupt entry to be treated as absent: a miss is normal,
-        /// corruption is a fault that someone needs to know about.
         Corrupted,
     }
 
     impl Lookup {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Lookup::Hit => "CACHE_HIT",
@@ -5407,13 +4249,11 @@ pub mod cache {
             }
         }
 
-        /// Whether the stored result may be reused.
         pub const fn is_usable(self) -> bool {
             matches!(self, Lookup::Hit)
         }
     }
 
-    /// One stored result.
     #[derive(Clone, Copy, Debug)]
     struct Entry {
         key: Key,
@@ -5421,25 +4261,14 @@ pub mod cache {
         valid: bool,
     }
 
-    /// Counters worth reporting after a build (directive section 56).
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Statistics {
-        /// Lookups that could be reused.
         pub hits: u64,
-        /// Lookups that found nothing.
         pub misses: u64,
-        /// Lookups that found an entry marked unusable.
         pub invalidated: u64,
-        /// Lookups that found an entry whose content had changed underneath it.
         pub corrupted: u64,
     }
 
-    /// An in-memory cache index.
-    ///
-    /// **Status** — FOUNDATION. It records what is cached and answers lookups
-    /// correctly; it stores no bytes and survives no restart. A persistent store
-    /// needs the virtual filesystem underneath it and a decision about eviction,
-    /// neither of which is written yet.
     #[derive(Clone, Debug, Default)]
     pub struct Index {
         entries: Vec<Entry>,
@@ -5447,12 +4276,10 @@ pub mod cache {
     }
 
     impl Index {
-        /// An empty index.
         pub fn new() -> Self {
             Index::default()
         }
 
-        /// Records a result under a key.
         pub fn store(&mut self, key: Key, content: Digest) {
             match self.entries.iter_mut().find(|entry| entry.key == key) {
                 Some(entry) => {
@@ -5467,18 +4294,12 @@ pub mod cache {
             }
         }
 
-        /// Marks an entry unusable without forgetting that it existed.
         pub fn invalidate(&mut self, key: Key) {
             if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
                 entry.valid = false;
             }
         }
 
-        /// Asks what is stored under a key, given the content found on disk.
-        ///
-        /// `observed` is the digest of what is actually there now. Passing it is
-        /// mandatory: a cache that answers without looking at the content cannot
-        /// tell a hit from corruption.
         pub fn lookup(&mut self, key: Key, observed: Option<Digest>) -> Lookup {
             let outcome = match self.entries.iter().find(|entry| entry.key == key) {
                 None => Lookup::Miss,
@@ -5499,22 +4320,18 @@ pub mod cache {
             outcome
         }
 
-        /// Counters accumulated so far.
         pub fn statistics(&self) -> Statistics {
             self.statistics
         }
 
-        /// Number of entries held.
         pub fn len(&self) -> usize {
             self.entries.len()
         }
 
-        /// Whether nothing is held.
         pub fn is_empty(&self) -> bool {
             self.entries.is_empty()
         }
 
-        /// Serialises the counters as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_u64("entries", self.entries.len() as u64);
@@ -5528,20 +4345,6 @@ pub mod cache {
     }
 }
 
-// ===========================================================================
-// graph — the build graph (directive sections 9 and 10)
-// ===========================================================================
-
-/// A real directed acyclic graph of build work.
-///
-/// Directive section 9 opens with the point of this module: a build system is
-/// not an ordered list of files. Every node names its dependencies explicitly,
-/// the order comes out of the graph rather than out of the order things were
-/// added, and a cycle is a diagnostic rather than a hang.
-///
-/// **Status** — PARTIAL. The graph, its invariants and its ordering are real.
-/// Node timing and memory figures are recorded but are only as good as what the
-/// scheduler measures, and nothing yet reads a previous build's graph back.
 pub mod graph {
     use crate::artifact::ArtifactId;
     use crate::cache::Key as CacheKey;
@@ -5550,21 +4353,14 @@ pub mod graph {
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// Diagnostic code for a graph that is not acyclic.
-    ///
-    /// Directive section 10 names this code literally, so it is spelled the way
-    /// the directive spells it rather than following the `E****` convention.
     pub const CYCLE_CODE: &str = "BUILD_GRAPH_CYCLE";
 
-    /// Largest graph the scheduler will accept (directive section 60).
     pub const MAX_NODES: usize = 100_000;
 
-    /// Stable identity of a node.
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct NodeId(String);
 
     impl NodeId {
-        /// Creates an identifier.
         pub fn new(value: impl Into<String>) -> Result<NodeId, Diagnostic> {
             let value = value.into();
             let usable = !value.is_empty()
@@ -5591,7 +4387,6 @@ pub mod graph {
             Ok(NodeId(value))
         }
 
-        /// The identifier as text.
         pub fn as_str(&self) -> &str {
             &self.0
         }
@@ -5603,33 +4398,21 @@ pub mod graph {
         }
     }
 
-    /// What a node does, following the pipeline of directive section 9.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Kind {
-        /// Read and validate the project manifest.
         Manifest,
-        /// Compile resources.
         Resources,
-        /// Analyse sources.
         SourceAnalysis,
-        /// Produce compiler intermediate representation.
         CompilerIr,
-        /// Produce Dalvik executables.
         Dex,
-        /// Produce native libraries.
         Native,
-        /// Decide the package layout.
         ApkLayout,
-        /// Build the package.
         Package,
-        /// Sign the package.
         Sign,
-        /// Verify the result.
         Verify,
     }
 
     impl Kind {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Kind::Manifest => "MANIFEST",
@@ -5646,31 +4429,18 @@ pub mod graph {
         }
     }
 
-    /// Where a node is in its execution.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Status {
-        /// Not started.
         Pending,
-        /// Started, not finished.
         Running,
-        /// Finished and produced what it promised.
         Succeeded,
-        /// Its result was reused from the cache.
         CacheHit,
-        /// It ran and failed.
         Failed,
-        /// It did not run because something it depends on failed.
-        ///
-        /// Distinct from `Failed`: this node has no defect of its own, and
-        /// reporting it as failed would send whoever reads the build to the
-        /// wrong place.
         Skipped,
-        /// It did not run because the build was cancelled.
         Cancelled,
     }
 
     impl Status {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Status::Pending => "PENDING",
@@ -5683,37 +4453,21 @@ pub mod graph {
             }
         }
 
-        /// Whether dependents of this node may run.
-        ///
-        /// Directive section 10 forbids treating a failed, skipped or cancelled
-        /// node as a success, and this is the single place that question is
-        /// answered.
         pub const fn produced_its_outputs(self) -> bool {
             matches!(self, Status::Succeeded | Status::CacheHit)
         }
 
-        /// Whether the node is finished, whatever the outcome.
         pub const fn is_finished(self) -> bool {
             !matches!(self, Status::Pending | Status::Running)
         }
     }
 
-    /// What a node measured while it ran.
-    ///
-    /// Wall-clock timestamps are deliberately absent. Directive section 9 lists
-    /// start and end times, but an artifact that embeds them is not reproducible
-    /// (section 12), so the graph records how long a node took rather than when
-    /// it happened. The scheduler supplies the figures; a zero means nothing was
-    /// measured, never that nothing was used.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Measurements {
-        /// How long the node ran, in microseconds.
         pub duration_micros: u64,
-        /// Peak memory attributable to the node, in bytes.
         pub peak_memory_bytes: u64,
     }
 
-    /// One unit of build work.
     #[derive(Clone, Debug)]
     pub struct Node {
         id: NodeId,
@@ -5736,7 +4490,6 @@ pub mod graph {
     }
 
     impl Node {
-        /// Describes a unit of work.
         pub fn new(
             id: NodeId,
             kind: Kind,
@@ -5762,80 +4515,65 @@ pub mod graph {
             }
         }
 
-        /// Declares an artifact this node consumes.
         pub fn with_input(mut self, id: ArtifactId) -> Self {
             self.inputs.push(id);
             self
         }
 
-        /// Declares an artifact this node produces.
         pub fn with_output(mut self, id: ArtifactId) -> Self {
             self.outputs.push(id);
             self
         }
 
-        /// Declares a node that must finish first.
         pub fn after(mut self, id: NodeId) -> Self {
             self.dependencies.push(id);
             self
         }
 
-        /// Identity.
         pub fn id(&self) -> &NodeId {
             &self.id
         }
 
-        /// What it does.
         pub fn kind(&self) -> Kind {
             self.kind
         }
 
-        /// Which plugin performs it.
         pub fn plugin(&self) -> &str {
             &self.plugin
         }
 
-        /// Artifacts it consumes.
         pub fn inputs(&self) -> &[ArtifactId] {
             &self.inputs
         }
 
-        /// Artifacts it produces.
         pub fn outputs(&self) -> &[ArtifactId] {
             &self.outputs
         }
 
-        /// Nodes that must finish first.
         pub fn dependencies(&self) -> &[NodeId] {
             &self.dependencies
         }
 
-        /// Where it is in its execution.
         pub fn status(&self) -> Status {
             self.status
         }
 
-        /// What it measured.
         pub fn measurements(&self) -> Measurements {
             self.measurements
         }
 
-        /// Its cache key, once computed.
         pub fn cache_key(&self) -> Option<CacheKey> {
             self.cache_key
         }
 
-        /// Digest of what it produced, once it has produced it.
         pub fn artifact_digest(&self) -> Option<Digest> {
             self.artifact_digest
         }
 
-        /// Codes of diagnostics raised while it ran.
         pub fn diagnostics(&self) -> &[String] {
             &self.diagnostics
         }
 
-        /// Serialises the node as an object inside an open array.
         pub fn write_json(&self, w: &mut Writer) {
             w.begin_object(None);
             w.field_str("id", self.id.as_str());
@@ -5883,22 +4621,16 @@ pub mod graph {
         }
     }
 
-    /// The graph itself.
     #[derive(Clone, Debug, Default)]
     pub struct Graph {
         nodes: Vec<Node>,
     }
 
     impl Graph {
-        /// An empty graph.
         pub fn new() -> Self {
             Graph::default()
         }
 
-        /// Adds a node.
-        ///
-        /// Refuses a duplicate identifier: two nodes answering to one name would
-        /// make every dependency edge ambiguous.
         pub fn add(&mut self, node: Node) -> Result<(), Diagnostic> {
             if self.nodes.len() >= MAX_NODES {
                 return Err(Diagnostic::new(
@@ -5926,32 +4658,26 @@ pub mod graph {
             Ok(())
         }
 
-        /// Every node, in the order they were added.
         pub fn nodes(&self) -> &[Node] {
             &self.nodes
         }
 
-        /// Number of nodes.
         pub fn len(&self) -> usize {
             self.nodes.len()
         }
 
-        /// Whether the graph is empty.
         pub fn is_empty(&self) -> bool {
             self.nodes.is_empty()
         }
 
-        /// Looks a node up.
         pub fn node(&self, id: &NodeId) -> Option<&Node> {
             self.nodes.iter().find(|node| &node.id == id)
         }
 
-        /// Looks a node up for modification.
         pub fn node_mut(&mut self, id: &NodeId) -> Option<&mut Node> {
             self.nodes.iter_mut().find(|node| &node.id == id)
         }
 
-        /// Records how a node finished.
         pub(crate) fn finish(
             &mut self,
             id: &NodeId,
@@ -5968,14 +4694,12 @@ pub mod graph {
             }
         }
 
-        /// Records the cache key computed for a node.
         pub fn set_cache_key(&mut self, id: &NodeId, key: CacheKey) {
             if let Some(node) = self.node_mut(id) {
                 node.cache_key = Some(key);
             }
         }
 
-        /// Nodes that depend on this one, directly.
         pub fn dependents(&self, id: &NodeId) -> Vec<&NodeId> {
             self.nodes
                 .iter()
@@ -5984,12 +4708,6 @@ pub mod graph {
                 .collect()
         }
 
-        /// Checks the graph and returns the order work may run in.
-        ///
-        /// The order is produced by Kahn's algorithm over nodes taken in
-        /// insertion order, so a given graph always yields the same plan
-        /// (directive section 12). Every failure mode of directive section 10 is
-        /// answered here: an edge to a node that does not exist, and a cycle.
         pub fn plan(&self) -> Result<Vec<NodeId>, Diagnostic> {
             for node in &self.nodes {
                 for dependency in &node.dependencies {
@@ -6070,7 +4788,6 @@ pub mod graph {
             )
         }
 
-        /// Serialises the graph as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_u64("nodes", self.nodes.len() as u64);
@@ -6105,21 +4822,6 @@ pub mod graph {
     }
 }
 
-// ===========================================================================
-// scheduler — running the graph (directive sections 10, 35 and 36)
-// ===========================================================================
-
-/// Executes a build graph without violating any of its invariants.
-///
-/// Directive section 10 states what a scheduler may not do: cross a dependency
-/// edge, accept a cycle, ignore a failed dependency, call a cancelled node
-/// successful, or treat a stale artifact as fresh. Each of those is a test in
-/// this file rather than a promise in a comment.
-///
-/// **Status** — PARTIAL. Ordering, failure propagation and cancellation are
-/// real. Execution is sequential: directive section 36 asks for a scheduler that
-/// is aware of memory, battery and thermal state, and none of that is
-/// implemented, so nothing here claims to run work in parallel.
 pub mod scheduler {
     use crate::caps::Policy;
     use crate::diag::{Diagnostic, Severity, Sink};
@@ -6132,69 +4834,42 @@ pub mod scheduler {
     use std::sync::Arc;
     use std::time::Instant;
 
-    /// A build's cancellation flag (directive section 35).
-    ///
-    /// Cheap to clone and safe to share, so a user interface can hold one while
-    /// the build holds another. Cancelling is one-way: a build that has been
-    /// asked to stop is not restarted by clearing a flag, it is started again.
     #[derive(Clone, Debug, Default)]
     pub struct Cancellation {
         flag: Arc<AtomicBool>,
     }
 
     impl Cancellation {
-        /// A token that has not been cancelled.
         pub fn new() -> Self {
             Cancellation::default()
         }
 
-        /// Asks the build to stop at its next checkpoint.
         pub fn cancel(&self) {
             self.flag.store(true, Ordering::SeqCst);
         }
 
-        /// Whether cancellation has been requested.
         pub fn is_cancelled(&self) -> bool {
             self.flag.load(Ordering::SeqCst)
         }
     }
 
-    /// What a node produced.
     #[derive(Clone, Copy, Debug, Default)]
     pub struct NodeResult {
-        /// Digest of the artifact it produced, when it produced one.
         pub artifact_digest: Option<Digest>,
-        /// Whether the result was reused rather than computed.
         pub from_cache: bool,
-        /// Peak memory attributable to the node.
-        ///
-        /// Zero means "not measured", never "none used". Directive section 1
-        /// does not allow an unmeasured figure to be presented as a measurement.
         pub peak_memory_bytes: u64,
     }
 
-    /// Whatever actually performs a node's work.
-    ///
-    /// The scheduler owns ordering and invariants; what a node *does* is
-    /// somebody else's problem. That separation is what lets these invariants be
-    /// tested without a compiler existing (directive section 66).
     pub trait NodeExecutor {
-        /// Performs the node's work.
         fn execute(&mut self, node: &Node, ctx: &mut Context<'_>)
             -> Result<NodeResult, Diagnostic>;
     }
 
-    /// Runs each node through the plugin registry.
-    ///
-    /// Every plugin in this tree is `PLANNED`, so every node this executor runs
-    /// fails with `E0001`. That is the honest behaviour: the scheduler works, and
-    /// there is nothing yet for it to schedule.
     pub struct PluginRegistryExecutor {
         registry: Registry,
     }
 
     impl PluginRegistryExecutor {
-        /// Uses the plugins compiled into this build.
         pub fn new() -> Self {
             PluginRegistryExecutor {
                 registry: Registry::builtin(),
@@ -6233,21 +4908,15 @@ pub mod scheduler {
         }
     }
 
-    /// How a build ended.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Outcome {
-        /// Every node produced its outputs.
         Completed,
-        /// At least one node failed.
         Failed,
-        /// The build was cancelled before it finished.
         Cancelled,
-        /// The graph was rejected before any node ran.
         Rejected,
     }
 
     impl Outcome {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Outcome::Completed => "COMPLETED",
@@ -6258,29 +4927,19 @@ pub mod scheduler {
         }
     }
 
-    /// What happened during a build.
     #[derive(Clone, Debug)]
     pub struct Report {
-        /// How it ended.
         pub outcome: Outcome,
-        /// Nodes that produced their outputs.
         pub succeeded: u64,
-        /// Nodes whose results were reused.
         pub cache_hits: u64,
-        /// Nodes that ran and failed.
         pub failed: u64,
-        /// Nodes that did not run because a dependency failed.
         pub skipped: u64,
-        /// Nodes that did not run because the build was cancelled.
         pub cancelled: u64,
-        /// The order the scheduler chose, whether or not it got through it.
         pub order: Vec<NodeId>,
-        /// Total time spent inside node execution, in microseconds.
         pub duration_micros: u64,
     }
 
     impl Report {
-        /// Serialises the report as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("outcome", self.outcome.as_str());
@@ -6300,13 +4959,6 @@ pub mod scheduler {
         }
     }
 
-    /// Runs the graph.
-    ///
-    /// The plan is computed first, so a graph that cannot be executed is
-    /// rejected before anything runs rather than part-way through. Cancellation
-    /// is checked between nodes, which is the checkpoint directive section 35
-    /// asks for; a node already running is left to finish, because stopping it
-    /// mid-write is what atomic output exists to prevent.
     pub fn run(
         graph: &mut Graph,
         executor: &mut dyn NodeExecutor,
@@ -6356,10 +5008,6 @@ pub mod scheduler {
                 continue;
             }
 
-            // The node is cloned so the graph can be written to while its work
-            // runs. Nodes are small; the alternative is threading a borrow of the
-            // graph through every executor, which would make an executor able to
-            // rewrite the graph it is running inside.
             let Some(node) = graph.node(id).cloned() else {
                 continue;
             };
@@ -6377,8 +5025,6 @@ pub mod scheduler {
                 .collect();
 
             if !blocked.is_empty() {
-                // Directive section 10: a failed dependency is never ignored, and
-                // a node that never ran is never called failed.
                 sink.emit(
                     Diagnostic::new(
                         "W6002",
@@ -6478,57 +5124,19 @@ pub mod scheduler {
     }
 }
 
-// ===========================================================================
-// binary — the binary core (directive sections 20 and 41)
-// ===========================================================================
-
-/// Reading and writing binary formats, safely.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                        |
-/// |----------------------|--------------------------------------------------------------|
-/// | Module               | `omni_core::binary`                                          |
-/// | Purpose              | The primitives every binary subsystem shares: cursors, bounded |
-/// |                      | reads, patched writes, sections, tables and checksums.        |
-/// | Non-Responsibilities | Knowing what any particular format means. DEX, ZIP and the    |
-/// |                      | resource table are built on this; none of them lives here.    |
-/// | Inputs               | Byte slices. Untrusted, always.                              |
-/// | Outputs              | Values, or diagnostics saying exactly what was wrong and where.|
-/// | Security             | Every read is bounds-checked. Every length that comes *out of* |
-/// |                      | the data is validated against what remains *before* anything   |
-/// |                      | is allocated. There is no recursion.                          |
-/// | Failure Modes        | Truncated input, a length that cannot be satisfied, an integer |
-/// |                      | that overflows, an overlong encoding, a write past the limit.  |
-/// | Determinism          | A writer given the same calls produces the same bytes.        |
-/// | Status               | PARTIAL — see the subsystem inventory.                        |
-///
-/// ## Why every read returns a `Result`
-///
-/// Directive section 41 requires that malformed input cannot crash, hang,
-/// corrupt memory or allocate without bound. A reader that panics on bad input
-/// satisfies none of that, and a reader that returns a zero on bad input is
-/// worse: it turns a detectable problem into a silent one. So every read either
-/// returns the value or says why it could not, and the type system makes
-/// ignoring that awkward.
 pub mod binary {
     use crate::diag::{Diagnostic, Severity, Sink};
     use crate::FailureClass;
 
-    /// Largest buffer a writer will produce (directive section 60).
     pub const MAX_BUFFER_BYTES: usize = 256 * 1024 * 1024;
 
-    /// Byte order.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Endian {
-        /// Least significant byte first. DEX and ZIP both use this.
         Little,
-        /// Most significant byte first.
         Big,
     }
 
     impl Endian {
-        /// Stable machine-readable name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Endian::Little => "LITTLE",
@@ -6547,11 +5155,6 @@ pub mod binary {
         )
     }
 
-    /// A bounded, non-panicking reader over a byte slice.
-    ///
-    /// The lifetime is the data's: reads that return bytes borrow from the input
-    /// rather than copying it, which is what lets a large file be parsed without
-    /// being duplicated in memory (directive section 37).
     #[derive(Clone, Debug)]
     pub struct Reader<'a> {
         data: &'a [u8],
@@ -6561,7 +5164,6 @@ pub mod binary {
     }
 
     impl<'a> Reader<'a> {
-        /// Reads `data`, describing it as `origin` in any diagnostic.
         pub fn new(data: &'a [u8], endian: Endian, origin: impl Into<String>) -> Reader<'a> {
             Reader {
                 data,
@@ -6571,52 +5173,38 @@ pub mod binary {
             }
         }
 
-        /// Total size of the input.
         pub fn len(&self) -> usize {
             self.data.len()
         }
 
-        /// Whether the input is empty.
         pub fn is_empty(&self) -> bool {
             self.data.is_empty()
         }
 
-        /// Current offset.
         pub fn position(&self) -> usize {
             self.position
         }
 
-        /// Bytes left after the cursor.
         pub fn remaining(&self) -> usize {
             self.data.len() - self.position
         }
 
-        /// Byte order in force.
         pub fn endian(&self) -> Endian {
             self.endian
         }
 
-        /// Moves the cursor to an absolute offset.
         pub fn seek(&mut self, offset: u64) -> Result<(), Diagnostic> {
             let offset = self.checked_offset(offset)?;
             self.position = offset;
             Ok(())
         }
 
-        /// Advances the cursor.
         pub fn skip(&mut self, count: usize) -> Result<(), Diagnostic> {
             self.require(count)?;
             self.position += count;
             Ok(())
         }
 
-        /// Converts a length taken from the data into a usable one.
-        ///
-        /// This is the single most important function in the module. A length
-        /// field in a malformed file is the classic way to make a parser
-        /// allocate gigabytes or read past its buffer, so a declared length is
-        /// checked against what is actually left *before* it is used for
-        /// anything (directive section 60).
         pub fn checked_length(&self, declared: u64) -> Result<usize, Diagnostic> {
             let remaining = self.remaining() as u64;
             if declared > remaining {
@@ -6636,7 +5224,6 @@ pub mod binary {
             Ok(declared as usize)
         }
 
-        /// Converts an offset taken from the data into a usable one.
         pub fn checked_offset(&self, declared: u64) -> Result<usize, Diagnostic> {
             if declared > self.data.len() as u64 {
                 return Err(fail("E7002", "The data points past its own end.")
@@ -6660,7 +5247,6 @@ pub mod binary {
             Ok(())
         }
 
-        /// Reads `count` bytes and advances.
         pub fn bytes(&mut self, count: usize) -> Result<&'a [u8], Diagnostic> {
             self.require(count)?;
             let start = self.position;
@@ -6668,7 +5254,6 @@ pub mod binary {
             Ok(&self.data[start..self.position])
         }
 
-        /// Borrows a span without moving the cursor.
         pub fn slice_at(&self, offset: u64, length: u64) -> Result<&'a [u8], Diagnostic> {
             let start = self.checked_offset(offset)?;
             let Some(end) = (start as u64).checked_add(length) else {
@@ -6680,17 +5265,14 @@ pub mod binary {
             Ok(&self.data[start..end])
         }
 
-        /// Reads one byte.
         pub fn u8(&mut self) -> Result<u8, Diagnostic> {
             Ok(self.bytes(1)?[0])
         }
 
-        /// Reads a signed byte.
         pub fn i8(&mut self) -> Result<i8, Diagnostic> {
             Ok(self.u8()? as i8)
         }
 
-        /// Reads a 16-bit unsigned integer.
         pub fn u16(&mut self) -> Result<u16, Diagnostic> {
             let bytes: [u8; 2] = self.fixed()?;
             Ok(match self.endian {
@@ -6699,7 +5281,6 @@ pub mod binary {
             })
         }
 
-        /// Reads a 32-bit unsigned integer.
         pub fn u32(&mut self) -> Result<u32, Diagnostic> {
             let bytes: [u8; 4] = self.fixed()?;
             Ok(match self.endian {
@@ -6708,7 +5289,6 @@ pub mod binary {
             })
         }
 
-        /// Reads a 64-bit unsigned integer.
         pub fn u64(&mut self) -> Result<u64, Diagnostic> {
             let bytes: [u8; 8] = self.fixed()?;
             Ok(match self.endian {
@@ -6717,12 +5297,10 @@ pub mod binary {
             })
         }
 
-        /// Reads a 16-bit signed integer.
         pub fn i16(&mut self) -> Result<i16, Diagnostic> {
             Ok(self.u16()? as i16)
         }
 
-        /// Reads a 32-bit signed integer.
         pub fn i32(&mut self) -> Result<i32, Diagnostic> {
             Ok(self.u32()? as i32)
         }
@@ -6734,12 +5312,6 @@ pub mod binary {
             Ok(out)
         }
 
-        /// Reads an unsigned LEB128 integer.
-        ///
-        /// The DEX format is full of these. The encoding is refused if it runs
-        /// longer than the widest legal form or if it is longer than it needs to
-        /// be: an overlong encoding is a second spelling of one number, and two
-        /// spellings are two chances for a checksum and a parser to disagree.
         pub fn uleb128(&mut self) -> Result<u64, Diagnostic> {
             let mut value: u64 = 0;
             let mut shift = 0u32;
@@ -6777,7 +5349,6 @@ pub mod binary {
                 .with_suggestion("Every byte had its continuation bit set."))
         }
 
-        /// Reads a NUL-terminated byte string, without the terminator.
         pub fn cstring(&mut self) -> Result<&'a [u8], Diagnostic> {
             let start = self.position;
             let Some(relative) = self.data[start..].iter().position(|byte| *byte == 0) else {
@@ -6789,7 +5360,6 @@ pub mod binary {
             Ok(&self.data[start..start + relative])
         }
 
-        /// Checks that the input begins with an expected marker.
         pub fn expect_magic(&mut self, magic: &[u8]) -> Result<(), Diagnostic> {
             let found = self.bytes(magic.len())?;
             if found != magic {
@@ -6822,12 +5392,6 @@ pub mod binary {
         out
     }
 
-    /// A reserved span in a writer's output, to be filled in later.
-    ///
-    /// Binary formats are full of values that are only known once something
-    /// later has been written: a size, an offset, a count. Reserving the space
-    /// and patching it is how that is done without either two passes or
-    /// guesswork.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct Patch {
         offset: usize,
@@ -6835,18 +5399,15 @@ pub mod binary {
     }
 
     impl Patch {
-        /// Where the reserved span starts.
         pub fn offset(&self) -> usize {
             self.offset
         }
 
-        /// How wide it is.
         pub fn width(&self) -> usize {
             self.width
         }
     }
 
-    /// A bounded binary writer.
     #[derive(Clone, Debug)]
     pub struct Writer {
         buffer: Vec<u8>,
@@ -6855,12 +5416,10 @@ pub mod binary {
     }
 
     impl Writer {
-        /// A writer with the default limit.
         pub fn new(endian: Endian) -> Writer {
             Writer::with_limit(endian, MAX_BUFFER_BYTES)
         }
 
-        /// A writer that refuses to grow past `limit` bytes.
         pub fn with_limit(endian: Endian, limit: usize) -> Writer {
             Writer {
                 buffer: Vec::new(),
@@ -6869,17 +5428,14 @@ pub mod binary {
             }
         }
 
-        /// How much has been written.
         pub fn position(&self) -> usize {
             self.buffer.len()
         }
 
-        /// Whether nothing has been written.
         pub fn is_empty(&self) -> bool {
             self.buffer.is_empty()
         }
 
-        /// Byte order in force.
         pub fn endian(&self) -> Endian {
             self.endian
         }
@@ -6907,19 +5463,16 @@ pub mod binary {
             Ok(())
         }
 
-        /// Appends raw bytes.
         pub fn bytes(&mut self, data: &[u8]) -> Result<(), Diagnostic> {
             self.room_for(data.len())?;
             self.buffer.extend_from_slice(data);
             Ok(())
         }
 
-        /// Appends one byte.
         pub fn u8(&mut self, value: u8) -> Result<(), Diagnostic> {
             self.bytes(&[value])
         }
 
-        /// Appends a 16-bit unsigned integer.
         pub fn u16(&mut self, value: u16) -> Result<(), Diagnostic> {
             match self.endian {
                 Endian::Little => self.bytes(&value.to_le_bytes()),
@@ -6927,7 +5480,6 @@ pub mod binary {
             }
         }
 
-        /// Appends a 32-bit unsigned integer.
         pub fn u32(&mut self, value: u32) -> Result<(), Diagnostic> {
             match self.endian {
                 Endian::Little => self.bytes(&value.to_le_bytes()),
@@ -6935,7 +5487,6 @@ pub mod binary {
             }
         }
 
-        /// Appends a 64-bit unsigned integer.
         pub fn u64(&mut self, value: u64) -> Result<(), Diagnostic> {
             match self.endian {
                 Endian::Little => self.bytes(&value.to_le_bytes()),
@@ -6943,7 +5494,6 @@ pub mod binary {
             }
         }
 
-        /// Appends an unsigned LEB128 integer, in its shortest form.
         pub fn uleb128(&mut self, mut value: u64) -> Result<(), Diagnostic> {
             loop {
                 let mut byte = (value & 0x7f) as u8;
@@ -6958,11 +5508,6 @@ pub mod binary {
             }
         }
 
-        /// Pads with zeroes until the position is a multiple of `alignment`.
-        ///
-        /// Alignment must be a power of two: every binary format that asks for
-        /// alignment asks for one, and accepting anything else would silently
-        /// produce a layout no reader expects.
         pub fn align_to(&mut self, alignment: usize) -> Result<(), Diagnostic> {
             if alignment == 0 || !alignment.is_power_of_two() {
                 return Err(Diagnostic::new(
@@ -6981,21 +5526,18 @@ pub mod binary {
             Ok(())
         }
 
-        /// Reserves four bytes to be filled in later.
         pub fn reserve_u32(&mut self) -> Result<Patch, Diagnostic> {
             let offset = self.buffer.len();
             self.u32(0)?;
             Ok(Patch { offset, width: 4 })
         }
 
-        /// Reserves two bytes to be filled in later.
         pub fn reserve_u16(&mut self) -> Result<Patch, Diagnostic> {
             let offset = self.buffer.len();
             self.u16(0)?;
             Ok(Patch { offset, width: 2 })
         }
 
-        /// Fills in a reserved 32-bit span.
         pub fn patch_u32(&mut self, patch: Patch, value: u32) -> Result<(), Diagnostic> {
             self.patch(
                 patch,
@@ -7007,7 +5549,6 @@ pub mod binary {
             )
         }
 
-        /// Fills in a reserved 16-bit span.
         pub fn patch_u16(&mut self, patch: Patch, value: u16) -> Result<(), Diagnostic> {
             self.patch(
                 patch,
@@ -7050,30 +5591,23 @@ pub mod binary {
             Ok(())
         }
 
-        /// Borrows what has been written.
         pub fn as_slice(&self) -> &[u8] {
             &self.buffer
         }
 
-        /// Takes the finished bytes.
         pub fn finish(self) -> Vec<u8> {
             self.buffer
         }
     }
 
-    /// A named span within a file.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Section {
-        /// What it is called in the format's specification.
         pub name: String,
-        /// Where it starts.
         pub offset: u64,
-        /// How long it is.
         pub size: u64,
     }
 
     impl Section {
-        /// Checks that the section lies inside `total` bytes.
         pub fn validate(&self, total: u64) -> Result<(), Diagnostic> {
             let Some(end) = self.offset.checked_add(self.size) else {
                 return Err(
@@ -7091,7 +5625,6 @@ pub mod binary {
             Ok(())
         }
 
-        /// Whether this section overlaps another.
         pub fn overlaps(&self, other: &Section) -> bool {
             let this_end = self.offset.saturating_add(self.size);
             let other_end = other.offset.saturating_add(other.size);
@@ -7099,25 +5632,15 @@ pub mod binary {
         }
     }
 
-    /// A run of fixed-size entries.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Table {
-        /// What it is called in the format's specification.
         pub name: String,
-        /// Where the first entry starts.
         pub offset: u64,
-        /// How large one entry is.
         pub entry_size: u64,
-        /// How many entries there are.
         pub count: u64,
     }
 
     impl Table {
-        /// Total size of the table, refusing an overflow.
-        ///
-        /// `entry_size * count` is exactly the multiplication a malformed header
-        /// uses to make a parser believe a small file contains an enormous
-        /// table, so it is checked rather than computed.
         pub fn span(&self) -> Result<u64, Diagnostic> {
             self.entry_size.checked_mul(self.count).ok_or_else(|| {
                 fail("E7040", "A table's size overflows.")
@@ -7129,7 +5652,6 @@ pub mod binary {
             })
         }
 
-        /// Checks that every entry lies inside `total` bytes.
         pub fn validate(&self, total: u64) -> Result<(), Diagnostic> {
             let span = self.span()?;
             Section {
@@ -7140,7 +5662,6 @@ pub mod binary {
             .validate(total)
         }
 
-        /// Offset of one entry.
         pub fn entry_offset(&self, index: u64) -> Result<u64, Diagnostic> {
             if index >= self.count {
                 return Err(fail("E7041", "A table entry is out of range.")
@@ -7157,36 +5678,12 @@ pub mod binary {
         }
     }
 
-    /// Something that can check a parsed structure and report what is wrong.
-    ///
-    /// Validators collect every problem rather than stopping at the first, so a
-    /// person fixing a malformed file sees the whole picture in one pass
-    /// (directive section 33).
     pub trait Validator {
-        /// Name used in diagnostics.
         fn name(&self) -> &str;
 
-        /// Checks the input, appending anything wrong to `sink`.
-        ///
-        /// Returns whether the input may be used.
         fn validate(&self, data: &[u8], sink: &mut Sink) -> bool;
     }
 
-    /// Checksums used by the formats this toolchain touches.
-    ///
-    /// Both algorithms are published standards with published check values, and
-    /// both are implemented from those specifications. Directive section 30
-    /// applies to checksums as much as to hashes: nothing here is invented, and
-    /// nothing is trusted until it reproduces the official value.
-    ///
-    /// Neither is a security primitive. A checksum detects accidental damage;
-    /// only a signature detects a deliberate change (directive section 25).
-    /// Modified UTF-8, the encoding both the DEX and JVM class formats use.
-    ///
-    /// It lives here rather than in either format's module because it belongs
-    /// to neither: a `CONSTANT_Utf8` in a class file and a `string_data_item`
-    /// in a DEX are the same bytes read the same way, and making one format
-    /// depend on the other to say so would be a lie about the structure.
     pub mod modified_utf8 {
         use crate::diag::{Diagnostic, Severity};
         use crate::FailureClass;
@@ -7201,21 +5698,6 @@ pub mod binary {
             )
         }
 
-        /// Decodes modified UTF-8.
-        ///
-        /// It differs from UTF-8 in two ways that matter, and both are the
-        /// reason this is written by hand rather than handed to
-        /// `str::from_utf8`:
-        ///
-        /// * `U+0000` is encoded as `0xc0 0x80` so that a string may contain a
-        ///   NUL without terminating itself.
-        /// * A character outside the basic plane is encoded as its two UTF-16
-        ///   surrogates, each in three bytes, rather than in one four-byte
-        ///   sequence. Standard UTF-8 forbids encoding a surrogate at all.
-        ///
-        /// An unpaired surrogate is refused rather than replaced. Replacing it
-        /// would let two different files decode to the same name, and a name is
-        /// what a class is identified by.
         pub fn decode(bytes: &[u8]) -> Result<String, Diagnostic> {
             let mut units: Vec<u16> = Vec::with_capacity(bytes.len());
             let mut index = 0usize;
@@ -7253,8 +5735,6 @@ pub mod binary {
                         );
                         index += 3;
                     }
-                    // 0x00 would terminate a DEX string, and 0xf0 and above is
-                    // the four-byte form that modified UTF-8 does not use.
                     _ => {
                         return Err(fail(
                             "E7052",
@@ -7270,10 +5750,7 @@ pub mod binary {
         }
     }
 
-    /// The checksums the container formats in this tree record.
     pub mod checksum {
-        /// CRC-32 as used by ZIP, gzip and PNG (ITU-T V.42, reflected, polynomial
-        /// 0xEDB88320).
         #[derive(Clone, Copy, Debug)]
         pub struct Crc32 {
             state: u32,
@@ -7286,12 +5763,10 @@ pub mod binary {
         }
 
         impl Crc32 {
-            /// A fresh accumulator.
             pub const fn new() -> Self {
                 Crc32 { state: 0xffff_ffff }
             }
 
-            /// Absorbs more data.
             pub fn update(&mut self, data: &[u8]) {
                 for byte in data {
                     self.state ^= u32::from(*byte);
@@ -7302,20 +5777,17 @@ pub mod binary {
                 }
             }
 
-            /// The checksum so far.
             pub const fn finish(self) -> u32 {
                 self.state ^ 0xffff_ffff
             }
         }
 
-        /// CRC-32 of a slice.
         pub fn crc32(data: &[u8]) -> u32 {
             let mut crc = Crc32::new();
             crc.update(data);
             crc.finish()
         }
 
-        /// Adler-32 as used by zlib and by the DEX header (RFC 1950).
         #[derive(Clone, Copy, Debug)]
         pub struct Adler32 {
             a: u32,
@@ -7329,16 +5801,12 @@ pub mod binary {
         }
 
         impl Adler32 {
-            /// The largest number of bytes that can be absorbed before the sums
-            /// must be reduced, from RFC 1950.
             const NMAX: usize = 5552;
 
-            /// A fresh accumulator.
             pub const fn new() -> Self {
                 Adler32 { a: 1, b: 0 }
             }
 
-            /// Absorbs more data.
             pub fn update(&mut self, data: &[u8]) {
                 for chunk in data.chunks(Self::NMAX) {
                     for byte in chunk {
@@ -7350,13 +5818,11 @@ pub mod binary {
                 }
             }
 
-            /// The checksum so far.
             pub const fn finish(self) -> u32 {
                 (self.b << 16) | self.a
             }
         }
 
-        /// Adler-32 of a slice.
         pub fn adler32(data: &[u8]) -> u32 {
             let mut adler = Adler32::new();
             adler.update(data);
@@ -7365,97 +5831,45 @@ pub mod binary {
     }
 }
 
-// ===========================================================================
-// xml — a deliberately small XML reader (sections 22, 41, 60, 61)
-// ===========================================================================
-
-/// Enough XML to read Android resources, and nothing more.
-///
-/// ## Contract (directive section 2)
-///
-/// * **Purpose** — turn a resource file into a tree, or into diagnostics with a
-///   line and a column.
-/// * **Inputs** — text from a user's project. Untrusted (directive section 61).
-/// * **Non-Responsibilities** — namespaces as a resolution mechanism, schema
-///   validation, XPath, and every other thing a general XML library does. This
-///   reads resource files.
-/// * **Status** — PARTIAL. It reads what Android resource files contain.
-///
-/// ## What it refuses, and why
-///
-/// * **`<!DOCTYPE`** — refused outright. A document type declaration is the
-///   entry point for both external entity expansion, which turns a resource file
-///   into a way to read `/etc/passwd`, and for the nested entity definitions that
-///   make a two-kilobyte file expand to gigabytes. Neither is defended against
-///   here; both are simply unavailable.
-/// * **Custom entities** — only the five XML predefines and numeric character
-///   references are recognised. There is no entity table, so there is nothing to
-///   expand recursively.
-/// * **Depth, size, attribute count, name and text length** — all bounded
-///   (directive section 60).
-///
-/// The parser holds its own stack rather than recursing, so a deeply nested
-/// document cannot overflow the machine stack no matter what the depth limit is
-/// set to.
 pub mod xml {
     use crate::diag::{Diagnostic, Location, Severity, Sink};
     use crate::FailureClass;
 
-    /// Largest accepted document, in bytes.
     pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
 
-    /// Deepest accepted nesting.
     pub const MAX_DEPTH: usize = 64;
 
-    /// Most attributes accepted on one element.
     pub const MAX_ATTRIBUTES: usize = 128;
 
-    /// Longest accepted element or attribute name, in bytes.
     pub const MAX_NAME_BYTES: usize = 256;
 
-    /// Longest accepted run of text, in bytes.
     pub const MAX_TEXT_BYTES: usize = 256 * 1024;
 
-    /// Most elements accepted in one document.
     pub const MAX_ELEMENTS: usize = 50_000;
 
-    /// Where something appeared in the source.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
     pub struct Position {
-        /// 1-based line.
         pub line: u32,
-        /// 1-based column.
         pub column: u32,
     }
 
-    /// One attribute of an element.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Attribute {
-        /// Name as written, including any namespace prefix.
         pub name: String,
-        /// Value, with references already decoded.
         pub value: String,
-        /// Where the name started.
         pub position: Position,
     }
 
-    /// An element and everything inside it.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Element {
-        /// Name as written, including any namespace prefix.
         pub name: String,
-        /// Attributes, in document order.
         pub attributes: Vec<Attribute>,
-        /// Child elements, in document order.
         pub children: Vec<Element>,
-        /// All text directly inside this element, concatenated and decoded.
         pub text: String,
-        /// Where the element started.
         pub position: Position,
     }
 
     impl Element {
-        /// Looks an attribute up by name.
         pub fn attribute(&self, name: &str) -> Option<&str> {
             self.attributes
                 .iter()
@@ -7463,16 +5877,11 @@ pub mod xml {
                 .map(|attribute| attribute.value.as_str())
         }
 
-        /// Child elements with a given name.
         pub fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> {
             self.children.iter().filter(move |child| child.name == name)
         }
     }
 
-    /// Reads a document and returns its root element.
-    ///
-    /// Returns `None` when the document cannot be trusted; every reason is in
-    /// `sink`, with a position.
     pub fn parse(text: &str, origin: &str, sink: &mut Sink) -> Option<Element> {
         Parser::new(text, origin).run(sink)
     }
@@ -7487,7 +5896,6 @@ pub mod xml {
         elements: usize,
     }
 
-    /// An element being built, held on the parser's own stack.
     struct Open {
         name: String,
         attributes: Vec<Attribute>,
@@ -7542,8 +5950,6 @@ pub mod xml {
                 self.line += 1;
                 self.column = 1;
             } else if byte & 0xc0 != 0x80 {
-                // Count characters, not bytes, so a column number means something
-                // in a file with Turkish or any other non-ASCII text in it.
                 self.column += 1;
             }
             Some(byte)
@@ -7576,7 +5982,6 @@ pub mod xml {
                 return None;
             }
 
-            // A byte order mark is legal at the start and means nothing here.
             if self.starts_with("\u{feff}") {
                 self.skip("\u{feff}".len());
             }
@@ -7679,7 +6084,6 @@ pub mod xml {
                         continue;
                     }
 
-                    // An opening tag.
                     self.elements += 1;
                     if self.elements > MAX_ELEMENTS {
                         sink.emit(
@@ -7738,7 +6142,6 @@ pub mod xml {
                     continue;
                 }
 
-                // Text.
                 let at = self.position();
                 let start = self.offset;
                 while let Some(byte) = self.peek() {
@@ -8031,12 +6434,6 @@ pub mod xml {
             }
         }
 
-        /// Decodes the five predefined entities and numeric character references.
-        ///
-        /// There is no entity table, so there is nothing that can be defined in
-        /// terms of itself. An unrecognised reference is an error rather than
-        /// something passed through, because passing it through would put a
-        /// literal `&foo;` into a string and leave the author wondering.
         fn decode(&self, raw: &str, at: Position, sink: &mut Sink) -> Option<String> {
             if !raw.contains('&') {
                 return Some(raw.to_string());
@@ -8137,78 +6534,30 @@ pub mod xml {
     }
 }
 
-// ===========================================================================
-// resources — the resource engine (directive section 22)
-// ===========================================================================
-
-/// Android resources: parsed, validated, numbered and resolved.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                       |
-/// |----------------------|-------------------------------------------------------------|
-/// | Module               | `omni_core::resources`                                      |
-/// | Purpose              | Turn a project's resource files into a table with stable     |
-/// |                      | identifiers and resolved references.                         |
-/// | Inputs               | `values/*.xml` documents and resource file names. Untrusted.  |
-/// | Outputs              | A [`Table`], plus diagnostics with a line and a column.       |
-/// | Non-Responsibilities | Writing the binary resource table, rendering drawables, and   |
-/// |                      | reading anything from the Android platform.                   |
-/// | Determinism          | Identifiers come from sorted order, never from the order      |
-/// |                      | files happened to be read (directive section 12).             |
-/// | Status               | PARTIAL — see the subsystem inventory.                        |
-///
-/// ## The pipeline of directive section 22
-///
-/// ```text
-/// Source -> Validation -> Parse -> Resource Model -> ID Assignment ->
-/// Reference Resolution -> Table Construction -> Compiled Resources -> Verification
-/// ```
-///
-/// Everything up to and including verification is implemented. "Compiled
-/// Resources" means the binary table an Android package carries, and that is not
-/// written here: it belongs with the packaging engine, and claiming it now would
-/// be exactly the kind of overstatement directive section 1 forbids.
 pub mod resources {
     use crate::diag::{Diagnostic, Location, Severity, Sink};
     use crate::json::Writer;
     use crate::xml::{self, Element, Position};
     use crate::FailureClass;
 
-    /// Package identifier an application's own resources use.
-    ///
-    /// `0x01` belongs to the platform and `0x7f` to the application; everything
-    /// between is for shared libraries. Nothing here allocates a library id.
     pub const APPLICATION_PACKAGE_ID: u8 = 0x7f;
 
-    /// Most resources accepted in one project (directive section 60).
     pub const MAX_ENTRIES: usize = 65_535;
 
-    /// What kind of resource something is.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum Kind {
-        /// `<bool>`
         Bool,
-        /// `<color>` and colour files.
         Color,
-        /// `<dimen>`
         Dimension,
-        /// Files under `drawable/`.
         Drawable,
-        /// Identifiers declared with `@+id/`.
         Id,
-        /// `<integer>`
         Integer,
-        /// Files under `mipmap/`.
         Mipmap,
-        /// `<string>`
         String,
-        /// `<style>`
         Style,
     }
 
     impl Kind {
-        /// The name Android uses, which is also the directory or element name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Kind::Bool => "bool",
@@ -8223,10 +6572,6 @@ pub mod resources {
             }
         }
 
-        /// Every kind, in the order identifiers are assigned.
-        ///
-        /// Alphabetical, and therefore stable: a type's number must not depend on
-        /// which file happened to mention it first.
         pub const ALL: &'static [Kind] = &[
             Kind::Bool,
             Kind::Color,
@@ -8239,7 +6584,6 @@ pub mod resources {
             Kind::Style,
         ];
 
-        /// Looks a kind up by name.
         pub fn parse(value: &str) -> Option<Kind> {
             Kind::ALL
                 .iter()
@@ -8254,32 +6598,21 @@ pub mod resources {
         }
     }
 
-    /// Screen density a resource is meant for.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
     pub enum Density {
-        /// No qualifier: used when nothing more specific matches.
         #[default]
         Default,
-        /// `ldpi`
         Low,
-        /// `mdpi`
         Medium,
-        /// `hdpi`
         High,
-        /// `xhdpi`
         ExtraHigh,
-        /// `xxhdpi`
         ExtraExtraHigh,
-        /// `xxxhdpi`
         ExtraExtraExtraHigh,
-        /// `nodpi`: never scaled.
         None,
-        /// `anydpi`: matches any density, used by adaptive icons.
         Any,
     }
 
     impl Density {
-        /// The qualifier as written in a directory name.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Density::Default => "default",
@@ -8294,7 +6627,6 @@ pub mod resources {
             }
         }
 
-        /// Every density, in declaration order.
         pub const ALL: &'static [Density] = &[
             Density::Default,
             Density::Low,
@@ -8307,7 +6639,6 @@ pub mod resources {
             Density::Any,
         ];
 
-        /// Looks a density up by qualifier.
         pub fn parse(value: &str) -> Option<Density> {
             Density::ALL
                 .iter()
@@ -8316,26 +6647,16 @@ pub mod resources {
         }
     }
 
-    /// The qualifiers that select between resources of the same name.
-    ///
-    /// Only density is modelled. Locale, orientation, size and the rest of the
-    /// qualifier set are not, and a directory carrying one is refused rather than
-    /// silently treated as the default (directive section 64).
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
     pub struct Config {
-        /// Density this resource is for.
         pub density: Density,
     }
 
     impl Config {
-        /// The default configuration.
         pub const DEFAULT: Config = Config {
             density: Density::Default,
         };
 
-        /// Reads the qualifiers from a resource directory name.
-        ///
-        /// `drawable` yields the default; `drawable-hdpi` yields high density.
         pub fn parse_directory(name: &str) -> Result<(Kind, Config), String> {
             let mut parts = name.split('-');
             let Some(kind_name) = parts.next() else {
@@ -8366,25 +6687,17 @@ pub mod resources {
         }
     }
 
-    /// The unit a dimension is written in.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Unit {
-        /// Density-independent pixels.
         Dp,
-        /// Scale-independent pixels, which follow the user's font size.
         Sp,
-        /// Physical pixels.
         Px,
-        /// Points.
         Pt,
-        /// Inches.
         In,
-        /// Millimetres.
         Mm,
     }
 
     impl Unit {
-        /// The suffix as written.
         pub const fn as_str(self) -> &'static str {
             match self {
                 Unit::Dp => "dp",
@@ -8396,26 +6709,19 @@ pub mod resources {
             }
         }
 
-        /// Every unit, longest suffix first so parsing is unambiguous.
         pub const ALL: &'static [Unit] =
             &[Unit::Dp, Unit::Sp, Unit::Px, Unit::Pt, Unit::In, Unit::Mm];
     }
 
-    /// A reference to another resource.
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct Reference {
-        /// Package, when one is named. `android` means the platform.
         pub package: Option<String>,
-        /// What kind of resource is referred to.
         pub kind: Kind,
-        /// Its name.
         pub name: String,
-        /// Whether the reference also declares the resource, as `@+id/` does.
         pub declares: bool,
     }
 
     impl Reference {
-        /// Reads `@[package:]type/name` or `@+id/name`.
         pub fn parse(value: &str) -> Option<Reference> {
             let body = value.strip_prefix('@')?;
             let (body, declares) = match body.strip_prefix('+') {
@@ -8443,7 +6749,6 @@ pub mod resources {
             })
         }
 
-        /// Whether this points at the Android platform rather than the project.
         pub fn is_platform(&self) -> bool {
             self.package.as_deref() == Some("android")
         }
@@ -8462,42 +6767,19 @@ pub mod resources {
         }
     }
 
-    /// What a resource holds.
-    ///
-    /// A dimension is stored in thousandths rather than as a float. A build that
-    /// rounds differently on two machines is not reproducible, and directive
-    /// section 12 does not leave room for "close enough".
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub enum Value {
-        /// Text.
         Text(String),
-        /// A colour, as 0xAARRGGBB.
         Color(u32),
-        /// A dimension, in thousandths of its unit.
-        Dimension {
-            /// The value multiplied by one thousand.
-            milli: i64,
-            /// The unit it was written in.
-            unit: Unit,
-        },
-        /// A boolean.
+        Dimension { milli: i64, unit: Unit },
         Bool(bool),
-        /// A whole number.
         Integer(i32),
-        /// A reference to another resource.
         Reference(Reference),
-        /// A file, named by its path inside the project.
         File(String),
-        /// The resource exists and holds nothing.
-        ///
-        /// An identifier declared with `<id name="…"/>` is exactly this: a name
-        /// that other resources can point at. Encoding it as a false boolean
-        /// would be a lie that happens to compile.
         Empty,
     }
 
     impl Value {
-        /// Stable name of the value's form.
         pub const fn type_name(&self) -> &'static str {
             match self {
                 Value::Text(_) => "text",
@@ -8511,7 +6793,6 @@ pub mod resources {
             }
         }
 
-        /// Renders the value the way it would be written in a resource file.
         pub fn to_source(&self) -> String {
             match self {
                 Value::Text(text) => text.clone(),
@@ -8538,60 +6819,42 @@ pub mod resources {
         }
     }
 
-    /// One resource.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Entry {
-        /// What kind it is.
         pub kind: Kind,
-        /// Its name, which must be a usable Java identifier.
         pub name: String,
-        /// Which configuration it belongs to.
         pub config: Config,
-        /// What it holds.
         pub value: Value,
-        /// Where it was declared.
         pub origin: String,
-        /// Where in that file.
         pub position: Position,
     }
 
     impl Entry {
-        /// Sort key that makes identifier assignment deterministic.
         fn order_key(&self) -> (Kind, &str, Config) {
             (self.kind, self.name.as_str(), self.config)
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Table construction
-    // -----------------------------------------------------------------------
-
-    /// A resource identifier, `0xPPTTEEEE`.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub struct ResourceId(u32);
 
     impl ResourceId {
-        /// Builds an identifier from its three parts.
         pub const fn new(package: u8, type_index: u8, entry_index: u16) -> ResourceId {
             ResourceId(((package as u32) << 24) | ((type_index as u32) << 16) | entry_index as u32)
         }
 
-        /// The raw value.
         pub const fn raw(self) -> u32 {
             self.0
         }
 
-        /// Which package it belongs to.
         pub const fn package(self) -> u8 {
             (self.0 >> 24) as u8
         }
 
-        /// Which type, 1-based.
         pub const fn type_index(self) -> u8 {
             ((self.0 >> 16) & 0xff) as u8
         }
 
-        /// Which entry within that type, 0-based.
         pub const fn entry_index(self) -> u16 {
             (self.0 & 0xffff) as u16
         }
@@ -8603,7 +6866,6 @@ pub mod resources {
         }
     }
 
-    /// Resources being collected.
     #[derive(Clone, Debug)]
     pub struct Table {
         package_id: u8,
@@ -8611,12 +6873,10 @@ pub mod resources {
     }
 
     impl Table {
-        /// A table for an application's own resources.
         pub fn new() -> Table {
             Table::for_package(APPLICATION_PACKAGE_ID)
         }
 
-        /// A table for a named package identifier.
         pub fn for_package(package_id: u8) -> Table {
             Table {
                 package_id,
@@ -8624,26 +6884,18 @@ pub mod resources {
             }
         }
 
-        /// Everything collected so far.
         pub fn entries(&self) -> &[Entry] {
             &self.entries
         }
 
-        /// How many resources are held.
         pub fn len(&self) -> usize {
             self.entries.len()
         }
 
-        /// Whether nothing has been collected.
         pub fn is_empty(&self) -> bool {
             self.entries.is_empty()
         }
 
-        /// Reads a `values/*.xml` document.
-        ///
-        /// Returns whether everything in it was understood. A document with a
-        /// problem still contributes what was valid, so one broken entry does not
-        /// hide every other mistake in the file (directive section 33).
         pub fn read_values(&mut self, text: &str, origin: &str, sink: &mut Sink) -> bool {
             let Some(root) = xml::parse(text, origin, sink) else {
                 return false;
@@ -8777,10 +7029,6 @@ pub mod resources {
             )
         }
 
-        /// Records a resource that is a file, such as a drawable.
-        ///
-        /// `directory` is the resource directory name, `file_name` the file
-        /// inside it, and `path` how the file is addressed in the project.
         pub fn read_file(
             &mut self,
             directory: &str,
@@ -8891,15 +7139,7 @@ pub mod resources {
             .with_location(Location::at(origin, position.line, position.column))
         }
 
-        /// Assigns identifiers, resolves references and verifies the result.
-        ///
-        /// This is the second half of the pipeline in directive section 22, run
-        /// as one step because none of it means anything alone: an identifier
-        /// that nothing can refer to is bookkeeping, and a resolved reference
-        /// without an identifier has nothing to resolve to.
         pub fn compile(mut self, sink: &mut Sink) -> Option<Compiled> {
-            // Sorted, so an identifier depends on what is declared and never on
-            // the order files were read (directive section 12).
             self.entries
                 .sort_by(|left, right| left.order_key().cmp(&right.order_key()));
 
@@ -8982,9 +7222,6 @@ pub mod resources {
             sink: &mut Sink,
         ) -> bool {
             if reference.is_platform() {
-                // The platform's resource table is not available to this build, so
-                // the reference is recorded and left unresolved rather than
-                // guessed at.
                 return true;
             }
 
@@ -9042,10 +7279,6 @@ pub mod resources {
             true
         }
 
-        /// Refuses a reference that eventually points back at itself.
-        ///
-        /// Following one would loop forever, so the chain is walked with a bound
-        /// and a visited list rather than recursively.
         fn check_for_cycles(&self, sink: &mut Sink) -> bool {
             let mut ok = true;
 
@@ -9113,7 +7346,6 @@ pub mod resources {
         }
     }
 
-    /// A table that has been numbered and verified.
     #[derive(Clone, Debug)]
     pub struct Compiled {
         package_id: u8,
@@ -9122,17 +7354,14 @@ pub mod resources {
     }
 
     impl Compiled {
-        /// Which package these resources belong to.
         pub fn package_id(&self) -> u8 {
             self.package_id
         }
 
-        /// Every resource, in identifier order.
         pub fn entries(&self) -> &[Entry] {
             &self.entries
         }
 
-        /// The identifier of a resource, if it has one.
         pub fn id(&self, kind: Kind, name: &str) -> Option<ResourceId> {
             self.assignments
                 .iter()
@@ -9140,12 +7369,10 @@ pub mod resources {
                 .map(|(_, _, id)| *id)
         }
 
-        /// Every identifier, in assignment order.
         pub fn assignments(&self) -> &[(Kind, String, ResourceId)] {
             &self.assignments
         }
 
-        /// Serialises the table as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("packageId", &format!("0x{:02x}", self.package_id));
@@ -9166,17 +7393,11 @@ pub mod resources {
     }
 
     impl Kind {
-        /// Whether a values file may declare one of these.
-        ///
-        /// A style can be referred to but not declared: declaring one needs the
-        /// attribute system, which is not built, and half a style is worse than
-        /// none.
         pub const fn declarable(self) -> bool {
             !matches!(self, Kind::Style)
         }
     }
 
-    /// Checks that a name can become a field in generated code.
     fn validate_name(name: &str) -> Result<(), String> {
         if name.is_empty() {
             return Err("A resource name is empty.".to_string());
@@ -9201,7 +7422,6 @@ pub mod resources {
         Ok(())
     }
 
-    /// Reads the text of a resource into a value of the right shape.
     fn parse_value(
         kind: Kind,
         text: &str,
@@ -9314,11 +7534,6 @@ pub mod resources {
         .with_location(Location::at(origin, position.line, position.column))
     }
 
-    /// Applies the escape and whitespace rules Android uses for strings.
-    ///
-    /// Text is trimmed and internal whitespace runs collapse to one space, which
-    /// is what makes a resource file readable across several lines. Text wrapped
-    /// in double quotes keeps its spacing exactly.
     fn decode_string(text: &str) -> String {
         let trimmed = text.trim();
         if let Some(quoted) = trimmed
@@ -9373,7 +7588,6 @@ pub mod resources {
         out
     }
 
-    /// Reads `#rgb`, `#argb`, `#rrggbb` or `#aarrggbb` into 0xAARRGGBB.
     fn parse_color(text: &str) -> Result<u32, String> {
         let Some(digits) = text.strip_prefix('#') else {
             return Err(format!("'{text}' does not start with '#'."));
@@ -9409,7 +7623,6 @@ pub mod resources {
         }
     }
 
-    /// Reads a dimension into thousandths of its unit.
     fn parse_dimension(text: &str) -> Result<(i64, Unit), String> {
         let Some(unit) = Unit::ALL
             .iter()
@@ -9465,45 +7678,6 @@ pub mod resources {
     }
 }
 
-// ===========================================================================
-// archive — the ZIP container an APK is (directive sections 23 and 24)
-// ===========================================================================
-
-/// ZIP archives: read, modelled, validated and written.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                       |
-/// |----------------------|-------------------------------------------------------------|
-/// | Module               | `omni_core::archive`                                        |
-/// | Purpose              | The container format an Android package is.                  |
-/// | Inputs               | Archive bytes, or entries to write. Untrusted, always.       |
-/// | Outputs              | An [`Archive`] model, or archive bytes; plus diagnostics.    |
-/// | Non-Responsibilities | Compression, signing, and knowing what an APK's entries mean. |
-/// | Security             | Every offset is checked against the file. Entry names cannot  |
-/// |                      | escape, absolutely or by traversal. Central directory and     |
-/// |                      | local headers must agree.                                     |
-/// | Determinism          | Fixed timestamps, sorted entries, no host-dependent metadata. |
-/// | Status               | PARTIAL — reads any archive's structure, writes stored        |
-/// |                      | entries only.                                                 |
-///
-/// ## The approach directive section 24 requires
-///
-/// > Specification → Parser → Internal Model → Validator → Writer →
-/// > Conformance Tests
-///
-/// The format is not reinvented. This implements the subset of PKWARE's
-/// APPNOTE that an APK uses: local file headers, the central directory, and the
-/// end-of-central-directory record.
-///
-/// ## What it does not do
-///
-/// **It does not compress.** Entries are written stored, byte for byte. Deflate
-/// is a compressor, which is a subsystem of its own with its own tests, and an
-/// APK built with stored entries is correct and larger rather than smaller and
-/// wrong. An archive being *read* may hold deflated entries; their structure is
-/// modelled and their bytes are not decompressed, and the model says which is
-/// which rather than pretending.
 pub mod archive {
     use crate::binary::{checksum, Endian, Reader, Writer as BinaryWriter};
     use crate::diag::{Diagnostic, Severity, Sink};
@@ -9511,65 +7685,36 @@ pub mod archive {
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// Signature of a local file header.
     pub const LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4b50;
 
-    /// Signature of a central directory record.
     pub const CENTRAL_HEADER_SIGNATURE: u32 = 0x0201_4b50;
 
-    /// Signature of the end-of-central-directory record.
     pub const END_OF_CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x0605_4b50;
 
-    /// Fixed size of a local file header before the name and extra field.
     pub const LOCAL_HEADER_SIZE: u64 = 30;
 
-    /// Fixed size of a central directory record before the name, extra and comment.
     pub const CENTRAL_HEADER_SIZE: u64 = 46;
 
-    /// Fixed size of the end-of-central-directory record before the comment.
     pub const END_OF_CENTRAL_DIRECTORY_SIZE: u64 = 22;
 
-    /// Most entries an archive may hold.
-    ///
-    /// The end-of-central-directory record counts entries in sixteen bits, and
-    /// this implementation does not write the ZIP64 records that lift that.
     pub const MAX_ENTRIES: usize = 65_535;
 
-    /// Longest accepted entry name, in bytes.
     pub const MAX_NAME_BYTES: usize = 4_096;
 
-    /// Largest archive this implementation will read or write.
-    ///
-    /// Four gigabytes is where the format's 32-bit offsets stop working, and
-    /// ZIP64 is not implemented (directive section 60).
     pub const MAX_ARCHIVE_BYTES: u64 = u32::MAX as u64;
 
-    /// Fixed modification date: 1 January 1980, the start of the DOS epoch.
-    ///
-    /// A real timestamp is the single most common reason two builds of the same
-    /// source produce different bytes (directive section 12). The format has
-    /// nowhere to put "unspecified", so the earliest representable moment is
-    /// used and the same value goes into every entry.
     pub const FIXED_DOS_DATE: u16 = 0x0021;
 
-    /// Fixed modification time: midnight.
     pub const FIXED_DOS_TIME: u16 = 0x0000;
 
-    /// How an entry's bytes are stored.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
     pub enum Compression {
-        /// Stored byte for byte.
         Stored,
-        /// Deflated. Readable as metadata; this implementation does not
-        /// decompress.
         Deflate,
-        /// Something else the format defines and this implementation does not
-        /// model.
         Other(u16),
     }
 
     impl Compression {
-        /// The method number the format uses.
         pub const fn method(self) -> u16 {
             match self {
                 Compression::Stored => 0,
@@ -9578,7 +7723,6 @@ pub mod archive {
             }
         }
 
-        /// Reads a method number.
         pub const fn from_method(method: u16) -> Compression {
             match method {
                 0 => Compression::Stored,
@@ -9587,7 +7731,6 @@ pub mod archive {
             }
         }
 
-        /// Stable machine-readable name.
         pub fn as_str(self) -> &'static str {
             match self {
                 Compression::Stored => "STORED",
@@ -9597,38 +7740,27 @@ pub mod archive {
         }
     }
 
-    /// One entry, as the archive describes it.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Entry {
-        /// Name, as stored. Always uses `/`.
         pub name: String,
-        /// How the bytes are stored.
         pub compression: Compression,
-        /// CRC-32 of the uncompressed bytes, as the archive claims.
         pub crc32: u32,
-        /// Size of the stored bytes.
         pub compressed_size: u64,
-        /// Size of the original bytes.
         pub uncompressed_size: u64,
-        /// Offset of the local file header.
         pub local_header_offset: u64,
-        /// Offset of the entry's bytes, once the local header has been read.
         pub data_offset: u64,
     }
 
     impl Entry {
-        /// Whether the entry names a directory rather than a file.
         pub fn is_directory(&self) -> bool {
             self.name.ends_with('/')
         }
 
-        /// Whether the entry's bytes start on a multiple of `alignment`.
         pub fn is_aligned_to(&self, alignment: u64) -> bool {
             alignment != 0 && self.data_offset.is_multiple_of(alignment)
         }
     }
 
-    /// An archive that has been read and checked.
     #[derive(Clone, Debug)]
     pub struct Archive {
         entries: Vec<Entry>,
@@ -9639,53 +7771,38 @@ pub mod archive {
     }
 
     impl Archive {
-        /// Every entry, in central directory order.
         pub fn entries(&self) -> &[Entry] {
             &self.entries
         }
 
-        /// Number of entries.
         pub fn len(&self) -> usize {
             self.entries.len()
         }
 
-        /// Whether the archive holds nothing.
         pub fn is_empty(&self) -> bool {
             self.entries.is_empty()
         }
 
-        /// Size of the archive in bytes.
         pub fn size(&self) -> u64 {
             self.size
         }
 
-        /// Where the central directory starts.
-        ///
-        /// The signing block, when there is one, sits immediately before it.
         pub fn central_directory_offset(&self) -> u64 {
             self.central_directory_offset
         }
 
-        /// Where the end-of-central-directory record starts.
         pub fn end_record_offset(&self) -> u64 {
             self.end_record_offset
         }
 
-        /// Digest of the whole archive.
         pub fn digest(&self) -> Digest {
             self.digest
         }
 
-        /// Looks an entry up by name.
         pub fn entry(&self, name: &str) -> Option<&Entry> {
             self.entries.iter().find(|entry| entry.name == name)
         }
 
-        /// Borrows one entry's stored bytes.
-        ///
-        /// For a stored entry these are the file's bytes. For a deflated one
-        /// they are the compressed bytes, and the caller is told so rather than
-        /// handed something that looks like content.
         pub fn stored_bytes<'a>(
             &self,
             data: &'a [u8],
@@ -9695,7 +7812,6 @@ pub mod archive {
             reader.slice_at(entry.data_offset, entry.compressed_size)
         }
 
-        /// Serialises the archive as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_u64("size", self.size);
@@ -9728,12 +7844,6 @@ pub mod archive {
         )
     }
 
-    /// Checks that an entry name is one an archive may safely carry.
-    ///
-    /// Directive section 23 names path traversal and invalid names as mandatory
-    /// checks. An archive is a directory tree written by somebody else, and an
-    /// entry called `../../etc/passwd` is how that tree reaches outside wherever
-    /// it is unpacked.
     pub fn validate_entry_name(name: &str) -> Result<(), Diagnostic> {
         let reject = |code: &str, message: String, suggestion: &str| {
             Err(Diagnostic::new(
@@ -9811,11 +7921,6 @@ pub mod archive {
         out
     }
 
-    /// Reads an archive and checks everything directive section 23 requires.
-    ///
-    /// Returns `None` when the archive cannot be trusted; every reason is in
-    /// `sink`. Reading stops at the first structural problem, because after one
-    /// the offsets are guesses.
     pub fn read(data: &[u8], sink: &mut Sink) -> Option<Archive> {
         if data.len() as u64 > MAX_ARCHIVE_BYTES {
             sink.emit(
@@ -9870,9 +7975,6 @@ pub mod archive {
             }
         }
 
-        // Duplicate names are a mandatory check: two entries answering to one
-        // name make every lookup ambiguous, and which one a reader picks has
-        // been a source of real Android vulnerabilities.
         let mut seen: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
         seen.sort_unstable();
         for pair in seen.windows(2) {
@@ -9904,11 +8006,6 @@ pub mod archive {
         central_directory_offset: u64,
     }
 
-    /// Finds the end-of-central-directory record.
-    ///
-    /// It is at the end, unless there is a comment, in which case it is up to
-    /// 65535 bytes earlier. The search is backwards and bounded, which is what
-    /// keeps a hostile archive from making it quadratic.
     fn find_end_of_central_directory(data: &[u8]) -> Result<u64, Diagnostic> {
         let size = END_OF_CENTRAL_DIRECTORY_SIZE as usize;
         if data.len() < size {
@@ -10041,9 +8138,6 @@ pub mod archive {
         reader.skip(extra_length)?;
         reader.skip(comment_length)?;
 
-        // The local header is read too, and must agree. An archive whose two
-        // descriptions of an entry differ is how a reader and a verifier are
-        // made to see different files.
         let data_offset = read_local_header(data, &name, local_header_offset, crc32, method)?;
 
         Ok(Entry {
@@ -10121,8 +8215,6 @@ pub mod archive {
             .with_context(format!("Entry: {}", truncate(expected_name, 96))));
         }
 
-        // A data descriptor moves the CRC and sizes to after the data, so the
-        // zeroes in the local header are expected rather than a disagreement.
         let has_descriptor = flags & 0x0008 != 0;
         if !has_descriptor && crc32 != expected_crc {
             return Err(fail(
@@ -10139,12 +8231,6 @@ pub mod archive {
         Ok(reader.position() as u64)
     }
 
-    /// Verifies that every stored entry's bytes match the checksum recorded for
-    /// them.
-    ///
-    /// Only stored entries can be checked: a deflated entry's checksum covers
-    /// what it decompresses to, and nothing here decompresses. Which entries
-    /// were checked is reported rather than glossed over.
     pub fn verify_checksums(archive: &Archive, data: &[u8], sink: &mut Sink) -> (u64, u64) {
         let mut checked = 0;
         let mut skipped = 0;
@@ -10194,28 +8280,12 @@ pub mod archive {
         (checked, skipped)
     }
 
-    // -----------------------------------------------------------------------
-    // Writer
-    // -----------------------------------------------------------------------
-
-    /// Header identifier of the padding record used for alignment.
-    ///
-    /// `0xd935` is the identifier Android's own alignment tool writes. Using a
-    /// well-formed extra-field record rather than raw padding means every reader
-    /// skips it correctly instead of tolerating it.
     pub const ALIGNMENT_EXTRA_ID: u16 = 0xd935;
 
-    /// Alignment every entry gets unless something asks for more.
     pub const DEFAULT_ALIGNMENT: u64 = 4;
 
-    /// Alignment a native library needs.
-    ///
-    /// A device with 16 KB memory pages maps a shared library straight out of
-    /// the package, which it can only do when the library starts on a page
-    /// boundary. This was measured against `zipalign -P 16` on a real package.
     pub const NATIVE_LIBRARY_ALIGNMENT: u64 = 16 * 1024;
 
-    /// An entry waiting to be written.
     #[derive(Clone, Debug)]
     struct Pending {
         name: String,
@@ -10223,11 +8293,6 @@ pub mod archive {
         alignment: u64,
     }
 
-    /// Builds an archive.
-    ///
-    /// Output is deterministic by construction: entries are sorted by name, all
-    /// timestamps are the same fixed value, and nothing about the machine that
-    /// ran the build reaches the bytes (directive section 12).
     #[derive(Clone, Debug, Default)]
     pub struct Builder {
         entries: Vec<Pending>,
@@ -10235,7 +8300,6 @@ pub mod archive {
     }
 
     impl Builder {
-        /// A builder that aligns every entry to four bytes.
         pub fn new() -> Builder {
             Builder {
                 entries: Vec::new(),
@@ -10243,10 +8307,6 @@ pub mod archive {
             }
         }
 
-        /// A builder that also puts native libraries on a page boundary.
-        ///
-        /// This is the policy an Android package needs: `lib/**/*.so` aligned to
-        /// 16 KB so the platform can map it directly, everything else to four.
         pub fn for_android() -> Builder {
             Builder {
                 entries: Vec::new(),
@@ -10254,17 +8314,14 @@ pub mod archive {
             }
         }
 
-        /// Number of entries added.
         pub fn len(&self) -> usize {
             self.entries.len()
         }
 
-        /// Whether nothing has been added.
         pub fn is_empty(&self) -> bool {
             self.entries.is_empty()
         }
 
-        /// Adds an entry, choosing its alignment from the builder's policy.
         pub fn add(&mut self, name: impl Into<String>, bytes: Vec<u8>) -> Result<(), Diagnostic> {
             let name = name.into();
             let alignment = if self.android_alignment && is_native_library(&name) {
@@ -10275,7 +8332,6 @@ pub mod archive {
             self.add_aligned(name, bytes, alignment)
         }
 
-        /// Adds an entry with an explicit alignment.
         pub fn add_aligned(
             &mut self,
             name: impl Into<String>,
@@ -10331,11 +8387,6 @@ pub mod archive {
             Ok(())
         }
 
-        /// Writes the archive.
-        ///
-        /// Entries are sorted by name first. Directive section 23 requires
-        /// deterministic ordering, and sorting is the only ordering that does not
-        /// depend on how the caller happened to walk a directory.
         pub fn finish(mut self) -> Result<Vec<u8>, Diagnostic> {
             self.entries
                 .sort_by(|left, right| left.name.cmp(&right.name));
@@ -10370,10 +8421,6 @@ pub mod archive {
                     )
                 })?;
 
-                // The extra field is sized so that the entry's bytes land on the
-                // boundary it asked for. A record is four bytes of header plus
-                // its payload, so padding of one to three bytes is grown by one
-                // whole alignment step rather than written as a malformed record.
                 let base = header_offset + LOCAL_HEADER_SIZE + u64::from(name_length);
                 let mut padding = (entry.alignment - (base % entry.alignment)) % entry.alignment;
                 while padding != 0 && padding < 4 {
@@ -10392,8 +8439,8 @@ pub mod archive {
                 })?;
 
                 writer.u32(LOCAL_HEADER_SIGNATURE)?;
-                writer.u16(20)?; // version needed: 2.0, which is stored and deflate
-                writer.u16(0)?; // no flags: no encryption, no data descriptor
+                writer.u16(20)?;
+                writer.u16(0)?;
                 writer.u16(Compression::Stored.method())?;
                 writer.u16(FIXED_DOS_TIME)?;
                 writer.u16(FIXED_DOS_DATE)?;
@@ -10422,8 +8469,8 @@ pub mod archive {
             for (entry, header_offset, crc) in &written {
                 let size = entry.bytes.len() as u32;
                 writer.u32(CENTRAL_HEADER_SIGNATURE)?;
-                writer.u16(20)?; // version made by
-                writer.u16(20)?; // version needed
+                writer.u16(20)?;
+                writer.u16(20)?;
                 writer.u16(0)?;
                 writer.u16(Compression::Stored.method())?;
                 writer.u16(FIXED_DOS_TIME)?;
@@ -10432,11 +8479,11 @@ pub mod archive {
                 writer.u32(size)?;
                 writer.u32(size)?;
                 writer.u16(entry.name.len() as u16)?;
-                writer.u16(0)?; // the central directory carries no extra field
-                writer.u16(0)?; // no comment
-                writer.u16(0)?; // disk number
-                writer.u16(0)?; // internal attributes
-                writer.u32(0)?; // external attributes: none, so no host's umask
+                writer.u16(0)?;
+                writer.u16(0)?;
+                writer.u16(0)?;
+                writer.u16(0)?;
+                writer.u32(0)?;
                 writer.u32(*header_offset as u32)?;
                 writer.bytes(entry.name.as_bytes())?;
             }
@@ -10459,104 +8506,56 @@ pub mod archive {
             writer.u16(count)?;
             writer.u32(directory_size as u32)?;
             writer.u32(directory_offset as u32)?;
-            writer.u16(0)?; // no archive comment
+            writer.u16(0)?;
 
             Ok(writer.finish())
         }
     }
 
-    /// Whether a name is a native library, which needs page alignment.
     fn is_native_library(name: &str) -> bool {
         name.starts_with("lib/") && name.ends_with(".so")
     }
 }
 
-// ===========================================================================
-// der — ASN.1 distinguished encoding rules (directive sections 20 and 30)
-// ===========================================================================
-
-/// The encoding every X.509 certificate is written in.
-///
-/// ## Contract (directive section 2)
-///
-/// * **Purpose** — read DER, the one canonical encoding of ASN.1.
-/// * **Inputs** — bytes from a certificate. Untrusted, always: a certificate
-///   arrives from whoever signed the thing being verified.
-/// * **Non-Responsibilities** — BER, which allows several encodings of one
-///   value, and the meaning of anything it reads.
-/// * **Security** — lengths are bounded before use, nesting is explicit rather
-///   than recursive, and every encoding DER forbids is refused rather than
-///   accepted leniently.
-/// * **Status** — PARTIAL: the subset a certificate uses.
-///
-/// ## Why leniency is a security bug here
-///
-/// DER exists because BER lets one value be written several ways, and a
-/// verifier that accepts two spellings of a name can be shown a different name
-/// from the one a parser displays. Every rule below - definite lengths, shortest
-/// form, no indefinite encoding - is refused rather than tolerated for that
-/// reason.
 pub mod der {
     use crate::binary::{Endian, Reader as BinaryReader};
     use crate::diag::{Diagnostic, Severity};
     use crate::FailureClass;
 
-    /// Deepest nesting this reader will follow.
     pub const MAX_DEPTH: usize = 32;
 
-    /// Universal tag numbers this module names.
     pub mod tag {
-        /// INTEGER
         pub const INTEGER: u8 = 0x02;
-        /// BIT STRING
         pub const BIT_STRING: u8 = 0x03;
-        /// OCTET STRING
         pub const OCTET_STRING: u8 = 0x04;
-        /// NULL
         pub const NULL: u8 = 0x05;
-        /// OBJECT IDENTIFIER
         pub const OID: u8 = 0x06;
-        /// UTF8String
         pub const UTF8_STRING: u8 = 0x0c;
-        /// PrintableString
         pub const PRINTABLE_STRING: u8 = 0x13;
-        /// IA5String
         pub const IA5_STRING: u8 = 0x16;
-        /// UTCTime
         pub const UTC_TIME: u8 = 0x17;
-        /// GeneralizedTime
         pub const GENERALIZED_TIME: u8 = 0x18;
-        /// SEQUENCE
         pub const SEQUENCE: u8 = 0x30;
-        /// SET
         pub const SET: u8 = 0x31;
     }
 
-    /// One tag-length-value element.
     #[derive(Clone, Copy, Debug)]
     pub struct Element<'a> {
-        /// The identifier octet.
         pub tag: u8,
-        /// The contents, without the tag or the length.
         pub contents: &'a [u8],
-        /// Offset of the identifier octet within the document.
         pub offset: usize,
-        /// Total size of the element, including its tag and length.
         pub total: usize,
     }
 
     impl<'a> Element<'a> {
-        /// Whether the element holds other elements.
         pub fn is_constructed(&self) -> bool {
             self.tag & 0x20 != 0
         }
 
-        /// Whether the tag is context-specific, as `[0]` is.
         pub fn is_context_specific(&self) -> bool {
             self.tag & 0xc0 == 0x80
         }
 
-        /// The context tag number, when the tag is context-specific.
         pub fn context_number(&self) -> Option<u8> {
             if self.is_context_specific() {
                 Some(self.tag & 0x1f)
@@ -10565,7 +8564,6 @@ pub mod der {
             }
         }
 
-        /// Reads the contents as a sequence of further elements.
         pub fn reader(&self) -> Reader<'a> {
             Reader::new(self.contents, self.offset)
         }
@@ -10582,7 +8580,6 @@ pub mod der {
         .with_context(format!("At offset: {offset}"))
     }
 
-    /// Reads a run of DER elements.
     #[derive(Clone, Debug)]
     pub struct Reader<'a> {
         data: &'a [u8],
@@ -10591,7 +8588,6 @@ pub mod der {
     }
 
     impl<'a> Reader<'a> {
-        /// Reads `data`, reporting offsets relative to `base`.
         pub fn new(data: &'a [u8], base: usize) -> Reader<'a> {
             Reader {
                 data,
@@ -10600,17 +8596,14 @@ pub mod der {
             }
         }
 
-        /// Whether everything has been read.
         pub fn is_empty(&self) -> bool {
             self.position >= self.data.len()
         }
 
-        /// Bytes left.
         pub fn remaining(&self) -> usize {
             self.data.len() - self.position
         }
 
-        /// Reads the next element.
         pub fn next_element(&mut self) -> Result<Element<'a>, Diagnostic> {
             let offset = self.base + self.position;
             let mut reader =
@@ -10670,12 +8663,6 @@ pub mod der {
                 value
             };
 
-            // A declared length is checked against what is actually there
-            // before it is used for anything, so a wrong length cannot make
-            // this read past its buffer (directive section 60). The check
-            // lives here rather than in the binary reader so the diagnostic
-            // names the element rather than the byte stream, and so the two
-            // do not race to report the same problem with different codes.
             let contents_start = self.position + reader.position();
             let available = (self.data.len() - contents_start) as u64;
             if length > available {
@@ -10687,7 +8674,6 @@ pub mod der {
                 .with_context(format!("Wants: {length} bytes"))
                 .with_context(format!("Available: {available}")));
             }
-            // Bounded by `available` just above, so this cannot truncate.
             let length = length as usize;
             let end = contents_start + length;
 
@@ -10701,7 +8687,6 @@ pub mod der {
             Ok(element)
         }
 
-        /// Reads the next element and checks its tag.
         pub fn expect(&mut self, tag: u8) -> Result<Element<'a>, Diagnostic> {
             let element = self.next_element()?;
             if element.tag != tag {
@@ -10714,8 +8699,6 @@ pub mod der {
             Ok(element)
         }
 
-        /// Reads the next element if it has this tag, without consuming anything
-        /// otherwise.
         pub fn take_if(&mut self, tag: u8) -> Option<Element<'a>> {
             let saved = self.position;
             match self.next_element() {
@@ -10728,10 +8711,6 @@ pub mod der {
         }
     }
 
-    /// Reads an OBJECT IDENTIFIER into its dotted form.
-    ///
-    /// The first byte holds two arcs at once, which is the one place the
-    /// encoding is not simply base-128.
     pub fn read_oid(element: &Element<'_>) -> Result<String, Diagnostic> {
         if element.tag != tag::OID {
             return Err(fail(
@@ -10801,10 +8780,6 @@ pub mod der {
         Ok(out)
     }
 
-    /// Reads an INTEGER into its unpadded big-endian bytes.
-    ///
-    /// A certificate serial number is routinely larger than any integer type, so
-    /// it is kept as bytes and rendered as hexadecimal rather than converted.
     pub fn read_integer_bytes<'a>(element: &Element<'a>) -> Result<&'a [u8], Diagnostic> {
         if element.tag != tag::INTEGER {
             return Err(fail(
@@ -10830,7 +8805,6 @@ pub mod der {
         Ok(element.contents)
     }
 
-    /// Reads a text element, refusing anything that is not one.
     pub fn read_string(element: &Element<'_>) -> Result<String, Diagnostic> {
         match element.tag {
             tag::UTF8_STRING | tag::PRINTABLE_STRING | tag::IA5_STRING => {
@@ -10851,7 +8825,6 @@ pub mod der {
         }
     }
 
-    /// Renders bytes as uppercase hexadecimal, the way a serial number is shown.
     pub fn to_hex(bytes: &[u8]) -> String {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
         let mut out = String::with_capacity(bytes.len() * 2);
@@ -10863,34 +8836,6 @@ pub mod der {
     }
 }
 
-// ===========================================================================
-// x509 — certificates (directive sections 25 and 30)
-// ===========================================================================
-
-/// Reading the certificate that says who signed something.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                       |
-/// |----------------------|-------------------------------------------------------------|
-/// | Module               | `omni_core::x509`                                           |
-/// | Purpose              | Turn a certificate into facts that can be shown and compared.|
-/// | Inputs               | DER bytes. Untrusted: a certificate comes from whoever signed |
-/// |                      | the artifact being examined.                                  |
-/// | Outputs              | A [`Certificate`], or diagnostics.                            |
-/// | Non-Responsibilities | Checking a signature, building a chain, or deciding trust.    |
-/// | Status               | PARTIAL — see what it does not do, below.                     |
-///
-/// ## What this does not do, said plainly
-///
-/// It **parses**. It does not verify. Nothing here checks that a certificate's
-/// signature is valid, that it chains to anything, that it has not been revoked,
-/// or that the key in it signed anything. Those need public-key arithmetic that
-/// this tree does not have, and directive section 1 does not allow a parser to
-/// be described as a verifier.
-///
-/// What it is good for today: identifying a signer, comparing one build's signer
-/// with another's by fingerprint, and showing a person who signed something.
 pub mod x509 {
     use crate::der::{self, tag, Element};
     use crate::diag::{Diagnostic, Severity};
@@ -10898,34 +8843,24 @@ pub mod x509 {
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// Largest certificate this reader accepts (directive section 60).
     pub const MAX_CERTIFICATE_BYTES: usize = 64 * 1024;
 
-    /// An algorithm identifier, kept as its number and its name.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Algorithm {
-        /// The object identifier, in dotted form.
         pub oid: String,
-        /// The name, when this build knows it.
         pub name: Option<&'static str>,
     }
 
     impl Algorithm {
-        /// The name if there is one, otherwise the identifier.
         pub fn display(&self) -> &str {
             self.name.unwrap_or(&self.oid)
         }
 
-        /// Whether this build recognises the algorithm.
         pub fn is_known(&self) -> bool {
             self.name.is_some()
         }
     }
 
-    /// Algorithm identifiers a signed Android package uses.
-    ///
-    /// An unknown identifier is reported as unknown rather than guessed at: a
-    /// signature this build cannot name is one it certainly cannot check.
     const ALGORITHMS: &[(&str, &str)] = &[
         ("1.2.840.113549.1.1.1", "RSA"),
         ("1.2.840.113549.1.1.5", "SHA-1 with RSA"),
@@ -10940,7 +8875,6 @@ pub mod x509 {
         ("1.3.101.112", "Ed25519"),
     ];
 
-    /// Attribute types that appear in a distinguished name.
     const NAME_ATTRIBUTES: &[(&str, &str)] = &[
         ("2.5.4.3", "CN"),
         ("2.5.4.6", "C"),
@@ -10963,34 +8897,20 @@ pub mod x509 {
         }
     }
 
-    /// A certificate, as far as this build reads one.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Certificate {
-        /// Serial number, in uppercase hexadecimal.
         pub serial: String,
-        /// Who issued it.
         pub issuer: String,
-        /// Who it is about.
         pub subject: String,
-        /// Start of validity, normalised.
         pub not_before: String,
-        /// End of validity, normalised.
         pub not_after: String,
-        /// Algorithm the issuer used to sign it.
         pub signature_algorithm: Algorithm,
-        /// Algorithm of the key inside it.
         pub public_key_algorithm: Algorithm,
-        /// Size of the key in bits, when it can be determined.
         pub public_key_bits: Option<u32>,
-        /// SHA-256 of the whole certificate.
-        ///
-        /// This is the fingerprint every tool prints, and the only thing here
-        /// that identifies a signer without needing to verify anything.
         pub fingerprint: Digest,
     }
 
     impl Certificate {
-        /// Reads a certificate.
         pub fn parse(data: &[u8]) -> Result<Certificate, Diagnostic> {
             if data.len() > MAX_CERTIFICATE_BYTES {
                 return Err(Diagnostic::new(
@@ -11020,8 +8940,6 @@ pub mod x509 {
 
             let mut fields = tbs.reader();
 
-            // The version is [0] EXPLICIT and absent for a version 1
-            // certificate, so it is taken only if it is there.
             let _version = fields.take_if(0xa0);
 
             let serial = der::to_hex(der::read_integer_bytes(&fields.expect(tag::INTEGER)?)?);
@@ -11050,7 +8968,6 @@ pub mod x509 {
             })
         }
 
-        /// The fingerprint in the colon-separated form tools print.
         pub fn fingerprint_display(&self) -> String {
             let hex = self.fingerprint.to_hex().to_uppercase();
             hex.as_bytes()
@@ -11060,7 +8977,6 @@ pub mod x509 {
                 .join(":")
         }
 
-        /// Serialises the certificate as an object inside an open array.
         pub fn write_json(&self, w: &mut Writer) {
             w.begin_object(None);
             w.field_str("serial", &self.serial);
@@ -11096,7 +9012,6 @@ pub mod x509 {
         Ok(name_algorithm(&oid))
     }
 
-    /// Renders a distinguished name in the order it is encoded.
     fn read_name(element: &Element<'_>) -> Result<String, Diagnostic> {
         let mut parts: Vec<String> = Vec::new();
         let mut sequence = element.reader();
@@ -11116,9 +9031,6 @@ pub mod x509 {
                     .map(|(_, label)| (*label).to_string())
                     .unwrap_or(oid);
 
-                // A name may hold a type this build does not model; its value is
-                // still shown, because hiding part of a name is how two signers
-                // are made to look like one.
                 let text = der::read_string(&value)
                     .unwrap_or_else(|_| format!("#{}", der::to_hex(value.contents)));
                 parts.push(format!("{label}={text}"));
@@ -11136,10 +9048,6 @@ pub mod x509 {
         Ok(parts.join(", "))
     }
 
-    /// Normalises a certificate time into `YYYY-MM-DD HH:MM:SS UTC`.
-    ///
-    /// UTCTime writes a two-digit year, and the rule for reading it is fixed by
-    /// RFC 5280: 50 and above means the twentieth century.
     fn read_time(element: &Element<'_>) -> Result<String, Diagnostic> {
         let text = core::str::from_utf8(element.contents).map_err(|_| {
             problem(
@@ -11206,17 +9114,12 @@ pub mod x509 {
         ))
     }
 
-    /// Reads the algorithm of the key, and its size when that can be told.
     fn read_public_key(element: &Element<'_>) -> Result<(Algorithm, Option<u32>), Diagnostic> {
         let mut fields = element.reader();
         let algorithm = read_algorithm(&fields.expect(tag::SEQUENCE)?)?;
         let key = fields.expect(tag::BIT_STRING)?;
 
-        // An RSA key is a SEQUENCE of two integers inside the bit string, and
-        // the first is the modulus. Its length is the key size, which is worth
-        // showing: a 1024-bit key is a fact a person should see.
         let bits = if algorithm.oid == "1.2.840.113549.1.1.1" && !key.contents.is_empty() {
-            // The first byte of a BIT STRING counts unused trailing bits.
             let mut inner = der::Reader::new(&key.contents[1..], key.offset);
             inner
                 .expect(tag::SEQUENCE)
@@ -11227,11 +9130,6 @@ pub mod x509 {
                 })
                 .and_then(|modulus| der::read_integer_bytes(&modulus).ok())
                 .map(|bytes| {
-                    // A DER integer is signed, so a modulus whose top bit is
-                    // set carries a leading zero byte that is padding and not
-                    // part of the number. The key size is the number's own bit
-                    // length -- 2048, not 2056 -- which is what every tool
-                    // prints and what a person comparing two reports expects.
                     let digits = match bytes.iter().position(|byte| *byte != 0) {
                         Some(first) => &bytes[first..],
                         None => &[][..],
@@ -11249,44 +9147,6 @@ pub mod x509 {
     }
 }
 
-// ===========================================================================
-// signing — the APK signing block (directive sections 25, 27 and 30)
-// ===========================================================================
-
-/// Reading and checking the signature block an Android package carries.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                        |
-/// |----------------------|--------------------------------------------------------------|
-/// | Module               | `omni_core::signing`                                         |
-/// | Purpose              | Find the signing block, read who signed, and recompute the    |
-/// |                      | digests it claims over the package's own bytes.               |
-/// | Inputs               | A package's bytes. Untrusted.                                 |
-/// | Outputs              | A [`Report`] saying what was found and what was checked.      |
-/// | Security             | Never reports a digest as verified without having recomputed  |
-/// |                      | it, and never calls a digest match a valid signature.         |
-/// | Status               | PARTIAL — the digests are checked, the signatures are not.    |
-///
-/// ## What is checked, and what is not
-///
-/// **Checked.** The content digest. The scheme splits the package into three
-/// sections, chunks each into one-megabyte pieces, hashes every chunk and then
-/// hashes the chunk hashes. Recomputing that and comparing it with what the
-/// block claims detects any change to the package's contents, its central
-/// directory, or its end record. That covers threats T1, T3 and T4 of directive
-/// section 27: an APK modified after signing, a modified DEX, a modified native
-/// library.
-///
-/// **Not checked.** Whether the signature over the signed data is valid. That
-/// needs RSA or elliptic-curve arithmetic, which this tree does not have. So a
-/// digest match proves the package has not changed since the block was written;
-/// it does not prove who wrote it. Anyone able to rewrite the package can also
-/// rewrite the digest, and only a signature check closes that gap.
-///
-/// This distinction is why [`Report::signatures_checked`] exists and is always
-/// false. Directive section 1 does not allow the difference to be blurred, and
-/// section 28 does not allow security to be reduced to one boolean.
 pub mod signing {
     use crate::binary::{Endian, Reader};
     use crate::diag::{Diagnostic, Severity, Sink};
@@ -11295,60 +9155,36 @@ pub mod signing {
     use crate::x509::Certificate;
     use crate::FailureClass;
 
-    /// The magic that marks the end of an APK signing block.
     pub const MAGIC: &[u8; 16] = b"APK Sig Block 42";
 
-    /// Identifier of the APK Signature Scheme v2 block.
     pub const V2_BLOCK_ID: u32 = 0x7109_871a;
 
-    /// Identifier of the APK Signature Scheme v3 block.
     pub const V3_BLOCK_ID: u32 = 0xf053_68c0;
 
-    /// Identifier of the APK Signature Scheme v3.1 block.
     pub const V31_BLOCK_ID: u32 = 0x1b93_ad61;
 
-    /// Size of the chunks the content digest is computed over.
     pub const CHUNK_SIZE: usize = 1024 * 1024;
 
-    /// Prefix of a chunk's own digest, from the scheme's definition.
     const CHUNK_PREFIX: u8 = 0xa5;
 
-    /// Prefix of the digest over the chunk digests.
     const ROOT_PREFIX: u8 = 0x5a;
 
-    /// Largest signing block this reader accepts (directive section 60).
     pub const MAX_BLOCK_BYTES: u64 = 64 * 1024 * 1024;
 
-    /// How an algorithm's content digest is constructed.
-    ///
-    /// This is not the same question as which hash it names. The verity
-    /// algorithms hash the package into an fs-verity Merkle tree and record its
-    /// root; that value has nothing to do with the chunked digest, and
-    /// comparing the two would always disagree. Reporting that disagreement as
-    /// a tampered package would be a false accusation about a sound one, so the
-    /// construction is modelled explicitly rather than inferred from the name.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum DigestKind {
-        /// The scheme's chunked digest, with SHA-256 over every chunk.
         Chunked256,
-        /// The same construction with SHA-512.
         Chunked512,
-        /// The root of an fs-verity Merkle tree. Not implemented here.
         VerityMerkle,
     }
 
-    /// A signature algorithm the scheme defines.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct SignatureAlgorithm {
-        /// The identifier as written in the block.
         pub id: u32,
-        /// Its name.
         pub name: &'static str,
-        /// How its content digest is built.
         pub digest: DigestKind,
     }
 
-    /// Every algorithm the scheme defines, and how each one's digest is built.
     const ALGORITHMS: &[SignatureAlgorithm] = &[
         SignatureAlgorithm {
             id: 0x0101,
@@ -11402,7 +9238,6 @@ pub mod signing {
         },
     ];
 
-    /// The algorithm a scheme identifier names, if the scheme defines one.
     pub fn algorithm(id: u32) -> Option<SignatureAlgorithm> {
         ALGORITHMS.iter().copied().find(|entry| entry.id == id)
     }
@@ -11417,7 +9252,6 @@ pub mod signing {
         )
     }
 
-    /// The block that sits between a package's entries and its central directory.
     #[derive(Clone, Debug)]
     pub struct Block {
         offset: u64,
@@ -11426,22 +9260,18 @@ pub mod signing {
     }
 
     impl Block {
-        /// Where the block starts.
         pub fn offset(&self) -> u64 {
             self.offset
         }
 
-        /// How large it is, including its two size fields and its magic.
         pub fn size(&self) -> u64 {
             self.size
         }
 
-        /// The identifiers it carries, in order.
         pub fn ids(&self) -> Vec<u32> {
             self.pairs.iter().map(|(id, _)| *id).collect()
         }
 
-        /// The value stored under an identifier.
         pub fn value(&self, id: u32) -> Option<&[u8]> {
             self.pairs
                 .iter()
@@ -11450,11 +9280,6 @@ pub mod signing {
         }
     }
 
-    /// Finds and reads the signing block.
-    ///
-    /// It ends immediately before the central directory, and is found by reading
-    /// backwards from there: magic, then size, then the block itself. Returns
-    /// `Ok(None)` when the package simply has no block, which is not an error.
     pub fn find_block(
         data: &[u8],
         central_directory_offset: u64,
@@ -11487,8 +9312,6 @@ pub mod signing {
             .with_context(format!("Limit: {MAX_BLOCK_BYTES} bytes")));
         }
 
-        // The block's size counts everything after the leading size field, so
-        // the block begins eight bytes before that.
         let Some(start) = central_directory_offset
             .checked_sub(trailing_size)
             .and_then(|value| value.checked_sub(8))
@@ -11517,8 +9340,6 @@ pub mod signing {
             );
         }
 
-        // The pairs occupy everything between the leading size and the trailing
-        // size, which is the block's size less the trailing size field and magic.
         let Some(pairs_length) = trailing_size.checked_sub(24) else {
             return Err(fail(
                 "ES004",
@@ -11579,20 +9400,14 @@ pub mod signing {
         }))
     }
 
-    /// One signer's claim, as the v2 block records it.
     #[derive(Clone, Debug)]
     pub struct Signer {
-        /// Digests the signer claims, by algorithm.
         pub digests: Vec<(SignatureAlgorithm, Vec<u8>)>,
-        /// Algorithms the signer produced a signature with.
         pub signature_algorithms: Vec<SignatureAlgorithm>,
-        /// Certificates, the first of which identifies the signer.
         pub certificates: Vec<Certificate>,
-        /// Identifiers of algorithms this build does not know.
         pub unknown_algorithms: Vec<u32>,
     }
 
-    /// Reads a length-prefixed sequence, one element at a time.
     fn read_length_prefixed<'a>(
         reader: &mut Reader<'a>,
         what: &str,
@@ -11604,10 +9419,6 @@ pub mod signing {
         reader.bytes(length)
     }
 
-    /// Reads an APK Signature Scheme v2 or v3 block.
-    ///
-    /// The two share this structure; v3 adds fields this reader does not need
-    /// and skips over.
     pub fn parse_signers(value: &[u8]) -> Result<Vec<Signer>, Diagnostic> {
         let mut outer = Reader::new(value, Endian::Little, "signers");
         let signers_bytes = read_length_prefixed(&mut outer, "signers")?;
@@ -11622,7 +9433,6 @@ pub mod signing {
             let signed_data = read_length_prefixed(&mut signer, "signed data")?;
             let mut signed = Reader::new(signed_data, Endian::Little, "signed data");
 
-            // Digests.
             let digests_bytes = read_length_prefixed(&mut signed, "digests")?;
             let mut digests_reader = Reader::new(digests_bytes, Endian::Little, "digests");
             let mut digests = Vec::new();
@@ -11638,7 +9448,6 @@ pub mod signing {
                 }
             }
 
-            // Certificates.
             let certificates_bytes = read_length_prefixed(&mut signed, "certificates")?;
             let mut certificates_reader =
                 Reader::new(certificates_bytes, Endian::Little, "certificates");
@@ -11648,11 +9457,6 @@ pub mod signing {
                 certificates.push(Certificate::parse(der)?);
             }
 
-            // The remainder of the signed data is additional attributes, which
-            // this build does not interpret.
-
-            // Signatures: their algorithms are recorded, their bytes are not
-            // checked, and nothing here pretends otherwise.
             let signatures_bytes = read_length_prefixed(&mut signer, "signatures")?;
             let mut signatures_reader = Reader::new(signatures_bytes, Endian::Little, "signatures");
             let mut signature_algorithms = Vec::new();
@@ -11687,27 +9491,13 @@ pub mod signing {
         Ok(signers)
     }
 
-    /// The three spans of a package the content digest covers.
-    ///
-    /// The package is treated as three sections: everything before the signing
-    /// block, the central directory, and the end record with its central
-    /// directory offset replaced by the signing block's offset. The
-    /// substitution in the third section is what lets the digest cover the end
-    /// record without covering the offset the signing block itself moved.
-    ///
-    /// The end record is held owned because it is the patched copy, not the
-    /// bytes in the file.
     struct DigestSections<'a> {
-        /// Everything before the signing block.
         contents: &'a [u8],
-        /// The central directory.
         directory: &'a [u8],
-        /// The end record with its central directory offset substituted.
         end_record: Vec<u8>,
     }
 
     impl DigestSections<'_> {
-        /// The three spans in the order the digest covers them.
         fn each(&self) -> [&[u8]; 3] {
             [self.contents, self.directory, self.end_record.as_slice()]
         }
@@ -11748,11 +9538,6 @@ pub mod signing {
         })
     }
 
-    /// Computes the SHA-256 content digest the scheme defines.
-    ///
-    /// Each section is split into one-megabyte chunks, every chunk is hashed
-    /// with a `0xa5` prefix and its length, and the chunk hashes are hashed
-    /// together with a `0x5a` prefix and their count.
     pub fn content_digest_sha256(
         data: &[u8],
         block_offset: u64,
@@ -11786,12 +9571,6 @@ pub mod signing {
         Ok(root.finish())
     }
 
-    /// Computes the SHA-512 content digest the scheme defines.
-    ///
-    /// The identical construction to [`content_digest_sha256`] with SHA-512 in
-    /// place of SHA-256. A signer with a large RSA key produces this one, so
-    /// without it the Core would have to decline to check the very packages
-    /// this repository's own release build produces.
     pub fn content_digest_sha512(
         data: &[u8],
         block_offset: u64,
@@ -11825,35 +9604,22 @@ pub mod signing {
         Ok(root.finish())
     }
 
-    /// What was found in a package, and what of it was checked.
     #[derive(Clone, Debug)]
     pub struct Report {
-        /// Whether the package carries a signing block at all.
         pub has_block: bool,
-        /// Which schemes are present, by name.
         pub schemes: Vec<&'static str>,
-        /// Signers found, in block order.
         pub signers: Vec<Signer>,
-        /// Content digests that were recomputed and matched.
         pub digests_verified: u64,
-        /// Content digests that could not be recomputed by this build.
         pub digests_unverifiable: u64,
-        /// Content digests that were recomputed and did not match.
         pub digests_failed: u64,
-        /// Always false, and deliberately so: see the module documentation.
         pub signatures_checked: bool,
     }
 
     impl Report {
-        /// Whether everything this build is able to check, checked out.
-        ///
-        /// This is not "the package is genuine". It is "nothing this build can
-        /// check is wrong", which is a smaller and more honest claim.
         pub fn everything_checkable_passed(&self) -> bool {
             self.has_block && self.digests_failed == 0 && self.digests_verified > 0
         }
 
-        /// Serialises the report as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_bool("hasSigningBlock", self.has_block);
@@ -11893,7 +9659,6 @@ pub mod signing {
         }
     }
 
-    /// Examines a package's signature block.
     pub fn examine(
         data: &[u8],
         central_directory_offset: u64,
@@ -11979,9 +9744,6 @@ pub mod signing {
             }
         }
 
-        // Both digests are computed only if some signer actually claims one.
-        // A package is commonly signed with one algorithm, and hashing it twice
-        // to satisfy a claim nobody made would double the work for nothing.
         let wanted = |kind: DigestKind| {
             report
                 .signers
@@ -12023,8 +9785,6 @@ pub mod signing {
 
         for signer in &report.signers {
             for (algorithm, claimed) in &signer.digests {
-                // What this build recomputed for the construction this
-                // algorithm uses, if it can build that construction at all.
                 let computed: Option<(&[u8], String)> = match algorithm.digest {
                     DigestKind::Chunked256 => sha256_digest
                         .as_ref()
@@ -12089,50 +9849,6 @@ pub mod signing {
     }
 }
 
-// ===========================================================================
-// dex — the Dalvik executable format (directive section 21)
-// ===========================================================================
-
-/// Reading a `classes.dex` and checking it against its own self-description.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                        |
-/// |----------------------|--------------------------------------------------------------|
-/// | Module               | `omni_core::dex`                                             |
-/// | Purpose              | Read a DEX file's header, map and index pools, and recompute  |
-/// |                      | the checksum and signature it records over itself.            |
-/// | Inputs               | A DEX file's bytes. Untrusted.                                |
-/// | Outputs              | A [`Dex`] model and an [`Integrity`] result.                  |
-/// | Security             | Every offset and count is checked against the file's own      |
-/// |                      | length before it is used. A malformed file is refused, never  |
-/// |                      | partially believed.                                           |
-/// | Determinism          | Reading the same bytes yields the same model.                 |
-/// | Status               | PARTIAL — the index structures are read; bytecode is not.     |
-///
-/// ## What is read, and what is not
-///
-/// **Read.** The header, the map list, the string pool (with its modified
-/// UTF-8 decoded properly, including the surrogate pairs that encode
-/// characters outside the basic plane), the type, prototype, field and method
-/// pools, and the class definitions with their superclass, interfaces, access
-/// flags and source file. That is enough to say what a DEX declares.
-///
-/// **Not read.** Code items, so no instruction is decoded and nothing here can
-/// say what a method *does*. Debug information, annotations and encoded array
-/// values are located through the map but not parsed. Nothing writes a DEX;
-/// producing one is the DEX plugin's job and it stays `PLANNED`.
-///
-/// ## The two integrity fields
-///
-/// A DEX records an Adler-32 checksum of everything after byte 12 and a SHA-1
-/// signature of everything after byte 32. Both are recomputed here.
-///
-/// Neither is a security property. They are the file's description of itself,
-/// so they catch truncation, a bad transfer and an edit made by something that
-/// did not know to fix them up. Anyone who edits a DEX deliberately recomputes
-/// both, and SHA-1 is in any case broken for collision resistance. Every report
-/// this module writes says so rather than letting a match be read as proof.
 pub mod dex {
     use crate::binary::checksum::adler32;
     use crate::binary::{Endian, Reader};
@@ -12141,39 +9857,20 @@ pub mod dex {
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// The first four bytes of every DEX file.
     pub const MAGIC: &[u8; 4] = b"dex\n";
 
-    /// The size the header declares for itself, in every version so far.
     pub const HEADER_SIZE: u32 = 0x70;
 
-    /// The value that means "this file is little-endian", which is the only
-    /// byte order Android has ever shipped.
     pub const ENDIAN_CONSTANT: u32 = 0x1234_5678;
 
-    /// The reversed constant, which would mean a big-endian file.
     pub const REVERSE_ENDIAN_CONSTANT: u32 = 0x7856_3412;
 
-    /// Offset at which the Adler-32 checksum's coverage begins.
     const CHECKSUM_COVERAGE_FROM: usize = 12;
 
-    /// Offset at which the SHA-1 signature's coverage begins.
     const SIGNATURE_COVERAGE_FROM: usize = 32;
 
-    /// Largest DEX this reader accepts (directive section 60).
-    ///
-    /// The format's own limit is 65536 methods per file, and a real
-    /// `classes.dex` is a few megabytes. This bound exists so that a declared
-    /// size cannot make the reader allocate; it is not a statement about what
-    /// is reasonable.
     pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
-    /// Largest number of entries any one pool may declare.
-    ///
-    /// Each pool entry costs at least four bytes in the file, so a count past
-    /// this could not be satisfied by any file this reader accepts. Checking
-    /// the count before trusting it is what stops a header from asking for an
-    /// allocation the file cannot back.
     const MAX_POOL_ENTRIES: u32 = 16 * 1024 * 1024;
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -12186,51 +9883,31 @@ pub mod dex {
         )
     }
 
-    /// A DEX file's header, as it describes itself.
     #[derive(Clone, Debug)]
     pub struct Header {
-        /// The three-digit version from the magic, for example `035`.
         pub version: String,
-        /// The Adler-32 checksum the file records.
         pub checksum: u32,
-        /// The SHA-1 signature the file records.
         pub signature: [u8; 20],
-        /// The length the file claims to be.
         pub file_size: u32,
-        /// The length the header claims to be.
         pub header_size: u32,
-        /// The byte-order marker.
         pub endian_tag: u32,
-        /// Where the map list is.
         pub map_off: u32,
-        /// Number of entries in the string pool.
         pub string_ids_size: u32,
-        /// Number of entries in the type pool.
         pub type_ids_size: u32,
-        /// Number of entries in the prototype pool.
         pub proto_ids_size: u32,
-        /// Number of entries in the field pool.
         pub field_ids_size: u32,
-        /// Number of entries in the method pool.
         pub method_ids_size: u32,
-        /// Number of class definitions.
         pub class_defs_size: u32,
     }
 
-    /// One entry of the map list.
     #[derive(Clone, Debug)]
     pub struct MapEntry {
-        /// The type code the format assigns to this kind of item.
         pub kind: u16,
-        /// Its name, or `"unknown"` for a code this build does not know.
         pub name: &'static str,
-        /// How many of them there are.
         pub size: u32,
-        /// Where they start.
         pub offset: u32,
     }
 
-    /// Every map item type the format defines.
     const MAP_TYPES: &[(u16, &str)] = &[
         (0x0000, "header_item"),
         (0x0001, "string_id_item"),
@@ -12263,64 +9940,41 @@ pub mod dex {
             .unwrap_or("unknown")
     }
 
-    /// A class the file defines.
     #[derive(Clone, Debug)]
     pub struct Class {
-        /// Its name in source form, for example `com.omni.builder.Builder`.
         pub name: String,
-        /// Its access flags, as recorded.
         pub access_flags: u32,
-        /// Its superclass, absent only for `java.lang.Object`.
         pub superclass: Option<String>,
-        /// The interfaces it declares.
         pub interfaces: Vec<String>,
-        /// The source file it was compiled from, when recorded.
         pub source_file: Option<String>,
     }
 
-    /// A method the file refers to, whether or not it defines it.
     #[derive(Clone, Debug)]
     pub struct Method {
-        /// The class that holds it, in source form.
         pub class: String,
-        /// Its name.
         pub name: String,
-        /// Its shorty descriptor, which is one character per parameter.
         pub shorty: String,
     }
 
-    /// A field the file refers to, whether or not it defines it.
     #[derive(Clone, Debug)]
     pub struct Field {
-        /// The class that holds it, in source form.
         pub class: String,
-        /// Its name.
         pub name: String,
-        /// Its type, in source form.
         pub type_name: String,
     }
 
-    /// A DEX file, read.
     #[derive(Clone, Debug)]
     pub struct Dex {
-        /// The header, as the file describes itself.
         pub header: Header,
-        /// The map list, in file order.
         pub map: Vec<MapEntry>,
-        /// The string pool, decoded from modified UTF-8.
         pub strings: Vec<String>,
-        /// The type pool, in source form.
         pub types: Vec<String>,
-        /// The classes the file defines.
         pub classes: Vec<Class>,
-        /// The methods the file refers to.
         pub methods: Vec<Method>,
-        /// The fields the file refers to.
         pub fields: Vec<Field>,
     }
 
     impl Dex {
-        /// The names of the classes this file defines, in file order.
         pub fn class_names(&self) -> Vec<&str> {
             self.classes
                 .iter()
@@ -12328,12 +9982,10 @@ pub mod dex {
                 .collect()
         }
 
-        /// Whether this file defines a class with the given source-form name.
         pub fn defines(&self, name: &str) -> bool {
             self.classes.iter().any(|class| class.name == name)
         }
 
-        /// Serialises the model as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("version", &self.header.version);
@@ -12355,49 +10007,32 @@ pub mod dex {
         }
     }
 
-    /// What the two self-describing fields say, and what they actually are.
     #[derive(Clone, Debug)]
     pub struct Integrity {
-        /// The Adler-32 the file records.
         pub checksum_recorded: u32,
-        /// The Adler-32 this build computed over the same bytes.
         pub checksum_computed: u32,
-        /// The SHA-1 the file records.
         pub signature_recorded: [u8; 20],
-        /// The SHA-1 this build computed over the same bytes.
         pub signature_computed: Digest160,
     }
 
     impl Integrity {
-        /// Whether the checksum matches.
         pub fn checksum_matches(&self) -> bool {
             self.checksum_recorded == self.checksum_computed
         }
 
-        /// Whether the signature matches.
         pub fn signature_matches(&self) -> bool {
             &self.signature_recorded == self.signature_computed.as_bytes()
         }
 
-        /// Whether the file matches its own description of itself.
-        ///
-        /// This is not "the file is genuine" and must never be reported as
-        /// though it were. Both fields are recomputed by anything that edits a
-        /// DEX on purpose, and SHA-1 is broken for collision resistance. What a
-        /// match rules out is a truncated file, a damaged transfer, and an edit
-        /// by something that did not know to fix the header up.
         pub fn self_consistent(&self) -> bool {
             self.checksum_matches() && self.signature_matches()
         }
 
-        /// Serialises the result as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_bool("checksumMatches", self.checksum_matches());
             w.field_bool("signatureMatches", self.signature_matches());
             w.field_str("signature", &self.signature_computed.to_hex());
-            // Directive section 1: the field name has to carry the limit, or
-            // the number above will be read as something it is not.
             w.field_str(
                 "note",
                 "These two fields are the file's description of itself. A match \
@@ -12409,7 +10044,6 @@ pub mod dex {
         }
     }
 
-    /// Recomputes the checksum and the signature a DEX records over itself.
     pub fn integrity(data: &[u8]) -> Result<Integrity, Diagnostic> {
         if data.len() < HEADER_SIZE as usize {
             return Err(fail("EX001", "The file is shorter than a DEX header.")
@@ -12428,11 +10062,6 @@ pub mod dex {
         })
     }
 
-    /// Turns a type descriptor into the form a person writes.
-    ///
-    /// `Ljava/lang/String;` becomes `java.lang.String`, `[I` becomes `int[]`.
-    /// A descriptor this does not recognise is returned unchanged rather than
-    /// guessed at, so nothing is ever silently renamed.
     pub fn descriptor_to_source(descriptor: &str) -> String {
         let mut dimensions = 0usize;
         let mut rest = descriptor;
@@ -12467,12 +10096,6 @@ pub mod dex {
         out
     }
 
-    /// Reads a DEX file.
-    ///
-    /// Everything the header declares is checked against the length of the data
-    /// actually supplied before it is used, so no count and no offset in a
-    /// malformed file can make this read past its buffer or allocate for a
-    /// pool that is not there (directive section 60).
     pub fn read(data: &[u8], sink: &mut Sink) -> Result<Dex, Diagnostic> {
         if data.len() as u64 > MAX_FILE_BYTES {
             return Err(
@@ -12529,8 +10152,6 @@ pub mod dex {
                 .with_context(format!("Expected: {HEADER_SIZE}")));
         }
 
-        // A file that lies about its own length is not one to keep reading:
-        // every offset below is relative to a size this disagrees with.
         if file_size as usize != data.len() {
             return Err(
                 fail("EX006", "The header's file size is not the file's size.")
@@ -12607,14 +10228,8 @@ pub mod dex {
         )?;
         let classes = read_classes(data, class_defs_off, class_defs_size, &strings, &types)?;
 
-        // The prototypes are read to give the methods their shorty, and the
-        // return types are not modelled separately; saying so beats a field
-        // that exists and is always empty.
         let _ = protos;
 
-        // The integrity fields are reported, not enforced. A DEX that fails
-        // them is still readable and the caller may want to see what is in it,
-        // so this is a diagnostic rather than a refusal.
         match integrity(data) {
             Ok(result) => {
                 if !result.checksum_matches() {
@@ -12677,8 +10292,6 @@ pub mod dex {
             return Err(fail("EX030", "The map list declares too many entries.")
                 .with_context(format!("Declared: {count}")));
         }
-        // Each entry is 12 bytes; refusing a count the file cannot hold is what
-        // stops the reservation below from being driven by the file.
         if u64::from(count) * 12 > reader.remaining() as u64 {
             return Err(fail("EX030", "The map list is longer than the file.")
                 .with_context(format!("Entries: {count}"))
@@ -12701,10 +10314,6 @@ pub mod dex {
         Ok(entries)
     }
 
-    /// Checks that a pool of `count` fixed-size entries fits in the file.
-    ///
-    /// Called before every `Vec::with_capacity` below, so that a count taken
-    /// from the file can never drive an allocation the file cannot back.
     fn pool_fits(
         data: &[u8],
         offset: u32,
@@ -12741,9 +10350,6 @@ pub mod dex {
         for data_offset in offsets {
             let mut item = Reader::new(data, Endian::Little, "classes.dex");
             item.seek(u64::from(data_offset))?;
-            // The declared length is in UTF-16 units, which is not the number
-            // of bytes; the bytes run to the NUL. Reading to the NUL and then
-            // decoding is what makes the two agree without trusting either.
             let _utf16_units = item.uleb128()?;
             let bytes = item.cstring()?;
             strings.push(crate::binary::modified_utf8::decode(bytes)?);
@@ -12751,7 +10357,6 @@ pub mod dex {
         Ok(strings)
     }
 
-    /// Looks a string up, refusing an index the pool does not have.
     fn string_at(strings: &[String], index: u32, what: &str) -> Result<String, Diagnostic> {
         strings.get(index as usize).cloned().ok_or_else(|| {
             fail(
@@ -12762,7 +10367,6 @@ pub mod dex {
         })
     }
 
-    /// Looks a type up, refusing an index the pool does not have.
     fn type_at(types: &[String], index: u32, what: &str) -> Result<String, Diagnostic> {
         types.get(index as usize).cloned().ok_or_else(|| {
             fail(
@@ -12909,8 +10513,6 @@ pub mod dex {
             let _class_data_off = reader.u32()?;
             let _static_values_off = reader.u32()?;
 
-            // NO_INDEX marks a field that is absent rather than zero, and the
-            // difference matters: string 0 and type 0 are real entries.
             const NO_INDEX: u32 = 0xffff_ffff;
 
             classes.push(Class {
@@ -12943,7 +10545,6 @@ pub mod dex {
         let mut reader = Reader::new(data, Endian::Little, "classes.dex");
         reader.seek(u64::from(offset))?;
         let count = reader.u32()?;
-        // Two bytes per entry, checked before reserving anything.
         if u64::from(count) * 2 > reader.remaining() as u64 {
             return Err(fail("EX031", "A type list is longer than the file.")
                 .with_context(format!("Entries: {count}")));
@@ -12957,52 +10558,6 @@ pub mod dex {
     }
 }
 
-// ===========================================================================
-// jvm — the class file format (directive sections 16 and 17)
-// ===========================================================================
-
-/// Reading a `.class` file: the interface a front end must produce.
-///
-/// ## Contract (directive section 2)
-///
-/// | Field                | Value                                                        |
-/// |----------------------|--------------------------------------------------------------|
-/// | Module               | `omni_core::jvm`                                             |
-/// | Purpose              | Read a class file's constant pool, members and attributes,    |
-/// |                      | and the Kotlin metadata a Kotlin-produced class carries.      |
-/// | Inputs               | A class file's bytes. Untrusted.                              |
-/// | Outputs              | A [`Class`] model.                                            |
-/// | Security             | Every count and index is checked against the file before use. |
-/// | Determinism          | Reading the same bytes yields the same model.                 |
-/// | Status               | PARTIAL — structure and metadata; no bytecode is decoded.     |
-///
-/// ## Why this is the Kotlin phase's foundation, and why it is not a compiler
-///
-/// The Kotlin plugin's contract declares `jvm.class` among its outputs, and the
-/// DEX plugin declares it among its inputs. It is the interface between the two
-/// halves of the toolchain, and it is a format with a published specification,
-/// so it can be built and checked now while a front end cannot.
-///
-/// **This is not a Kotlin compiler and does not move `Plugins/Kotlin.rs` off
-/// `PLANNED`.** No lexer, parser, symbol table, type checker or backend exists
-/// in this tree. Reading what the upstream compiler produced is not evidence
-/// that anything here could produce it, and directive section 16 says so
-/// directly. What this does is define and verify the shape of the artifact the
-/// front end will one day have to emit.
-///
-/// ## What is read, and what is not
-///
-/// **Read.** The magic and version, the whole constant pool including the
-/// long and double entries that occupy two slots each, access flags, the class
-/// and its superclass and interfaces, every field and method with its name and
-/// descriptor, attribute names and sizes, and the `kotlin.Metadata` annotation
-/// that says which compiler produced the class.
-///
-/// **Not read.** The `Code` attribute's instructions, so nothing here can say
-/// what a method does. The `d1` and `d2` arrays of `kotlin.Metadata`, which are
-/// a protobuf payload whose schema is not part of any published specification
-/// this tree can rely on; the metadata *version* is read, and that is the part
-/// with a stable, documented meaning.
 pub mod jvm {
     use crate::binary::{modified_utf8, Endian, Reader};
     use crate::diag::Diagnostic;
@@ -13010,10 +10565,8 @@ pub mod jvm {
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// The four bytes every class file begins with.
     pub const MAGIC: u32 = 0xcafe_babe;
 
-    /// Largest class file this reader accepts (directive section 60).
     pub const MAX_FILE_BYTES: u64 = 64 * 1024 * 1024;
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -13026,77 +10579,37 @@ pub mod jvm {
         )
     }
 
-    /// One entry of the constant pool.
-    ///
-    /// Only the shapes this build needs are modelled as data; the rest are kept
-    /// as [`Constant::Other`] with their tag, because skipping an entry without
-    /// recording that it was there would silently renumber everything after it.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub enum Constant {
-        /// A string, in modified UTF-8.
         Utf8(String),
-        /// A four-byte integer.
-        ///
-        /// Kept as a value rather than skipped because the Kotlin metadata
-        /// version is an array of these, and reading it is the point of this
-        /// module knowing about Kotlin at all.
         Integer(i32),
-        /// A class, by the pool index of its name.
         Class(u16),
-        /// A string constant, by the pool index of its text.
         String(u16),
-        /// A name and a descriptor, by pool index.
         NameAndType(u16, u16),
-        /// The second half of a long or double, which is not an entry at all.
-        ///
-        /// The specification calls this slot unusable. Modelling it keeps every
-        /// index after a long or double correct, which is the single most
-        /// common way a class file reader goes subtly wrong.
         Unusable,
-        /// An entry this build does not need to interpret, by tag.
         Other(u8),
     }
 
-    /// A field or a method.
     #[derive(Clone, Debug)]
     pub struct Member {
-        /// Its access flags, as recorded.
         pub access_flags: u16,
-        /// Its name.
         pub name: String,
-        /// Its descriptor, in the format's own notation.
         pub descriptor: String,
     }
 
-    /// An attribute, by name and size.
-    ///
-    /// The contents are not parsed except where a field below says otherwise:
-    /// an attribute a reader does not understand must be skipped, and the
-    /// specification says so.
     #[derive(Clone, Debug)]
     pub struct Attribute {
-        /// Its name.
         pub name: String,
-        /// How many bytes of content it has.
         pub length: u32,
     }
 
-    /// What a Kotlin-produced class says about the compiler that made it.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct KotlinMetadata {
-        /// The kind: 1 is a class, 2 a file facade, 5 multi-file parts, and so on.
         pub kind: i32,
-        /// The metadata version, for example `2.4.0`.
-        ///
-        /// This tracks the language release, not the compiler patch version:
-        /// every 2.4.x compiler writes `2.4.0`. It is what proves a class was
-        /// produced by a 2.4 compiler and not by the one an older Android
-        /// Gradle Plugin would have used.
         pub metadata_version: Vec<i32>,
     }
 
     impl KotlinMetadata {
-        /// The metadata version as a dotted string.
         pub fn version_string(&self) -> String {
             self.metadata_version
                 .iter()
@@ -13106,54 +10619,34 @@ pub mod jvm {
         }
     }
 
-    /// A class file, read.
     #[derive(Clone, Debug)]
     pub struct Class {
-        /// The major version, for example 52 for Java 8 and 61 for Java 17.
         pub major_version: u16,
-        /// The minor version.
         pub minor_version: u16,
-        /// The constant pool, with index 0 held by an unusable placeholder so
-        /// that a pool index means the same here as in the file.
         pub constants: Vec<Constant>,
-        /// The class's access flags, as recorded.
         pub access_flags: u16,
-        /// Its name in source form, for example `com.omni.builder.Builder`.
         pub name: String,
-        /// Its superclass, absent only for `java.lang.Object`.
         pub superclass: Option<String>,
-        /// The interfaces it declares.
         pub interfaces: Vec<String>,
-        /// Its fields.
         pub fields: Vec<Member>,
-        /// Its methods.
         pub methods: Vec<Member>,
-        /// Its attributes.
         pub attributes: Vec<Attribute>,
-        /// The Kotlin metadata, when the class carries any.
         pub kotlin: Option<KotlinMetadata>,
     }
 
     impl Class {
-        /// The Java release this class file targets, when it maps to one.
-        ///
-        /// Major 45 is Java 1.1 and every release since has added one, so the
-        /// arithmetic is exact rather than a lookup table that would go stale.
         pub fn java_release(&self) -> Option<u16> {
             self.major_version.checked_sub(44)
         }
 
-        /// Whether this class was produced by a Kotlin compiler.
         pub fn is_kotlin(&self) -> bool {
             self.kotlin.is_some()
         }
 
-        /// The names of the methods it declares.
         pub fn method_names(&self) -> Vec<&str> {
             self.methods.iter().map(|m| m.name.as_str()).collect()
         }
 
-        /// Serialises the model as the object member `key`.
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_str("name", &self.name);
@@ -13169,9 +10662,6 @@ pub mod jvm {
                     w.begin_object(Some("kotlin"));
                     w.field_str("kind", &metadata.kind.to_string());
                     w.field_str("metadataVersion", &metadata.version_string());
-                    // Directive section 1: the number above is a language
-                    // release, and a reader who takes it for a compiler
-                    // version will draw a conclusion it does not support.
                     w.field_str(
                         "note",
                         "This is the metadata version, which tracks the Kotlin \
@@ -13186,11 +10676,6 @@ pub mod jvm {
         }
     }
 
-    /// Turns an internal class name into the form a person writes.
-    ///
-    /// `com/omni/builder/Builder` becomes `com.omni.builder.Builder`. An array
-    /// descriptor is passed to [`crate::dex::descriptor_to_source`], because
-    /// the two formats spell those the same way.
     pub fn internal_name_to_source(name: &str) -> String {
         if name.starts_with('[') {
             return crate::dex::descriptor_to_source(name);
@@ -13198,7 +10683,6 @@ pub mod jvm {
         name.replace('/', ".")
     }
 
-    /// Reads a class file.
     pub fn read(data: &[u8]) -> Result<Class, Diagnostic> {
         if data.len() as u64 > MAX_FILE_BYTES {
             return Err(
@@ -13208,8 +10692,6 @@ pub mod jvm {
             );
         }
 
-        // A class file is big-endian, which is the opposite of every other
-        // format in this tree and the reason the reader takes it as a parameter.
         let mut reader = Reader::new(data, Endian::Big, "class file");
 
         let magic = reader.u32()?;
@@ -13240,8 +10722,6 @@ pub mod jvm {
         let name = internal_name_to_source(&class_name(&constants, this_class, "this class")?);
 
         let super_class = reader.u16()?;
-        // Index zero is not a class, it means there is no superclass. Only
-        // java.lang.Object and the module-info pseudo-class say that.
         let superclass = if super_class == 0 {
             None
         } else {
@@ -13267,8 +10747,6 @@ pub mod jvm {
         let fields = read_members(&mut reader, &constants, "field")?;
         let methods = read_members(&mut reader, &constants, "method")?;
 
-        // The class's own attributes are where the Kotlin metadata lives, so
-        // this one is read rather than only measured.
         let attribute_count = reader.u16()?;
         bounded(&reader, u64::from(attribute_count), 6, "attribute")?;
         let mut attributes = Vec::with_capacity(attribute_count as usize);
@@ -13282,9 +10760,6 @@ pub mod jvm {
 
             if attribute_name == "RuntimeVisibleAnnotations" {
                 let content = reader.slice_at(content_start as u64, content_length as u64)?;
-                // A malformed annotation is not a reason to refuse the class:
-                // the structure above it read cleanly, and reporting the class
-                // without its metadata is more useful than reporting nothing.
                 if let Ok(Some(found)) = read_kotlin_metadata(content, &constants) {
                     kotlin = Some(found);
                 }
@@ -13312,10 +10787,6 @@ pub mod jvm {
         })
     }
 
-    /// Refuses a count the remaining bytes could not possibly satisfy.
-    ///
-    /// Called before every `Vec::with_capacity` below, so a count taken from
-    /// the file can never drive an allocation the file cannot back.
     fn bounded(
         reader: &Reader<'_>,
         count: u64,
@@ -13338,13 +10809,9 @@ pub mod jvm {
         if count == 0 {
             return Err(fail("EJ010", "The constant pool count is zero."));
         }
-        // The count is one more than the number of entries, which is a quirk of
-        // the format rather than an off-by-one here.
         let entries = u64::from(count) - 1;
         bounded(reader, entries, 3, "constant pool")?;
 
-        // Index 0 is never used. Holding a slot for it keeps every index in the
-        // file equal to the index here, which removes a whole class of mistake.
         let mut constants = Vec::with_capacity(count as usize);
         constants.push(Constant::Unusable);
 
@@ -13365,14 +10832,10 @@ pub mod jvm {
                     Constant::NameAndType(name, descriptor)
                 }
                 3 => Constant::Integer(reader.i32()?),
-                // A float is four bytes this build has no use for.
                 4 => {
                     reader.skip(4)?;
                     Constant::Other(tag)
                 }
-                // Long and Double take two slots each. The specification calls
-                // this a poor choice in its own text, and a reader that misses
-                // it renumbers every entry after the first long in the file.
                 5 | 6 => {
                     reader.skip(8)?;
                     constants.push(Constant::Other(tag));
@@ -13380,7 +10843,6 @@ pub mod jvm {
                     index += 2;
                     continue;
                 }
-                // Fieldref, Methodref, InterfaceMethodref, Dynamic, InvokeDynamic.
                 9 | 10 | 11 | 17 | 18 => {
                     reader.skip(4)?;
                     Constant::Other(tag)
@@ -13389,7 +10851,6 @@ pub mod jvm {
                     reader.skip(3)?;
                     Constant::Other(tag)
                 }
-                // MethodType, Module, Package.
                 16 | 19 | 20 => {
                     reader.skip(2)?;
                     Constant::Other(tag)
@@ -13410,7 +10871,6 @@ pub mod jvm {
         Ok(constants)
     }
 
-    /// Reads a string out of the pool, refusing anything that is not one.
     fn constant_utf8(constants: &[Constant], index: u16, what: &str) -> Result<String, Diagnostic> {
         match constants.get(usize::from(index)) {
             Some(Constant::Utf8(text)) => Ok(text.clone()),
@@ -13429,7 +10889,6 @@ pub mod jvm {
         }
     }
 
-    /// Reads a class name through the `Class` entry that names it.
     fn class_name(constants: &[Constant], index: u16, what: &str) -> Result<String, Diagnostic> {
         match constants.get(usize::from(index)) {
             Some(Constant::Class(name_index)) => constant_utf8(constants, *name_index, what),
@@ -13481,14 +10940,6 @@ pub mod jvm {
         Ok(members)
     }
 
-    /// Finds `kotlin.Metadata` in a `RuntimeVisibleAnnotations` attribute.
-    ///
-    /// The annotation's own layout is in the class file specification; what is
-    /// read here is `k`, the kind, and `mv`, the metadata version. The `d1` and
-    /// `d2` arrays are deliberately not read: they carry a protobuf payload
-    /// whose schema is a Kotlin implementation detail rather than a published
-    /// format, and guessing at it would be exactly the kind of thing directive
-    /// section 1 forbids presenting as understood.
     fn read_kotlin_metadata(
         content: &[u8],
         constants: &[Constant],
@@ -13534,7 +10985,6 @@ pub mod jvm {
         Ok(None)
     }
 
-    /// Reads an `element_value` that is expected to be a constant integer.
     fn read_int_value(
         reader: &mut Reader<'_>,
         constants: &[Constant],
@@ -13548,7 +10998,6 @@ pub mod jvm {
         Ok(Some(pool_integer(constants, index)?))
     }
 
-    /// Reads an `element_value` that is an array of constant integers.
     fn read_int_array(
         reader: &mut Reader<'_>,
         constants: &[Constant],
@@ -13572,11 +11021,6 @@ pub mod jvm {
         Ok(values)
     }
 
-    /// The value of a `CONSTANT_Integer`, read from the pool's own bytes.
-    ///
-    /// The pool keeps integers as [`Constant::Other`] because nothing else in
-    /// this build needs their value. The metadata version does, so it is read
-    /// here rather than by widening the model for one caller.
     fn pool_integer(constants: &[Constant], index: u16) -> Result<i32, Diagnostic> {
         match constants.get(usize::from(index)) {
             Some(Constant::Integer(value)) => Ok(*value),
@@ -13600,22 +11044,18 @@ pub mod jvm {
         skip_element_value_body(reader, constants, tag)
     }
 
-    /// Skips one `element_value` whose tag has already been read.
     fn skip_element_value_body(
         reader: &mut Reader<'_>,
         constants: &[Constant],
         tag: u8,
     ) -> Result<(), Diagnostic> {
         match tag {
-            // Every constant kind, and the class kind: one pool index.
             b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b's' | b'c' => {
                 reader.skip(2)?;
             }
-            // An enum: two pool indices.
             b'e' => {
                 reader.skip(4)?;
             }
-            // A nested annotation.
             b'@' => {
                 let _type_index = reader.u16()?;
                 let pairs = reader.u16()?;
@@ -13642,19 +11082,6 @@ pub mod jvm {
     }
 }
 
-// ===========================================================================
-// report — the single source of truth the user interface renders
-// ===========================================================================
-
-/// Builds the state report the host displays.
-///
-/// Directive section 43 requires the user interface to render Core state rather
-/// than imitate it: `Core State -> View Model -> UI`. This function *is* that
-/// core state. Anything the interface shows that does not appear here would be
-/// a fabrication.
-///
-/// The output is deterministic: it contains no timestamp, no locale-dependent
-/// formatting and no random identifier (directive section 12).
 pub fn state_report(observed_environment: &str) -> String {
     let mut sink = diag::Sink::new();
     let observation = toolchain::Observation::parse(observed_environment, &mut sink);
@@ -13793,72 +11220,29 @@ pub fn state_report(observed_environment: &str) -> String {
     w.finish()
 }
 
-// ===========================================================================
-// ffi — the C ABI consumed by Builder/Source/Main/Native/Builder.cpp (ADR-0004)
-// ===========================================================================
-
-/// Stable C ABI boundary.
-///
-/// ## Contract
-///
-/// * No function here unwinds. Every entry point is wrapped in
-///   [`std::panic::catch_unwind`]; a panic becomes a null return, never
-///   undefined behaviour.
-/// * Every pointer this module returns from an `omni_*_new`-style call must be
-///   released with [`omni_string_free`], and with nothing else.
-/// * [`omni_core_version`] returns a pointer with static lifetime that must
-///   **not** be freed.
-/// * The Core never retains a pointer the caller passed in.
 pub mod ffi {
     use std::ffi::{c_char, CStr, CString};
     use std::panic::catch_unwind;
 
-    /// Version of this ABI.
-    ///
-    /// The C++ bridge checks this at load time and refuses to run against a Core
-    /// it was not compiled for (directive section 65).
     pub const OMNI_ABI_VERSION: u32 = 1;
 
-    /// Returns the ABI version the Core was built with.
-    ///
-    /// Never fails.
     #[no_mangle]
     pub extern "C" fn omni_abi_version() -> u32 {
         OMNI_ABI_VERSION
     }
 
-    /// Returns the Core version as a NUL-terminated string with static lifetime.
-    ///
-    /// # Safety for the caller
-    ///
-    /// The returned pointer is valid for the lifetime of the process and must
-    /// not be passed to [`omni_string_free`] or to `free`.
     #[no_mangle]
     pub extern "C" fn omni_core_version() -> *const c_char {
         const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
         VERSION.as_ptr() as *const c_char
     }
 
-    /// Builds the full state report as a NUL-terminated JSON document.
-    ///
-    /// `observed_environment` may be null, which is treated as "nothing
-    /// observed". Otherwise it must point to a NUL-terminated string; invalid
-    /// UTF-8 is rejected rather than repaired.
-    ///
-    /// Returns null on failure. Ownership of a non-null result transfers to the
-    /// caller, which must release it with [`omni_string_free`].
-    ///
-    /// # Safety
-    ///
-    /// `observed_environment` must be null or point to a valid NUL-terminated
-    /// C string that stays valid for the duration of the call.
     #[no_mangle]
     pub unsafe extern "C" fn omni_state_report(observed_environment: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
             let observed = if observed_environment.is_null() {
                 String::new()
             } else {
-                // SAFETY: the caller guarantees a valid NUL-terminated string.
                 match unsafe { CStr::from_ptr(observed_environment) }.to_str() {
                     Ok(text) => text.to_string(),
                     Err(_) => return std::ptr::null_mut(),
@@ -13867,8 +11251,6 @@ pub mod ffi {
 
             match CString::new(crate::state_report(&observed)) {
                 Ok(report) => report.into_raw(),
-                // The report is generated by the Core and cannot contain an
-                // interior NUL, but the ABI stays total rather than asserting.
                 Err(_) => std::ptr::null_mut(),
             }
         });
@@ -13876,32 +11258,16 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Releases a string previously returned by [`omni_state_report`].
-    ///
-    /// Passing null is allowed and does nothing.
-    ///
-    /// # Safety
-    ///
-    /// `value` must be null or a pointer returned by [`omni_state_report`] that
-    /// has not already been released. Passing any other pointer is undefined
-    /// behaviour.
     #[no_mangle]
     pub unsafe extern "C" fn omni_string_free(value: *mut c_char) {
         if value.is_null() {
             return;
         }
-        // SAFETY: the caller guarantees this pointer came from CString::into_raw
-        // and has not been released. Dropping it returns the allocation to the
-        // same allocator that produced it.
         let _ = catch_unwind(|| unsafe {
             drop(CString::from_raw(value));
         });
     }
 }
-
-// ===========================================================================
-// Tests (directive sections 40 and 51)
-// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -13932,10 +11298,6 @@ mod tests {
     use super::x509::Certificate;
     use super::{FailureClass, Status};
 
-    /// Structural check that a document is balanced and quotes are terminated.
-    ///
-    /// The Core has no JSON parser by design (ADR-0003), so the tests verify the
-    /// writer's output structurally rather than by round-tripping it.
     fn is_structurally_valid(document: &str) -> bool {
         let mut stack: Vec<char> = Vec::new();
         let mut in_string = false;
@@ -13950,7 +11312,7 @@ mod tests {
                 } else if ch == '"' {
                     in_string = false;
                 } else if (ch as u32) < 0x20 {
-                    return false; // raw control character inside a string
+                    return false;
                 }
                 continue;
             }
@@ -13965,8 +11327,6 @@ mod tests {
 
         stack.is_empty() && !in_string
     }
-
-    // --- json ---------------------------------------------------------------
 
     #[test]
     fn json_escapes_every_character_that_would_break_a_document() {
@@ -14027,8 +11387,6 @@ mod tests {
         w.begin_object(None);
         let _ = w.finish();
     }
-
-    // --- diagnostics --------------------------------------------------------
 
     #[test]
     fn diagnostic_renders_the_form_required_by_the_directive() {
@@ -14096,8 +11454,6 @@ mod tests {
         assert!(Severity::Fatal.is_blocking());
     }
 
-    // --- capability security ------------------------------------------------
-
     #[test]
     fn a_fresh_policy_grants_nothing() {
         let mut policy = Policy::new("test");
@@ -14141,8 +11497,6 @@ mod tests {
 
     #[test]
     fn audit_records_never_carry_a_payload() {
-        // The audit type has exactly four fields, none of which can hold key
-        // material. This test exists so that adding one is a deliberate act.
         let mut policy = Policy::new("test");
         policy.request("p", Capability::KeyAccess);
         let record = &policy.audit()[0];
@@ -14172,8 +11526,6 @@ mod tests {
         assert_eq!(Capability::SensitiveOutput.as_str(), "SENSITIVE_OUTPUT");
         assert_eq!(Capability::ALL.len(), 13);
     }
-
-    // --- plugin registry ----------------------------------------------------
 
     #[test]
     fn the_registry_holds_exactly_the_nine_declared_plugins() {
@@ -14207,8 +11559,6 @@ mod tests {
 
     #[test]
     fn no_plugin_claims_to_be_implemented() {
-        // Directive section 1. This test is the mechanical guard against a
-        // subsystem being marked finished before it is.
         for plugin in Registry::builtin().all() {
             let contract = plugin.contract();
             assert_eq!(
@@ -14277,8 +11627,6 @@ mod tests {
 
     #[test]
     fn no_plugin_requests_internet_access() {
-        // Directive section 7: a compiler plugin has no business reaching the
-        // network. Relaxing this must be a deliberate, reviewed change.
         for plugin in Registry::builtin().all() {
             let contract = plugin.contract();
             for capability in [Capability::Network, Capability::Internet] {
@@ -14311,11 +11659,8 @@ mod tests {
         assert_eq!(Version::new(1, 2, 3).to_string(), "1.2.3");
     }
 
-    // --- toolchain lock -----------------------------------------------------
-
     #[test]
     fn the_lock_contains_no_dynamic_version() {
-        // Directive section 14 forbids `latest`, `9.+` and `*`.
         for pin in toolchain::LOCK {
             let pinned = pin.pinned;
             assert!(!pinned.is_empty(), "{}", pin.id);
@@ -14411,8 +11756,6 @@ mod tests {
 
     #[test]
     fn host_only_components_are_reported_as_unverifiable_not_as_verified() {
-        // Directive section 15: bootstrap dependencies must be visible, and the
-        // device cannot observe them. Claiming a match here would be a lie.
         let mut sink = Sink::new();
         let observation = Observation::parse("", &mut sink);
         let findings = toolchain::verify(&observation, &mut sink);
@@ -14473,8 +11816,6 @@ mod tests {
 
     #[test]
     fn observation_reports_unknown_keys_rather_than_ignoring_them() {
-        // Directive section 44: unknown critical fields must not be silently
-        // discarded.
         let mut sink = Sink::new();
         let _ = Observation::parse("somethingElse=1", &mut sink);
         assert!(sink.entries().iter().any(|d| d.code == "W1107"));
@@ -14488,8 +11829,6 @@ mod tests {
         assert_eq!(observation.get("targetSdk"), Some("36"));
     }
 
-    // --- state report -------------------------------------------------------
-
     #[test]
     fn the_state_report_is_structurally_valid_json() {
         let report = super::state_report("minSdk=28;targetSdk=36");
@@ -14498,7 +11837,6 @@ mod tests {
 
     #[test]
     fn the_state_report_is_deterministic() {
-        // Directive section 12: identical input, identical bytes.
         let a = super::state_report("minSdk=28;targetSdk=36");
         let b = super::state_report("minSdk=28;targetSdk=36");
         assert_eq!(a, b);
@@ -14514,8 +11852,6 @@ mod tests {
 
     #[test]
     fn the_state_report_survives_hostile_input() {
-        // Directive section 41: malformed input must not crash, hang or allocate
-        // without bound.
         for input in [
             "",
             "=",
@@ -14545,11 +11881,8 @@ mod tests {
         }
     }
 
-    // --- binary core: checksums (official check values) ----------------------
-
     #[test]
     fn crc32_matches_the_published_check_value() {
-        // The check value every CRC-32 specification quotes for "123456789".
         assert_eq!(checksum::crc32(b"123456789"), 0xcbf4_3926);
         assert_eq!(checksum::crc32(b""), 0x0000_0000);
         assert_eq!(checksum::crc32(b"a"), 0xe8b7_be43);
@@ -14562,7 +11895,6 @@ mod tests {
 
     #[test]
     fn adler32_matches_the_published_check_value() {
-        // RFC 1950. The DEX header carries one of these over its own body.
         assert_eq!(checksum::adler32(b"123456789"), 0x091e_01de);
         assert_eq!(checksum::adler32(b""), 0x0000_0001);
         assert_eq!(checksum::adler32(b"a"), 0x0062_0062);
@@ -14576,8 +11908,6 @@ mod tests {
         let crc_once = checksum::crc32(&message);
         let adler_once = checksum::adler32(&message);
 
-        // 5552 is the reduction boundary in RFC 1950; either side of it is where
-        // a streaming bug in Adler-32 shows up.
         for split in [1usize, 7, 255, 5_551, 5_552, 5_553, 8_192, 19_999] {
             let mut crc = checksum::Crc32::new();
             let mut adler = checksum::Adler32::new();
@@ -14589,8 +11919,6 @@ mod tests {
             assert_eq!(adler.finish(), adler_once, "adler split at {split}");
         }
     }
-
-    // --- binary core: reading ------------------------------------------------
 
     fn reader(data: &[u8]) -> BinaryReader<'_> {
         BinaryReader::new(data, Endian::Little, "test")
@@ -14613,8 +11941,6 @@ mod tests {
 
     #[test]
     fn a_truncated_input_is_reported_not_padded() {
-        // A reader that returns zero for missing bytes turns a detectable
-        // problem into a silent one.
         let data = [0x01, 0x02];
         let mut r = reader(&data);
         assert_eq!(r.u32().unwrap_err().code, "E7003");
@@ -14626,8 +11952,6 @@ mod tests {
 
     #[test]
     fn a_declared_length_is_checked_before_anything_is_allocated() {
-        // Directive section 60: this is the exact shape of the bug that makes a
-        // parser allocate gigabytes from a two-byte file.
         let data = [0xff; 4];
         let r = reader(&data);
         let error = r.checked_length(u64::MAX).unwrap_err();
@@ -14680,8 +12004,6 @@ mod tests {
 
     #[test]
     fn uleb128_refuses_overlong_and_unterminated_encodings() {
-        // Two spellings of one number are two chances for a writer and a reader
-        // to disagree about a checksum.
         assert_eq!(reader(&[0x80, 0x00]).uleb128().unwrap_err().code, "E7006");
         assert_eq!(reader(&[0x81, 0x00]).uleb128().unwrap_err().code, "E7006");
 
@@ -14719,8 +12041,6 @@ mod tests {
         assert!(error.context.iter().any(|line| line.contains("Found")));
     }
 
-    // --- binary core: writing ------------------------------------------------
-
     #[test]
     fn a_writer_produces_the_bytes_the_format_expects() {
         let mut w = BinaryWriter::new(Endian::Little);
@@ -14737,8 +12057,6 @@ mod tests {
 
     #[test]
     fn a_reserved_span_can_be_filled_in_once_the_size_is_known() {
-        // This is how every real binary format writes a size it does not know
-        // until later, without a second pass.
         let mut w = BinaryWriter::new(Endian::Little);
         let size = w.reserve_u32().unwrap();
         w.bytes(b"payload").unwrap();
@@ -14759,7 +12077,6 @@ mod tests {
         w.patch_u16(narrow, 0xabcd).unwrap();
         assert_eq!(w.as_slice(), &[0xcd, 0xab]);
 
-        // A patch from one writer cannot be used on another.
         let mut other = BinaryWriter::new(Endian::Little);
         assert_eq!(other.patch_u16(narrow, 1).unwrap_err().code, "E7024");
     }
@@ -14785,8 +12102,6 @@ mod tests {
 
     #[test]
     fn a_writer_refuses_to_grow_past_its_limit() {
-        // Directive section 60: an unbounded writer is a way to run a phone out
-        // of memory.
         let mut w = BinaryWriter::with_limit(Endian::Little, 8);
         w.bytes(&[0u8; 8]).unwrap();
         let error = w.u8(0).unwrap_err();
@@ -14827,8 +12142,6 @@ mod tests {
             );
         }
     }
-
-    // --- binary core: sections and tables ------------------------------------
 
     #[test]
     fn a_section_must_lie_inside_the_file() {
@@ -14879,8 +12192,6 @@ mod tests {
 
     #[test]
     fn a_table_refuses_the_multiplication_that_hides_a_malformed_header() {
-        // entry_size * count is where a header claims a two-byte file holds an
-        // enormous table.
         let table = BinaryTable {
             name: "string_ids".into(),
             offset: 32,
@@ -14915,13 +12226,6 @@ mod tests {
         assert_eq!(table.entry_offset(u64::MAX).unwrap_err().code, "E7041");
     }
 
-    // --- binary core: robustness against malformed input ---------------------
-
-    /// A deterministic generator, so a failure can be reproduced from its seed.
-    ///
-    /// This is xorshift64*, chosen because it is four lines and needs no
-    /// dependency (ADR-0003). It is not a cryptographic generator and nothing
-    /// here needs one.
     fn xorshift(state: &mut u64) -> u64 {
         let mut x = *state;
         x ^= x >> 12;
@@ -14933,11 +12237,6 @@ mod tests {
 
     #[test]
     fn the_reader_survives_arbitrary_input() {
-        // Directive section 41 names BinaryReader as a fuzz target. This is not
-        // coverage-guided fuzzing and does not claim to be: it is a deterministic
-        // randomised robustness test over the operations a real parser performs.
-        // What it proves is that no sequence of them panics, hangs, or reads
-        // outside the buffer.
         let mut seed = 0x0123_4567_89ab_cdefu64;
 
         for _ in 0..4_000 {
@@ -14980,11 +12279,9 @@ mod tests {
                     };
                     let _ = moved;
 
-                    // The cursor never leaves the buffer, whatever happened.
                     assert!(r.position() <= data.len(), "cursor escaped the buffer");
                     assert_eq!(r.remaining(), data.len() - r.position());
                     if before > r.position() {
-                        // Only an explicit seek may move backwards.
                         assert_eq!(operation, 8, "cursor moved backwards unexpectedly");
                     }
                 }
@@ -15035,7 +12332,6 @@ mod tests {
                     }
                 }
 
-                // The limit is never exceeded, whatever the sequence.
                 assert!(w.position() <= limit, "writer exceeded its limit");
             }
         }
@@ -15049,15 +12345,10 @@ mod tests {
             let data: Vec<u8> = (0..length)
                 .map(|_| (xorshift(&mut seed) & 0xff) as u8)
                 .collect();
-            // Both must agree with themselves whatever the input; the point is
-            // that neither panics nor loops on any length, including zero and
-            // lengths either side of the Adler-32 reduction boundary.
             assert_eq!(checksum::crc32(&data), checksum::crc32(&data));
             assert_eq!(checksum::adler32(&data), checksum::adler32(&data));
         }
     }
-
-    // --- xml -----------------------------------------------------------------
 
     fn parse_xml(text: &str) -> (Option<super::xml::Element>, Sink) {
         let mut sink = Sink::new();
@@ -15108,9 +12399,6 @@ mod tests {
 
     #[test]
     fn xml_refuses_a_document_type_declaration() {
-        // This is the entry point for external entity expansion and for the
-        // nested definitions that make a small file expand to gigabytes. It is
-        // not defended against; it is simply unavailable.
         let (root, sink) = parse_xml(r#"<!DOCTYPE r [<!ENTITY x "boom">]><r>&x;</r>"#);
         assert!(root.is_none());
         let error = sink.entries().iter().find(|d| d.code == "E8002").unwrap();
@@ -15119,8 +12407,6 @@ mod tests {
 
     #[test]
     fn xml_refuses_an_entity_it_does_not_define() {
-        // With no entity table there is nothing to expand recursively, so the
-        // billion-laughs shape cannot be built in the first place.
         let (root, sink) = parse_xml("<r>&lol;</r>");
         assert!(root.is_none());
         assert!(sink.entries().iter().any(|d| d.code == "E8031"));
@@ -15137,7 +12423,6 @@ mod tests {
         assert!(root.children.is_empty(), "CDATA is text, not an element");
         assert_eq!(root.text, "<not> & parsed");
 
-        // And it mixes with ordinary text in the order it appears.
         let (root, _) = parse_xml("<r>before <![CDATA[<raw>]]> after</r>");
         assert_eq!(root.unwrap().text, "before <raw> after");
 
@@ -15174,7 +12459,6 @@ mod tests {
 
     #[test]
     fn xml_is_bounded_in_every_direction() {
-        // Directive section 60, on input that comes from a user's project.
         let deep = format!(
             "{}{}",
             "<a>".repeat(super::xml::MAX_DEPTH + 1),
@@ -15203,8 +12487,6 @@ mod tests {
 
     #[test]
     fn xml_columns_count_characters_not_bytes() {
-        // A column number that counts bytes points at the wrong place in any file
-        // with Turkish, Greek or emoji in it.
         let (root, sink) = parse_xml("<r>şşşş</r>\n<b>");
         assert!(root.is_none());
         let error = sink.entries().iter().find(|d| d.code == "E8009").unwrap();
@@ -15219,8 +12501,6 @@ mod tests {
 
     #[test]
     fn xml_survives_arbitrary_input() {
-        // Directive section 41. Resource files come from a user's project, and
-        // this reader is the first thing that touches them.
         let mut seed = 0x5eed_0000_1111_2222u64;
         let alphabet = b"<>/=\"'& \n\tabc&#;!-[]DOCTYPExml?";
 
@@ -15230,12 +12510,9 @@ mod tests {
                 .map(|_| alphabet[(xorshift(&mut seed) as usize) % alphabet.len()] as char)
                 .collect();
             let mut sink = Sink::new();
-            // The requirement is that this returns, whatever it was given.
             let _ = super::xml::parse(&document, "fuzz.xml", &mut sink);
         }
     }
-
-    // --- resources -----------------------------------------------------------
 
     fn values(text: &str) -> (ResourceTable, Sink) {
         let mut table = ResourceTable::new();
@@ -15342,8 +12619,6 @@ mod tests {
 
     #[test]
     fn dimensions_keep_exactly_three_decimal_places() {
-        // Stored in thousandths, because a build that rounds differently on two
-        // machines is not reproducible (directive section 12).
         let (table, sink) = values(
             r#"<resources>
     <dimen name="a">16dp</dimen>
@@ -15391,7 +12666,6 @@ mod tests {
             })
         );
 
-        // Rendering round-trips, so a report shows what the author wrote.
         assert_eq!(
             ResourceValue::Dimension {
                 milli: 14_500,
@@ -15448,8 +12722,6 @@ mod tests {
 
     #[test]
     fn identifiers_are_assigned_from_sorted_order_not_file_order() {
-        // Directive section 12: an identifier must not depend on which file
-        // happened to be read first.
         let forwards =
             "<resources><string name=\"b\">B</string><string name=\"a\">A</string></resources>";
         let backwards =
@@ -15566,8 +12838,6 @@ mod tests {
 
     #[test]
     fn an_unmodelled_element_is_reported_not_skipped() {
-        // Directive section 64: a resource that silently never existed is harder
-        // to find than one that was refused.
         let (_, sink) = values("<resources><plurals name=\"p\">x</plurals></resources>");
         assert!(sink.entries().iter().any(|d| d.code == "E9002"));
 
@@ -15609,9 +12879,6 @@ mod tests {
 
     #[test]
     fn a_qualifier_this_build_does_not_model_is_refused() {
-        // A locale qualifier on a directory this build does understand: the type
-        // is fine, the qualifier is not modelled, and treating it as the default
-        // would put the wrong file on every device.
         let mut table = ResourceTable::new();
         let mut sink = Sink::new();
         assert!(!table.read_file("drawable-tr", "a.png", "res/drawable-tr/a.png", &mut sink));
@@ -15622,7 +12889,6 @@ mod tests {
             error.message
         );
 
-        // A directory whose type is not a resource type at all.
         let mut sink = Sink::new();
         assert!(!table.read_file("nonsense", "a.png", "res/nonsense/a.png", &mut sink));
         let error = sink.entries().iter().find(|d| d.code == "E9010").unwrap();
@@ -15648,7 +12914,6 @@ mod tests {
         assert_eq!(table.len(), 2);
 
         let compiled = table.compile(&mut Sink::new()).unwrap();
-        // One name, one identifier, whatever the number of configurations.
         assert_eq!(compiled.assignments().len(), 1);
     }
 
@@ -15709,15 +12974,6 @@ mod tests {
         }
     }
 
-    // --- archive: conformance against an independently produced file --------
-
-    /// An archive produced by the Info-ZIP `zip` tool, byte for byte.
-    ///
-    /// Directive section 24 ends its list with conformance tests, and a parser
-    /// tested only against its own writer proves that the two agree, not that
-    /// either follows the specification. This file was made by a tool that has
-    /// nothing to do with this project and holds two entries: `a.txt` with
-    /// "hello omni", and `dir/b.txt` with "second entry".
     const INFOZIP_SAMPLE: &[u8] = &[
         0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x04,
         0xc9, 0x25, 0x28, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
@@ -15753,7 +13009,6 @@ mod tests {
         let b = archive.entry("dir/b.txt").expect("dir/b.txt");
         assert_eq!(b.uncompressed_size, 12);
 
-        // The bytes are where the headers say they are.
         assert_eq!(
             archive.stored_bytes(INFOZIP_SAMPLE, a).unwrap(),
             b"hello omni"
@@ -15763,7 +13018,6 @@ mod tests {
             b"second entry"
         );
 
-        // And the checksums that tool computed match the ones this one does.
         let mut verify_sink = Sink::new();
         let (checked, skipped) =
             archive::verify_checksums(&archive, INFOZIP_SAMPLE, &mut verify_sink);
@@ -15771,8 +13025,6 @@ mod tests {
         assert_eq!(skipped, 0);
         assert!(!verify_sink.has_blocking(), "{:?}", verify_sink.entries());
     }
-
-    // --- archive: writing ----------------------------------------------------
 
     #[test]
     fn an_archive_round_trips_through_the_writer_and_the_reader() {
@@ -15811,9 +13063,6 @@ mod tests {
 
     #[test]
     fn entries_are_written_in_sorted_order_whatever_order_they_arrive_in() {
-        // Directive section 23 lists deterministic ordering as mandatory.
-        // Sorting is the only ordering that does not depend on how the caller
-        // happened to walk a directory.
         let build = |names: &[&str]| {
             let mut builder = ArchiveBuilder::new();
             for name in names {
@@ -15834,7 +13083,6 @@ mod tests {
 
     #[test]
     fn the_same_input_always_produces_the_same_archive() {
-        // No timestamp, no host attributes, nothing about the machine.
         let build = || {
             let mut builder = ArchiveBuilder::for_android();
             builder.add("classes.dex", vec![7; 64]).unwrap();
@@ -15849,8 +13097,6 @@ mod tests {
 
     #[test]
     fn native_libraries_land_on_a_page_boundary() {
-        // A device with 16 KB pages maps a library straight out of the package,
-        // which it can only do when the library starts on a page boundary.
         let mut builder = ArchiveBuilder::for_android();
         builder
             .add("AndroidManifest.xml", b"<manifest/>".to_vec())
@@ -15888,8 +13134,6 @@ mod tests {
 
     #[test]
     fn alignment_padding_is_a_well_formed_extra_field() {
-        // Raw padding is tolerated by most readers; a proper record is skipped
-        // correctly by all of them.
         let mut builder = ArchiveBuilder::new();
         builder.add_aligned("x", vec![1; 4], 64).unwrap();
         let bytes = builder.finish().unwrap();
@@ -15910,9 +13154,6 @@ mod tests {
 
     #[test]
     fn the_writer_refuses_a_name_no_archive_should_carry() {
-        // Directive section 23 names path traversal and invalid names as
-        // mandatory checks, and refusing at write time is better than producing
-        // an archive that will be refused later.
         let mut builder = ArchiveBuilder::new();
         for (name, code) in [
             ("", "EA001"),
@@ -15953,8 +13194,6 @@ mod tests {
         assert!(!sink.has_blocking());
     }
 
-    // --- archive: refusing what should be refused ----------------------------
-
     #[test]
     fn a_truncated_or_absent_end_record_is_reported() {
         let mut sink = Sink::new();
@@ -15965,7 +13204,6 @@ mod tests {
         assert!(archive::read(&[0u8; 64], &mut sink).is_none());
         assert!(sink.entries().iter().any(|d| d.code == "EA013"));
 
-        // A real archive with its tail cut off.
         let mut sink = Sink::new();
         let cut = &INFOZIP_SAMPLE[..INFOZIP_SAMPLE.len() - 4];
         assert!(archive::read(cut, &mut sink).is_none());
@@ -15977,8 +13215,6 @@ mod tests {
         bytes.add("a", b"x".to_vec()).unwrap();
         let mut bytes = bytes.finish().unwrap();
 
-        // The end record's last four bytes before the comment length are the
-        // directory offset. Point it past the end.
         let offset_position = bytes.len() - 6;
         bytes[offset_position..offset_position + 4].copy_from_slice(&0xffff_fff0u32.to_le_bytes());
 
@@ -15992,13 +13228,10 @@ mod tests {
 
     #[test]
     fn an_entry_whose_two_headers_disagree_is_refused() {
-        // Which of the two a reader believes decides which file it gets. An
-        // archive that gives two answers is refused rather than guessed at.
         let mut builder = ArchiveBuilder::new();
         builder.add("a.txt", b"content".to_vec()).unwrap();
         let mut bytes = builder.finish().unwrap();
 
-        // Corrupt the checksum in the local header only.
         bytes[14..18].copy_from_slice(&0xdead_beefu32.to_le_bytes());
 
         let mut sink = Sink::new();
@@ -16027,8 +13260,6 @@ mod tests {
 
     #[test]
     fn an_archive_naming_the_same_entry_twice_is_refused() {
-        // The writer will not produce one, so the archive is built by hand: two
-        // central directory records pointing at one local header.
         let mut builder = ArchiveBuilder::new();
         builder.add("a.txt", b"x".to_vec()).unwrap();
         let single = builder.finish().unwrap();
@@ -16059,13 +13290,10 @@ mod tests {
 
     #[test]
     fn an_archive_carrying_a_traversing_name_is_refused_when_read() {
-        // The writer refuses these, so this one is assembled by hand to prove
-        // the reader refuses them too. A hostile archive was not written here.
         let mut builder = ArchiveBuilder::new();
         builder.add("aa/bb", b"x".to_vec()).unwrap();
         let mut bytes = builder.finish().unwrap();
 
-        // Rewrite the name in both headers, keeping its length.
         let first = bytes
             .windows(5)
             .position(|window| window == b"aa/bb")
@@ -16086,9 +13314,6 @@ mod tests {
 
     #[test]
     fn the_archive_reader_survives_arbitrary_input() {
-        // Directive section 41 names ZIP and APK as fuzz targets. An archive is
-        // a structure of offsets pointing at other offsets, which is the shape
-        // that makes a reader loop or read out of bounds.
         let mut seed = 0x1234_5678_9abc_def0u64;
         let mut valid = ArchiveBuilder::new();
         valid.add("a.txt", b"hello".to_vec()).unwrap();
@@ -16098,8 +13323,6 @@ mod tests {
         for _ in 0..3_000 {
             let mut bytes = base.clone();
 
-            // Corrupt a few bytes of a real archive: mutations near a structure
-            // reach code that random noise never would.
             let mutations = (xorshift(&mut seed) % 6) + 1;
             for _ in 0..mutations {
                 let position = (xorshift(&mut seed) as usize) % bytes.len();
@@ -16108,7 +13331,6 @@ mod tests {
 
             let mut sink = Sink::new();
             if let Some(archive) = archive::read(&bytes, &mut sink) {
-                // Anything it accepts must be self-consistent.
                 for entry in archive.entries() {
                     assert!(entry.data_offset <= bytes.len() as u64);
                     assert!(archive::validate_entry_name(&entry.name).is_ok());
@@ -16117,7 +13339,6 @@ mod tests {
             }
         }
 
-        // And pure noise, which mostly exercises the end-record search.
         for _ in 0..2_000 {
             let length = (xorshift(&mut seed) % 300) as usize;
             let bytes: Vec<u8> = (0..length)
@@ -16130,12 +13351,6 @@ mod tests {
 
     #[test]
     fn an_archive_this_build_writes_satisfies_independent_tools() {
-        // Directive section 24 ends with conformance tests. Reading a file made
-        // by another tool proves the parser follows the specification; this
-        // proves the writer does, which is the half a round-trip cannot show.
-        //
-        // The tools are used where they exist and the test says so when they do
-        // not, rather than passing quietly on a machine that checked nothing.
         let directory = temp_directory("conformance");
         let path = directory.join("omni.apk");
 
@@ -16167,7 +13382,6 @@ mod tests {
 
         let mut checked = 0;
 
-        // Info-ZIP: does the archive hold together, and do its checksums pass?
         if let Some((ok, text)) = run("unzip", &["-t", path.to_str().unwrap()]) {
             assert!(ok, "unzip -t refused the archive:\n{text}");
             assert!(
@@ -16177,7 +13391,6 @@ mod tests {
             checked += 1;
         }
 
-        // And does it list what was put in it?
         if let Some((ok, text)) = run("unzip", &["-l", path.to_str().unwrap()]) {
             assert!(ok, "unzip -l failed:\n{text}");
             for name in [
@@ -16191,7 +13404,6 @@ mod tests {
             checked += 1;
         }
 
-        // Android's own tool: are the native libraries on a page boundary?
         if let Ok(sdk) = std::env::var("ANDROID_HOME") {
             let zipalign = format!("{sdk}/build-tools/36.0.0/zipalign");
             if std::path::Path::new(&zipalign).is_file() {
@@ -16239,16 +13451,6 @@ mod tests {
         assert!(document.contains(&archive.digest().to_hex()));
     }
 
-    // --- DER -----------------------------------------------------------------
-
-    /// A self-signed certificate produced by `keytool`, byte for byte.
-    ///
-    /// OpenSSL reads it as:
-    ///   subject = C = TR, O = Omni, CN = Omni Conformance
-    ///   serial  = 5D97B82E9226CBB1
-    ///   sha256  = a725...9fbe
-    /// Those are the values the tests below check against, so the parser is
-    /// measured against a tool that has nothing to do with this project.
     const CONFORMANCE_CERTIFICATE: &[u8] = &[
         0x30, 0x82, 0x03, 0x11, 0x30, 0x82, 0x01, 0xf9, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x08,
         0x5d, 0x97, 0xb8, 0x2e, 0x92, 0x26, 0xcb, 0xb1, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
@@ -16307,15 +13509,12 @@ mod tests {
 
     #[test]
     fn der_refuses_every_encoding_the_rules_forbid() {
-        // DER exists because BER lets one value be written several ways, and a
-        // verifier that accepts two spellings of a name can be shown a different
-        // name from the one a parser displays.
         let cases: &[(&[u8], &str)] = &[
-            (&[0x30, 0x80, 0x00, 0x00], "ED002"), // indefinite length
-            (&[0x30, 0x81, 0x00], "ED004"),       // long form, leading zero
-            (&[0x30, 0x81, 0x01, 0x00], "ED005"), // long form for a short length
-            (&[0x1f, 0x01, 0x00], "ED001"),       // high tag number form
-            (&[0x30, 0x05, 0x00], "ED007"),       // runs past its container
+            (&[0x30, 0x80, 0x00, 0x00], "ED002"),
+            (&[0x30, 0x81, 0x00], "ED004"),
+            (&[0x30, 0x81, 0x01, 0x00], "ED005"),
+            (&[0x1f, 0x01, 0x00], "ED001"),
+            (&[0x30, 0x05, 0x00], "ED007"),
         ];
         for (bytes, code) in cases {
             let mut reader = super::der::Reader::new(bytes, 0);
@@ -16323,7 +13522,6 @@ mod tests {
             assert_eq!(error.code, *code, "{bytes:?}");
         }
 
-        // A padded integer has a shorter encoding, so it is not DER.
         let padded = super::der::Element {
             tag: super::der::tag::INTEGER,
             contents: &[0x00, 0x01],
@@ -16338,8 +13536,6 @@ mod tests {
 
     #[test]
     fn der_reads_object_identifiers_the_way_the_encoding_defines_them() {
-        // The first byte holds two arcs at once, which is the one place the
-        // encoding is not simply base-128.
         let cases: &[(&[u8], &str)] = &[
             (&[0x06, 0x03, 0x55, 0x04, 0x03], "2.5.4.3"),
             (
@@ -16359,7 +13555,6 @@ mod tests {
             assert_eq!(super::der::read_oid(&element).unwrap(), *expected);
         }
 
-        // An arc that never ends, and one with a leading zero byte.
         for bad in [
             &[0x06u8, 0x02, 0x55, 0x80][..],
             &[0x06, 0x03, 0x55, 0x80, 0x01][..],
@@ -16379,7 +13574,6 @@ mod tests {
                 .map(|_| (xorshift(&mut seed) & 0xff) as u8)
                 .collect();
             let mut reader = super::der::Reader::new(&bytes, 0);
-            // Reading until it stops must terminate, whatever it was given.
             for _ in 0..64 {
                 match reader.next_element() {
                     Ok(element) => {
@@ -16397,8 +13591,6 @@ mod tests {
         }
     }
 
-    // --- X.509 ---------------------------------------------------------------
-
     #[test]
     fn a_certificate_reads_as_the_tools_read_it() {
         let certificate = Certificate::parse(CONFORMANCE_CERTIFICATE).expect("must parse");
@@ -16410,7 +13602,6 @@ mod tests {
         assert_eq!(certificate.public_key_bits, Some(2048));
         assert!(certificate.signature_algorithm.is_known());
 
-        // The fingerprint OpenSSL prints for this file.
         assert_eq!(
             certificate.fingerprint.to_hex(),
             "a7259d236ba6819af41ef78ed77ed17804f07ec9edce8294a5ff380558289fbe"
@@ -16425,8 +13616,6 @@ mod tests {
 
     #[test]
     fn a_certificate_never_claims_its_signature_was_checked() {
-        // Directive section 1: a parser is not a verifier, and the report must
-        // not let the two be confused.
         let certificate = Certificate::parse(CONFORMANCE_CERTIFICATE).unwrap();
         let mut w = Writer::new();
         w.begin_array(None);
@@ -16469,8 +13658,6 @@ mod tests {
         }
     }
 
-    // --- signing block -------------------------------------------------------
-
     #[test]
     fn a_package_without_a_signing_block_is_reported_as_such() {
         let mut builder = ArchiveBuilder::new();
@@ -16491,17 +13678,6 @@ mod tests {
         assert!(sink.entries().iter().any(|d| d.code == "ES030"));
     }
 
-    /// Signs a small package with `apksigner`, when it is available.
-    ///
-    /// Returns the bytes and the directory to clean up, or `None` when the tool
-    /// is not here.
-    /// Finds `apksigner` in whatever Android SDK this machine has.
-    ///
-    /// A conformance test that silently skips is worse than no test, because it
-    /// reports success while checking nothing. So the search covers the places
-    /// an SDK actually lives -- both environment variables and the path the
-    /// image installs it at -- and takes the newest build-tools it finds rather
-    /// than a hard-coded version that will stop existing.
     fn find_apksigner() -> Option<std::path::PathBuf> {
         let mut roots: Vec<std::path::PathBuf> = Vec::new();
         for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
@@ -16534,9 +13710,6 @@ mod tests {
             }
         }
 
-        // A machine without an SDK may skip; a machine that promised one may
-        // not. Continuous integration sets this so that a conformance test
-        // which silently stopped running fails the build instead.
         assert!(
             std::env::var("OMNI_REQUIRE_APKSIGNER").is_err(),
             "OMNI_REQUIRE_APKSIGNER is set but no apksigner was found, so the \
@@ -16549,11 +13722,6 @@ mod tests {
         sign_with_apksigner_using(label, 2048)
     }
 
-    /// Signs a package with a key of the given size.
-    ///
-    /// The size decides the digest: apksigner picks SHA-256 for a 2048-bit RSA
-    /// key and SHA-512 for a 4096-bit one, so this is how both content-digest
-    /// constructions get exercised against the tool that defines them.
     fn sign_with_apksigner_using(
         label: &str,
         key_bits: u32,
@@ -16636,10 +13804,6 @@ mod tests {
 
     #[test]
     fn the_digest_this_build_computes_matches_the_one_apksigner_wrote() {
-        // This is the conformance test that matters. The scheme's chunked digest
-        // is defined precisely, and recomputing it from the specification and
-        // getting the same answer as Google's signer is the only way to know the
-        // implementation is right rather than merely self-consistent.
         let Some((bytes, directory)) = sign_with_apksigner("v2-digest") else {
             eprintln!(
                 "signing conformance: apksigner is not available here, so the digest \
@@ -16677,12 +13841,10 @@ mod tests {
         );
         assert!(report.everything_checkable_passed());
 
-        // And the certificate inside is the one that was just made.
         let certificate = &report.signers[0].certificates[0];
         assert_eq!(certificate.subject, "C=TR, O=Omni, CN=Omni Test");
         assert_eq!(certificate.public_key_bits, Some(2048));
 
-        // The report never overstates what happened.
         assert!(!report.signatures_checked);
 
         eprintln!(
@@ -16692,17 +13854,7 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// The package this repository's own build produced, if it has been built.
-    ///
-    /// The conformance test above signs an archive this tree wrote, which
-    /// proves the digest against apksigner but says nothing about a package
-    /// with thousands of deflated entries that the Android Gradle Plugin laid
-    /// out. This points the same reader at exactly that.
     fn package_this_build_produced() -> Option<Vec<u8>> {
-        // Naming a package is a promise that it is there. Falling back to the
-        // default path when the named one cannot be read would turn a wrong
-        // path into a silent skip, which is the failure this whole helper
-        // exists to avoid.
         if let Ok(named) = std::env::var("OMNI_PACKAGE_UNDER_TEST") {
             if !named.is_empty() {
                 let bytes = std::fs::read(&named)
@@ -16754,9 +13906,6 @@ mod tests {
 
     #[test]
     fn a_sha512_signed_package_is_checked_rather_than_declined() {
-        // A 4096-bit key makes apksigner sign with SHA-512, which is what this
-        // repository's own release build produces. Before SHA-512 existed here
-        // the Core could only say "cannot recompute" about its own artifact.
         let Some((bytes, directory)) = sign_with_apksigner_using("v2-sha512", 4096) else {
             eprintln!("signing conformance: apksigner is not available here");
             return;
@@ -16771,7 +13920,6 @@ mod tests {
             &mut sink,
         );
 
-        // The point of the test: the digest is SHA-512, and it was checked.
         let algorithms: Vec<&str> = report
             .signers
             .iter()
@@ -16804,11 +13952,6 @@ mod tests {
 
     #[test]
     fn a_verity_digest_is_never_compared_against_the_chunked_one() {
-        // A verity digest is the root of an fs-verity Merkle tree. It is not the
-        // chunked digest and will never equal it, so comparing the two would
-        // report a sound package as tampered with - telling a person not to
-        // install something that is perfectly fine. The table must classify the
-        // construction, not guess it from the algorithm's name.
         for id in [0x0421u32, 0x0423, 0x0425] {
             let algorithm = signing::algorithm(id).expect("a defined algorithm");
             assert_eq!(
@@ -16819,7 +13962,6 @@ mod tests {
             );
         }
 
-        // And the ones that really are chunked are classified by their hash.
         for (id, kind) in [
             (0x0101u32, signing::DigestKind::Chunked256),
             (0x0102, signing::DigestKind::Chunked512),
@@ -16835,9 +13977,6 @@ mod tests {
 
     #[test]
     fn changing_one_byte_of_a_signed_package_is_detected() {
-        // Threats T1, T3 and T4 of directive section 27: an APK modified after
-        // signing, a modified DEX, a modified native library. All three are the
-        // same thing to a content digest, and this is what catches them.
         let Some((bytes, directory)) = sign_with_apksigner("v2-tamper") else {
             eprintln!("signing conformance: apksigner is not available here");
             return;
@@ -16922,8 +14061,6 @@ mod tests {
                     archive.end_record_offset(),
                     &mut sink,
                 );
-                // Whatever it decided, it must never claim to have checked a
-                // signature.
                 assert!(!report.signatures_checked);
             }
         }
@@ -16931,14 +14068,8 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    // --- roadmap -------------------------------------------------------------
-
     #[test]
     fn the_roadmap_agrees_with_the_phase_this_tree_is_on() {
-        // One phase is CURRENT, it is the one CORE_PHASE names, and everything
-        // before it is DELIVERED while everything after it is PLANNED. A
-        // roadmap that drifts from CORE_PHASE would show a person the wrong
-        // place on it, which is the whole thing this table exists to prevent.
         let current: Vec<&super::Phase> = super::ROADMAP
             .iter()
             .filter(|p| p.state == super::PhaseState::Current)
@@ -16958,6 +14089,38 @@ mod tests {
     }
 
     #[test]
+    fn no_text_the_interface_shows_carries_a_stray_run_of_spaces() {
+        let check = |what: &str, text: &str| {
+            assert!(
+                !text.contains("  "),
+                "{what} carries a run of spaces: {text:?}"
+            );
+        };
+
+        for phase in super::ROADMAP {
+            check(phase.name, phase.name);
+            check(phase.name, phase.delivers);
+        }
+        for subsystem in super::SUBSYSTEMS {
+            check(subsystem.name, subsystem.name);
+            check(subsystem.name, subsystem.summary);
+            for missing in subsystem.missing {
+                check(subsystem.name, missing);
+            }
+        }
+        for dependency in super::BOOTSTRAP_DEPENDENCIES {
+            check(dependency, dependency);
+        }
+        for plugin in super::plugin::Registry::builtin().all() {
+            let contract = plugin.contract();
+            check(contract.id, contract.summary);
+            for note in contract.non_responsibilities {
+                check(contract.id, note);
+            }
+        }
+    }
+
+    #[test]
     fn the_roadmap_is_numbered_without_a_gap() {
         for (index, phase) in super::ROADMAP.iter().enumerate() {
             assert_eq!(phase.number as usize, index + 1);
@@ -16968,8 +14131,6 @@ mod tests {
 
     #[test]
     fn every_plugin_names_a_phase_the_roadmap_has() {
-        // A plugin whose roadmap phase is spelled differently from the roadmap
-        // is a plugin the user interface cannot place.
         let registry = super::plugin::Registry::builtin();
         for contract in registry.all().iter().map(|plugin| plugin.contract()) {
             assert!(
@@ -16985,11 +14146,7 @@ mod tests {
 
     #[test]
     fn a_delivered_phase_does_not_make_anything_production() {
-        // Directive section 1. DELIVERED means the work landed, not that it is
-        // finished, and nothing in the report may let those be confused.
         let report = super::state_report("");
-        // Derived, not written down: a literal here would need editing on every
-        // phase and would be wrong until someone remembered to do it.
         let delivered = super::ROADMAP
             .iter()
             .filter(|p| p.state == super::PhaseState::Delivered)
@@ -17001,31 +14158,18 @@ mod tests {
         }
     }
 
-    // --- DEX (directive section 21) ------------------------------------------
-
-    /// Builds a valid, empty DEX: a header and nothing else.
-    ///
-    /// Writing one by hand is the only way to test the refusals, because every
-    /// refusal needs a file that is correct except for the one thing under
-    /// test. It also proves the header layout is understood rather than merely
-    /// parsed by luck: the checksum and signature below are computed the way
-    /// the format defines them, and the reader accepts the result.
     fn minimal_dex(version: &[u8; 3]) -> Vec<u8> {
         let mut data = vec![0u8; dex::HEADER_SIZE as usize];
         data[0..4].copy_from_slice(dex::MAGIC);
         data[4..7].copy_from_slice(version);
         data[7] = 0;
-        // 8..12 checksum, 12..32 signature: filled in at the end.
-        data[32..36].copy_from_slice(&(dex::HEADER_SIZE).to_le_bytes()); // file_size
-        data[36..40].copy_from_slice(&dex::HEADER_SIZE.to_le_bytes()); // header_size
+        data[32..36].copy_from_slice(&(dex::HEADER_SIZE).to_le_bytes());
+        data[36..40].copy_from_slice(&dex::HEADER_SIZE.to_le_bytes());
         data[40..44].copy_from_slice(&dex::ENDIAN_CONSTANT.to_le_bytes());
-        // Everything from here is a size or an offset, and all of them are zero:
-        // link, map, and the six pools. An empty DEX declares nothing.
         seal_dex(&mut data);
         data
     }
 
-    /// Recomputes the two fields a DEX records over itself.
     fn seal_dex(data: &mut [u8]) {
         let signature = super::hash::sha1(&data[32..]);
         data[12..32].copy_from_slice(signature.as_bytes());
@@ -17054,15 +14198,10 @@ mod tests {
 
     #[test]
     fn a_dex_header_is_checked_before_it_is_believed() {
-        // Every one of these is a file that is correct except for the field
-        // under test, which is the only way to know the reader is checking that
-        // field rather than failing for some other reason.
-        /// One way of damaging an otherwise valid header.
         type Damage = fn(&mut Vec<u8>);
 
         let cases: &[(&str, Damage)] = &[
             ("EX004", |d| {
-                // Big-endian, which Android has never shipped.
                 d[40..44].copy_from_slice(&dex::REVERSE_ENDIAN_CONSTANT.to_le_bytes());
                 seal_dex(d);
             }),
@@ -17075,13 +14214,10 @@ mod tests {
                 seal_dex(d);
             }),
             ("EX006", |d| {
-                // Claims to be longer than it is: every offset below would be
-                // measured against a length that is not the file's.
                 d[32..36].copy_from_slice(&9_999u32.to_le_bytes());
                 seal_dex(d);
             }),
             ("EX007", |d| {
-                // A string pool with more entries than any file could hold.
                 d[56..60].copy_from_slice(&0xffff_ffffu32.to_le_bytes());
                 seal_dex(d);
             }),
@@ -17102,7 +14238,7 @@ mod tests {
             &b""[..],
             &b"dex"[..],
             &b"not a dex file at all"[..],
-            &b"dex\n035\0"[..], // magic only, no header
+            &b"dex\n035\0"[..],
         ] {
             assert!(
                 dex::read(bad, &mut Sink::new()).is_err(),
@@ -17114,9 +14250,6 @@ mod tests {
 
     #[test]
     fn changing_one_byte_of_a_dex_is_reported_but_not_hidden() {
-        // The two self-describing fields catch an edit made by something that
-        // did not fix them up. The file still reads: refusing to show a person
-        // what is in a damaged file would be less useful, not more.
         let mut data = minimal_dex(b"035");
         data[dex::HEADER_SIZE as usize - 1] ^= 0xff;
 
@@ -17134,9 +14267,6 @@ mod tests {
 
     #[test]
     fn integrity_is_never_reported_as_more_than_it_is() {
-        // Directive section 1. A checksum and a SHA-1 the file carries about
-        // itself are not evidence of who made it, and the report has to say so
-        // in the same breath as the result.
         let data = minimal_dex(b"035");
         let integrity = dex::integrity(&data).unwrap();
 
@@ -17177,8 +14307,6 @@ mod tests {
             );
         }
 
-        // Something that is not a descriptor is returned untouched rather than
-        // guessed at: a silently renamed class is worse than an odd-looking one.
         for odd in ["", "Ljava/lang/String", "Q", "L;x"] {
             assert_eq!(dex::descriptor_to_source(odd), odd, "{odd:?}");
         }
@@ -17186,39 +14314,28 @@ mod tests {
 
     #[test]
     fn modified_utf8_is_decoded_the_way_the_formats_define_it() {
-        // Plain ASCII.
         assert_eq!(modified_utf8::decode(b"Builder").unwrap(), "Builder");
 
-        // U+0000 is written as two bytes so that a string can hold a NUL
-        // without ending itself. Standard UTF-8 has no such spelling.
         assert_eq!(modified_utf8::decode(&[0xc0, 0x80]).unwrap(), "\0");
 
-        // Two and three byte forms.
         assert_eq!(modified_utf8::decode("çğü".as_bytes()).unwrap(), "çğü");
         assert_eq!(modified_utf8::decode("→".as_bytes()).unwrap(), "→");
 
-        // A character outside the basic plane is written as its two UTF-16
-        // surrogates, three bytes each. Standard UTF-8 forbids that spelling,
-        // so this is the case a plain decoder gets wrong.
         let rocket = [0xed, 0xa0, 0xbd, 0xed, 0xb2, 0x80];
         assert_eq!(modified_utf8::decode(&rocket).unwrap(), "\u{1f480}");
 
-        // And the four-byte form standard UTF-8 would use is not accepted,
-        // because a DEX never writes it.
         assert!(modified_utf8::decode(&[0xf0, 0x9f, 0x92, 0x80]).is_err());
     }
 
     #[test]
     fn a_broken_string_is_refused_rather_than_repaired() {
-        // Replacing a bad byte with U+FFFD would let two different files decode
-        // to the same class name, and a name is what a class is identified by.
         let cases: &[(&[u8], &str)] = &[
-            (&[0xed, 0xa0, 0xbd], "E7053"),       // a high surrogate alone
-            (&[0xed, 0xb2, 0x80], "E7053"),       // a low surrogate alone
-            (&[0xc2], "E7050"),                   // ends inside a character
-            (&[0xe2, 0x86], "E7050"),             // ends inside a character
-            (&[0xc2, 0x41], "E7051"),             // a bad continuation byte
-            (&[0xf0, 0x9f, 0x92, 0x80], "E7052"), // the four-byte form
+            (&[0xed, 0xa0, 0xbd], "E7053"),
+            (&[0xed, 0xb2, 0x80], "E7053"),
+            (&[0xc2], "E7050"),
+            (&[0xe2, 0x86], "E7050"),
+            (&[0xc2, 0x41], "E7051"),
+            (&[0xf0, 0x9f, 0x92, 0x80], "E7052"),
         ];
         for (bytes, code) in cases {
             let error =
@@ -17229,9 +14346,6 @@ mod tests {
 
     #[test]
     fn the_dex_reader_survives_arbitrary_input() {
-        // Directive section 21 names this explicitly: malformed DEX input must
-        // never crash the reader. What is checked is that it always terminates
-        // and never panics, whatever it is handed.
         let mut seed = 0x1dea_7c0f_fee5_1234u64;
         for _ in 0..3_000 {
             let length = (xorshift(&mut seed) % 400) as usize;
@@ -17239,8 +14353,6 @@ mod tests {
                 .map(|_| (xorshift(&mut seed) & 0xff) as u8)
                 .collect();
 
-            // Half the cases start with a real magic, so the reader gets past
-            // the first check and into the fields that actually take work.
             if length >= 8 && xorshift(&mut seed).is_multiple_of(2) {
                 data[0..4].copy_from_slice(dex::MAGIC);
                 data[4..8].copy_from_slice(b"035\0");
@@ -17253,12 +14365,6 @@ mod tests {
         }
     }
 
-    /// Refuses to let a conformance test skip where it was promised to run.
-    ///
-    /// A machine without an SDK or without a built package may skip; a machine
-    /// that promised both may not. Continuous integration sets this so that a
-    /// conformance test which quietly stopped running fails the build instead
-    /// of reporting success while checking nothing.
     fn dex_conformance_may_skip(why: &str) {
         assert!(
             std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
@@ -17267,7 +14373,6 @@ mod tests {
         );
     }
 
-    /// The `classes.dex` inside the package this build produced, if built.
     fn dex_this_build_produced() -> Option<Vec<u8>> {
         let Some(apk) = ["release/Builder-release.apk", "debug/Builder-debug.apk"]
             .iter()
@@ -17289,7 +14394,6 @@ mod tests {
         Some(output.stdout)
     }
 
-    /// Runs `dexdump -f` and returns its header fields and class descriptors.
     fn dexdump(bytes: &[u8]) -> Option<(std::collections::BTreeMap<String, String>, Vec<String>)> {
         let Some(tool) = find_apksigner().and_then(|p| Some(p.parent()?.join("dexdump"))) else {
             dex_conformance_may_skip("no Android SDK build-tools were found");
@@ -17333,10 +14437,6 @@ mod tests {
 
     #[test]
     fn the_dex_this_build_produced_reads_as_dexdump_reads_it() {
-        // The conformance test for this phase. Reading a DEX correctly is not
-        // something a self-consistent parser can establish about itself; what
-        // establishes it is agreeing, field for field, with the tool Google
-        // ships for the same file.
         let Some(bytes) = dex_this_build_produced() else {
             eprintln!(
                 "dex conformance: no built package here, so nothing was read. \
@@ -17363,7 +14463,6 @@ mod tests {
             let raw = fields
                 .get(key)
                 .unwrap_or_else(|| panic!("dexdump printed no {key}"));
-            // Values are printed as "9820 (0x00265c)" or plainly.
             raw.split_whitespace()
                 .next()
                 .unwrap()
@@ -17382,21 +14481,18 @@ mod tests {
         assert_eq!(file.header.method_ids_size, number("method_ids_size"));
         assert_eq!(file.header.class_defs_size, number("class_defs_size"));
 
-        // The pools were not merely counted, they were read.
         assert_eq!(file.strings.len(), file.header.string_ids_size as usize);
         assert_eq!(file.types.len(), file.header.type_ids_size as usize);
         assert_eq!(file.fields.len(), file.header.field_ids_size as usize);
         assert_eq!(file.methods.len(), file.header.method_ids_size as usize);
         assert_eq!(file.classes.len(), file.header.class_defs_size as usize);
 
-        // And every class, in the same order, with the same name.
         let expected: Vec<String> = descriptors
             .iter()
             .map(|d| dex::descriptor_to_source(d))
             .collect();
         assert_eq!(file.class_names(), expected);
 
-        // The file's own two fields hold.
         let integrity = dex::integrity(&bytes).unwrap();
         assert!(integrity.checksum_matches());
         assert!(integrity.signature_matches());
@@ -17410,32 +14506,24 @@ mod tests {
         );
     }
 
-    // --- JVM class files (directive sections 16 and 17) -----------------------
-
-    /// Builds a minimal, valid class file.
-    ///
-    /// `long_first` puts a `CONSTANT_Long` at index 1. A long occupies two pool
-    /// slots, and a reader that misses that renumbers every entry after it - so
-    /// the same file built both ways, read the same, is what proves the quirk
-    /// is handled rather than accidentally avoided.
     fn minimal_class(long_first: bool) -> Vec<u8> {
         let mut pool: Vec<u8> = Vec::new();
         let mut next = 1u16;
 
         if long_first {
-            pool.push(5); // CONSTANT_Long
+            pool.push(5);
             pool.extend_from_slice(&1_234_567_890_123u64.to_be_bytes());
-            next += 2; // and the unusable slot it drags along
+            next += 2;
         }
 
         let name_index = next;
-        pool.push(1); // CONSTANT_Utf8
+        pool.push(1);
         pool.extend_from_slice(&4u16.to_be_bytes());
         pool.extend_from_slice(b"Test");
         next += 1;
 
         let this_index = next;
-        pool.push(7); // CONSTANT_Class
+        pool.push(7);
         pool.extend_from_slice(&name_index.to_be_bytes());
         next += 1;
 
@@ -17452,17 +14540,17 @@ mod tests {
 
         let mut data: Vec<u8> = Vec::new();
         data.extend_from_slice(&jvm::MAGIC.to_be_bytes());
-        data.extend_from_slice(&0u16.to_be_bytes()); // minor
-        data.extend_from_slice(&61u16.to_be_bytes()); // major: Java 17
-        data.extend_from_slice(&next.to_be_bytes()); // count is one more than entries
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&61u16.to_be_bytes());
+        data.extend_from_slice(&next.to_be_bytes());
         data.extend_from_slice(&pool);
-        data.extend_from_slice(&0x0021u16.to_be_bytes()); // public super
+        data.extend_from_slice(&0x0021u16.to_be_bytes());
         data.extend_from_slice(&this_index.to_be_bytes());
         data.extend_from_slice(&super_index.to_be_bytes());
-        data.extend_from_slice(&0u16.to_be_bytes()); // interfaces
-        data.extend_from_slice(&0u16.to_be_bytes()); // fields
-        data.extend_from_slice(&0u16.to_be_bytes()); // methods
-        data.extend_from_slice(&0u16.to_be_bytes()); // attributes
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&0u16.to_be_bytes());
+        data.extend_from_slice(&0u16.to_be_bytes());
         data
     }
 
@@ -17480,23 +14568,16 @@ mod tests {
 
     #[test]
     fn a_long_in_the_constant_pool_occupies_two_slots() {
-        // The specification's own text calls this a poor historical choice. A
-        // reader that misses it reads every entry after the first long from the
-        // wrong index, and the usual symptom is a class with a plausible but
-        // wrong name - which is far worse than a refusal.
         let class = jvm::read(&minimal_class(true)).expect("a long must not break the pool");
         assert_eq!(class.name, "Test", "the pool was renumbered by the long");
         assert_eq!(class.superclass.as_deref(), Some("java.lang.Object"));
 
-        // The slot after the long exists and is explicitly unusable, so that a
-        // pool index here means what it means in the file.
         assert_eq!(class.constants[2], jvm::Constant::Unusable);
         assert!(matches!(class.constants[3], jvm::Constant::Utf8(_)));
     }
 
     #[test]
     fn a_class_file_is_checked_before_it_is_believed() {
-        /// One way of damaging an otherwise valid class file.
         type Damage = &'static dyn Fn(&mut Vec<u8>);
 
         let cases: &[(&str, Damage)] = &[
@@ -17508,7 +14589,6 @@ mod tests {
                 d[8..10].copy_from_slice(&0u16.to_be_bytes())
             }),
             ("EJ004", &|d: &mut Vec<u8>| {
-                // More pool entries than the file has bytes for.
                 d[8..10].copy_from_slice(&0xffffu16.to_be_bytes())
             }),
         ];
@@ -17527,7 +14607,7 @@ mod tests {
             &b""[..],
             &b"\xca\xfe"[..],
             &b"PK\x03\x04nope"[..],
-            &b"\xca\xfe\xba\xbe"[..], // magic only
+            &b"\xca\xfe\xba\xbe"[..],
         ] {
             assert!(jvm::read(bad).is_err(), "{bad:?} must be refused");
         }
@@ -17543,7 +14623,6 @@ mod tests {
             jvm::internal_name_to_source("java/lang/Object"),
             "java.lang.Object"
         );
-        // An array shows up as a descriptor, which both formats spell alike.
         assert_eq!(
             jvm::internal_name_to_source("[Ljava/lang/String;"),
             "java.lang.String[]"
@@ -17559,8 +14638,6 @@ mod tests {
                 .map(|_| (xorshift(&mut seed) & 0xff) as u8)
                 .collect();
 
-            // Half the cases start with a real magic, so the reader gets past
-            // the first check and into the pool, where the work is.
             if length >= 8 && xorshift(&mut seed).is_multiple_of(2) {
                 data[0..4].copy_from_slice(&jvm::MAGIC.to_be_bytes());
                 data[4..6].copy_from_slice(&0u16.to_be_bytes());
@@ -17571,7 +14648,6 @@ mod tests {
         }
     }
 
-    /// What `javap -v` says about one class file.
     #[derive(Debug)]
     struct JavapFacts {
         major: u16,
@@ -17622,12 +14698,10 @@ mod tests {
             } else if let Some(value) = after(trimmed, "minor version:") {
                 facts.minor = value.parse().ok()?;
             } else if let Some(value) = after(trimmed, "this_class:") {
-                // "#2   // com/omni/builder/CoreState"
                 facts.this_class = value.split("//").nth(1)?.trim().to_string();
             } else if let Some(value) = after(trimmed, "super_class:") {
                 facts.super_class = value.split("//").nth(1).map(|s| s.trim().to_string());
             } else if trimmed.starts_with("interfaces:") && trimmed.contains("fields:") {
-                // "interfaces: 0, fields: 17, methods: 39, attributes: 4"
                 for part in trimmed.split(',') {
                     let Some((key, value)) = part.split_once(':') else {
                         continue;
@@ -17641,7 +14715,6 @@ mod tests {
                     }
                 }
             } else if let Some(rest) = trimmed.strip_prefix('#') {
-                // "#191 = Integer            2" - the highest one gives the size.
                 if let Some(number) = rest.split_whitespace().next() {
                     if let Ok(index) = number.parse::<usize>() {
                         facts.pool_count = facts.pool_count.max(index + 1);
@@ -17660,7 +14733,6 @@ mod tests {
         Some(facts)
     }
 
-    /// Every class file the Kotlin compiler produced in this build.
     fn classes_this_build_produced() -> Vec<std::path::PathBuf> {
         fn walk(directory: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
             let Ok(entries) = std::fs::read_dir(directory) else {
@@ -17687,10 +14759,6 @@ mod tests {
 
     #[test]
     fn every_class_this_build_produced_reads_as_javap_reads_it() {
-        // The conformance test for this phase. These are real Kotlin output -
-        // data classes, sealed interfaces, objects, companions, nested and
-        // synthetic classes - and every one of them is read and compared field
-        // for field with the tool the JDK ships for the same file.
         let classes = classes_this_build_produced();
         if classes.is_empty() {
             assert!(
@@ -17748,9 +14816,6 @@ mod tests {
                 "{where_}: constant pool"
             );
 
-            // And the Kotlin metadata, where there is any. This is the field
-            // that says which compiler produced the class, and getting it right
-            // is what makes it evidence rather than decoration.
             match (&class.kotlin, &facts.kotlin_mv) {
                 (Some(metadata), Some(expected)) => {
                     let ours = metadata
@@ -17781,10 +14846,6 @@ mod tests {
 
     #[test]
     fn the_kotlin_metadata_is_reported_as_a_language_release_not_a_compiler() {
-        // Directive section 1. `mv` tracks the language release: every 2.4.x
-        // compiler writes 2.4.0. Reporting it without saying so invites the
-        // reader to conclude something it does not support - which is exactly
-        // the mistake this project already made once about Kotlin 2.4.10.
         let classes = classes_this_build_produced();
         let Some(path) = classes.first() else {
             return;
@@ -17805,13 +14866,8 @@ mod tests {
         }
     }
 
-    // --- subsystem inventory -------------------------------------------------
-
     #[test]
     fn no_subsystem_claims_to_be_finished() {
-        // Directive section 1. The gates of section 51 decide when this may
-        // change, and this test is what makes that a decision rather than an
-        // oversight.
         for subsystem in super::SUBSYSTEMS {
             assert_ne!(
                 subsystem.status,
@@ -17829,8 +14885,6 @@ mod tests {
             assert!(!subsystem.summary.is_empty(), "{}", subsystem.name);
             assert!(subsystem.directive_section > 0, "{}", subsystem.name);
 
-            // Anything short of BETA has unfinished work by definition, and
-            // saying so is the whole point of the table.
             if subsystem.status < Status::Beta {
                 assert!(
                     !subsystem.missing.is_empty(),
@@ -17855,8 +14909,6 @@ mod tests {
             );
         }
     }
-
-    // --- artifact lifecycle --------------------------------------------------
 
     fn artifact_named(name: &str) -> Artifact {
         Artifact::created(
@@ -17918,8 +14970,6 @@ mod tests {
 
     #[test]
     fn an_unverified_artifact_cannot_be_published() {
-        // Directive section 58, in one sentence: an invalid artifact cannot be
-        // published. This is where that sentence is enforced.
         let mut artifact = artifact_named("apk.release");
         assert_eq!(artifact.published().unwrap_err().code, "E5012");
 
@@ -17944,9 +14994,6 @@ mod tests {
 
     #[test]
     fn verification_actually_compares_the_digest() {
-        // Invariant I6: an artifact is verified before use. A verification that
-        // compares nothing would satisfy the letter of that and none of its
-        // point.
         let mut artifact = artifact_named("a.b");
         let original = super::hash::sha256(b"original");
         artifact.hashed(original, 8).unwrap();
@@ -17965,18 +15012,12 @@ mod tests {
 
     #[test]
     fn an_artifact_without_a_digest_cannot_be_verified() {
-        // Reaching VALIDATED without a digest is impossible by construction, so
-        // the guard is checked on a fresh artifact. Both the missing digest and
-        // the illegal transition apply here; the diagnostic reports the missing
-        // digest, because "hash it first" is the actionable half.
         let mut artifact = artifact_named("a.b");
         let error = artifact.verified(super::hash::sha256(b"x")).unwrap_err();
         assert_eq!(error.code, "E5010");
         assert!(error.suggestion.as_deref().unwrap().contains("Hash it"));
         assert_eq!(artifact.state(), ArtifactState::Created);
     }
-
-    // --- cache ---------------------------------------------------------------
 
     fn cache_inputs<'a>(source: &'a Digest, dependencies: &'a Digest) -> CacheInputs<'a> {
         CacheInputs {
@@ -17998,8 +15039,6 @@ mod tests {
 
     #[test]
     fn a_cache_key_changes_when_any_declared_input_changes() {
-        // Directive section 11 lists what a key must cover. Each of these is one
-        // of those inputs, and each must move the key.
         let source = super::hash::sha256(b"source");
         let dependencies = super::hash::sha256(b"deps");
         let base = cache_inputs(&source, &dependencies).key();
@@ -18081,8 +15120,6 @@ mod tests {
 
     #[test]
     fn the_four_cache_outcomes_stay_distinguishable() {
-        // Directive section 11 requires them to be told apart, and section 11's
-        // last line forbids treating a corrupt entry as usable.
         let source = super::hash::sha256(b"source");
         let dependencies = super::hash::sha256(b"deps");
         let key = cache_inputs(&source, &dependencies).key();
@@ -18117,8 +15154,6 @@ mod tests {
         }
     }
 
-    // --- build graph ---------------------------------------------------------
-
     fn digests() -> [Digest; 4] {
         [
             super::hash::sha256(b"input"),
@@ -18134,7 +15169,6 @@ mod tests {
 
     #[test]
     fn a_graph_orders_work_by_its_edges_not_by_insertion() {
-        // Directive section 9: a build system is not a file ordering.
         let mut graph = Graph::new();
         graph
             .add(node("package", NodeKind::Package).after(NodeId::new("dex").unwrap()))
@@ -18155,8 +15189,6 @@ mod tests {
 
     #[test]
     fn the_plan_is_the_same_every_time() {
-        // Directive section 12: identical input, identical order, so a build's
-        // shape never depends on iteration luck.
         let mut graph = Graph::new();
         graph.add(node("a", NodeKind::Manifest)).unwrap();
         graph.add(node("b", NodeKind::Resources)).unwrap();
@@ -18224,7 +15256,6 @@ mod tests {
 
     #[test]
     fn a_status_only_unblocks_dependents_when_it_produced_something() {
-        // Directive section 10, stated once and used everywhere.
         assert!(NodeStatus::Succeeded.produced_its_outputs());
         assert!(NodeStatus::CacheHit.produced_its_outputs());
         for blocked in [
@@ -18238,9 +15269,6 @@ mod tests {
         }
     }
 
-    // --- scheduler -----------------------------------------------------------
-
-    /// An executor whose behaviour each test decides node by node.
     struct ScriptedExecutor {
         failing: Vec<String>,
         cached: Vec<String>,
@@ -18334,8 +15362,6 @@ mod tests {
 
     #[test]
     fn a_failure_stops_its_dependents_and_says_why() {
-        // Directive section 10: a failed dependency is never ignored, and the
-        // nodes behind it are skipped rather than called failed.
         let mut graph = linear_graph();
         let mut executor = ScriptedExecutor::new().failing("dex");
         let mut policy = Policy::new("build");
@@ -18378,8 +15404,6 @@ mod tests {
 
     #[test]
     fn a_cancelled_build_marks_nothing_as_successful() {
-        // Directive section 10 forbids calling a cancelled node successful, and
-        // section 35 asks for a safe stop rather than a torn one.
         let mut graph = linear_graph();
         let mut executor = ScriptedExecutor::new();
         let mut policy = Policy::new("build");
@@ -18473,8 +15497,6 @@ mod tests {
 
     #[test]
     fn the_real_executor_refuses_to_invent_a_result_for_a_planned_plugin() {
-        // Every plugin in this tree is PLANNED, so a real build fails - loudly,
-        // with E0001, and with nothing marked as produced (directive section 1).
         let mut graph = Graph::new();
         graph
             .add(Node::new(
@@ -18569,12 +15591,6 @@ mod tests {
         assert!(document.contains("\"status\":\"SKIPPED\""));
     }
 
-    // --- project manifest ----------------------------------------------------
-
-    /// The manifest exactly as directive section 44 writes it, with the one
-    /// typographical slip corrected: the directive prints `Deterministic.`
-    /// with a trailing dot, and a separate test covers what happens if that is
-    /// typed literally.
     const DIRECTIVE_MANIFEST: &str = r#"
 [ Project ]
 Name    = "Demo App"
@@ -18635,10 +15651,6 @@ Viewbinding   = false
 
     #[test]
     fn a_mistyped_key_is_named_and_corrected() {
-        // Directive section 44 prints "Deterministic." with a trailing dot. A
-        // build that quietly accepted it would leave the author believing a
-        // setting was in force when it was not (section 64), so it is refused -
-        // with the correction spelled out.
         let manifest = "[ Project ]\nName = \"A\"\nId = \"com.a\"\n\
                         [ Build ]\nDeterministic.   = true\n";
         let mut sink = Sink::new();
@@ -18659,7 +15671,6 @@ Viewbinding   = false
 
     #[test]
     fn keys_and_sections_are_case_sensitive() {
-        // Directive section 44 says so explicitly.
         let manifest = "[ project ]\nname = \"A\"\n";
         let mut sink = Sink::new();
         assert!(parse_manifest(manifest, "com.fallback", &mut sink).is_none());
@@ -18678,8 +15689,6 @@ Viewbinding   = false
 
     #[test]
     fn a_minimal_manifest_gets_safe_defaults() {
-        // Directive section 45: the smallest useful project still builds, and
-        // every default is a decision rather than an accident.
         let mut sink = Sink::new();
         let project =
             parse_manifest("[ Project ]\nName = \"Tiny\"\n", "com.omni.tiny", &mut sink).unwrap();
@@ -18875,7 +15884,6 @@ Viewbinding   = false
             let parsed = parse_manifest(&manifest, "com.f", &mut sink).unwrap();
             assert_eq!(parsed.profile, *profile);
         }
-        // Directive section 13 requires at least these nine.
         assert_eq!(Profile::ALL.len(), 9);
 
         for level in GuardLevel::ALL {
@@ -18895,17 +15903,14 @@ Viewbinding   = false
     fn the_configuration_digest_reflects_behaviour_not_naming() {
         let base = parse_manifest(DIRECTIVE_MANIFEST, "com.f", &mut Sink::new()).unwrap();
 
-        // Deterministic (directive section 12).
         assert_eq!(base.digest(), base.digest());
         let again = parse_manifest(DIRECTIVE_MANIFEST, "com.f", &mut Sink::new()).unwrap();
         assert_eq!(base.digest(), again.digest());
 
-        // Renaming a project does not change what it produces.
         let mut renamed = base.clone();
         renamed.name = "Something Else".to_string();
         assert_eq!(base.digest(), renamed.digest());
 
-        // Anything that does change the output changes the digest.
         for mutate in [
             (|p: &mut Project| p.optimization = Optimization::Speed) as fn(&mut Project),
             |p: &mut Project| p.lto = false,
@@ -18932,7 +15937,6 @@ Viewbinding   = false
 
     #[test]
     fn the_manifest_is_bounded() {
-        // Directive section 60, on input that is not trusted.
         let mut sink = Sink::new();
         let huge = "x".repeat(super::project::MAX_MANIFEST_BYTES + 1);
         assert!(parse_manifest(&huge, "com.f", &mut sink).is_none());
@@ -18953,8 +15957,6 @@ Viewbinding   = false
 
     #[test]
     fn hostile_manifests_are_rejected_without_crashing() {
-        // Directive section 41: malformed input must not crash, hang or allocate
-        // without bound. Project files come from outside (section 61).
         let cases = [
             "",
             "[",
@@ -18973,7 +15975,6 @@ Viewbinding   = false
         ];
         for manifest in cases {
             let mut sink = Sink::new();
-            // The only requirement is that this returns rather than misbehaving.
             let _ = parse_manifest(manifest, "com.f", &mut sink);
         }
     }
@@ -18993,13 +15994,6 @@ Viewbinding   = false
         assert!(document.contains(&project.digest().to_hex()));
     }
 
-    // --- virtual filesystem --------------------------------------------------
-
-    /// A fresh directory under the system temporary directory.
-    ///
-    /// No dependency is used for this: a counter plus the process id is enough
-    /// to keep concurrent tests apart, and ADR-0003 keeps the Core dependency
-    /// free right down to its tests.
     fn temp_directory(label: &str) -> std::path::PathBuf {
         use std::sync::atomic::{AtomicU32, Ordering};
         static COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -19011,7 +16005,6 @@ Viewbinding   = false
         path
     }
 
-    /// A policy that grants exactly what the test asks for.
     fn policy_with(capabilities: &[Capability]) -> Policy {
         let mut policy = Policy::new("test");
         for capability in capabilities {
@@ -19037,7 +16030,6 @@ Viewbinding   = false
 
     #[test]
     fn virtual_paths_refuse_to_leave_their_mount() {
-        // Directive section 8: traversal is refused, in every spelling.
         for attempt in [
             "..",
             "../secret",
@@ -19074,8 +16066,6 @@ Viewbinding   = false
 
     #[test]
     fn virtual_paths_are_bounded() {
-        // Directive section 60: path explosion and deep nesting are refused
-        // rather than merely being slow.
         let long_path = "a".repeat(super::vfs::MAX_PATH_BYTES + 1);
         assert_eq!(VirtualPath::parse(&long_path).unwrap_err().code, "E2002");
 
@@ -19085,7 +16075,6 @@ Viewbinding   = false
         let deep = vec!["d"; super::vfs::MAX_SEGMENTS + 1].join("/");
         assert_eq!(VirtualPath::parse(&deep).unwrap_err().code, "E2009");
 
-        // Exactly at the limits is accepted; the bound is not off by one.
         let at_limit = vec!["d"; super::vfs::MAX_SEGMENTS].join("/");
         assert!(VirtualPath::parse(&at_limit).is_ok());
     }
@@ -19173,8 +16162,6 @@ Viewbinding   = false
 
     #[test]
     fn a_write_leaves_no_partial_file_behind() {
-        // Directive section 59: a build must never publish something half
-        // written, and must not litter the output with the evidence either.
         let root = temp_directory("atomic");
         let mut vfs = VirtualFs::new(Quota::default());
         vfs.mount("output", &root, Access::ReadWrite).unwrap();
@@ -19206,8 +16193,6 @@ Viewbinding   = false
 
     #[test]
     fn the_filesystem_is_unreachable_without_a_capability() {
-        // Directive section 7: default deny, and the refusal is a diagnostic
-        // rather than a silent empty result.
         let root = temp_directory("caps");
         std::fs::write(root.join("file.txt"), b"data").unwrap();
 
@@ -19233,7 +16218,6 @@ Viewbinding   = false
             .unwrap_err();
         assert_eq!(write.code, "E2030");
 
-        // And the refusal was audited.
         assert!(policy.audit().iter().any(|record| {
             record.subject == "plugin.test" && record.decision == Decision::Deny
         }));
@@ -19323,7 +16307,6 @@ Viewbinding   = false
         );
         assert_eq!(vfs.usage().bytes_written, 8);
 
-        // Reading is bounded too.
         std::fs::write(root.join("large.bin"), [0u8; 9]).unwrap();
         let large = VirtualPath::parse("large.bin").unwrap();
         assert_eq!(
@@ -19337,8 +16320,6 @@ Viewbinding   = false
     #[cfg(unix)]
     #[test]
     fn a_symlink_cannot_smuggle_a_path_out_of_its_mount() {
-        // Syntax alone cannot catch this: the path has no '..' in it. Only
-        // resolving the link does.
         let root = temp_directory("symlink");
         let outside = temp_directory("symlink-outside");
         std::fs::write(outside.join("secret.txt"), b"not yours").unwrap();
@@ -19366,13 +16347,8 @@ Viewbinding   = false
         std::fs::remove_dir_all(&outside).ok();
     }
 
-    // --- SHA-1 (official NIST vectors) ---------------------------------------
-
     #[test]
     fn sha1_matches_the_nist_published_vectors() {
-        // FIPS 180-4 appendix A. SHA-1 is here only to check the DEX header's
-        // own signature field, and directive section 30 still requires the
-        // official vectors before it may be used for even that.
         let cases: &[(&[u8], &str)] = &[
             (b"", "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
             (b"abc", "a9993e364706816aba3e25717850c26c9cd0d89d"),
@@ -19414,14 +16390,8 @@ Viewbinding   = false
         }
     }
 
-    // --- SHA-512 (official NIST vectors) -------------------------------------
-
     #[test]
     fn sha512_matches_the_nist_published_vectors() {
-        // FIPS 180-4 appendix C and the NIST Cryptographic Algorithm Validation
-        // Program publish these. Directive section 30 makes passing them the
-        // condition for using the primitive at all; nothing in the signing
-        // module may call SHA-512 unless this test passes.
         let cases: &[(&[u8], &str)] = &[
             (
                 b"",
@@ -19447,7 +16417,6 @@ Viewbinding   = false
         ];
 
         for (input, expected) in cases {
-            // The source layout wraps these, so strip what the wrapping added.
             let cleaned: Vec<u8> = input.iter().copied().filter(|b| *b != b' ').collect();
             let wanted: String = expected.chars().filter(|c| !c.is_whitespace()).collect();
             assert_eq!(
@@ -19461,9 +16430,6 @@ Viewbinding   = false
 
     #[test]
     fn sha512_matches_the_one_million_a_vector() {
-        // The long-message vector. It is the one that catches a broken length
-        // counter or a broken padding boundary, which for SHA-512 sits at a
-        // different place than for SHA-256.
         let mut hasher = super::hash::Sha512::new();
         let chunk = vec![b'a'; 1_000];
         for _ in 0..1_000 {
@@ -19495,8 +16461,6 @@ Viewbinding   = false
 
     #[test]
     fn sha512_handles_every_padding_boundary() {
-        // 112 is where the 128-bit length field starts, and 128 is the block
-        // size. A padding bug lives on one side of one of these.
         for length in [
             0usize, 1, 110, 111, 112, 113, 127, 128, 129, 239, 240, 255, 256,
         ] {
@@ -19529,13 +16493,8 @@ Viewbinding   = false
         }
     }
 
-    // --- SHA-256 (official NIST vectors) -------------------------------------
-
     #[test]
     fn sha256_matches_the_nist_published_vectors() {
-        // FIPS 180-4 and the NIST Cryptographic Algorithm Validation Program
-        // publish these. Directive section 30 makes passing them the condition
-        // for using the primitive at all.
         let cases: &[(&[u8], &str)] = &[
             (
                 b"",
@@ -19557,8 +16516,6 @@ Viewbinding   = false
         ];
 
         for (input, expected) in cases {
-            // The fourth case uses a line continuation, so strip the indentation
-            // the source layout introduced.
             let cleaned: Vec<u8> = input.iter().copied().filter(|b| *b != b' ').collect();
             assert_eq!(
                 super::hash::sha256(&cleaned).to_hex(),
@@ -19571,8 +16528,6 @@ Viewbinding   = false
 
     #[test]
     fn sha256_matches_the_one_million_a_vector() {
-        // The long-message vector from FIPS 180-4 appendix B.3. It is the one
-        // that catches a broken length counter or a broken padding boundary.
         let mut hasher = super::hash::Sha256::new();
         let chunk = vec![b'a'; 1_000];
         for _ in 0..1_000 {
@@ -19586,8 +16541,6 @@ Viewbinding   = false
 
     #[test]
     fn sha256_is_insensitive_to_how_the_message_is_split() {
-        // Streaming has to agree with the one-shot form, or a digest would
-        // depend on the caller's buffer size rather than on the data.
         let message: Vec<u8> = (0u8..=255).cycle().take(1_000).collect();
         let one_shot = super::hash::sha256(&message);
 
@@ -19602,8 +16555,6 @@ Viewbinding   = false
 
     #[test]
     fn sha256_handles_every_padding_boundary() {
-        // Lengths either side of the block and length-field boundaries are where
-        // a padding bug hides.
         for length in [0usize, 1, 54, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128] {
             let message = vec![b'x'; length];
             let streamed = {
@@ -19617,10 +16568,6 @@ Viewbinding   = false
 
     #[test]
     fn sha256_survives_arbitrary_input() {
-        // Directive section 41 applies to every parser and every primitive that
-        // reads untrusted bytes. SHA-256 has no parsing to get wrong, so what is
-        // checked here is that no length, including the padding boundaries, can
-        // make it disagree with itself or misbehave.
         let mut seed = 0xdead_beef_cafe_1234u64;
         for _ in 0..2_000 {
             let length = (xorshift(&mut seed) % 4_096) as usize;
@@ -19653,26 +16600,20 @@ Viewbinding   = false
 
     #[test]
     fn field_hashing_cannot_be_confused_by_moving_a_boundary() {
-        // Without length prefixes these two would hash identically, and two
-        // different cache keys would collide (directive section 11).
         let left = super::hash::sha256_fields(&[("a", b"ab"), ("b", b"c")]);
         let right = super::hash::sha256_fields(&[("a", b"a"), ("b", b"bc")]);
         assert_ne!(left, right);
 
-        // Renaming a field changes the digest too.
         assert_ne!(
             super::hash::sha256_fields(&[("a", b"x")]),
             super::hash::sha256_fields(&[("b", b"x")])
         );
 
-        // And the same fields always give the same answer (section 12).
         assert_eq!(
             super::hash::sha256_fields(&[("a", b"x"), ("b", b"y")]),
             super::hash::sha256_fields(&[("a", b"x"), ("b", b"y")])
         );
     }
-
-    // --- C ABI --------------------------------------------------------------
 
     #[test]
     fn the_abi_reports_its_version() {
@@ -19683,22 +16624,18 @@ Viewbinding   = false
     fn the_abi_exposes_a_static_nul_terminated_version() {
         let ptr = super::ffi::omni_core_version();
         assert!(!ptr.is_null());
-        // SAFETY: the ABI guarantees a static NUL-terminated string.
         let version = unsafe { std::ffi::CStr::from_ptr(ptr) };
         assert_eq!(version.to_str().unwrap(), super::CORE_VERSION);
     }
 
     #[test]
     fn the_abi_accepts_null_as_an_empty_observation() {
-        // SAFETY: null is an accepted argument per the ABI contract.
         let ptr = unsafe { super::ffi::omni_state_report(std::ptr::null()) };
         assert!(!ptr.is_null());
-        // SAFETY: the pointer was produced by omni_state_report.
         let report = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .unwrap()
             .to_string();
-        // SAFETY: releasing exactly once, as the contract requires.
         unsafe { super::ffi::omni_string_free(ptr) };
         assert!(is_structurally_valid(&report));
     }
@@ -19706,22 +16643,18 @@ Viewbinding   = false
     #[test]
     fn the_abi_round_trips_an_observation() {
         let input = std::ffi::CString::new("minSdk=28;targetSdk=36").unwrap();
-        // SAFETY: a valid NUL-terminated string is passed.
         let ptr = unsafe { super::ffi::omni_state_report(input.as_ptr()) };
         assert!(!ptr.is_null());
-        // SAFETY: the pointer was produced by omni_state_report.
         let report = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .unwrap()
             .to_string();
-        // SAFETY: releasing exactly once.
         unsafe { super::ffi::omni_string_free(ptr) };
         assert!(report.contains("\"state\":\"MATCH\""));
     }
 
     #[test]
     fn freeing_null_is_a_no_op() {
-        // SAFETY: null is explicitly accepted.
         unsafe { super::ffi::omni_string_free(std::ptr::null_mut()) };
     }
 }

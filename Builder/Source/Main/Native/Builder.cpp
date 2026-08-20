@@ -1,12 +1,3 @@
-// Omni_Builder — JNI bridge, implementation
-//
-// See Builder.hpp for the module contract.
-//
-// Every function here does exactly three things: convert an argument, call the
-// Core, convert the result. There is no fallback path that manufactures a
-// plausible answer when the Core fails; a failure becomes a Java exception with
-// a specific message (directive sections 1 and 34).
-
 #include "Builder.hpp"
 
 #include <android/log.h>
@@ -21,40 +12,23 @@ constexpr const char *kIllegalState = "java/lang/IllegalStateException";
 constexpr const char *kIllegalArgument = "java/lang/IllegalArgumentException";
 constexpr const char *kOutOfMemory = "java/lang/OutOfMemoryError";
 
-/// Throws a Java exception if one is not already pending.
-///
-/// The message names the subsystem and what went wrong, and never contains any
-/// part of the payload that was being carried (directive section 57).
 void ThrowJava(JNIEnv *env, const char *klass, const char *message) {
   if (env->ExceptionCheck() == JNI_TRUE) {
-    return;  // A pending exception is more specific than anything added here.
+    return;
   }
   jclass clazz = env->FindClass(klass);
   if (clazz == nullptr) {
-    // FindClass failed and has queued its own error. Nothing further is safe.
     return;
   }
   env->ThrowNew(clazz, message);
   env->DeleteLocalRef(clazz);
 }
 
-/// Converts a Java string to standard UTF-8.
-///
-/// `GetStringUTFChars` must not be used here. It yields *modified* UTF-8, which
-/// encodes a supplementary character as a surrogate pair (CESU-8) and U+0000 as
-/// two bytes. Rust requires standard UTF-8 and rejects both, so a project path
-/// or a version string containing an emoji would have been refused by the Core
-/// with a vague error. Converting from UTF-16 here fixes that at the boundary
-/// where the encoding is actually known.
-///
-/// Returns false and throws a specific Java exception when the string cannot be
-/// represented: an unpaired surrogate, or an embedded NUL that a C string
-/// cannot carry without silently truncating the value.
 bool JavaStringToUtf8(JNIEnv *env, jstring value, std::string *out) {
   const jsize length = env->GetStringLength(value);
   const jchar *units = env->GetStringChars(value, nullptr);
   if (units == nullptr) {
-    return false;  // GetStringChars has queued an OutOfMemoryError.
+    return false;
   }
 
   out->clear();
@@ -112,9 +86,6 @@ bool JavaStringToUtf8(JNIEnv *env, jstring value, std::string *out) {
   return ok;
 }
 
-/// Calls the Core and converts the JSON report into a Java string.
-///
-/// `observed` may be null, which the Core reads as "nothing observed".
 jstring CallCoreReport(JNIEnv *env, const char *observed) {
   char *report = omni_state_report(observed);
   if (report == nullptr) {
@@ -125,7 +96,6 @@ jstring CallCoreReport(JNIEnv *env, const char *observed) {
   }
 
   jstring result = env->NewStringUTF(report);
-  // Released on every path, including the one where NewStringUTF failed.
   omni_string_free(report);
 
   if (result == nullptr) {
@@ -136,15 +106,11 @@ jstring CallCoreReport(JNIEnv *env, const char *observed) {
   return result;
 }
 
-}  // namespace
+}
 
 extern "C" {
 
-/// Verifies that this bridge and the linked Core agree on the ABI.
-///
-/// Returning JNI_ERR makes System.loadLibrary throw, which is the correct
-/// outcome: a bridge that does not understand its Core must not run.
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * ) {
   JNIEnv *env = nullptr;
   if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK) {
     __android_log_print(ANDROID_LOG_ERROR, kLogTag,
@@ -167,15 +133,13 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * /*reserved*/) {
   return JNI_VERSION_1_6;
 }
 
-/// com.omni.builder.Builder.nativeAbiVersion
 JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeAbiVersion(
-    JNIEnv * /*env*/, jobject /*self*/) {
+    JNIEnv * , jobject ) {
   return static_cast<jint>(omni_abi_version());
 }
 
-/// com.omni.builder.Builder.nativeCoreVersion
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCoreVersion(
-    JNIEnv *env, jobject /*self*/) {
+    JNIEnv *env, jobject ) {
   const char *version = omni_core_version();
   if (version == nullptr) {
     ThrowJava(env, kIllegalState, "Omni Core reported no version.");
@@ -188,24 +152,18 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCoreVersion(
   return result;
 }
 
-/// com.omni.builder.Builder.nativeStateReport
-///
-/// `observed_environment` may be null. The Core bounds and validates the
-/// contents; this bridge does not pre-filter them, so that every rejection is
-/// reported by the Core as a diagnostic rather than silently dropped here
-/// (directive section 44).
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(
-    JNIEnv *env, jobject /*self*/, jstring observed_environment) {
+    JNIEnv *env, jobject , jstring observed_environment) {
   if (observed_environment == nullptr) {
     return CallCoreReport(env, nullptr);
   }
 
   std::string observed;
   if (!JavaStringToUtf8(env, observed_environment, &observed)) {
-    return nullptr;  // A specific exception is already pending.
+    return nullptr;
   }
 
   return CallCoreReport(env, observed.c_str());
 }
 
-}  // extern "C"
+}

@@ -31,110 +31,40 @@ import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
 
-// ---------------------------------------------------------------------------
-// Logging (directive sections 33, 34, 56 and 57)
-// ---------------------------------------------------------------------------
-
-/** Severity of a session log entry. */
 enum class LogLevel {
-    /** Fine-grained detail. */
     TRACE,
 
-    /** Something happened that is worth a record. */
     INFO,
 
-    /** Something is suspicious but the application continues. */
     WARN,
 
-    /** Something failed. */
     ERROR,
 }
 
-/**
- * Where a log file could be written.
- *
- * The application always keeps a copy it controls. Publishing to shared storage
- * can fail for reasons the application does not govern - a denied permission, a
- * provider that refuses - and when it does, the reason is recorded rather than
- * swallowed.
- */
 sealed interface LogDestination {
-    /** The file reached shared storage. */
     data class Published(val location: String) : LogDestination
 
-    /**
-     * The private copy is written and publishing is still running.
-     *
-     * Measured on a Galaxy S23 running Android 16, publishing takes 11 to 18 ms
-     * while the private write is sub-millisecond. Directive section 36 does not
-     * allow spending that on the main thread, so the two are split and this
-     * state is what the caller sees in between.
-     */
     data class Pending(val location: String) : LogDestination
 
-    /** Only the private copy exists. */
     data class PrivateOnly(val location: String, val reason: String) : LogDestination
 }
 
-/**
- * One place a copy of a log was written, and how that went.
- *
- * Two attempts to publish the log went wrong in a row, and both stayed invisible
- * for a whole phase because a failure was recorded only in the log that had just
- * failed to be published. Every attempt is now reported individually, with the
- * exception's type as well as its message: an IOException's message is often
- * null, and "publishing failed: null" says nothing at all.
- */
 data class LogCopy(
-    /** Short name of the place, for the screen. */
     val label: String,
-    /** Where it went, or where it would have gone. */
     val location: String,
-    /** Null when it worked; otherwise what went wrong. */
     val error: String?,
 ) {
-    /** Whether the copy is there. */
     val succeeded: Boolean get() = error == null
 }
 
-/**
- * The application's log.
- *
- * ## Contract (directive section 2)
- *
- * * **Purpose** — record what the application did and why it stopped, in a place
- *   the person using it can actually reach.
- * * **Outputs** — `Documents/Omni_Builder/Session_Log.txt` and
- *   `Documents/Omni_Builder/Crash_Log.txt`, plus a private copy of each.
- * * **Security** — the log carries no credential, no key and no file content
- *   from a user's project (directive sections 25 and 57). It records what
- *   happened, not what was processed.
- * * **Failure modes** — writing the private copy is the operation that must not
- *   fail; publishing to shared storage may, and the reason becomes a log entry
- *   of its own. A failure inside the logger never propagates to the caller,
- *   because a broken logger must not be the thing that breaks the application.
- * * **Resource bounds** — each file is capped, and the oldest half is dropped
- *   when the cap is reached (directive section 60).
- * * **Status** — FOUNDATION.
- */
 object OmniLog {
 
-    /** Directory created under the shared Documents folder. */
     const val DIRECTORY_NAME: String = "Omni_Builder"
 
-    /** File holding this run's events. */
     const val SESSION_FILE: String = "Session_Log.txt"
 
-    /** File holding every crash the application has recorded. */
     const val CRASH_FILE: String = "Crash_Log.txt"
 
-    /**
-     * Largest a log file may become, in bytes.
-     *
-     * A log that grows without bound is a resource-exhaustion bug wearing a
-     * useful disguise (directive section 60). On overflow the newest half is
-     * kept: the entries near a failure are the ones worth having.
-     */
     const val MAX_BYTES: Int = 256 * 1024
 
     private const val TAG = "OmniBuilder"
@@ -142,13 +72,6 @@ object OmniLog {
     private val lock = Any()
     private val session = StringBuilder(8 * 1024)
 
-    /**
-     * Carries publishing off the calling thread.
-     *
-     * One thread, so writes stay ordered and two flushes can never interleave
-     * inside the same file. A daemon thread, so it can never hold the process
-     * open (directive section 36).
-     */
     private val publisher = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "omni-log-publisher").apply { isDaemon = true }
     }
@@ -159,13 +82,6 @@ object OmniLog {
     @Volatile
     private var copies: List<LogCopy> = emptyList()
 
-    /**
-     * Notified after each publish attempt, on the publisher thread.
-     *
-     * A single listener rather than a list: exactly one screen shows this, and a
-     * registry of listeners would be a way to leak an activity. It is cleared in
-     * onDestroy for the same reason.
-     */
     @Volatile
     private var publishListener: ((LogDestination) -> Unit)? = null
 
@@ -178,12 +94,6 @@ object OmniLog {
     private fun timestamp(): String =
         SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
 
-    /**
-     * Binds the log to an application context and installs the crash handler.
-     *
-     * Called from [BuilderApplication] rather than from the activity, so a crash
-     * during activity creation is still recorded.
-     */
     fun install(application: Application) {
         context = application.applicationContext
         installedAt = timestamp()
@@ -193,8 +103,6 @@ object OmniLog {
             try {
                 recordCrash(thread, error)
             } catch (secondary: Throwable) {
-                // The crash handler must never become the crash. Logcat is the
-                // last resort and is always available.
                 Log.e(TAG, "The crash could not be written to the log.", secondary)
             }
             if (previous != null) {
@@ -208,7 +116,6 @@ object OmniLog {
         event(LogLevel.INFO, "session", describeEnvironment(application))
     }
 
-    /** Records one event. Never throws. */
     fun event(level: LogLevel, tag: String, message: String) {
         val line = "${timestamp()}  ${level.name.padEnd(5)}  ${tag.padEnd(12)}  $message"
         synchronized(lock) { session.append(line).append('\n') }
@@ -219,21 +126,10 @@ object OmniLog {
         }
     }
 
-    /**
-     * Writes this run's events to storage.
-     *
-     * Safe to call repeatedly; each call rewrites the session file with
-     * everything recorded so far.
-     */
     fun flushSession(): LogDestination {
         val started = System.nanoTime()
         val destination = write(SESSION_FILE, sessionDocument(), append = false)
 
-        // Writing the log is I/O on whichever thread asked for it, and on a
-        // phone that is usually the main thread. The cost is recorded rather
-        // than assumed (directive section 38): if it ever stops being a few
-        // milliseconds, this belongs on a background thread and the measurement
-        // in the log is what will say so.
         val elapsedMilliseconds = (System.nanoTime() - started) / 1_000_000
         event(
             LogLevel.TRACE,
@@ -244,13 +140,6 @@ object OmniLog {
         return destination
     }
 
-    /**
-     * Appends a crash record and flushes the session alongside it.
-     *
-     * The record is deliberately self-contained: the events leading up to the
-     * failure are written into the crash file too, so one file is enough to
-     * understand what happened.
-     */
     fun recordCrash(thread: Thread, error: Throwable) {
         event(LogLevel.ERROR, "crash", "${error.javaClass.name}: ${error.message}")
 
@@ -279,7 +168,6 @@ object OmniLog {
         append(synchronized(lock) { session.toString() })
     }
 
-    /** The most recent crash record, if there is one. */
     fun lastCrash(): String? {
         val file = privateFile(CRASH_FILE) ?: return null
         if (!file.isFile || file.length() == 0L) {
@@ -292,7 +180,6 @@ object OmniLog {
         }.getOrNull()
     }
 
-    /** Human-readable description of where the logs went. */
     fun describeDestination(destination: LogDestination): String = when (destination) {
         is LogDestination.Published -> destination.location
         is LogDestination.Pending -> "${destination.location} (publishing to Documents)"
@@ -300,13 +187,10 @@ object OmniLog {
             "${destination.location} (shared storage unavailable: ${destination.reason})"
     }
 
-    /** The outcome of the most recent publish, if one has finished. */
     fun lastPublishOutcome(): LogDestination? = lastPublished
 
-    /** Every place the log was written on the most recent flush, and how it went. */
     fun lastCopies(): List<LogCopy> = copies
 
-    /** Replaces the publish listener. Passing null removes it. */
     fun setPublishListener(listener: ((LogDestination) -> Unit)?) {
         publishListener = listener
         lastPublished?.let { outcome -> listener?.invoke(outcome) }
@@ -327,24 +211,12 @@ object OmniLog {
 
     private fun privateFile(name: String): File? = context?.let { File(it.filesDir, name) }
 
-    /** Outcome of writing the copy the application controls. */
     private sealed interface PrivateWrite {
-        /** The private copy is on disk at this path. */
         data class Ok(val path: String) : PrivateWrite
 
-        /** It is not, and this is what the caller should report. */
         data class Failed(val destination: LogDestination) : PrivateWrite
     }
 
-    /**
-     * Writes the private copy now and publishes in the background.
-     *
-     * The split is deliberate. The private copy is the one that must survive a
-     * process being killed, so it is written on the calling thread where its
-     * completion is guaranteed; it costs well under a millisecond. Publishing to
-     * shared storage costs an order of magnitude more and nothing depends on it
-     * having finished, so it goes to the publisher thread.
-     */
     private fun write(name: String, text: String, append: Boolean): LogDestination =
         when (val written = writePrivate(name, text, append)) {
             is PrivateWrite.Failed -> written.destination
@@ -366,12 +238,6 @@ object OmniLog {
             }
         }
 
-    /**
-     * Writes the private copy and publishes before returning.
-     *
-     * Used by the crash handler, where there is no later moment: the process is
-     * about to end, so a background publish would simply not happen.
-     */
     private fun writeBlocking(name: String, text: String, append: Boolean): LogDestination =
         when (val written = writePrivate(name, text, append)) {
             is PrivateWrite.Failed -> written.destination
@@ -381,13 +247,6 @@ object OmniLog {
             }
         }
 
-    /**
-     * Writes the copy the application controls.
-     *
-     * Reports failure as a value rather than throwing: every caller is on a path
-     * where the right response is to record what went wrong and carry on. A
-     * logger that throws is a logger that takes the application down with it.
-     */
     private fun writePrivate(name: String, text: String, append: Boolean): PrivateWrite {
         val target = privateFile(name)
             ?: return PrivateWrite.Failed(
@@ -406,13 +265,6 @@ object OmniLog {
         }
     }
 
-    /**
-     * Drops the oldest half once the cap is reached.
-     *
-     * A log that grows without bound is a resource-exhaustion bug wearing a
-     * useful disguise (directive section 60). The newest half is kept: the
-     * entries near a failure are the ones worth having.
-     */
     private fun trim(file: File) {
         if (file.length() <= MAX_BYTES) {
             return
@@ -424,7 +276,6 @@ object OmniLog {
         }
     }
 
-    /** Reads the private copy back and pushes it to shared storage. */
     private fun publishNow(name: String, privatePath: String): LogDestination {
         val target = privateFile(name)
             ?: return LogDestination.PrivateOnly(privatePath, "no application context")
@@ -442,8 +293,6 @@ object OmniLog {
         )
         copies = attempts
 
-        // Report the best place the file actually reached. The order is by how
-        // easily a person can get at it, not by how clever the mechanism is.
         val shared = attempts.last()
         if (shared.succeeded) {
             return LogDestination.Published(shared.location)
@@ -458,14 +307,6 @@ object OmniLog {
         )
     }
 
-    /**
-     * Writes into the application's own directory on shared storage.
-     *
-     * This is the copy that cannot fail for a permission reason: every app may
-     * write under `Android/data/<package>/files` without holding anything, on
-     * every version this application runs on. A file manager reaches it, which
-     * is what matters when the point of the file is to be sent to someone.
-     */
     private fun publishToApplicationExternal(name: String, bytes: ByteArray): LogCopy {
         val label = "Shared storage"
         val context = context ?: return LogCopy(label, "(not started)", "no application context")
@@ -495,7 +336,6 @@ object OmniLog {
         }
     }
 
-    /** Writes into the shared Documents folder, where it is easiest to find. */
     private fun publishToSharedDocuments(name: String, bytes: ByteArray): LogCopy {
         val label = "Documents"
         val context = context ?: return LogCopy(label, "(not started)", "no application context")
@@ -513,46 +353,11 @@ object OmniLog {
         }
     }
 
-    /**
-     * Describes a failure in a way that is worth reading.
-     *
-     * An IOException's message is frequently null, and a report that says
-     * "failed: null" is how the last two publishing bugs stayed invisible.
-     */
     private fun Exception.describe(): String {
         val detail = message?.takeIf { it.isNotBlank() }
         return if (detail == null) javaClass.simpleName else "${javaClass.simpleName}: $detail"
     }
 
-    /**
-     * Writes into shared Documents through MediaStore.
-     *
-     * ## Why this is written the way it is
-     *
-     * Two earlier attempts failed on a Galaxy S23 running Android 16, and both
-     * failed the same way:
-     *
-     *     SQLiteConstraintException: UNIQUE constraint failed: files._data
-     *
-     * `_data` is the absolute path column. That error means a row already holds
-     * `/storage/emulated/0/Documents/Omni_Builder/<name>`, and the insert is
-     * refused because two rows may not claim one path.
-     *
-     * The first attempt deleted by `DISPLAY_NAME` and `RELATIVE_PATH` and then
-     * inserted; the delete matched nothing. The second looked the row up by the
-     * same two columns and wrote into it; the lookup found nothing either. Both
-     * searched by the columns a person reads and were beaten by the column the
-     * constraint is actually on - and a row can be invisible to that search for
-     * reasons that have nothing to do with its name: it can be pending from a
-     * write that never finished, or trashed, and both are hidden from an
-     * ordinary query while still holding `_data`.
-     *
-     * So this searches by `_data` first, includes pending and trashed rows,
-     * clears those flags before writing, and if the insert is still refused,
-     * deletes the row holding that path and inserts again. Every step that can
-     * fail says which step it was, because the two previous fixes each removed
-     * one cause and left the message unable to distinguish the rest.
-     */
     private fun publishThroughMediaStore(context: Context, name: String, bytes: ByteArray) {
         val resolver = context.contentResolver
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
@@ -560,8 +365,6 @@ object OmniLog {
         val absolutePath = expectedAbsolutePath(name)
         val tried = StringBuilder()
 
-        // 1. The row that holds the path the constraint is on, whatever it is
-        //    called and whether or not it is pending or trashed.
         findByData(resolver, collection, absolutePath)?.let { existing ->
             clearPendingAndTrashed(resolver, existing)
             writeTruncating(resolver, existing, bytes)
@@ -569,8 +372,6 @@ object OmniLog {
         }
         tried.append("no row holds $absolutePath")
 
-        // 2. The row with this name in this folder, in case the provider stores
-        //    a path that is spelled differently from the one built above.
         findByName(resolver, collection, relativePath, name)?.let { existing ->
             clearPendingAndTrashed(resolver, existing)
             writeTruncating(resolver, existing, bytes)
@@ -578,7 +379,6 @@ object OmniLog {
         }
         tried.append("; no row named $name under $relativePath")
 
-        // 3. Nothing is there, so make it.
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
@@ -590,8 +390,6 @@ object OmniLog {
         } catch (refused: Exception) {
             tried.append("; insert refused: ${refused.describe()}")
 
-            // 4. A row holds the path and none of the searches above reached it.
-            //    Remove it by the one column that is certain to identify it.
             val removed = try {
                 resolver.delete(
                     collection,
@@ -617,7 +415,6 @@ object OmniLog {
         writeTruncating(resolver, created, bytes)
     }
 
-    /** The absolute path MediaStore will store for this file. */
     @Suppress("DEPRECATION")
     private fun expectedAbsolutePath(name: String): String {
         val documents =
@@ -625,17 +422,9 @@ object OmniLog {
         return File(File(documents, DIRECTORY_NAME), name).absolutePath
     }
 
-    /** The column the UNIQUE constraint is on. Deprecated to write, fine to read. */
     @Suppress("DEPRECATION")
     private fun dataColumn(): String = MediaStore.MediaColumns.DATA
 
-    /**
-     * Runs a query that also returns pending and trashed rows.
-     *
-     * Both are hidden from an ordinary query, and both still occupy `_data`.
-     * A row hidden this way is exactly the row that makes an insert fail while
-     * a search says the file is not there.
-     */
     private fun queryIncludingHidden(
         resolver: android.content.ContentResolver,
         collection: Uri,
@@ -662,7 +451,6 @@ object OmniLog {
         }
     }.getOrNull()
 
-    /** Finds the row holding an absolute path, which is what the constraint is on. */
     private fun findByData(
         resolver: android.content.ContentResolver,
         collection: Uri,
@@ -674,12 +462,6 @@ object OmniLog {
         arrayOf(absolutePath),
     )
 
-    /**
-     * Finds an entry by name, tolerating how the provider spells its path.
-     *
-     * `RELATIVE_PATH` is stored with a trailing slash on some devices and
-     * without on others, so this matches a prefix rather than the whole value.
-     */
     private fun findByName(
         resolver: android.content.ContentResolver,
         collection: Uri,
@@ -693,13 +475,6 @@ object OmniLog {
         arrayOf(name, "$relativePath%"),
     )
 
-    /**
-     * Makes a row visible and writable again.
-     *
-     * A row left pending by a write that did not finish stays hidden for seven
-     * days and keeps its path the whole time. Clearing the flag is what turns
-     * the row found above into one that can actually be opened.
-     */
     private fun clearPendingAndTrashed(
         resolver: android.content.ContentResolver,
         uri: Uri,
@@ -710,19 +485,9 @@ object OmniLog {
                 put(MediaStore.MediaColumns.IS_TRASHED, 0)
             }
         }
-        // Best effort: a row that is neither pending nor trashed rejects this on
-        // some providers, and that is not a reason to fail the write.
         runCatching { resolver.update(uri, values, null, null) }
     }
 
-    /**
-     * Writes over an entry, shortening it to what is written.
-     *
-     * "rwt" is the mode that truncates; "wt" did not on the device this was
-     * measured on, and truncating through a raw descriptor closed it twice.
-     * `AutoCloseOutputStream` owns the descriptor and closes it exactly once,
-     * which is the whole reason that class exists.
-     */
     private fun writeTruncating(
         resolver: android.content.ContentResolver,
         uri: Uri,
@@ -736,9 +501,6 @@ object OmniLog {
             stream.flush()
         }
 
-        // The size is read back, but a zero or absent size means "not indexed
-        // yet" rather than "wrong": treating it as a failure once threw away a
-        // write that had in fact succeeded.
         val stored = runCatching {
             resolver.query(uri, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)
                 ?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else -1L }
@@ -750,10 +512,6 @@ object OmniLog {
         }
     }
 
-    /**
-     * Publishes on Android 9, where shared storage is still a filesystem path
-     * and writing to it requires a permission the user grants at runtime.
-     */
     @Suppress("DEPRECATION")
     private fun publishThroughLegacyStorage(context: Context, name: String, bytes: ByteArray) {
         if (context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
@@ -775,12 +533,6 @@ object OmniLog {
     }
 }
 
-/**
- * Application entry point.
- *
- * It exists for one reason: the crash handler has to be installed before any
- * activity is created, or the first thing that goes wrong goes unrecorded.
- */
 class BuilderApplication : Application() {
     override fun onCreate() {
         super.onCreate()
@@ -788,51 +540,17 @@ class BuilderApplication : Application() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bridge to the Omni Core
-// ---------------------------------------------------------------------------
-
-/**
- * Bridge to the Omni Core.
- *
- * ## Contract (directive section 2)
- *
- * * **Purpose** — carry calls to the native Core and nothing else.
- * * **Non-responsibilities** — interpreting, caching or embellishing what the
- *   Core returns. Directive section 43 requires the flow to be
- *   `Core State -> View Model -> UI`; this object is the first arrow only.
- * * **Failure modes** — [load] reports why the library could not be loaded
- *   instead of leaving the caller to guess.
- * * **Status** — FOUNDATION.
- *
- * The external functions are instance methods of this object, which is what the
- * `Java_com_omni_builder_Builder_*` symbols in `Builder.cpp` are named for.
- */
 object Builder {
 
-    /** Outcome of loading the native library. */
     sealed interface LoadState {
-        /** The library loaded and its ABI matched. */
         data object Loaded : LoadState
 
-        /**
-         * The library did not load.
-         *
-         * @property reason what went wrong, in a form that can be shown to a user.
-         */
         data class Failed(val reason: String) : LoadState
     }
 
     @Volatile
     private var loadState: LoadState? = null
 
-    /**
-     * Loads `libomni_builder.so` once, and remembers the outcome.
-     *
-     * A failure here is never swallowed. The most likely causes are an ABI
-     * mismatch, which `JNI_OnLoad` refuses deliberately, and a build in which
-     * the Core was not linked in.
-     */
     @Synchronized
     fun load(): LoadState {
         loadState?.let { return it }
@@ -852,28 +570,12 @@ object Builder {
         return state
     }
 
-    /** ABI version reported by the linked Core. */
     external fun nativeAbiVersion(): Int
 
-    /** Version string of the linked Core. */
     external fun nativeCoreVersion(): String
 
-    /**
-     * Asks the Core for its full state as a JSON document.
-     *
-     * @param observedEnvironment `key=value` pairs separated by `;`, or `null`.
-     *   The Core bounds and validates them and reports anything it rejects as a
-     *   diagnostic, so nothing is filtered here.
-     */
     external fun nativeStateReport(observedEnvironment: String?): String
 
-    /**
-     * Everything about the toolchain lock this device can honestly observe.
-     *
-     * Gradle, the JDK, the NDK and the compilers run on a build host, not on the
-     * device, so they are deliberately absent: the Core reports them as
-     * `NOT_OBSERVABLE` rather than guessing (directive section 15).
-     */
     fun observedEnvironment(context: Context): String {
         val info = context.applicationInfo
         return buildString {
@@ -884,120 +586,61 @@ object Builder {
     }
 }
 
-// ---------------------------------------------------------------------------
-// View model (directive section 43: Core State -> View Model -> UI)
-// ---------------------------------------------------------------------------
-
-/** A single line of the toolchain verification table. */
 data class ToolchainRow(
-    /** Human-facing component name. */
     val displayName: String,
-    /** The version the toolchain lock pins. */
     val pinned: String,
-    /** What the device reported, if anything. */
     val observed: String?,
-    /** `MATCH`, `MISMATCH`, `MISSING` or `NOT_OBSERVABLE`. */
     val state: String,
-    /** Whether a checksum has been verified for this component. */
     val checksumPinned: Boolean,
 )
 
-/** A single line of the plugin table. */
 data class PluginRow(
-    /** Human-facing plugin name. */
     val displayName: String,
-    /** Maturity, verbatim from the Core. */
     val status: String,
-    /** Roadmap phase in which this plugin becomes real. */
     val roadmapPhase: String,
 )
 
-/** One phase of the roadmap in directive section 52. */
 data class PhaseRow(
-    /** Its number in the roadmap. */
     val number: Int,
-    /** Its name, as the Core spells it. */
     val name: String,
-    /** `DELIVERED`, `CURRENT` or `PLANNED`, verbatim from the Core. */
     val state: String,
-    /** What landed, or what is meant to land. */
     val delivers: String,
 )
 
-/** One subsystem of the Core, with what it still lacks. */
 data class SubsystemRow(
-    /** Human-facing name. */
     val name: String,
-    /** Maturity, verbatim from the Core. */
     val status: String,
-    /** Section of the directive that specifies it. */
     val directiveSection: Int,
-    /** One sentence on what it does today. */
     val summary: String,
-    /** What the specification asks for that is not built. */
     val missing: List<String>,
 )
 
-/** A single diagnostic, as the Core emitted it. */
 data class DiagnosticRow(
-    /** Stable diagnostic code. */
     val code: String,
-    /** Severity name. */
     val severity: String,
-    /** One-sentence statement of the problem. */
     val message: String,
-    /** Actionable remedy, when the Core supplied one. */
     val suggestion: String?,
 )
 
-/**
- * The Core's state, reshaped for display.
- *
- * Every field here comes from the Core's report. The user interface adds no
- * field of its own, so it cannot show something the Core did not say.
- */
 data class CoreState(
-    /** Core version. */
     val version: String,
-    /** Core maturity. */
     val status: String,
-    /** Roadmap phase this build implements. */
     val phase: String,
-    /** Every phase of the roadmap, and where this build is on it. */
     val roadmap: List<PhaseRow>,
-    /** How many phases have had their work land. */
     val roadmapDelivered: Int,
-    /** C ABI version in use. */
     val abiVersion: Int,
-    /** Whether Omni_Builder builds itself. Always false for now. */
     val selfHosted: Boolean,
-    /** The Core's own explanation of the self-hosting state. */
     val selfHostingNote: String,
-    /** Tools this build still borrows (directive section 15). */
     val bootstrapDependencies: List<String>,
-    /** The Core's own subsystems and their maturity. */
     val subsystems: List<SubsystemRow>,
-    /** How many subsystems have reached PRODUCTION. */
     val subsystemsProduction: Int,
-    /** Toolchain verification table. */
     val toolchain: List<ToolchainRow>,
-    /** Number of pinned components that were verified here. */
     val toolchainVerified: Int,
-    /** Plugin table. */
     val plugins: List<PluginRow>,
-    /** How many plugins are actually implemented. */
     val pluginsImplemented: Int,
-    /** Diagnostics the Core emitted while producing this report. */
     val diagnostics: List<DiagnosticRow>,
 ) {
     companion object {
-        /**
-         * Parses a Core report.
-         *
-         * `org.json` is part of Android, so this adds no dependency. Any missing
-         * field is a defect in the Core rather than something to paper over, so
-         * required fields are read with the strict accessors that throw.
-         */
         fun parse(document: String): CoreState {
             val root = JSONObject(document)
             val core = root.getJSONObject("core")
@@ -1070,34 +713,14 @@ data class CoreState(
     }
 }
 
-// ---------------------------------------------------------------------------
-// User interface
-// ---------------------------------------------------------------------------
-
-/**
- * Shows what Omni_Builder actually is right now.
- *
- * This screen deliberately offers no "Build" button. Directive section 1 forbids
- * a feature that only exists in the interface, and no plugin in this tree can
- * produce an artifact yet. The screen's job is to state the truth: what the Core
- * is, what the toolchain lock demands, what could be verified here, which
- * subsystems exist only as contracts, what the build still borrows, and where
- * the logs went.
- *
- * The view is built in code rather than from a layout resource because directive
- * section 46 defines no `res/layout` directory.
- */
 class BuilderActivity : Activity() {
 
     private companion object {
-        /** Identifies the storage permission request on Android 9. */
         const val STORAGE_PERMISSION_REQUEST = 1
     }
 
-    /** The line that says where the session log went, updated when it gets there. */
     private var logDestinationView: TextView? = null
 
-    /** The list of copies, refreshed when publishing finishes. */
     private var logCopiesView: LinearLayout? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -1133,12 +756,6 @@ class BuilderActivity : Activity() {
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity resumed.")
     }
 
-    /**
-     * Flushes the log when the activity stops being interactive.
-     *
-     * A mobile process can be terminated at any point after this (directive
-     * section 36), so this is the last reliable moment to persist the session.
-     */
     override fun onPause() {
         super.onPause()
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity paused.")
@@ -1146,7 +763,6 @@ class BuilderActivity : Activity() {
     }
 
     override fun onDestroy() {
-        // The listener holds this activity; leaving it registered would leak it.
         OmniLog.setPublishListener(null)
         logDestinationView = null
         logCopiesView = null
@@ -1155,13 +771,6 @@ class BuilderActivity : Activity() {
         super.onDestroy()
     }
 
-    /**
-     * Asks for the storage permission, but only where it is the sole way to
-     * write into shared Documents.
-     *
-     * On Android 10 and later MediaStore needs no permission, so none is asked
-     * for. The manifest caps the declaration at API 28 for the same reason.
-     */
     private fun requestLegacyStoragePermissionIfNeeded() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             return
@@ -1206,12 +815,6 @@ class BuilderActivity : Activity() {
         OmniLog.flushSession()
     }
 
-    /**
-     * Renders the failure honestly.
-     *
-     * There is no partial or cached view to fall back to: if the Core is not
-     * there, the application has nothing true to show.
-     */
     private fun renderLoadFailure(root: LinearLayout, reason: String) {
         root.addView(title(getString(R.string.omni_app_name)))
         root.addView(banner(getString(R.string.omni_core_unavailable), R.color.omni_error))
@@ -1221,9 +824,6 @@ class BuilderActivity : Activity() {
     private fun renderCoreState(root: LinearLayout) {
         val started = System.nanoTime()
         val state = try {
-            // Measured at roughly 0.1 ms per call on a desktop host for a 14 KB
-            // report. It is called once per screen creation, so it stays on the
-            // main thread; if that measurement ever changes, so must this.
             CoreState.parse(Builder.nativeStateReport(Builder.observedEnvironment(this)))
         } catch (error: RuntimeException) {
             val reason = "The Core produced a report this build cannot read: " +
@@ -1381,12 +981,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /**
-     * Shows where the logs went, and the last crash if there was one.
-     *
-     * The location is not assumed: it is whatever the logger reports after
-     * actually writing, so a screen that says "published" means published.
-     */
     private fun renderLogSection(root: LinearLayout) {
         section(root, R.string.omni_section_logs)
 
@@ -1406,11 +1000,6 @@ class BuilderActivity : Activity() {
 
         root.addView(body(getString(R.string.omni_log_explanation, OmniLog.DIRECTORY_NAME)))
 
-        // Publishing runs on its own thread, so the lines above start out saying
-        // "publishing" and would stay that way forever if nothing came back to
-        // correct them. Directive section 43 does not allow a screen to show a
-        // state the system has already left - and two publishing bugs stayed
-        // hidden for a phase each because the screen never said what happened.
         OmniLog.setPublishListener { outcome ->
             runOnUiThread {
                 logDestinationView?.apply {
@@ -1439,7 +1028,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /** Lists every place a copy was written, and says why any of them failed. */
     private fun renderCopies(holder: LinearLayout, copies: List<LogCopy>) {
         if (copies.isEmpty()) {
             holder.addView(body(getString(R.string.omni_log_not_written_yet)))
@@ -1461,8 +1049,6 @@ class BuilderActivity : Activity() {
             )
         }
     }
-
-    // --- view helpers ------------------------------------------------------
 
     private fun section(root: LinearLayout, titleRes: Int) {
         root.addView(divider())

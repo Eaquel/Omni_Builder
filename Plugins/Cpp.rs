@@ -1,81 +1,8 @@
-//! # C/C++ plugin
-//!
-//! Compiles C and C++ translation units into Android native libraries.
-//!
-//! ## Contract (directive section 2)
-//!
-//! * **Module** — `omni.plugin.cpp`
-//! * **Purpose** — Own the native front end and the path from preprocessed
-//!   source to a linked ELF shared object for each supported ABI.
-//! * **Inputs** — cpp.source, cpp.header, native.build.config
-//! * **Outputs** — native.object, native.library
-//! * **Capabilities** — FsRead, TempStorage, Cache, Native; everything else denied
-//! * **State** — stateless
-//! * **Determinism** — required for every artifact this plugin emits
-//! * **Status** — `PLANNED` (directive section 18)
-//! * **Roadmap** — PHASE 10 — C/C++
-//!
-//! ## Target pipeline (directive section 18)
-//!
-//! ```text
-//! Source
-//!   ↓
-//! Preprocessor
-//!   ↓
-//! Lexer
-//!   ↓
-//! Parser
-//!   ↓
-//! AST
-//!   ↓
-//! Semantic Analysis
-//!   ↓
-//! IR
-//!   ↓
-//! Optimization
-//!   ↓
-//! Code Generation
-//!   ↓
-//! Assembly
-//!   ↓
-//! Object
-//!   ↓
-//! Link
-//!   ↓
-//! ELF
-//!   ↓
-//! Android Native Library
-//! ```
-//!
-//! ## Implementation status
-//!
-//! None of the pipeline above is implemented. This file declares the contract
-//! so that the registry, the capability policy and the user interface can
-//! reason about the plugin honestly; [`Plugin::execute`] refuses to run and
-//! says why.
-//!
-//! Target ABIs, once implemented: armeabi-v7a, arm64-v8a, x86, x86_64.
-//!
-//! The bootstrap build uses Clang from the pinned NDK through CMake. That is
-//! a bootstrap dependency, not an implementation of this plugin.
-//!
-//! PROCESS_EXEC is not requested. Driving an external compiler would need
-//! that capability, an explicit policy and an audit trail (directive section
-//! 61).
-//!
-//! ## Acceptance criteria before the status may change
-//!
-//! Directive section 51 applies in full: specification, stable contract,
-//! real implementation, unit and integration and regression tests, fuzzing
-//! where input is untrusted, security review, determinism verification,
-//! measured performance, diagnostics, documentation and compatibility.
-
 use crate::caps::Capability;
 use crate::diag::Diagnostic;
 use crate::plugin::{unimplemented_diagnostic, Context, Contract, Outcome, Plugin, Version};
 use crate::Status;
 
-/// The declared contract for the C/C++ plugin.
 pub static CONTRACT: Contract = Contract {
     id: "omni.plugin.cpp",
     display_name: "C/C++",
@@ -101,13 +28,11 @@ pub static CONTRACT: Contract = Contract {
         "Providing a C or C++ standard library implementation.",
         "Deciding which ABIs a project targets; that comes from the project model.",
     ],
-    roadmap_phase: "PHASE 10 — C/C++",
+    roadmap_phase: "PHASE 15 — C/C++",
 };
 
-/// Zero-sized handle registered in [`crate::plugin::Registry`].
 pub struct CppPlugin;
 
-/// The single instance the registry holds.
 pub static PLUGIN: CppPlugin = CppPlugin;
 
 impl Plugin for CppPlugin {
@@ -115,11 +40,6 @@ impl Plugin for CppPlugin {
         &CONTRACT
     }
 
-    /// Refuses to run.
-    ///
-    /// Directive section 1 forbids a fabricated success. While the contract
-    /// status is [`Status::Planned`], the only correct behaviour is to return
-    /// the diagnostic that explains what is missing and when it is scheduled.
     fn execute(&self, _ctx: &mut Context<'_>) -> Result<Outcome, Diagnostic> {
         Err(unimplemented_diagnostic(&CONTRACT))
     }
