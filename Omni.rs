@@ -328,6 +328,40 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &["Only two components can be observed from a device."],
     },
     Subsystem {
+        name: "Big integers",
+        status: Status::Partial,
+        directive_section: 30,
+        summary: "Arbitrary-precision unsigned arithmetic: add, subtract, multiply, Knuth division and modular exponentiation, checked against arbitrary-precision reference values and against native arithmetic on twenty thousand random pairs.",
+        missing: &[
+            "Nothing here is constant-time. Modular exponentiation is square-and-multiply, so its timing depends on the exponent, and a party able to time a signing operation could learn about the private key from it.",
+            "No primality testing and no key generation: a key is read, never made.",
+            "Schoolbook multiplication only; no Karatsuba and no Montgomery form.",
+        ],
+    },
+    Subsystem {
+        name: "RSA signing",
+        status: Status::Partial,
+        directive_section: 25,
+        summary: "RFC 8017 RSASSA-PKCS1-v1_5 signing with SHA-256 and SHA-512, over PKCS#1 and PKCS#8 private keys read with the Core's own DER reader. Signatures are byte-identical to the ones OpenSSL produces from the same key.",
+        missing: &[
+            "Signing only. RSASSA-PSS is not implemented and neither is encryption.",
+            "No elliptic-curve arithmetic, so an EC key cannot be used.",
+            "An encrypted keystore cannot be opened: the key must arrive as an unencrypted PKCS#8 or PKCS#1 file, which is worse custody than a keystore and is the next thing to fix.",
+            "Not constant-time; see the big integer entry.",
+        ],
+    },
+    Subsystem {
+        name: "Package signer",
+        status: Status::Partial,
+        directive_section: 25,
+        summary: "Writes an APK Signature Scheme v2 block: signed data, signatures and public key, spliced ahead of the central directory with the end record repointed. apksigner verifies what this writes.",
+        missing: &[
+            "v2 only. No v1 JAR signature, no v3, no v3.1 and no rotation.",
+            "One signer per package.",
+            "No key custody: the caller supplies the key and the certificate.",
+        ],
+    },
+    Subsystem {
         name: "Binary XML writer",
         status: Status::Partial,
         directive_section: 22,
@@ -8668,6 +8702,23 @@ pub mod der {
         }
     }
 
+    pub fn encode_element(tag: u8, contents: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(contents.len() + 6);
+        out.push(tag);
+        let length = contents.len();
+        if length < 0x80 {
+            out.push(length as u8);
+        } else {
+            let bytes = length.to_be_bytes();
+            let first = bytes.iter().position(|byte| *byte != 0).unwrap_or(0);
+            let significant = &bytes[first..];
+            out.push(0x80 | significant.len() as u8);
+            out.extend_from_slice(significant);
+        }
+        out.extend_from_slice(contents);
+        out
+    }
+
     pub fn read_oid(element: &Element<'_>) -> Result<String, Diagnostic> {
         if element.tag != tag::OID {
             return Err(fail(
@@ -8868,6 +8919,23 @@ pub mod x509 {
     }
 
     impl Certificate {
+        pub fn public_key_info(data: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+            let mut outer = der::Reader::new(data, 0);
+            let certificate = outer.expect(tag::SEQUENCE)?;
+            let mut body = certificate.reader();
+            let tbs = body.expect(tag::SEQUENCE)?;
+
+            let mut fields = tbs.reader();
+            let _version = fields.take_if(0xa0);
+            let _serial = fields.expect(tag::INTEGER)?;
+            let _algorithm = fields.expect(tag::SEQUENCE)?;
+            let _issuer = fields.expect(tag::SEQUENCE)?;
+            let _validity = fields.expect(tag::SEQUENCE)?;
+            let _subject = fields.expect(tag::SEQUENCE)?;
+            let key_info = fields.expect(tag::SEQUENCE)?;
+            Ok(der::encode_element(key_info.tag, key_info.contents))
+        }
+
         pub fn parse(data: &[u8]) -> Result<Certificate, Diagnostic> {
             if data.len() > MAX_CERTIFICATE_BYTES {
                 return Err(Diagnostic::new(
@@ -9115,6 +9183,8 @@ pub mod signing {
     pub const MAGIC: &[u8; 16] = b"APK Sig Block 42";
 
     pub const V2_BLOCK_ID: u32 = 0x7109_871a;
+
+    pub const VERITY_PADDING_ID: u32 = 0x4272_6577;
 
     pub const V3_BLOCK_ID: u32 = 0xf053_68c0;
 
@@ -9614,6 +9684,132 @@ pub mod signing {
             w.end_array();
             w.end_object();
         }
+    }
+
+    fn prefixed(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(payload.len() + 4);
+        out.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    pub fn locate(data: &[u8]) -> Result<(u64, u64), Diagnostic> {
+        let mut at = data
+            .len()
+            .checked_sub(22)
+            .ok_or_else(|| fail("ES040", "The package is too small to hold an end record."))?;
+        loop {
+            if &data[at..at + 4] == b"PK\x05\x06" {
+                let central = u32::from_le_bytes([
+                    data[at + 16],
+                    data[at + 17],
+                    data[at + 18],
+                    data[at + 19],
+                ]);
+                return Ok((u64::from(central), at as u64));
+            }
+            if at == 0 {
+                return Err(fail("ES041", "The package has no end record."));
+            }
+            at -= 1;
+        }
+    }
+
+    pub fn sign_v2(
+        package: &[u8],
+        key: &crate::rsa::PrivateKey,
+        certificate: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let (central_directory_offset, end_record_offset) = locate(package)?;
+        let block_offset = central_directory_offset;
+
+        let (algorithm_id, digest) = match algorithm {
+            crate::rsa::DigestAlgorithm::Sha256 => (
+                0x0103u32,
+                content_digest_sha256(
+                    package,
+                    block_offset,
+                    central_directory_offset,
+                    end_record_offset,
+                )?
+                .as_bytes()
+                .to_vec(),
+            ),
+            crate::rsa::DigestAlgorithm::Sha512 => (
+                0x0104u32,
+                content_digest_sha512(
+                    package,
+                    block_offset,
+                    central_directory_offset,
+                    end_record_offset,
+                )?
+                .as_bytes()
+                .to_vec(),
+            ),
+        };
+
+        let mut one_digest = Vec::new();
+        one_digest.extend_from_slice(&algorithm_id.to_le_bytes());
+        one_digest.extend_from_slice(&prefixed(&digest));
+        let digests = prefixed(&prefixed(&one_digest));
+        let certificates = prefixed(&prefixed(certificate));
+        let attributes = prefixed(&[]);
+
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&digests);
+        signed_data.extend_from_slice(&certificates);
+        signed_data.extend_from_slice(&attributes);
+
+        let signature = crate::rsa::sign(key, algorithm, &signed_data)?;
+        let mut one_signature = Vec::new();
+        one_signature.extend_from_slice(&algorithm_id.to_le_bytes());
+        one_signature.extend_from_slice(&prefixed(&signature));
+        let signatures = prefixed(&prefixed(&one_signature));
+
+        let public_key = prefixed(&crate::x509::Certificate::public_key_info(certificate)?);
+
+        let mut signer = Vec::new();
+        signer.extend_from_slice(&prefixed(&signed_data));
+        signer.extend_from_slice(&signatures);
+        signer.extend_from_slice(&public_key);
+
+        let signers = prefixed(&prefixed(&signer));
+
+        let mut block = Vec::new();
+        let pair_length = 4u64 + signers.len() as u64;
+        block.extend_from_slice(&pair_length.to_le_bytes());
+        block.extend_from_slice(&V2_BLOCK_ID.to_le_bytes());
+        block.extend_from_slice(&signers);
+
+        let mut padding = 0usize;
+        while !(24 + block.len() + padding + 8 + 4).is_multiple_of(4096) {
+            padding += 1;
+        }
+        if padding > 0 {
+            let payload = padding.saturating_sub(12);
+            let pair = 4u64 + payload as u64;
+            block.extend_from_slice(&pair.to_le_bytes());
+            block.extend_from_slice(&VERITY_PADDING_ID.to_le_bytes());
+            block.extend_from_slice(&vec![0u8; payload]);
+        }
+
+        let size = (block.len() + 8 + 16) as u64;
+        let mut whole = Vec::with_capacity(block.len() + 32);
+        whole.extend_from_slice(&size.to_le_bytes());
+        whole.extend_from_slice(&block);
+        whole.extend_from_slice(&size.to_le_bytes());
+        whole.extend_from_slice(MAGIC);
+
+        let mut out = Vec::with_capacity(package.len() + whole.len());
+        out.extend_from_slice(&package[..block_offset as usize]);
+        out.extend_from_slice(&whole);
+        out.extend_from_slice(&package[block_offset as usize..]);
+
+        let moved = block_offset as usize + whole.len();
+        let end = end_record_offset as usize + whole.len();
+        out[end + 16..end + 20].copy_from_slice(&(moved as u32).to_le_bytes());
+        Ok(out)
     }
 
     pub fn examine(
@@ -10512,6 +10708,636 @@ pub mod dex {
             list.push(type_at(types, index, "interface")?);
         }
         Ok(list)
+    }
+}
+
+pub mod bignum {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+    use core::cmp::Ordering;
+
+    pub const MAX_BITS: usize = 16_384;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.bignum",
+            message,
+        )
+    }
+
+    #[derive(Clone, PartialEq, Eq, Debug, Default)]
+    pub struct Natural {
+        limbs: Vec<u32>,
+    }
+
+    impl Natural {
+        pub fn zero() -> Natural {
+            Natural { limbs: Vec::new() }
+        }
+
+        pub fn one() -> Natural {
+            Natural { limbs: vec![1] }
+        }
+
+        pub fn from_u32(value: u32) -> Natural {
+            if value == 0 {
+                Natural::zero()
+            } else {
+                Natural { limbs: vec![value] }
+            }
+        }
+
+        pub fn from_bytes_be(bytes: &[u8]) -> Natural {
+            let mut limbs = Vec::with_capacity(bytes.len().div_ceil(4));
+            let mut index = bytes.len();
+            while index > 0 {
+                let start = index.saturating_sub(4);
+                let mut limb = 0u32;
+                for byte in &bytes[start..index] {
+                    limb = (limb << 8) | u32::from(*byte);
+                }
+                limbs.push(limb);
+                index = start;
+            }
+            let mut value = Natural { limbs };
+            value.trim();
+            value
+        }
+
+        pub fn to_bytes_be(&self, width: usize) -> Result<Vec<u8>, Diagnostic> {
+            let needed = self.byte_len();
+            if needed > width {
+                return Err(fail("EN010", "A value does not fit the width asked for.")
+                    .with_context(format!("Needs: {needed} bytes"))
+                    .with_context(format!("Width: {width} bytes")));
+            }
+            let mut out = vec![0u8; width];
+            for (index, limb) in self.limbs.iter().enumerate() {
+                let bytes = limb.to_be_bytes();
+                for (offset, byte) in bytes.iter().rev().enumerate() {
+                    let position = index * 4 + offset;
+                    if position < width {
+                        out[width - 1 - position] = *byte;
+                    }
+                }
+            }
+            Ok(out)
+        }
+
+        pub fn is_zero(&self) -> bool {
+            self.limbs.is_empty()
+        }
+
+        pub fn bit_len(&self) -> usize {
+            match self.limbs.last() {
+                None => 0,
+                Some(top) => self.limbs.len() * 32 - top.leading_zeros() as usize,
+            }
+        }
+
+        pub fn byte_len(&self) -> usize {
+            self.bit_len().div_ceil(8)
+        }
+
+        pub fn bit(&self, index: usize) -> bool {
+            let limb = index / 32;
+            match self.limbs.get(limb) {
+                None => false,
+                Some(value) => (value >> (index % 32)) & 1 == 1,
+            }
+        }
+
+        fn trim(&mut self) {
+            while self.limbs.last() == Some(&0) {
+                self.limbs.pop();
+            }
+        }
+
+        pub fn compare(&self, other: &Natural) -> Ordering {
+            if self.limbs.len() != other.limbs.len() {
+                return self.limbs.len().cmp(&other.limbs.len());
+            }
+            for index in (0..self.limbs.len()).rev() {
+                match self.limbs[index].cmp(&other.limbs[index]) {
+                    Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+            Ordering::Equal
+        }
+
+        pub fn add(&self, other: &Natural) -> Natural {
+            let mut limbs = Vec::with_capacity(self.limbs.len().max(other.limbs.len()) + 1);
+            let mut carry = 0u64;
+            for index in 0..self.limbs.len().max(other.limbs.len()) {
+                let left = u64::from(*self.limbs.get(index).unwrap_or(&0));
+                let right = u64::from(*other.limbs.get(index).unwrap_or(&0));
+                let sum = left + right + carry;
+                limbs.push(sum as u32);
+                carry = sum >> 32;
+            }
+            if carry > 0 {
+                limbs.push(carry as u32);
+            }
+            let mut value = Natural { limbs };
+            value.trim();
+            value
+        }
+
+        pub fn sub(&self, other: &Natural) -> Result<Natural, Diagnostic> {
+            if self.compare(other) == Ordering::Less {
+                return Err(fail("EN011", "A subtraction would go below zero."));
+            }
+            let mut limbs = Vec::with_capacity(self.limbs.len());
+            let mut borrow = 0i64;
+            for index in 0..self.limbs.len() {
+                let left = i64::from(self.limbs[index]);
+                let right = i64::from(*other.limbs.get(index).unwrap_or(&0));
+                let mut difference = left - right - borrow;
+                if difference < 0 {
+                    difference += 1i64 << 32;
+                    borrow = 1;
+                } else {
+                    borrow = 0;
+                }
+                limbs.push(difference as u32);
+            }
+            let mut value = Natural { limbs };
+            value.trim();
+            Ok(value)
+        }
+
+        pub fn mul(&self, other: &Natural) -> Natural {
+            if self.is_zero() || other.is_zero() {
+                return Natural::zero();
+            }
+            let mut limbs = vec![0u32; self.limbs.len() + other.limbs.len()];
+            for (i, left) in self.limbs.iter().enumerate() {
+                let mut carry = 0u64;
+                for (j, right) in other.limbs.iter().enumerate() {
+                    let at = i + j;
+                    let product =
+                        u64::from(*left) * u64::from(*right) + u64::from(limbs[at]) + carry;
+                    limbs[at] = product as u32;
+                    carry = product >> 32;
+                }
+                let mut at = i + other.limbs.len();
+                while carry > 0 {
+                    let sum = u64::from(limbs[at]) + carry;
+                    limbs[at] = sum as u32;
+                    carry = sum >> 32;
+                    at += 1;
+                }
+            }
+            let mut value = Natural { limbs };
+            value.trim();
+            value
+        }
+
+        fn shl_bits(&self, shift: u32) -> Natural {
+            if shift == 0 {
+                return self.clone();
+            }
+            let mut limbs = Vec::with_capacity(self.limbs.len() + 1);
+            let mut carry = 0u32;
+            for limb in &self.limbs {
+                limbs.push((limb << shift) | carry);
+                carry = (*limb) >> (32 - shift);
+            }
+            if carry > 0 {
+                limbs.push(carry);
+            }
+            let mut value = Natural { limbs };
+            value.trim();
+            value
+        }
+
+        fn shr_bits(&self, shift: u32) -> Natural {
+            if shift == 0 {
+                return self.clone();
+            }
+            let mut limbs = vec![0u32; self.limbs.len()];
+            for index in (0..self.limbs.len()).rev() {
+                let high = if index + 1 < self.limbs.len() {
+                    self.limbs[index + 1] << (32 - shift)
+                } else {
+                    0
+                };
+                limbs[index] = (self.limbs[index] >> shift) | high;
+            }
+            let mut value = Natural { limbs };
+            value.trim();
+            value
+        }
+
+        pub fn divmod(&self, divisor: &Natural) -> Result<(Natural, Natural), Diagnostic> {
+            if divisor.is_zero() {
+                return Err(fail("EN012", "A division by zero was attempted."));
+            }
+            if self.compare(divisor) == Ordering::Less {
+                return Ok((Natural::zero(), self.clone()));
+            }
+            if divisor.limbs.len() == 1 {
+                let small = u64::from(divisor.limbs[0]);
+                let mut quotient = vec![0u32; self.limbs.len()];
+                let mut remainder = 0u64;
+                for index in (0..self.limbs.len()).rev() {
+                    let current = (remainder << 32) | u64::from(self.limbs[index]);
+                    quotient[index] = (current / small) as u32;
+                    remainder = current % small;
+                }
+                let mut q = Natural { limbs: quotient };
+                q.trim();
+                return Ok((q, Natural::from_u32(remainder as u32)));
+            }
+
+            let shift = divisor.limbs.last().unwrap().leading_zeros();
+            let v = divisor.shl_bits(shift);
+            let mut u = self.shl_bits(shift).limbs;
+            let n = v.limbs.len();
+            while u.len() < self.limbs.len() + 1 {
+                u.push(0);
+            }
+            u.push(0);
+            let m = u.len() - 1 - n;
+
+            let mut quotient = vec![0u32; m + 1];
+            let top_divisor = u64::from(v.limbs[n - 1]);
+            let next_divisor = u64::from(v.limbs[n - 2]);
+
+            for j in (0..=m).rev() {
+                let numerator = (u64::from(u[j + n]) << 32) | u64::from(u[j + n - 1]);
+                let mut estimate = numerator / top_divisor;
+                let mut rest = numerator % top_divisor;
+                while estimate > 0xffff_ffff
+                    || estimate * next_divisor > ((rest << 32) | u64::from(u[j + n - 2]))
+                {
+                    estimate -= 1;
+                    rest += top_divisor;
+                    if rest > 0xffff_ffff {
+                        break;
+                    }
+                }
+
+                let mut carry = 0u64;
+                let mut borrow = 0i64;
+                for i in 0..n {
+                    let product = estimate * u64::from(v.limbs[i]) + carry;
+                    carry = product >> 32;
+                    let difference =
+                        i64::from(u[i + j]) - i64::from((product & 0xffff_ffff) as u32) - borrow;
+                    u[i + j] = (difference as u64 & 0xffff_ffff) as u32;
+                    borrow = i64::from(difference < 0);
+                }
+                let difference = i64::from(u[j + n]) - carry as i64 - borrow;
+                u[j + n] = (difference as u64 & 0xffff_ffff) as u32;
+
+                if difference < 0 {
+                    estimate -= 1;
+                    let mut carry = 0u64;
+                    for i in 0..n {
+                        let sum = u64::from(u[i + j]) + u64::from(v.limbs[i]) + carry;
+                        u[i + j] = sum as u32;
+                        carry = sum >> 32;
+                    }
+                    u[j + n] = (u64::from(u[j + n]) + carry) as u32;
+                }
+                quotient[j] = estimate as u32;
+            }
+
+            let mut q = Natural { limbs: quotient };
+            q.trim();
+            let mut remainder = Natural {
+                limbs: u[..n].to_vec(),
+            };
+            remainder.trim();
+            Ok((q, remainder.shr_bits(shift)))
+        }
+
+        pub fn modulus(&self, modulus: &Natural) -> Result<Natural, Diagnostic> {
+            Ok(self.divmod(modulus)?.1)
+        }
+
+        pub fn mod_mul(&self, other: &Natural, modulus: &Natural) -> Result<Natural, Diagnostic> {
+            self.mul(other).modulus(modulus)
+        }
+
+        pub fn mod_pow(
+            &self,
+            exponent: &Natural,
+            modulus: &Natural,
+        ) -> Result<Natural, Diagnostic> {
+            if modulus.is_zero() {
+                return Err(fail("EN012", "A modular exponentiation needs a modulus."));
+            }
+            if modulus.bit_len() > MAX_BITS {
+                return Err(
+                    fail("EN013", "A modulus is larger than this build accepts.")
+                        .with_context(format!("Bits: {}", modulus.bit_len()))
+                        .with_context(format!("Limit: {MAX_BITS}")),
+                );
+            }
+            if modulus.compare(&Natural::one()) == Ordering::Equal {
+                return Ok(Natural::zero());
+            }
+
+            let base = self.modulus(modulus)?;
+            let mut result = Natural::one();
+            for index in (0..exponent.bit_len()).rev() {
+                result = result.mul(&result).modulus(modulus)?;
+                if exponent.bit(index) {
+                    result = result.mul(&base).modulus(modulus)?;
+                }
+            }
+            Ok(result)
+        }
+    }
+}
+
+pub mod rsa {
+    use crate::bignum::Natural;
+    use crate::der;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::{sha256, sha512};
+    use crate::FailureClass;
+    use core::cmp::Ordering;
+
+    pub const RSA_OID: &str = "1.2.840.113549.1.1.1";
+
+    pub const SHA256_PREFIX: &[u8] = &[
+        0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
+        0x05, 0x00, 0x04, 0x20,
+    ];
+
+    pub const SHA512_PREFIX: &[u8] = &[
+        0x30, 0x51, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x03,
+        0x05, 0x00, 0x04, 0x40,
+    ];
+
+    pub const MIN_MODULUS_BITS: usize = 1024;
+    pub const MAX_MODULUS_BITS: usize = 16_384;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::SecurityFailure,
+            "core.rsa",
+            message,
+        )
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum DigestAlgorithm {
+        Sha256,
+        Sha512,
+    }
+
+    impl DigestAlgorithm {
+        pub fn prefix(self) -> &'static [u8] {
+            match self {
+                DigestAlgorithm::Sha256 => SHA256_PREFIX,
+                DigestAlgorithm::Sha512 => SHA512_PREFIX,
+            }
+        }
+
+        pub fn digest(self, message: &[u8]) -> Vec<u8> {
+            match self {
+                DigestAlgorithm::Sha256 => sha256(message).as_bytes().to_vec(),
+                DigestAlgorithm::Sha512 => sha512(message).as_bytes().to_vec(),
+            }
+        }
+
+        pub fn name(self) -> &'static str {
+            match self {
+                DigestAlgorithm::Sha256 => "SHA-256",
+                DigestAlgorithm::Sha512 => "SHA-512",
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct PrivateKey {
+        modulus: Natural,
+        public_exponent: Natural,
+        private_exponent: Natural,
+        prime1: Natural,
+        prime2: Natural,
+        exponent1: Natural,
+        exponent2: Natural,
+        coefficient: Natural,
+    }
+
+    impl core::fmt::Debug for PrivateKey {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "rsa::PrivateKey({} bits)", self.bits())
+        }
+    }
+
+    impl PrivateKey {
+        pub fn bits(&self) -> usize {
+            self.modulus.bit_len()
+        }
+
+        pub fn modulus_bytes(&self) -> usize {
+            self.modulus.byte_len()
+        }
+
+        pub fn modulus(&self) -> &Natural {
+            &self.modulus
+        }
+
+        pub fn public_exponent(&self) -> &Natural {
+            &self.public_exponent
+        }
+    }
+
+    fn integer(reader: &mut der::Reader<'_>, what: &str) -> Result<Natural, Diagnostic> {
+        let element = reader.expect(der::tag::INTEGER).map_err(|error| {
+            fail("ER010", format!("A key is missing its {what}.")).with_context(error.message)
+        })?;
+        let bytes = der::read_integer_bytes(&element)?;
+        Ok(Natural::from_bytes_be(bytes))
+    }
+
+    pub fn parse_pkcs1(bytes: &[u8]) -> Result<PrivateKey, Diagnostic> {
+        let mut outer = der::Reader::new(bytes, 0);
+        let sequence = outer.expect(der::tag::SEQUENCE)?;
+        let mut fields = sequence.reader();
+
+        let version = integer(&mut fields, "version")?;
+        if version.compare(&Natural::zero()) != Ordering::Equal {
+            return Err(fail(
+                "ER011",
+                "A multi-prime RSA key is not supported by this build.",
+            ));
+        }
+
+        let key = PrivateKey {
+            modulus: integer(&mut fields, "modulus")?,
+            public_exponent: integer(&mut fields, "public exponent")?,
+            private_exponent: integer(&mut fields, "private exponent")?,
+            prime1: integer(&mut fields, "first prime")?,
+            prime2: integer(&mut fields, "second prime")?,
+            exponent1: integer(&mut fields, "first exponent")?,
+            exponent2: integer(&mut fields, "second exponent")?,
+            coefficient: integer(&mut fields, "coefficient")?,
+        };
+
+        let bits = key.modulus.bit_len();
+        if !(MIN_MODULUS_BITS..=MAX_MODULUS_BITS).contains(&bits) {
+            return Err(
+                fail("ER012", "A key's modulus is outside the accepted range.")
+                    .with_context(format!("Bits: {bits}"))
+                    .with_context(format!(
+                        "Accepted: {MIN_MODULUS_BITS} to {MAX_MODULUS_BITS}"
+                    )),
+            );
+        }
+        if key.private_exponent.is_zero() {
+            return Err(fail("ER013", "A key has no private exponent."));
+        }
+        let uses_crt =
+            !key.exponent1.is_zero() && !key.exponent2.is_zero() && !key.coefficient.is_zero();
+        if uses_crt && (key.prime1.is_zero() || key.prime2.is_zero()) {
+            return Err(fail(
+                "ER013",
+                "A key carries CRT exponents but not its primes.",
+            ));
+        }
+        Ok(key)
+    }
+
+    pub fn parse_pkcs8(bytes: &[u8]) -> Result<PrivateKey, Diagnostic> {
+        let mut outer = der::Reader::new(bytes, 0);
+        let sequence = outer.expect(der::tag::SEQUENCE)?;
+        let mut fields = sequence.reader();
+
+        let _version = integer(&mut fields, "version")?;
+
+        let algorithm = fields.expect(der::tag::SEQUENCE)?;
+        let mut algorithm_fields = algorithm.reader();
+        let oid_element = algorithm_fields.expect(der::tag::OID)?;
+        let oid = der::read_oid(&oid_element)?;
+        if oid != RSA_OID {
+            return Err(fail("ER014", "The private key is not an RSA key.")
+                .with_context(format!("Algorithm: {oid}"))
+                .with_suggestion(
+                    "Only RSA is implemented; there is no elliptic-curve arithmetic here.",
+                ));
+        }
+
+        let wrapped = fields.expect(der::tag::OCTET_STRING)?;
+        parse_pkcs1(wrapped.contents)
+    }
+
+    pub fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey, Diagnostic> {
+        match parse_pkcs8(bytes) {
+            Ok(key) => Ok(key),
+            Err(_) => parse_pkcs1(bytes),
+        }
+    }
+
+    pub fn encode_pkcs1_v15(
+        algorithm: DigestAlgorithm,
+        digest: &[u8],
+        modulus_bytes: usize,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let prefix = algorithm.prefix();
+        let tail = prefix.len() + digest.len();
+        if modulus_bytes < tail + 11 {
+            return Err(fail(
+                "ER020",
+                "The key is too small to carry a signature of this digest.",
+            )
+            .with_context(format!("Modulus: {modulus_bytes} bytes"))
+            .with_context(format!("Needs at least: {} bytes", tail + 11)));
+        }
+
+        let mut out = Vec::with_capacity(modulus_bytes);
+        out.push(0x00);
+        out.push(0x01);
+        out.resize(modulus_bytes - tail - 1, 0xff);
+        out.push(0x00);
+        out.extend_from_slice(prefix);
+        out.extend_from_slice(digest);
+        debug_assert_eq!(out.len(), modulus_bytes);
+        Ok(out)
+    }
+
+    fn exponentiate(key: &PrivateKey, message: &Natural) -> Result<Natural, Diagnostic> {
+        if key.exponent1.is_zero() || key.exponent2.is_zero() || key.coefficient.is_zero() {
+            return message.mod_pow(&key.private_exponent, &key.modulus);
+        }
+        let m1 = message.mod_pow(&key.exponent1, &key.prime1)?;
+        let m2 = message.mod_pow(&key.exponent2, &key.prime2)?;
+        let difference = m1.add(&key.prime1).sub(&m2.modulus(&key.prime1)?)?;
+        let h = key.coefficient.mod_mul(&difference, &key.prime1)?;
+        Ok(m2.add(&h.mul(&key.prime2)))
+    }
+
+    pub fn sign(
+        key: &PrivateKey,
+        algorithm: DigestAlgorithm,
+        message: &[u8],
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let digest = algorithm.digest(message);
+        sign_digest(key, algorithm, &digest)
+    }
+
+    pub fn sign_digest(
+        key: &PrivateKey,
+        algorithm: DigestAlgorithm,
+        digest: &[u8],
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let width = key.modulus_bytes();
+        let encoded = encode_pkcs1_v15(algorithm, digest, width)?;
+        let value = Natural::from_bytes_be(&encoded);
+        if value.compare(&key.modulus) != Ordering::Less {
+            return Err(fail(
+                "ER021",
+                "The encoded message is not smaller than the modulus.",
+            ));
+        }
+
+        let signature = exponentiate(key, &value)?;
+
+        let check = signature.mod_pow(&key.public_exponent, &key.modulus)?;
+        if check.compare(&value) != Ordering::Equal {
+            return Err(fail(
+                "ER022",
+                "A signature did not survive verification with the public exponent.",
+            )
+            .with_suggestion(
+                "The private key's factors and exponents disagree with its modulus, or this \
+                 build computed the signature wrongly. Nothing is emitted either way.",
+            ));
+        }
+
+        signature.to_bytes_be(width)
+    }
+
+    pub fn verify(
+        modulus: &Natural,
+        public_exponent: &Natural,
+        algorithm: DigestAlgorithm,
+        digest: &[u8],
+        signature: &[u8],
+    ) -> Result<bool, Diagnostic> {
+        let width = modulus.byte_len();
+        if signature.len() != width {
+            return Ok(false);
+        }
+        let value = Natural::from_bytes_be(signature);
+        if value.compare(modulus) != Ordering::Less {
+            return Ok(false);
+        }
+        let recovered = value.mod_pow(public_exponent, modulus)?;
+        let expected = encode_pkcs1_v15(algorithm, digest, width)?;
+        Ok(recovered.to_bytes_be(width)? == expected)
     }
 }
 
@@ -14994,6 +15820,559 @@ mod tests {
             let jar = version.join("android.jar");
             jar.is_file().then_some(jar)
         })
+    }
+
+    fn natural(hex: &str) -> super::bignum::Natural {
+        let padded = if hex.len().is_multiple_of(2) {
+            hex.to_string()
+        } else {
+            format!("0{hex}")
+        };
+        let bytes: Vec<u8> = (0..padded.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&padded[at..at + 2], 16).unwrap())
+            .collect();
+        super::bignum::Natural::from_bytes_be(&bytes)
+    }
+
+    fn hex_of(value: &super::bignum::Natural) -> String {
+        if value.is_zero() {
+            return "0".to_string();
+        }
+        let bytes = value.to_bytes_be(value.byte_len()).unwrap();
+        let text: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        text.trim_start_matches('0').to_string()
+    }
+
+    #[test]
+    fn big_integers_agree_with_arbitrary_precision_arithmetic() {
+        let cases: &[(&str, &str, &str, &str, &str, &str)] = &[
+            ("b4191885f8363ccd3fc4e0ccaf88dcae", "c099a3f6a1917a7075881b5e6e3ed470a941e7149c9f61a2eb222a7a6e16ff75", "c099a3f6a1917a7075881b5e6e3ed4715d5aff9a94d59e702ae70b471d9fdc23", "877ee8bd9e9f04918ba960c0cc5705e1809617afd5e710cf3da03e09209f0740118b9f275bb68d0baa743be748522d86", "0", "b4191885f8363ccd3fc4e0ccaf88dcae"),
+            ("26fdd1684acd870a2f8e4f3035d869b12f869be96fd5c517456ce09150a332c90c4a9a23d6ec0366f6e4c333afbad55dbe450ac69c73fa6b4b0f665bca9d1964dbf67e7d128e3730ece0958c0dca7ecf497fb9e64f7c463a6da4f55486120359a481b293af78e1fb4fb085c3ecb51ea2d4977c4d95e4dba60b83fae06a0f64b06e7ebe808bad1f35675718578d98502085c1bb19cb10f1015426b24995492c18840b3b14990d8afa11beeb4abadfc6c7ef82af74f38463fd68807d4e7ac3bf27555972179474af97eda6ce2563b6c38531884da4f4ce248aa92afbd8b796e8afa79f692cc97bbc4bbc3a33246a05f3601278f031f956c774872c540091e5c822", "632a60374a45f73f06e9b3d7ea53d747", "26fdd1684acd870a2f8e4f3035d869b12f869be96fd5c517456ce09150a332c90c4a9a23d6ec0366f6e4c333afbad55dbe450ac69c73fa6b4b0f665bca9d1964dbf67e7d128e3730ece0958c0dca7ecf497fb9e64f7c463a6da4f55486120359a481b293af78e1fb4fb085c3ecb51ea2d4977c4d95e4dba60b83fae06a0f64b06e7ebe808bad1f35675718578d98502085c1bb19cb10f1015426b24995492c18840b3b14990d8afa11beeb4abadfc6c7ef82af74f38463fd68807d4e7ac3bf27555972179474af97eda6ce2563b6c38531884da4f4ce248aa92afbd8b796e8afa79f692cc97bbc4bbc3a33246a05f36075a35069439cbeb38e1607d87c399f69", "f1a9c474a68e1005226f193ab52192dc16f03f866e08a0ff029e441bb90c17cc11f0974d4281ad010aec8d268b1063bf0c96040af387a6b2f401d2c2727fa83c84201436db06f3fd3816d934ef00ddd66002a68b021a57c0fe314d9beb9848adb639801de0fe556d42a079a93e390bf4a6b5691129d9411a196f59bc2f1005e172ece80a481ab8ece25f09c0ce5441ef604e739d1f09d2997b856048b77853d68a3a4ed2c8d7db1d3f31b98f3c8c217fd1675eb823fe10e606837db56dba1a980a8c713f45e0189377ef9f33e0d0f0e530973bd0fe4ee3b7418a30d637b95c52d7aae2caf96b379962e459305f4593c2bbb1dc3818670a43abe493c2fbf2e25ef3b856894a0b4af9f3ff7ad68d50f6e", "64a87bf3297100ac9ecdcd2b43855592fb310f7ce13e0cd8d9ff233cbb501bd3f084007ffadf8539f55fb9c171a3eeac5dd1b90fb5a8fecd52450ed83f70f5ca3093242b1b2b1847ea13f1c841d685123c08ab006e811bcac76e27260c3408ab64ec8c762462be39c8753cae4da0da9f09c4ed563adcbe28922e5428435720994606a8c838d6b20d5ad36eae0d78b6ed96214a24ab885892799d1a12110568063ca79b4b6bb7ba94e653ab618375aff51a9e44f1896ab4c240fecbbcf94d1d67c5937102e7362d83de7fc73beeded196ed5277ef7a65a93da730f2d13d8ac53f5fd5b63cde9569b20d3d5377ae9e9fb1", "55d82ae1bd98127dd5ac2e1b5b66d70b"),
+            ("d5a36d743754f5f7", "c819f1f4b35ec41515403cb102f5658751f65dc263b339031e143db568a81244", "c819f1f4b35ec41515403cb102f5658751f65dc263b33903f3b7ab299ffd083b", "a6fd54638b12dd7de0f4a7fb87b111fcfc8f730b913a2411c522df7a91ffe3aaced3d5136df4b39c", "0", "d5a36d743754f5f7"),
+            ("d9e38d1cb1d485cc413fd4bfacd89674c40abd638f81efe20109a3490ade118a700f3a6bb11f16cdb8e560169434acaa812e99b8865bf24f6e947bc1e610f19ada45c10242cde6637928690569802bef9d9c06d6b0f058c2c7c882fc25747fb2b25c78308c61ac18a2e9be275ffe3d80084cb5e2dd4412ff7cd7144a85b8283df4a1fe16fc7105161b404afa8a32ac11c803f235da43d27f9f8d246ce3dd126c32b49941d814e5064d33f69f8cfa739aecf69fdab950d758bcf95c7f7149bebac96232df058c0eeda361401ec0280cd8993956c197fb85d281bae1fde01d18a6022299e2b8b5ce807e8f811c0b56be23c02ab5e6acd0bb60675f56bcc8648316", "1", "d9e38d1cb1d485cc413fd4bfacd89674c40abd638f81efe20109a3490ade118a700f3a6bb11f16cdb8e560169434acaa812e99b8865bf24f6e947bc1e610f19ada45c10242cde6637928690569802bef9d9c06d6b0f058c2c7c882fc25747fb2b25c78308c61ac18a2e9be275ffe3d80084cb5e2dd4412ff7cd7144a85b8283df4a1fe16fc7105161b404afa8a32ac11c803f235da43d27f9f8d246ce3dd126c32b49941d814e5064d33f69f8cfa739aecf69fdab950d758bcf95c7f7149bebac96232df058c0eeda361401ec0280cd8993956c197fb85d281bae1fde01d18a6022299e2b8b5ce807e8f811c0b56be23c02ab5e6acd0bb60675f56bcc8648317", "d9e38d1cb1d485cc413fd4bfacd89674c40abd638f81efe20109a3490ade118a700f3a6bb11f16cdb8e560169434acaa812e99b8865bf24f6e947bc1e610f19ada45c10242cde6637928690569802bef9d9c06d6b0f058c2c7c882fc25747fb2b25c78308c61ac18a2e9be275ffe3d80084cb5e2dd4412ff7cd7144a85b8283df4a1fe16fc7105161b404afa8a32ac11c803f235da43d27f9f8d246ce3dd126c32b49941d814e5064d33f69f8cfa739aecf69fdab950d758bcf95c7f7149bebac96232df058c0eeda361401ec0280cd8993956c197fb85d281bae1fde01d18a6022299e2b8b5ce807e8f811c0b56be23c02ab5e6acd0bb60675f56bcc8648316", "d9e38d1cb1d485cc413fd4bfacd89674c40abd638f81efe20109a3490ade118a700f3a6bb11f16cdb8e560169434acaa812e99b8865bf24f6e947bc1e610f19ada45c10242cde6637928690569802bef9d9c06d6b0f058c2c7c882fc25747fb2b25c78308c61ac18a2e9be275ffe3d80084cb5e2dd4412ff7cd7144a85b8283df4a1fe16fc7105161b404afa8a32ac11c803f235da43d27f9f8d246ce3dd126c32b49941d814e5064d33f69f8cfa739aecf69fdab950d758bcf95c7f7149bebac96232df058c0eeda361401ec0280cd8993956c197fb85d281bae1fde01d18a6022299e2b8b5ce807e8f811c0b56be23c02ab5e6acd0bb60675f56bcc8648316", "0"),
+            ("1", "17406b5240fe5253dd80f4bb7d558aaf", "17406b5240fe5253dd80f4bb7d558ab0", "17406b5240fe5253dd80f4bb7d558aaf", "0", "1"),
+            ("ba422ddbd5e2dc94e7fb878c6cd126049acd82ecbd71ce56d8b19b03a62b6468e865f127bdd5189912bc2c842e1f229c67511863286201533653b1d49af45e38", "4935abdf2f417d71225e5cc90a650040", "ba422ddbd5e2dc94e7fb878c6cd126049acd82ecbd71ce56d8b19b03a62b6468e865f127bdd5189912bc2c842e1f229cb086c44257a37ec458b20e9da5595e78", "3543ebd3c52a8fb99ca259ddd11ff20d92094638a9b90af80aee455a5add83fc61bc61b39d79c42eaba7ceaa4d5fcebc3f567504ef19f834894ce90da5a344e581c4dc590ecf595890253d36192f8e00", "28b4f5bb9ea26f5900621e13915a0a312d1a88c5fbd940e0afb6b91c4d37765fc6787eb42f3967a8c100b08aec4ae323c", "335876a7d625289882141e5745bbcf38"),
+            ("6b", "56242c2be5f0cccf", "56242c2be5f0cd3a", "24011e76591ba59a85", "0", "6b"),
+            ("38", "9b4ea70a60c3e5a5a5599ef06188962930f7af1a6e2853f0ed45997d0968c2f82f299aae223d7365abbd00416cd43242ee910ccd718a7f3962f64c2f0cc82765", "9b4ea70a60c3e5a5a5599ef06188962930f7af1a6e2853f0ed45997d0968c2f82f299aae223d7365abbd00416cd43242ee910ccd718a7f3962f64c2f0cc8279d", "21f9348a452ada3c3c2b9ac49555e0d902b62e4dc818d25cb3e739935a0eeaa64a5119d6177d713e3d91580e4fce6afea42fbaccf0d64bd48da5e0aa4acbc89e18", "0", "38"),
+            ("bdff74c956cfe3f935e4f3fd864ea9ed8c8b9fbd06cccd00e00daadf3a3b9287", "b77b0dd9c1f4acc2", "bdff74c956cfe3f935e4f3fd864ea9ed8c8b9fbd06cccd019788b8b8fc303f49", "882cf080a036b8ab8b76b5526727a238a73dfe37c84d44795d052c6717d489976ba0f1f89743be4e", "10917d33af5cf9df30aa96940063b3792fbed52ee38f7c919", "8138ee190e846195"),
+            ("535c52b6", "766a7e1ebc367a121cd459cefabe4291", "766a7e1ebc367a121cd459cf4e1a9547", "268f3b6b962ccf4affafcb8ae569f16c23b1c516", "0", "535c52b6"),
+            ("22d3ab124144e9827899863ff8a59f5121f4ff5ff1854eeab7c75d512fdbb4c62fe9c5089fffc5613863dd2861ce572f8b66a862afe79e927f530cd05ed0099aa86b9ece9ebeafead89dc1654ded914d37aace9e3b9a4089da891ca95bdddf66f566a9e34db62090c82e54add7b2fb8523d524ed7f091a7dce7c872b05bfaf4792e9fdf092bb34d6157b15f4df7cbfb53b0f935faf2bd6e33237ccb915009f1bdd7d557da9802a474a31884ae7396ac5ae0428fe0eed953b49d981e4bf1c230fe268b884a96147165f3206a65ae41f4feeddb84317df89e64efa5947182af2eaf4787508d53ed06ed4eedc9b36501d19095a7e385c4752ceea0c63b5bf45790b", "b4cbbb26fc71fc9134083370dd05e2f2ff3014f133c955ee17272b7f045c1062", "22d3ab124144e9827899863ff8a59f5121f4ff5ff1854eeab7c75d512fdbb4c62fe9c5089fffc5613863dd2861ce572f8b66a862afe79e927f530cd05ed0099aa86b9ece9ebeafead89dc1654ded914d37aace9e3b9a4089da891ca95bdddf66f566a9e34db62090c82e54add7b2fb8523d524ed7f091a7dce7c872b05bfaf4792e9fdf092bb34d6157b15f4df7cbfb53b0f935faf2bd6e33237ccb915009f1bdd7d557da9802a474a31884ae7396ac5ae0428fe0eed953b49d981e4bf1c230fe268b884a96147165f3206a65ae41f4feeddb84317df89e64efa5947182af2eba944302fd1b0cd0008f7100c1356000c088a93299010a8bd01338f34c3a1896d", "18988b976917ce6886bb2ad35e3161470a0efd88e72a1e4b3bfce4824c7421bed641a88e2c0b8911167a1a83a1451f552e72f3aca7e5b0021bc56e91b8bf591bf3611a6258423d4d544845533dae19693a6605edabd33bc5b98c12c7d7224c5e4af1bd7d5e5e6dbef931603dc4a12b2aca118fdc8043d215dfdf387a4131e27dcf739927ee4bf709099d863bc5b3e9e500d679b70e82486f2d9377757ddf01a26e13a9dde908e960e13b891763da1858f486a7d8270727e58ea3b38c7400df2b6b8b49e4d5ac24c3ade6d4c8aa77f118c258e19af6994e2e05f2bf36bcb7927ca43c0eb99542e53a3afcd58a0cba29fd814ceb6c52f4ad2b27b643d1174b224923664b9d6f4cc9d0f39ebfc1874b3721c96b98919aad7ed307c03fd83c1d0636", "31503f20cf1316cacbe6abc13fd3ac30e6dd5a3f71d3c8a8e60e9819b06535c11060aad1adb3cead7a036df2592b1531647fb537055ee1cfc9805cf35e99f6dc5840e23b31c091bfaa83f808f97e4185a3c303647954a985a3a46a43e629a06af4ddf5915fb8d6b20895fbc5ebf4bddadba095cfd2a83fcab8068639530240adf0e1e7ebf0afb1a4d65954b3b0c9d573a985af07e540f6b6d58c3fc7effe577160baf6919474e245793b1636580ef0d4150ae29983257eeeada33777fcef673b241ca7b3c0eeda47e9b66d1aaf0fe32756b1f5d79d25dab4f559ea2d05c726e0", "5bdc25891f4881df2ff2513ca1225972e96d855b3a00afd72544d4cf9e1a974b"),
+            ("5a5df6b1", "15", "5a5df6c6", "769b53c85", "44d9e08", "9"),
+            ("1f1f00bcb8e6d472cbeed5062dfa78cde695e16fcf104e106b591f26c62349642aae381c924d1e15ac065092c11a3a66b19c07a7768a42a66ad9b8b669dced35b6267c52e3ec5866f9a4ad3371fc2d363b1d312473492434597344374a39bd1d83c8d31e658c7b894bd3e398ec2c468a71800f9360be77636ad168c96ddf51e7334172fbb0e3f12d54a6371373a52cadd68af0473e4bff513896da2388b66e05d855c60465c852d68494d989e6e976730391da6b7f50f9035ca75add0ec9b27f704fa4f13bb592b6b1b363a22a510662269e8a48568a7d0a166d344b85d8a69a40e986aa198d68b414be0465f7ac573a3952dfd91d1f7e1e69f4295c6c979c05", "6aa8161cb668ec1c140f70beb9a3455c", "1f1f00bcb8e6d472cbeed5062dfa78cde695e16fcf104e106b591f26c62349642aae381c924d1e15ac065092c11a3a66b19c07a7768a42a66ad9b8b669dced35b6267c52e3ec5866f9a4ad3371fc2d363b1d312473492434597344374a39bd1d83c8d31e658c7b894bd3e398ec2c468a71800f9360be77636ad168c96ddf51e7334172fbb0e3f12d54a6371373a52cadd68af0473e4bff513896da2388b66e05d855c60465c852d68494d989e6e976730391da6b7f50f9035ca75add0ec9b27f704fa4f13bb592b6b1b363a22a510662269e8a48568a7d0a166d344b85d8a69a40e986aa198d68b414be0465f7ac573aa3faf5f5d3886a3a7e039a1b263ae161", "cf74556c80a03cd79e96782a9a4a7d6872036f56f4ff6592ccd34215d8db40abcb5aa316b36c916cdac1ad2f930d7e75f73b3db08f586880a9dd13f6f7eeed6befb4afa2203841190bb013f954b8bceff9a8a3afe0b12c6f47fa6219817d342fdaa421e1fe3c5115de222c9fcb1c086bbde6841e42c24d46dd0a655a8f66330d09867172c85f2aecae782ff687403b1ad73cdfedd62cdbcfa8a79172c7e3643346823f878e1774996fc0ef6bb8ab31ebb13ee6985767677133bd269e6a646c777231f3211887f37eb42dbd8ecc38cf0cc9c159bf5ae82f352623deb59498e3c63c9f3366754f5968c21cab0fe9c919ef18e5bcbd67a41953fc93ea503a6af9f12de94ceeae57190784a7679d7b86acc", "4ab29d2650e2392934e70841b7a1950e64a8e689a30a13a866d2719430cb0ca5d3bdefb7c097155a949e8f1057fd0bf94bef360938b21e9b2ae3106e897dbfe2cd58ad24d587108122650249b3922409a40f560cc07e963aca82b0505e6cd65bd63a2d42e885d6111df62b77b6462ffdf3567dd6c3ebd6593e9c7bdf1c3a9f46bfdf082f0339c5c06170b57a61e7876459114088e557fd1af9e0c605899d50a4775595aa019a9b79bbcd5a544ce93fe6da2bc9891dcefaf395eb90cea856fd9edab7ff22569f446eb2da253e9ec87306742a1313aa5a27075a908b42ec371ae6bb1433e25c1f2ac77a59dd9b8d603a24", "324fe40b9167a1ab76c12359a56b0315"),
+            ("349fa4a2e74ece3719529dd3cccbfd1d", "94b900de87b13d0a2fe0e90ba0ae2403b168f7c6dccb09f6718ef6f4c36636d5", "94b900de87b13d0a2fe0e90ba0ae2403e6089c69c419d82d8ae194c8903233f2", "1e9252b9e5c81b2e55b72a429081d519e8d7e5ebfc77e87b72ef9778f7f00b2b8a5219955f830fbc212817245dabb721", "0", "349fa4a2e74ece3719529dd3cccbfd1d"),
+            ("63c46216cb366872ccf0a5d54efaa7ed294e1c51e989b2890ed68879bdbc2696029bf93c8bc72b3e80b2317d9b23344ede787a3f59e6b106d01197b8c514706c1eb3f7a61f31b8fb1a22541e96db21f532b13feee25932829b16a8b78eeeb1815a3bcf6f0c728c6667bde6ffd5d7a5f0c092a7041163a4abba793a5e4c350da8", "6df5133", "63c46216cb366872ccf0a5d54efaa7ed294e1c51e989b2890ed68879bdbc2696029bf93c8bc72b3e80b2317d9b23344ede787a3f59e6b106d01197b8c514706c1eb3f7a61f31b8fb1a22541e96db21f532b13feee25932829b16a8b78eeeb1815a3bcf6f0c728c6667bde6ffd5d7a5f0c092a7041163a4abba793a5e53145edb", "2ada202fdc70bae5fb14b3a6d1333c3e1a04e0588593857d3a8e313926a6516756d146b65f33ccbffd2ac8e13359100757afdea69f91e2b44c815128314d79b318b91d3ada63c9cf7c7df2b0fa2fb81b72da8c978ef9517602803c85624cae0a7824b483292fd226ce1310ff8ca4c5e06b26b8e59030af875ea6b2e8f8c176ecd3be078", "e84681a6962ca788357ea958cb951647deeb77a9613e878dfbb41e0cbad52d5d56c41d9be9e8f39233b79c3a2b528407ab1f6e739dbcecd25d577945c9b84b228e184062c8689078f45eddf9a3a79a143bd01fc033baa6c1ac4dc80bcf25b91b269b5676ae8e07aaf8c23e6e734771715c3a059b409de55a2de53e9cc", "3cfee04"),
+            ("f34664be", "e830f0d4cd0667f7", "e830f0d5c04cccb5", "dca64d5b4b3302768de7a552", "0", "f34664be"),
+            ("0", "18a31530c9038ce74", "18a31530c9038ce74", "0", "0", "0"),
+            ("e2f9e26cf93a6769", "d2e483f99c8a69c9638f17965767c362d2b36775efb1780ff1cfc6c1223d5df4", "d2e483f99c8a69c9638f17965767c362d2b36775efb17810d4c9a92e1b77c55d", "bafb974e3c35ded90b323b78bc617205bea6e1eb00d6b58d66ea298eb01b5e901268b7375940b514", "0", "e2f9e26cf93a6769"),
+            ("cc4ccb42d6550d6b", "cd53d88f33f3ebb9769c11d0e6c7b928", "cd53d88f33f3ebba42e8dd13bd1cc693", "a3dc687d80297e0147675bee7fefb3f3c29b177084296bb8", "0", "cc4ccb42d6550d6b"),
+            ("1", "1", "2", "1", "1", "0"),
+            ("64d22b00c67381580c492cd36fc85cee87b657b4b00a30a10f1e22541b8245686e2e2e37c15a925fa12461e49d55f239c143b21da571197634eaae8726984261238de7fd063a57da9456ab65173b2ec8228eb9f6a0140977410064a0364fdac86441281c907f58f2bd7af9cfc691d837c864eefed6ad9394f7bb1797aa4c4280", "1", "64d22b00c67381580c492cd36fc85cee87b657b4b00a30a10f1e22541b8245686e2e2e37c15a925fa12461e49d55f239c143b21da571197634eaae8726984261238de7fd063a57da9456ab65173b2ec8228eb9f6a0140977410064a0364fdac86441281c907f58f2bd7af9cfc691d837c864eefed6ad9394f7bb1797aa4c4281", "64d22b00c67381580c492cd36fc85cee87b657b4b00a30a10f1e22541b8245686e2e2e37c15a925fa12461e49d55f239c143b21da571197634eaae8726984261238de7fd063a57da9456ab65173b2ec8228eb9f6a0140977410064a0364fdac86441281c907f58f2bd7af9cfc691d837c864eefed6ad9394f7bb1797aa4c4280", "64d22b00c67381580c492cd36fc85cee87b657b4b00a30a10f1e22541b8245686e2e2e37c15a925fa12461e49d55f239c143b21da571197634eaae8726984261238de7fd063a57da9456ab65173b2ec8228eb9f6a0140977410064a0364fdac86441281c907f58f2bd7af9cfc691d837c864eefed6ad9394f7bb1797aa4c4280", "0"),
+            ("18a96a2701a7eb951", "4843f60d78637e728af68a3106fa277ec8156a567af3cb5cc49d8b53d242c36956f3724c3fceaf3c44076aabce21d8cfc6fbfb8426fea876965ea22da540e39c", "4843f60d78637e728af68a3106fa277ec8156a567af3cb5cc49d8b53d242c36956f3724c3fceaf3c44076aabce21d8cfc6fbfb8426fea87820f5449dbfbf9ced", "6f631e5d8e1883bc75b49d44191fcb44bf5fb2facafa4685e7fbc49cf48a1bba028eb4d712bc382293f6bdb24c447ed741ee8c91c5b7bb16b46ca3884711281b3e38862b0ccbc05c", "0", "18a96a2701a7eb951"),
+            ("29e8553e6a651babdc1897199342ca56b493dd0fbc7dbb9b1098316af8357cf8f5f17e4a4f0500cfb24671a894447332d170739a8113654fe6ac006b83863eebbaa4b49c38303502d6a404b287b8fb9d0e82e9630c9e00ff44451239326d98201b2d23b7dd5836edb4b2329c0088bf14fa7cff874f43da33493bdc68fc7eb2a858e6ba37632bf3ae26a8a80466ecf7b42cd41f060e9772bc2286fcf2e645b27acd0d1f870fd1c7fea4457c2d7c6e5186a901c4934bf69415199b6dd31ddd9ec7e5de298193e7a96dc5c4174e412916d97f696bad2e61abe31cb7566263457e9bc6a1f5bd79d2fdda1e955d00adf0a9bb8db34d9c202701ffcd15328d25376ba5", "cec9d37fd01546ca231d93b332d85b0", "29e8553e6a651babdc1897199342ca56b493dd0fbc7dbb9b1098316af8357cf8f5f17e4a4f0500cfb24671a894447332d170739a8113654fe6ac006b83863eebbaa4b49c38303502d6a404b287b8fb9d0e82e9630c9e00ff44451239326d98201b2d23b7dd5836edb4b2329c0088bf14fa7cff874f43da33493bdc68fc7eb2a858e6ba37632bf3ae26a8a80466ecf7b42cd41f060e9772bc2286fcf2e645b27acd0d1f870fd1c7fea4457c2d7c6e5186a901c4934bf69415199b6dd31ddd9ec7e5de298193e7a96dc5c4174e412916d97f696bad2e61abe31cb7566263457e9bc6a1f5bd79d2fdda1e955d00adf0a9bb9a9fead41d28566c6f470bc85864f155", "21d9fea29233e23775f5c9d51cee627318a635afad44e08d611e0e13cde544fdf51dc95682104c1f135ae1c01f77e7e611303e822f556cd4ba5eac901ecd2574e73e2a44d3b66a5478249532f0c2c3243391c18497fd1f62c8787e88ce6b02b2b647f606274cdfdef14f121fe49bf08f54f72a4132d33bb47e642df32cbac2fb8b21dc19831310f2b73dbc346271c059c63ccf22c84dfc0db06b87a39077e38d8a9a82970ea56a4849f11fbb50163b886d5950cab77740f32aa26a0a79ce6f82df531b74c9d1693a188fe3c1a640cb1941b1cdae341e30f443048e0026569beb4a17d9976e294f45877dfb7c4c9a9dd5d471b06f9625e093f3781e89162af0b2ac2b9f14853959e95a956962c07ba70", "33e177bdb793819da64de7c3f7f5c6637eb8be52b11b591938de0afb77672aa7a7ff504dd269b797ab177e7316bfa118815d442bb45052c145b38b22ee35f1289381cd80ecaa2ecee14f7cb562c27263db08db354264ea1adb29c7b79554331216c4aaaba7f6443236c4a4f5c3f39d47566198a620854386b30fa4cd2d629ad1f3804098492d598d3823e3cac307fec688607918b1b0a5192a920f96a4eb5796466f1540bfa863e7e7b4c9d5b2fc5a5b915c5d615a8d5b07ea75feb1ee47592b07a8c2fa2e59327891ddaf80f08c3cd7e82ee9cef84c73d1480eb02e7d7766ac7766d82ec41075c7318ec936170023110", "7e33b249cbce5b40454186306860a5"),
+            ("dcd33c1ed29a9aa377a983626506d4ecef78d42f4c98005805b483742cd1a229e63340418e05cabfc4f45ccd7e51621218a952389fdb59d749ccbaa5034fbbbdf20f36da327d212074924929a9a5346d6b5f168381a185f180253d75a65335ef82050b9f7788adaad39d4830efddd9ed56b93a4bc447e2aeae6ba5a440dfded986286ab0fd08d486554d2a8c6c20d31b77975ebcad1dc59e39910849d0e7e1602bd37e740e63eb6d8eb8647d9bd39a39637e6c98af3d6536dd6f356d533f2025e550b032fc7077895e94e0397c872d9541223dad026e7f358499209e3ce6a2d2028c61d22315815805429bd2469ed97fb95497d7df6725e1d94bcf3cc4a9e01e", "1", "dcd33c1ed29a9aa377a983626506d4ecef78d42f4c98005805b483742cd1a229e63340418e05cabfc4f45ccd7e51621218a952389fdb59d749ccbaa5034fbbbdf20f36da327d212074924929a9a5346d6b5f168381a185f180253d75a65335ef82050b9f7788adaad39d4830efddd9ed56b93a4bc447e2aeae6ba5a440dfded986286ab0fd08d486554d2a8c6c20d31b77975ebcad1dc59e39910849d0e7e1602bd37e740e63eb6d8eb8647d9bd39a39637e6c98af3d6536dd6f356d533f2025e550b032fc7077895e94e0397c872d9541223dad026e7f358499209e3ce6a2d2028c61d22315815805429bd2469ed97fb95497d7df6725e1d94bcf3cc4a9e01f", "dcd33c1ed29a9aa377a983626506d4ecef78d42f4c98005805b483742cd1a229e63340418e05cabfc4f45ccd7e51621218a952389fdb59d749ccbaa5034fbbbdf20f36da327d212074924929a9a5346d6b5f168381a185f180253d75a65335ef82050b9f7788adaad39d4830efddd9ed56b93a4bc447e2aeae6ba5a440dfded986286ab0fd08d486554d2a8c6c20d31b77975ebcad1dc59e39910849d0e7e1602bd37e740e63eb6d8eb8647d9bd39a39637e6c98af3d6536dd6f356d533f2025e550b032fc7077895e94e0397c872d9541223dad026e7f358499209e3ce6a2d2028c61d22315815805429bd2469ed97fb95497d7df6725e1d94bcf3cc4a9e01e", "dcd33c1ed29a9aa377a983626506d4ecef78d42f4c98005805b483742cd1a229e63340418e05cabfc4f45ccd7e51621218a952389fdb59d749ccbaa5034fbbbdf20f36da327d212074924929a9a5346d6b5f168381a185f180253d75a65335ef82050b9f7788adaad39d4830efddd9ed56b93a4bc447e2aeae6ba5a440dfded986286ab0fd08d486554d2a8c6c20d31b77975ebcad1dc59e39910849d0e7e1602bd37e740e63eb6d8eb8647d9bd39a39637e6c98af3d6536dd6f356d533f2025e550b032fc7077895e94e0397c872d9541223dad026e7f358499209e3ce6a2d2028c61d22315815805429bd2469ed97fb95497d7df6725e1d94bcf3cc4a9e01e", "0"),
+        ];
+        for (a, b, sum, product, quotient, remainder) in cases {
+            let left = natural(a);
+            let right = natural(b);
+            assert_eq!(hex_of(&left.add(&right)), *sum, "{a} + {b}");
+            assert_eq!(hex_of(&left.mul(&right)), *product, "{a} * {b}");
+            let (q, r) = left.divmod(&right).unwrap();
+            assert_eq!(hex_of(&q), *quotient, "{a} / {b}");
+            assert_eq!(hex_of(&r), *remainder, "{a} % {b}");
+            assert_eq!(hex_of(&q.mul(&right).add(&r)), hex_of(&left), "{a} rebuilt");
+        }
+    }
+
+    #[test]
+    fn modular_exponentiation_agrees_with_arbitrary_precision() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("49b55e3e31710b4c699e47ecdfb791a5bc75b7992f607be602a1f303b8dd5fcc", "1071f", "b9b8b28ea8863803f381fb9b9111ed95c30091490fc9dd612e6a927e8d892947", "8c40a8befd2defd740edf41aa0f2de0d4dd7c68ac862f746a5efa39be46269c3"),
+            ("878ceaf42f14c58107324ec0c170e24cf2919a271df790bd261b93d946954e9d44bb2a1e0e344627ce0102623810fb643cbb9bf9635f2f40983148c579fd5d38", "9cb7", "9648e2013e1f9806bbb772e69d39c9c9c971f3d1989c6003009273ddff8431c95c1a0137e9ffad5ff28a5c4d0eb359d4db74f788c3596e96d5fa35400b678921", "1661d7a392d29fc1fb18735fda159cbc8670c7c9ba1885d8dfe6c780aec982dff370d5b81c5ceba74ca0f32c1547b24ffeb99ebdb3b27e20d9a07ffb1956313d"),
+            ("9da80e1fa5d94967ac90d3c478f3eb9941deea4ba448913a700ac45ef4c029b77fe2e4a07c75787c7b8b5b902633f9495f8daf04cd3b6930c04b5879ad1e912291f7f41bcbfe0c565c0af11bb13cc98be55a8d6568b3407a23f1b24e2ba0365e78ea9528e660a154d3a36433d6823f8abc9448c1f1b8858047bc10bb4b119bbc", "1afd3", "cb888f6972502623aaafbaa50b0e54d6b71dd1ede2c7c8b1c444069d39437d68928dd84e186be1e08b09097e01bb2ca43e0c2dc8aa26bbd420e29786d5409479759714f21d7df56c7afb3ff7539ddd99ca3da99b83f3f08ce0d625c4003bbf67ed11454a505ae84ab8ee65463feb929da8e899113b07dc2612131e47b507377b", "4ec2516f265fb01443461cbcaab91cda957c02d54c2defd627e978056be56127d65a66d27d4a9ad469851f8f4f0839d6f69a7d584ea7756beda12ad7469099c7582ae96a95f65418d064f4dc445f8a7f7b0b9c7283a98d1d94f0d82e1aaabd2b5e56a3345685c9bd9f70426b54df349f5dbf929fc7f6ceac89658224d6368080"),
+        ];
+        for (base, exponent, modulus, expected) in cases {
+            let result = natural(base)
+                .mod_pow(&natural(exponent), &natural(modulus))
+                .unwrap();
+            assert_eq!(
+                hex_of(&result),
+                *expected,
+                "{base}^{exponent} mod {modulus}"
+            );
+        }
+    }
+
+    #[test]
+    fn big_integers_agree_with_native_arithmetic_on_small_values() {
+        let mut seed = 0x51ed_270b_7d90_1e11u64;
+        for _ in 0..20_000 {
+            let a = xorshift(&mut seed) >> (xorshift(&mut seed) % 64);
+            let b = (xorshift(&mut seed) >> (xorshift(&mut seed) % 64)) | 1;
+            let left = natural(&format!("{a:x}"));
+            let right = natural(&format!("{b:x}"));
+
+            assert_eq!(
+                hex_of(&left.add(&right)),
+                format!("{:x}", a as u128 + b as u128)
+            );
+            assert_eq!(
+                hex_of(&left.mul(&right)),
+                format!("{:x}", a as u128 * b as u128)
+            );
+            let (q, r) = left.divmod(&right).unwrap();
+            assert_eq!(hex_of(&q), format!("{:x}", a / b));
+            assert_eq!(hex_of(&r), format!("{:x}", a % b));
+            if a >= b {
+                assert_eq!(hex_of(&left.sub(&right).unwrap()), format!("{:x}", a - b));
+            } else {
+                assert!(left.sub(&right).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn big_integers_round_trip_through_bytes() {
+        let mut seed = 0x2718_2818_2845_9045u64;
+        for _ in 0..2_000 {
+            let length = (xorshift(&mut seed) % 300) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+            let value = super::bignum::Natural::from_bytes_be(&bytes);
+            let width = bytes.len().max(1);
+            let back = value.to_bytes_be(width).unwrap();
+            let mut expected = vec![0u8; width];
+            expected[width - bytes.len()..].copy_from_slice(&bytes);
+            assert_eq!(back, expected, "length {length}");
+            assert!(
+                value
+                    .to_bytes_be(value.byte_len().saturating_sub(1))
+                    .is_err()
+                    || value.is_zero()
+            );
+        }
+    }
+
+    #[test]
+    fn division_by_zero_is_refused() {
+        let error = natural("ff")
+            .divmod(&super::bignum::Natural::zero())
+            .unwrap_err();
+        assert_eq!(error.code, "EN012");
+    }
+
+    fn openssl() -> Option<std::path::PathBuf> {
+        let path = std::path::PathBuf::from("/usr/bin/openssl");
+        if path.is_file() {
+            return Some(path);
+        }
+        let path = std::path::PathBuf::from("/usr/local/bin/openssl");
+        path.is_file().then_some(path)
+    }
+
+    fn generate_rsa_key(directory: &std::path::Path, bits: u32) -> Option<Vec<u8>> {
+        let tool = openssl()?;
+        let der = directory.join("key.der");
+        let made = std::process::Command::new(&tool)
+            .args([
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                &format!("rsa_keygen_bits:{bits}"),
+                "-outform",
+                "DER",
+                "-out",
+                der.to_str()?,
+            ])
+            .output()
+            .ok()?;
+        if !made.status.success() {
+            return None;
+        }
+        std::fs::read(&der).ok()
+    }
+
+    #[test]
+    fn a_signature_this_build_makes_is_accepted_by_an_independent_verifier() {
+        let Some(tool) = openssl() else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_RSA_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_RSA_CONFORMANCE is set but openssl is not available"
+            );
+            eprintln!("rsa conformance: openssl is not available here");
+            return;
+        };
+
+        let directory = temp_directory("rsa-sign");
+        for (bits, algorithm, name) in [
+            (2048u32, super::rsa::DigestAlgorithm::Sha256, "sha256"),
+            (4096, super::rsa::DigestAlgorithm::Sha512, "sha512"),
+        ] {
+            let Some(der) = generate_rsa_key(&directory, bits) else {
+                eprintln!("rsa conformance: openssl could not make a key");
+                return;
+            };
+            let key = super::rsa::parse_private_key(&der).expect("a PKCS#1 key must parse");
+            assert_eq!(key.bits(), bits as usize);
+
+            let key_path = directory.join("key.der");
+            let pkcs8_path = directory.join("key.pk8");
+            let converted = std::process::Command::new(&tool)
+                .args([
+                    "pkcs8",
+                    "-topk8",
+                    "-nocrypt",
+                    "-inform",
+                    "DER",
+                    "-in",
+                    key_path.to_str().unwrap(),
+                    "-outform",
+                    "DER",
+                    "-out",
+                    pkcs8_path.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(converted.status.success());
+            let wrapped = super::rsa::parse_pkcs8(&std::fs::read(&pkcs8_path).unwrap())
+                .expect("a PKCS#8 key must parse");
+            assert_eq!(wrapped.modulus(), key.modulus());
+            assert_eq!(wrapped.public_exponent(), key.public_exponent());
+
+            let message = b"Omni_Builder signs this with arithmetic it wrote itself.";
+            let signature = super::rsa::sign(&key, algorithm, message).expect("signing must work");
+            assert_eq!(signature.len(), key.modulus_bytes());
+
+            let message_path = directory.join("message.bin");
+            let signature_path = directory.join("signature.bin");
+            let public_path = directory.join("public.pem");
+            std::fs::write(&message_path, message).unwrap();
+            std::fs::write(&signature_path, &signature).unwrap();
+
+            let exported = std::process::Command::new(&tool)
+                .args([
+                    "pkey",
+                    "-in",
+                    key_path.to_str().unwrap(),
+                    "-inform",
+                    "DER",
+                    "-pubout",
+                    "-out",
+                    public_path.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(exported.status.success());
+
+            let verified = std::process::Command::new(&tool)
+                .args([
+                    "dgst",
+                    &format!("-{name}"),
+                    "-verify",
+                    public_path.to_str().unwrap(),
+                    "-signature",
+                    signature_path.to_str().unwrap(),
+                    message_path.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                verified.status.success(),
+                "openssl rejected a {bits}-bit {name} signature this build made: {}{}",
+                String::from_utf8_lossy(&verified.stdout),
+                String::from_utf8_lossy(&verified.stderr)
+            );
+
+            let theirs = directory.join("theirs.bin");
+            let signed = std::process::Command::new(&tool)
+                .args([
+                    "dgst",
+                    &format!("-{name}"),
+                    "-sign",
+                    key_path.to_str().unwrap(),
+                    "-keyform",
+                    "DER",
+                    "-out",
+                    theirs.to_str().unwrap(),
+                    message_path.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(signed.status.success());
+            let theirs = std::fs::read(&theirs).unwrap();
+            assert_eq!(
+                theirs, signature,
+                "PKCS#1 v1.5 is deterministic, so the two signatures must be identical"
+            );
+
+            let digest = algorithm.digest(message);
+            assert!(super::rsa::verify(
+                key.modulus(),
+                key.public_exponent(),
+                algorithm,
+                &digest,
+                &theirs
+            )
+            .unwrap());
+
+            let mut damaged = theirs.clone();
+            damaged[10] ^= 0xff;
+            assert!(!super::rsa::verify(
+                key.modulus(),
+                key.public_exponent(),
+                algorithm,
+                &digest,
+                &damaged
+            )
+            .unwrap());
+
+            eprintln!("rsa conformance: {bits}-bit {name} signature matches openssl byte for byte");
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_pkcs1_v15_padding_is_the_shape_the_standard_defines() {
+        let digest = [0xabu8; 32];
+        let encoded =
+            super::rsa::encode_pkcs1_v15(super::rsa::DigestAlgorithm::Sha256, &digest, 256)
+                .unwrap();
+        assert_eq!(encoded.len(), 256);
+        assert_eq!(encoded[0], 0x00);
+        assert_eq!(encoded[1], 0x01);
+        let zero = encoded
+            .iter()
+            .position(|byte| *byte == 0x00 && *byte != encoded[0]);
+        let separator = encoded[2..].iter().position(|byte| *byte == 0x00).unwrap() + 2;
+        assert!(separator >= 10, "at least eight padding bytes");
+        assert!(encoded[2..separator].iter().all(|byte| *byte == 0xff));
+        assert_eq!(
+            &encoded[separator + 1..separator + 20],
+            super::rsa::SHA256_PREFIX
+        );
+        assert_eq!(&encoded[separator + 20..], &digest);
+        let _ = zero;
+    }
+
+    #[test]
+    fn a_key_too_small_for_the_digest_is_refused() {
+        let digest = [0u8; 64];
+        let error = super::rsa::encode_pkcs1_v15(super::rsa::DigestAlgorithm::Sha512, &digest, 64)
+            .unwrap_err();
+        assert_eq!(error.code, "ER020");
+    }
+
+    #[test]
+    fn a_private_key_that_is_not_rsa_is_refused() {
+        let mut sink = Sink::new();
+        let _ = &mut sink;
+        let error = super::rsa::parse_pkcs8(&[0x30, 0x00]).unwrap_err();
+        assert!(!error.code.is_empty());
+    }
+
+    #[test]
+    fn the_key_reader_survives_arbitrary_input() {
+        let mut seed = 0x7a1c_9e3f_0b52_d641u64;
+        for _ in 0..3_000 {
+            let length = (xorshift(&mut seed) % 200) as usize;
+            let mut bytes: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+            if length > 2 && xorshift(&mut seed).is_multiple_of(2) {
+                bytes[0] = 0x30;
+            }
+            let _ = super::rsa::parse_private_key(&bytes);
+        }
+    }
+
+    const OMNI_BUILT_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.selfbuilt" android:versionCode="1" android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <application android:label="Omni Self Built" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
+</manifest>"#;
+
+    fn certificate_and_key(directory: &std::path::Path) -> Option<(Vec<u8>, Vec<u8>)> {
+        let tool = openssl()?;
+        let key_pem = directory.join("self.key.pem");
+        let key_der = directory.join("self.key.der");
+        let certificate = directory.join("self.crt");
+        let made = std::process::Command::new(&tool)
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-keyout",
+                key_pem.to_str()?,
+                "-out",
+                certificate.to_str()?,
+                "-days",
+                "3650",
+                "-nodes",
+                "-outform",
+                "DER",
+                "-subj",
+                "/CN=Omni Self Built/O=Omni/C=TR",
+            ])
+            .output()
+            .ok()?;
+        if !made.status.success() {
+            return None;
+        }
+        let converted = std::process::Command::new(&tool)
+            .args([
+                "pkcs8",
+                "-topk8",
+                "-nocrypt",
+                "-in",
+                key_pem.to_str()?,
+                "-outform",
+                "DER",
+                "-out",
+                key_der.to_str()?,
+            ])
+            .output()
+            .ok()?;
+        if !converted.status.success() {
+            return None;
+        }
+        Some((
+            std::fs::read(&certificate).ok()?,
+            std::fs::read(&key_der).ok()?,
+        ))
+    }
+
+    #[test]
+    fn omni_builds_and_signs_a_package_that_apksigner_accepts() {
+        let (Some(apksigner), Some(_)) = (find_apksigner(), openssl()) else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_SELF_BUILT_APK").is_err(),
+                "OMNI_REQUIRE_SELF_BUILT_APK is set but apksigner or openssl is missing"
+            );
+            eprintln!("apk builder: apksigner or openssl is not available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-apk");
+        let Some((certificate, key_bytes)) = certificate_and_key(&directory) else {
+            eprintln!("apk builder: openssl could not make a certificate");
+            return;
+        };
+        let key = super::rsa::parse_private_key(&key_bytes).expect("the key must parse");
+
+        let (root, sink) = parse_xml(OMNI_BUILT_MANIFEST);
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let manifest = axml::encode(&root.expect("the manifest must parse"))
+            .expect("the manifest must encode");
+
+        let mut builder = ArchiveBuilder::for_android();
+        builder.add("AndroidManifest.xml", manifest).unwrap();
+        builder
+            .add_aligned("lib/arm64-v8a/libomni.so", vec![0x7f; 4_096], 16_384)
+            .unwrap();
+        let unsigned = builder.finish().unwrap();
+
+        let signed = signing::sign_v2(
+            &unsigned,
+            &key,
+            &certificate,
+            super::rsa::DigestAlgorithm::Sha256,
+        )
+        .expect("signing must work");
+
+        let path = directory.join("omni-built.apk");
+        std::fs::write(&path, &signed).unwrap();
+
+        let verified = std::process::Command::new(&apksigner)
+            .args([
+                "verify",
+                "--verbose",
+                "--print-certs",
+                "--min-sdk-version",
+                "28",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verified.stdout),
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        assert!(
+            verified.status.success(),
+            "apksigner rejected a package Omni built and signed:\n{report}"
+        );
+        assert!(
+            report.contains("Verified using v2 scheme (APK Signature Scheme v2): true"),
+            "the v2 scheme was not what verified it:\n{report}"
+        );
+        assert!(report.contains("CN=Omni Self Built"), "{report}");
+
+        let mut own_sink = Sink::new();
+        let archive = archive::read(&signed, &mut own_sink).expect("the package must read");
+        let own = signing::examine(
+            &signed,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut own_sink,
+        );
+        assert!(own.has_block);
+        assert_eq!(own.digests_failed, 0, "{:?}", own_sink.entries());
+        assert!(own.digests_verified > 0, "{:?}", own_sink.entries());
+        assert_eq!(
+            own.signers[0].certificates[0].subject,
+            "CN=Omni Self Built, O=Omni, C=TR"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "apk builder: {} bytes built and signed with nothing but this tree, and apksigner verified it",
+            signed.len()
+        );
+    }
+
+    #[test]
+    fn changing_a_package_omni_signed_is_detected() {
+        let (Some(_), Some(_)) = (find_apksigner(), openssl()) else {
+            return;
+        };
+        let directory = temp_directory("omni-apk-tamper");
+        let Some((certificate, key_bytes)) = certificate_and_key(&directory) else {
+            return;
+        };
+        let key = super::rsa::parse_private_key(&key_bytes).unwrap();
+
+        let (root, _) = parse_xml(OMNI_BUILT_MANIFEST);
+        let manifest = axml::encode(&root.unwrap()).unwrap();
+        let mut builder = ArchiveBuilder::for_android();
+        builder.add("AndroidManifest.xml", manifest).unwrap();
+        let unsigned = builder.finish().unwrap();
+        let mut signed = signing::sign_v2(
+            &unsigned,
+            &key,
+            &certificate,
+            super::rsa::DigestAlgorithm::Sha256,
+        )
+        .unwrap();
+
+        signed[40] ^= 0xff;
+        let mut sink = Sink::new();
+        if let Some(archive) = archive::read(&signed, &mut sink) {
+            let report = signing::examine(
+                &signed,
+                archive.central_directory_offset(),
+                archive.end_record_offset(),
+                &mut sink,
+            );
+            assert!(
+                report.digests_failed > 0 || sink.has_blocking(),
+                "a changed package must not pass its own digest"
+            );
+        }
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]

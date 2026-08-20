@@ -31,6 +31,10 @@
 #      produced here, and agrees with javap on all of them.
 #  13. aapt2 reads the binary XML the Core writes and agrees on every value,
 #      and every attribute identifier the Core carries is the one aapt2 uses.
+#  14. The Core's RSA signatures are byte-identical to OpenSSL's from the same
+#      key, and OpenSSL verifies them.
+#  15. An APK built and signed with nothing but this tree - no aapt2, no d8,
+#      no apksigner, no library - is verified by apksigner under the v2 scheme.
 #
 # WHAT IT DOES NOT PROVE
 # -----------------------------------------------------------------------------
@@ -387,6 +391,19 @@ jobs:
 
       - name: Verify that the APKs can be installed
         run: ./gradlew :Builder:verifyApkInstallability --console=plain --rerun-tasks
+
+      - name: Build and sign a package with nothing but the Core
+        # The milestone of phase 9: an APK whose manifest, container, content
+        # digest, RSA signature and certificate handling all come from this
+        # tree, handed to Google's apksigner for judgement. No aapt2, no d8,
+        # no apksigner and no third-party library took part in making it.
+        env:
+          OMNI_REQUIRE_SELF_BUILT_APK: "1"
+          OMNI_REQUIRE_RSA_CONFORMANCE: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked omni_builds_and_signs -- --nocapture
+          cargo test --locked a_signature_this_build -- --nocapture
 
       - name: Read the classes this build produced with the Core's own reader
         # Every class file the Kotlin compiler just produced, compared field for
