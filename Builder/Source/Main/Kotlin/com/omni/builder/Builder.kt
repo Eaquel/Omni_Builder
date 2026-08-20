@@ -431,8 +431,23 @@ object OmniLog {
         }
 
         val destination = uri ?: throw IOException("MediaStore refused to create $name")
-        resolver.openOutputStream(destination, "wt")?.use { it.write(bytes) }
-            ?: throw IOException("MediaStore returned no stream for $name")
+
+        // The file is truncated explicitly rather than by opening it in "wt"
+        // mode. On a Galaxy S23 running Android 16, "wt" wrote from offset zero
+        // without shortening the file, so every flush left the previous, shorter
+        // document's tail behind and the published log grew without bound while
+        // the private copy stayed correct. Truncating through the channel is not
+        // a hint to the provider; it is the operation.
+        val opened = resolver.openFileDescriptor(destination, "rw")
+            ?: throw IOException("MediaStore returned no descriptor for $name")
+
+        opened.use { descriptor ->
+            FileOutputStream(descriptor.fileDescriptor).use { stream ->
+                stream.channel.truncate(0)
+                stream.write(bytes)
+                stream.flush()
+            }
+        }
 
         return "$relativePath/$name"
     }

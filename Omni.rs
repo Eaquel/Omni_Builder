@@ -308,7 +308,7 @@ pub mod sign;
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Phase of the roadmap in directive section 52 that this tree implements.
-pub const CORE_PHASE: &str = "PHASE 2 — OMNI CORE";
+pub const CORE_PHASE: &str = "PHASE 3 — BINARY CORE";
 
 /// Maturity of the Core as a whole. Never raise this without the quality gates
 /// of directive section 51.
@@ -436,7 +436,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         status: Status::Beta,
         directive_section: 30,
         summary: "FIPS 180-4 SHA-256, verified against the published NIST vectors.",
-        missing: &["Not fuzzed yet, which directive section 41 asks for."],
+        missing: &["Randomised robustness testing only; not coverage-guided fuzzing."],
     },
     Subsystem {
         name: "Virtual filesystem",
@@ -502,6 +502,18 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
             "Sequential only; nothing runs in parallel.",
             "Not memory, battery or thermal aware, which directive section 36 requires.",
             "No checkpoint or resume inside a node.",
+        ],
+    },
+    Subsystem {
+        name: "Binary core",
+        status: Status::Partial,
+        directive_section: 20,
+        summary: "Bounded readers, patched writers, sections, tables and the CRC-32 \
+                  and Adler-32 checksums the ZIP and DEX formats use.",
+        missing: &[
+            "No format is implemented on top of it yet.",
+            "Randomised robustness testing only; not coverage-guided fuzzing.",
+            "The Validator trait has no implementations.",
         ],
     },
     Subsystem {
@@ -5608,6 +5620,803 @@ pub mod scheduler {
 }
 
 // ===========================================================================
+// binary — the binary core (directive sections 20 and 41)
+// ===========================================================================
+
+/// Reading and writing binary formats, safely.
+///
+/// ## Contract (directive section 2)
+///
+/// | Field                | Value                                                        |
+/// |----------------------|--------------------------------------------------------------|
+/// | Module               | `omni_core::binary`                                          |
+/// | Purpose              | The primitives every binary subsystem shares: cursors, bounded |
+/// |                      | reads, patched writes, sections, tables and checksums.        |
+/// | Non-Responsibilities | Knowing what any particular format means. DEX, ZIP and the    |
+/// |                      | resource table are built on this; none of them lives here.    |
+/// | Inputs               | Byte slices. Untrusted, always.                              |
+/// | Outputs              | Values, or diagnostics saying exactly what was wrong and where.|
+/// | Security             | Every read is bounds-checked. Every length that comes *out of* |
+/// |                      | the data is validated against what remains *before* anything   |
+/// |                      | is allocated. There is no recursion.                          |
+/// | Failure Modes        | Truncated input, a length that cannot be satisfied, an integer |
+/// |                      | that overflows, an overlong encoding, a write past the limit.  |
+/// | Determinism          | A writer given the same calls produces the same bytes.        |
+/// | Status               | PARTIAL — see the subsystem inventory.                        |
+///
+/// ## Why every read returns a `Result`
+///
+/// Directive section 41 requires that malformed input cannot crash, hang,
+/// corrupt memory or allocate without bound. A reader that panics on bad input
+/// satisfies none of that, and a reader that returns a zero on bad input is
+/// worse: it turns a detectable problem into a silent one. So every read either
+/// returns the value or says why it could not, and the type system makes
+/// ignoring that awkward.
+pub mod binary {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::FailureClass;
+
+    /// Largest buffer a writer will produce (directive section 60).
+    pub const MAX_BUFFER_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Byte order.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Endian {
+        /// Least significant byte first. DEX and ZIP both use this.
+        Little,
+        /// Most significant byte first.
+        Big,
+    }
+
+    impl Endian {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Endian::Little => "LITTLE",
+                Endian::Big => "BIG",
+            }
+        }
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.binary",
+            message,
+        )
+    }
+
+    /// A bounded, non-panicking reader over a byte slice.
+    ///
+    /// The lifetime is the data's: reads that return bytes borrow from the input
+    /// rather than copying it, which is what lets a large file be parsed without
+    /// being duplicated in memory (directive section 37).
+    #[derive(Clone, Debug)]
+    pub struct Reader<'a> {
+        data: &'a [u8],
+        position: usize,
+        endian: Endian,
+        origin: String,
+    }
+
+    impl<'a> Reader<'a> {
+        /// Reads `data`, describing it as `origin` in any diagnostic.
+        pub fn new(data: &'a [u8], endian: Endian, origin: impl Into<String>) -> Reader<'a> {
+            Reader {
+                data,
+                position: 0,
+                endian,
+                origin: origin.into(),
+            }
+        }
+
+        /// Total size of the input.
+        pub fn len(&self) -> usize {
+            self.data.len()
+        }
+
+        /// Whether the input is empty.
+        pub fn is_empty(&self) -> bool {
+            self.data.is_empty()
+        }
+
+        /// Current offset.
+        pub fn position(&self) -> usize {
+            self.position
+        }
+
+        /// Bytes left after the cursor.
+        pub fn remaining(&self) -> usize {
+            self.data.len() - self.position
+        }
+
+        /// Byte order in force.
+        pub fn endian(&self) -> Endian {
+            self.endian
+        }
+
+        /// Moves the cursor to an absolute offset.
+        pub fn seek(&mut self, offset: u64) -> Result<(), Diagnostic> {
+            let offset = self.checked_offset(offset)?;
+            self.position = offset;
+            Ok(())
+        }
+
+        /// Advances the cursor.
+        pub fn skip(&mut self, count: usize) -> Result<(), Diagnostic> {
+            self.require(count)?;
+            self.position += count;
+            Ok(())
+        }
+
+        /// Converts a length taken from the data into a usable one.
+        ///
+        /// This is the single most important function in the module. A length
+        /// field in a malformed file is the classic way to make a parser
+        /// allocate gigabytes or read past its buffer, so a declared length is
+        /// checked against what is actually left *before* it is used for
+        /// anything (directive section 60).
+        pub fn checked_length(&self, declared: u64) -> Result<usize, Diagnostic> {
+            let remaining = self.remaining() as u64;
+            if declared > remaining {
+                return Err(fail(
+                    "E7001",
+                    "The data declares a length longer than the data that follows it.",
+                )
+                .with_context(format!("Source: {}", self.origin))
+                .with_context(format!("At offset: {}", self.position))
+                .with_context(format!("Declared: {declared} bytes"))
+                .with_context(format!("Available: {remaining} bytes"))
+                .with_suggestion(
+                    "The input is truncated or the length field is wrong. Nothing \
+                     is allocated for a length that cannot be satisfied.",
+                ));
+            }
+            Ok(declared as usize)
+        }
+
+        /// Converts an offset taken from the data into a usable one.
+        pub fn checked_offset(&self, declared: u64) -> Result<usize, Diagnostic> {
+            if declared > self.data.len() as u64 {
+                return Err(fail("E7002", "The data points past its own end.")
+                    .with_context(format!("Source: {}", self.origin))
+                    .with_context(format!("Offset: {declared}"))
+                    .with_context(format!("Size: {} bytes", self.data.len()))
+                    .with_suggestion("The offset field is wrong, or the file is truncated."));
+            }
+            Ok(declared as usize)
+        }
+
+        fn require(&self, count: usize) -> Result<(), Diagnostic> {
+            if count > self.remaining() {
+                return Err(fail("E7003", "The input ended before the value did.")
+                    .with_context(format!("Source: {}", self.origin))
+                    .with_context(format!("At offset: {}", self.position))
+                    .with_context(format!("Wanted: {count} bytes"))
+                    .with_context(format!("Available: {}", self.remaining()))
+                    .with_suggestion("The input is truncated."));
+            }
+            Ok(())
+        }
+
+        /// Reads `count` bytes and advances.
+        pub fn bytes(&mut self, count: usize) -> Result<&'a [u8], Diagnostic> {
+            self.require(count)?;
+            let start = self.position;
+            self.position += count;
+            Ok(&self.data[start..self.position])
+        }
+
+        /// Borrows a span without moving the cursor.
+        pub fn slice_at(&self, offset: u64, length: u64) -> Result<&'a [u8], Diagnostic> {
+            let start = self.checked_offset(offset)?;
+            let Some(end) = (start as u64).checked_add(length) else {
+                return Err(fail("E7004", "An offset and length overflow when added.")
+                    .with_context(format!("Source: {}", self.origin))
+                    .with_context(format!("Offset: {offset}, length: {length}")));
+            };
+            let end = self.checked_offset(end)?;
+            Ok(&self.data[start..end])
+        }
+
+        /// Reads one byte.
+        pub fn u8(&mut self) -> Result<u8, Diagnostic> {
+            Ok(self.bytes(1)?[0])
+        }
+
+        /// Reads a signed byte.
+        pub fn i8(&mut self) -> Result<i8, Diagnostic> {
+            Ok(self.u8()? as i8)
+        }
+
+        /// Reads a 16-bit unsigned integer.
+        pub fn u16(&mut self) -> Result<u16, Diagnostic> {
+            let bytes: [u8; 2] = self.fixed()?;
+            Ok(match self.endian {
+                Endian::Little => u16::from_le_bytes(bytes),
+                Endian::Big => u16::from_be_bytes(bytes),
+            })
+        }
+
+        /// Reads a 32-bit unsigned integer.
+        pub fn u32(&mut self) -> Result<u32, Diagnostic> {
+            let bytes: [u8; 4] = self.fixed()?;
+            Ok(match self.endian {
+                Endian::Little => u32::from_le_bytes(bytes),
+                Endian::Big => u32::from_be_bytes(bytes),
+            })
+        }
+
+        /// Reads a 64-bit unsigned integer.
+        pub fn u64(&mut self) -> Result<u64, Diagnostic> {
+            let bytes: [u8; 8] = self.fixed()?;
+            Ok(match self.endian {
+                Endian::Little => u64::from_le_bytes(bytes),
+                Endian::Big => u64::from_be_bytes(bytes),
+            })
+        }
+
+        /// Reads a 16-bit signed integer.
+        pub fn i16(&mut self) -> Result<i16, Diagnostic> {
+            Ok(self.u16()? as i16)
+        }
+
+        /// Reads a 32-bit signed integer.
+        pub fn i32(&mut self) -> Result<i32, Diagnostic> {
+            Ok(self.u32()? as i32)
+        }
+
+        fn fixed<const N: usize>(&mut self) -> Result<[u8; N], Diagnostic> {
+            let slice = self.bytes(N)?;
+            let mut out = [0u8; N];
+            out.copy_from_slice(slice);
+            Ok(out)
+        }
+
+        /// Reads an unsigned LEB128 integer.
+        ///
+        /// The DEX format is full of these. The encoding is refused if it runs
+        /// longer than the widest legal form or if it is longer than it needs to
+        /// be: an overlong encoding is a second spelling of one number, and two
+        /// spellings are two chances for a checksum and a parser to disagree.
+        pub fn uleb128(&mut self) -> Result<u64, Diagnostic> {
+            let mut value: u64 = 0;
+            let mut shift = 0u32;
+
+            for index in 0..10 {
+                let byte = self.u8()?;
+                let payload = u64::from(byte & 0x7f);
+
+                if shift >= 64 || (shift == 63 && payload > 1) {
+                    return Err(fail("E7005", "A LEB128 value does not fit in 64 bits.")
+                        .with_context(format!("Source: {}", self.origin))
+                        .with_context(format!("At offset: {}", self.position)));
+                }
+
+                value |= payload << shift;
+                shift += 7;
+
+                if byte & 0x80 == 0 {
+                    if index > 0 && byte == 0 {
+                        return Err(fail("E7006", "A LEB128 value is encoded overlong.")
+                            .with_context(format!("Source: {}", self.origin))
+                            .with_context(format!("At offset: {}", self.position))
+                            .with_suggestion(
+                                "The same number has a shorter encoding. Two \
+                                 spellings of one value make a format ambiguous.",
+                            ));
+                    }
+                    return Ok(value);
+                }
+            }
+
+            Err(fail("E7007", "A LEB128 value has no end.")
+                .with_context(format!("Source: {}", self.origin))
+                .with_context(format!("At offset: {}", self.position))
+                .with_suggestion("Every byte had its continuation bit set."))
+        }
+
+        /// Reads a NUL-terminated byte string, without the terminator.
+        pub fn cstring(&mut self) -> Result<&'a [u8], Diagnostic> {
+            let start = self.position;
+            let Some(relative) = self.data[start..].iter().position(|byte| *byte == 0) else {
+                return Err(fail("E7008", "A NUL-terminated string has no terminator.")
+                    .with_context(format!("Source: {}", self.origin))
+                    .with_context(format!("From offset: {start}")));
+            };
+            self.position = start + relative + 1;
+            Ok(&self.data[start..start + relative])
+        }
+
+        /// Checks that the input begins with an expected marker.
+        pub fn expect_magic(&mut self, magic: &[u8]) -> Result<(), Diagnostic> {
+            let found = self.bytes(magic.len())?;
+            if found != magic {
+                return Err(fail(
+                    "E7009",
+                    "The input does not start the way this format does.",
+                )
+                .with_context(format!("Source: {}", self.origin))
+                .with_context(format!("Expected: {}", hex(magic)))
+                .with_context(format!("Found: {}", hex(found)))
+                .with_suggestion("This is not the format it was read as."));
+            }
+            Ok(())
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut out = String::with_capacity(bytes.len() * 3);
+        for (index, byte) in bytes.iter().take(16).enumerate() {
+            if index > 0 {
+                out.push(' ');
+            }
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        if bytes.len() > 16 {
+            out.push_str(" …");
+        }
+        out
+    }
+
+    /// A reserved span in a writer's output, to be filled in later.
+    ///
+    /// Binary formats are full of values that are only known once something
+    /// later has been written: a size, an offset, a count. Reserving the space
+    /// and patching it is how that is done without either two passes or
+    /// guesswork.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Patch {
+        offset: usize,
+        width: usize,
+    }
+
+    impl Patch {
+        /// Where the reserved span starts.
+        pub fn offset(&self) -> usize {
+            self.offset
+        }
+
+        /// How wide it is.
+        pub fn width(&self) -> usize {
+            self.width
+        }
+    }
+
+    /// A bounded binary writer.
+    #[derive(Clone, Debug)]
+    pub struct Writer {
+        buffer: Vec<u8>,
+        endian: Endian,
+        limit: usize,
+    }
+
+    impl Writer {
+        /// A writer with the default limit.
+        pub fn new(endian: Endian) -> Writer {
+            Writer::with_limit(endian, MAX_BUFFER_BYTES)
+        }
+
+        /// A writer that refuses to grow past `limit` bytes.
+        pub fn with_limit(endian: Endian, limit: usize) -> Writer {
+            Writer {
+                buffer: Vec::new(),
+                endian,
+                limit: limit.min(MAX_BUFFER_BYTES),
+            }
+        }
+
+        /// How much has been written.
+        pub fn position(&self) -> usize {
+            self.buffer.len()
+        }
+
+        /// Whether nothing has been written.
+        pub fn is_empty(&self) -> bool {
+            self.buffer.is_empty()
+        }
+
+        /// Byte order in force.
+        pub fn endian(&self) -> Endian {
+            self.endian
+        }
+
+        fn room_for(&self, count: usize) -> Result<(), Diagnostic> {
+            let Some(total) = self.buffer.len().checked_add(count) else {
+                return Err(fail("E7020", "The output size overflows."));
+            };
+            if total > self.limit {
+                return Err(Diagnostic::new(
+                    "E7021",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.binary",
+                    "The output is larger than this writer is allowed to produce.",
+                )
+                .with_context(format!("Limit: {} bytes", self.limit))
+                .with_context(format!("Would become: {total} bytes"))
+                .with_suggestion(
+                    "Raise the limit deliberately if the artifact really is this \
+                     large; an unbounded writer is a way to run a device out of \
+                     memory.",
+                ));
+            }
+            Ok(())
+        }
+
+        /// Appends raw bytes.
+        pub fn bytes(&mut self, data: &[u8]) -> Result<(), Diagnostic> {
+            self.room_for(data.len())?;
+            self.buffer.extend_from_slice(data);
+            Ok(())
+        }
+
+        /// Appends one byte.
+        pub fn u8(&mut self, value: u8) -> Result<(), Diagnostic> {
+            self.bytes(&[value])
+        }
+
+        /// Appends a 16-bit unsigned integer.
+        pub fn u16(&mut self, value: u16) -> Result<(), Diagnostic> {
+            match self.endian {
+                Endian::Little => self.bytes(&value.to_le_bytes()),
+                Endian::Big => self.bytes(&value.to_be_bytes()),
+            }
+        }
+
+        /// Appends a 32-bit unsigned integer.
+        pub fn u32(&mut self, value: u32) -> Result<(), Diagnostic> {
+            match self.endian {
+                Endian::Little => self.bytes(&value.to_le_bytes()),
+                Endian::Big => self.bytes(&value.to_be_bytes()),
+            }
+        }
+
+        /// Appends a 64-bit unsigned integer.
+        pub fn u64(&mut self, value: u64) -> Result<(), Diagnostic> {
+            match self.endian {
+                Endian::Little => self.bytes(&value.to_le_bytes()),
+                Endian::Big => self.bytes(&value.to_be_bytes()),
+            }
+        }
+
+        /// Appends an unsigned LEB128 integer, in its shortest form.
+        pub fn uleb128(&mut self, mut value: u64) -> Result<(), Diagnostic> {
+            loop {
+                let mut byte = (value & 0x7f) as u8;
+                value >>= 7;
+                if value != 0 {
+                    byte |= 0x80;
+                }
+                self.u8(byte)?;
+                if value == 0 {
+                    return Ok(());
+                }
+            }
+        }
+
+        /// Pads with zeroes until the position is a multiple of `alignment`.
+        ///
+        /// Alignment must be a power of two: every binary format that asks for
+        /// alignment asks for one, and accepting anything else would silently
+        /// produce a layout no reader expects.
+        pub fn align_to(&mut self, alignment: usize) -> Result<(), Diagnostic> {
+            if alignment == 0 || !alignment.is_power_of_two() {
+                return Err(Diagnostic::new(
+                    "E7022",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.binary",
+                    "Alignment must be a power of two.",
+                )
+                .with_context(format!("Given: {alignment}")));
+            }
+            let padding = (alignment - (self.buffer.len() % alignment)) % alignment;
+            for _ in 0..padding {
+                self.u8(0)?;
+            }
+            Ok(())
+        }
+
+        /// Reserves four bytes to be filled in later.
+        pub fn reserve_u32(&mut self) -> Result<Patch, Diagnostic> {
+            let offset = self.buffer.len();
+            self.u32(0)?;
+            Ok(Patch { offset, width: 4 })
+        }
+
+        /// Reserves two bytes to be filled in later.
+        pub fn reserve_u16(&mut self) -> Result<Patch, Diagnostic> {
+            let offset = self.buffer.len();
+            self.u16(0)?;
+            Ok(Patch { offset, width: 2 })
+        }
+
+        /// Fills in a reserved 32-bit span.
+        pub fn patch_u32(&mut self, patch: Patch, value: u32) -> Result<(), Diagnostic> {
+            self.patch(
+                patch,
+                4,
+                &match self.endian {
+                    Endian::Little => value.to_le_bytes(),
+                    Endian::Big => value.to_be_bytes(),
+                },
+            )
+        }
+
+        /// Fills in a reserved 16-bit span.
+        pub fn patch_u16(&mut self, patch: Patch, value: u16) -> Result<(), Diagnostic> {
+            self.patch(
+                patch,
+                2,
+                &match self.endian {
+                    Endian::Little => value.to_le_bytes(),
+                    Endian::Big => value.to_be_bytes(),
+                },
+            )
+        }
+
+        fn patch(&mut self, patch: Patch, width: usize, value: &[u8]) -> Result<(), Diagnostic> {
+            if patch.width != width {
+                return Err(Diagnostic::new(
+                    "E7023",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.binary",
+                    "A reserved span is being filled with a value of another width.",
+                )
+                .with_context(format!("Reserved: {} bytes", patch.width))
+                .with_context(format!("Writing: {width} bytes")));
+            }
+
+            let end = patch.offset + width;
+            if end > self.buffer.len() {
+                return Err(Diagnostic::new(
+                    "E7024",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.binary",
+                    "A reserved span is outside the output.",
+                )
+                .with_context(format!("Span: {}..{end}", patch.offset))
+                .with_context(format!("Output: {} bytes", self.buffer.len()))
+                .with_suggestion("The patch belongs to a different writer."));
+            }
+
+            self.buffer[patch.offset..end].copy_from_slice(value);
+            Ok(())
+        }
+
+        /// Borrows what has been written.
+        pub fn as_slice(&self) -> &[u8] {
+            &self.buffer
+        }
+
+        /// Takes the finished bytes.
+        pub fn finish(self) -> Vec<u8> {
+            self.buffer
+        }
+    }
+
+    /// A named span within a file.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Section {
+        /// What it is called in the format's specification.
+        pub name: String,
+        /// Where it starts.
+        pub offset: u64,
+        /// How long it is.
+        pub size: u64,
+    }
+
+    impl Section {
+        /// Checks that the section lies inside `total` bytes.
+        pub fn validate(&self, total: u64) -> Result<(), Diagnostic> {
+            let Some(end) = self.offset.checked_add(self.size) else {
+                return Err(
+                    fail("E7030", "A section's offset and size overflow when added.")
+                        .with_context(format!("Section: {}", self.name)),
+                );
+            };
+            if end > total {
+                return Err(fail("E7031", "A section extends past the end of the file.")
+                    .with_context(format!("Section: {}", self.name))
+                    .with_context(format!("Span: {}..{end}", self.offset))
+                    .with_context(format!("File: {total} bytes"))
+                    .with_suggestion("The file is truncated or its header is wrong."));
+            }
+            Ok(())
+        }
+
+        /// Whether this section overlaps another.
+        pub fn overlaps(&self, other: &Section) -> bool {
+            let this_end = self.offset.saturating_add(self.size);
+            let other_end = other.offset.saturating_add(other.size);
+            self.offset < other_end && other.offset < this_end && self.size > 0 && other.size > 0
+        }
+    }
+
+    /// A run of fixed-size entries.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Table {
+        /// What it is called in the format's specification.
+        pub name: String,
+        /// Where the first entry starts.
+        pub offset: u64,
+        /// How large one entry is.
+        pub entry_size: u64,
+        /// How many entries there are.
+        pub count: u64,
+    }
+
+    impl Table {
+        /// Total size of the table, refusing an overflow.
+        ///
+        /// `entry_size * count` is exactly the multiplication a malformed header
+        /// uses to make a parser believe a small file contains an enormous
+        /// table, so it is checked rather than computed.
+        pub fn span(&self) -> Result<u64, Diagnostic> {
+            self.entry_size.checked_mul(self.count).ok_or_else(|| {
+                fail("E7040", "A table's size overflows.")
+                    .with_context(format!("Table: {}", self.name))
+                    .with_context(format!(
+                        "{} entries of {} bytes",
+                        self.count, self.entry_size
+                    ))
+            })
+        }
+
+        /// Checks that every entry lies inside `total` bytes.
+        pub fn validate(&self, total: u64) -> Result<(), Diagnostic> {
+            let span = self.span()?;
+            Section {
+                name: self.name.clone(),
+                offset: self.offset,
+                size: span,
+            }
+            .validate(total)
+        }
+
+        /// Offset of one entry.
+        pub fn entry_offset(&self, index: u64) -> Result<u64, Diagnostic> {
+            if index >= self.count {
+                return Err(fail("E7041", "A table entry is out of range.")
+                    .with_context(format!("Table: {}", self.name))
+                    .with_context(format!("Index: {index}, entries: {}", self.count)));
+            }
+            self.entry_size
+                .checked_mul(index)
+                .and_then(|shift| self.offset.checked_add(shift))
+                .ok_or_else(|| {
+                    fail("E7042", "A table entry's offset overflows.")
+                        .with_context(format!("Table: {}", self.name))
+                })
+        }
+    }
+
+    /// Something that can check a parsed structure and report what is wrong.
+    ///
+    /// Validators collect every problem rather than stopping at the first, so a
+    /// person fixing a malformed file sees the whole picture in one pass
+    /// (directive section 33).
+    pub trait Validator {
+        /// Name used in diagnostics.
+        fn name(&self) -> &str;
+
+        /// Checks the input, appending anything wrong to `sink`.
+        ///
+        /// Returns whether the input may be used.
+        fn validate(&self, data: &[u8], sink: &mut Sink) -> bool;
+    }
+
+    /// Checksums used by the formats this toolchain touches.
+    ///
+    /// Both algorithms are published standards with published check values, and
+    /// both are implemented from those specifications. Directive section 30
+    /// applies to checksums as much as to hashes: nothing here is invented, and
+    /// nothing is trusted until it reproduces the official value.
+    ///
+    /// Neither is a security primitive. A checksum detects accidental damage;
+    /// only a signature detects a deliberate change (directive section 25).
+    pub mod checksum {
+        /// CRC-32 as used by ZIP, gzip and PNG (ITU-T V.42, reflected, polynomial
+        /// 0xEDB88320).
+        #[derive(Clone, Copy, Debug)]
+        pub struct Crc32 {
+            state: u32,
+        }
+
+        impl Default for Crc32 {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl Crc32 {
+            /// A fresh accumulator.
+            pub const fn new() -> Self {
+                Crc32 { state: 0xffff_ffff }
+            }
+
+            /// Absorbs more data.
+            pub fn update(&mut self, data: &[u8]) {
+                for byte in data {
+                    self.state ^= u32::from(*byte);
+                    for _ in 0..8 {
+                        let mask = (self.state & 1).wrapping_neg();
+                        self.state = (self.state >> 1) ^ (0xedb8_8320 & mask);
+                    }
+                }
+            }
+
+            /// The checksum so far.
+            pub const fn finish(self) -> u32 {
+                self.state ^ 0xffff_ffff
+            }
+        }
+
+        /// CRC-32 of a slice.
+        pub fn crc32(data: &[u8]) -> u32 {
+            let mut crc = Crc32::new();
+            crc.update(data);
+            crc.finish()
+        }
+
+        /// Adler-32 as used by zlib and by the DEX header (RFC 1950).
+        #[derive(Clone, Copy, Debug)]
+        pub struct Adler32 {
+            a: u32,
+            b: u32,
+        }
+
+        impl Default for Adler32 {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl Adler32 {
+            /// The largest number of bytes that can be absorbed before the sums
+            /// must be reduced, from RFC 1950.
+            const NMAX: usize = 5552;
+
+            /// A fresh accumulator.
+            pub const fn new() -> Self {
+                Adler32 { a: 1, b: 0 }
+            }
+
+            /// Absorbs more data.
+            pub fn update(&mut self, data: &[u8]) {
+                for chunk in data.chunks(Self::NMAX) {
+                    for byte in chunk {
+                        self.a += u32::from(*byte);
+                        self.b += self.a;
+                    }
+                    self.a %= 65_521;
+                    self.b %= 65_521;
+                }
+            }
+
+            /// The checksum so far.
+            pub const fn finish(self) -> u32 {
+                (self.b << 16) | self.a
+            }
+        }
+
+        /// Adler-32 of a slice.
+        pub fn adler32(data: &[u8]) -> u32 {
+            let mut adler = Adler32::new();
+            adler.update(data);
+            adler.finish()
+        }
+    }
+}
+
+// ===========================================================================
 // report — the single source of truth the user interface renders
 // ===========================================================================
 
@@ -5849,6 +6658,10 @@ pub mod ffi {
 #[cfg(test)]
 mod tests {
     use super::artifact::{Artifact, ArtifactId, State as ArtifactState};
+    use super::binary::{
+        checksum, Endian, Reader as BinaryReader, Section, Table as BinaryTable,
+        Writer as BinaryWriter,
+    };
     use super::cache::{Index as CacheIndex, Inputs as CacheInputs, Lookup as CacheLookup};
     use super::caps::{Capability, Decision, Policy};
     use super::diag::{Diagnostic, Location, Severity, Sink};
@@ -6472,6 +7285,518 @@ mod tests {
         }
         for pin in toolchain::LOCK {
             assert!(report.contains(pin.id), "missing pin in report: {}", pin.id);
+        }
+    }
+
+    // --- binary core: checksums (official check values) ----------------------
+
+    #[test]
+    fn crc32_matches_the_published_check_value() {
+        // The check value every CRC-32 specification quotes for "123456789".
+        assert_eq!(checksum::crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!(checksum::crc32(b""), 0x0000_0000);
+        assert_eq!(checksum::crc32(b"a"), 0xe8b7_be43);
+        assert_eq!(checksum::crc32(b"abc"), 0x3524_41c2);
+        assert_eq!(
+            checksum::crc32(b"The quick brown fox jumps over the lazy dog"),
+            0x414f_a339
+        );
+    }
+
+    #[test]
+    fn adler32_matches_the_published_check_value() {
+        // RFC 1950. The DEX header carries one of these over its own body.
+        assert_eq!(checksum::adler32(b"123456789"), 0x091e_01de);
+        assert_eq!(checksum::adler32(b""), 0x0000_0001);
+        assert_eq!(checksum::adler32(b"a"), 0x0062_0062);
+        assert_eq!(checksum::adler32(b"abc"), 0x024d_0127);
+        assert_eq!(checksum::adler32(b"Wikipedia"), 0x11e6_0398);
+    }
+
+    #[test]
+    fn checksums_do_not_depend_on_how_the_input_is_split() {
+        let message: Vec<u8> = (0u8..=255).cycle().take(20_000).collect();
+        let crc_once = checksum::crc32(&message);
+        let adler_once = checksum::adler32(&message);
+
+        // 5552 is the reduction boundary in RFC 1950; either side of it is where
+        // a streaming bug in Adler-32 shows up.
+        for split in [1usize, 7, 255, 5_551, 5_552, 5_553, 8_192, 19_999] {
+            let mut crc = checksum::Crc32::new();
+            let mut adler = checksum::Adler32::new();
+            for piece in message.chunks(split) {
+                crc.update(piece);
+                adler.update(piece);
+            }
+            assert_eq!(crc.finish(), crc_once, "crc split at {split}");
+            assert_eq!(adler.finish(), adler_once, "adler split at {split}");
+        }
+    }
+
+    // --- binary core: reading ------------------------------------------------
+
+    fn reader(data: &[u8]) -> BinaryReader<'_> {
+        BinaryReader::new(data, Endian::Little, "test")
+    }
+
+    #[test]
+    fn integers_are_read_in_the_declared_byte_order() {
+        let data = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+
+        let mut little = BinaryReader::new(&data, Endian::Little, "test");
+        assert_eq!(little.u16().unwrap(), 0x0201);
+        assert_eq!(little.u16().unwrap(), 0x0403);
+        assert_eq!(little.u32().unwrap(), 0x0807_0605);
+
+        let mut big = BinaryReader::new(&data, Endian::Big, "test");
+        assert_eq!(big.u16().unwrap(), 0x0102);
+        assert_eq!(big.u32().unwrap(), 0x0304_0506);
+        assert_eq!(big.remaining(), 2);
+    }
+
+    #[test]
+    fn a_truncated_input_is_reported_not_padded() {
+        // A reader that returns zero for missing bytes turns a detectable
+        // problem into a silent one.
+        let data = [0x01, 0x02];
+        let mut r = reader(&data);
+        assert_eq!(r.u32().unwrap_err().code, "E7003");
+        assert_eq!(r.position(), 0, "a failed read must not move the cursor");
+
+        assert_eq!(reader(&[]).u8().unwrap_err().code, "E7003");
+        assert_eq!(reader(&data).bytes(3).unwrap_err().code, "E7003");
+    }
+
+    #[test]
+    fn a_declared_length_is_checked_before_anything_is_allocated() {
+        // Directive section 60: this is the exact shape of the bug that makes a
+        // parser allocate gigabytes from a two-byte file.
+        let data = [0xff; 4];
+        let r = reader(&data);
+        let error = r.checked_length(u64::MAX).unwrap_err();
+        assert_eq!(error.code, "E7001");
+        assert!(error.context.iter().any(|line| line.contains("Available")));
+
+        assert_eq!(r.checked_length(4).unwrap(), 4);
+        assert_eq!(r.checked_length(0).unwrap(), 0);
+        assert_eq!(r.checked_length(5).unwrap_err().code, "E7001");
+    }
+
+    #[test]
+    fn an_offset_past_the_end_is_refused() {
+        let data = [0u8; 8];
+        let r = reader(&data);
+        assert_eq!(r.checked_offset(8).unwrap(), 8);
+        assert_eq!(r.checked_offset(9).unwrap_err().code, "E7002");
+        assert_eq!(r.checked_offset(u64::MAX).unwrap_err().code, "E7002");
+
+        assert_eq!(r.slice_at(4, 4).unwrap().len(), 4);
+        assert_eq!(r.slice_at(4, 5).unwrap_err().code, "E7002");
+        assert_eq!(r.slice_at(1, u64::MAX).unwrap_err().code, "E7004");
+    }
+
+    #[test]
+    fn seeking_stays_inside_the_input() {
+        let data = [0u8; 4];
+        let mut r = reader(&data);
+        r.seek(4).unwrap();
+        assert_eq!(r.remaining(), 0);
+        assert_eq!(r.seek(5).unwrap_err().code, "E7002");
+        assert_eq!(r.skip(1).unwrap_err().code, "E7003");
+    }
+
+    #[test]
+    fn uleb128_reads_what_the_dex_format_writes() {
+        let cases: &[(&[u8], u64)] = &[
+            (&[0x00], 0),
+            (&[0x01], 1),
+            (&[0x7f], 127),
+            (&[0x80, 0x01], 128),
+            (&[0xff, 0x7f], 16_383),
+            (&[0x80, 0x80, 0x01], 16_384),
+            (&[0xff, 0xff, 0xff, 0xff, 0x0f], u64::from(u32::MAX)),
+        ];
+        for (bytes, expected) in cases {
+            assert_eq!(reader(bytes).uleb128().unwrap(), *expected, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn uleb128_refuses_overlong_and_unterminated_encodings() {
+        // Two spellings of one number are two chances for a writer and a reader
+        // to disagree about a checksum.
+        assert_eq!(reader(&[0x80, 0x00]).uleb128().unwrap_err().code, "E7006");
+        assert_eq!(reader(&[0x81, 0x00]).uleb128().unwrap_err().code, "E7006");
+
+        assert_eq!(reader(&[0x80]).uleb128().unwrap_err().code, "E7003");
+        assert_eq!(reader(&[0x80; 10]).uleb128().unwrap_err().code, "E7007");
+        assert_eq!(
+            reader(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f])
+                .uleb128()
+                .unwrap_err()
+                .code,
+            "E7005"
+        );
+    }
+
+    #[test]
+    fn a_string_without_a_terminator_is_refused() {
+        let mut r = reader(b"omni\0rest");
+        assert_eq!(r.cstring().unwrap(), b"omni");
+        assert_eq!(r.position(), 5);
+        assert_eq!(
+            reader(b"no terminator").cstring().unwrap_err().code,
+            "E7008"
+        );
+        assert_eq!(reader(b"\0").cstring().unwrap(), b"");
+    }
+
+    #[test]
+    fn a_wrong_magic_number_says_what_it_found() {
+        let mut r = reader(b"dex\n035\0");
+        r.expect_magic(b"dex\n035\0").unwrap();
+
+        let mut r = reader(b"PK\x03\x04");
+        let error = r.expect_magic(b"dex\n").unwrap_err();
+        assert_eq!(error.code, "E7009");
+        assert!(error.context.iter().any(|line| line.contains("Found")));
+    }
+
+    // --- binary core: writing ------------------------------------------------
+
+    #[test]
+    fn a_writer_produces_the_bytes_the_format_expects() {
+        let mut w = BinaryWriter::new(Endian::Little);
+        w.u8(0x01).unwrap();
+        w.u16(0x0302).unwrap();
+        w.u32(0x0706_0504).unwrap();
+        assert_eq!(w.as_slice(), &[1, 2, 3, 4, 5, 6, 7]);
+
+        let mut w = BinaryWriter::new(Endian::Big);
+        w.u16(0x0102).unwrap();
+        w.u64(0x0304_0506_0708_090a).unwrap();
+        assert_eq!(w.finish(), vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    }
+
+    #[test]
+    fn a_reserved_span_can_be_filled_in_once_the_size_is_known() {
+        // This is how every real binary format writes a size it does not know
+        // until later, without a second pass.
+        let mut w = BinaryWriter::new(Endian::Little);
+        let size = w.reserve_u32().unwrap();
+        w.bytes(b"payload").unwrap();
+        let written = w.position() as u32 - 4;
+        w.patch_u32(size, written).unwrap();
+
+        let bytes = w.finish();
+        let mut r = BinaryReader::new(&bytes, Endian::Little, "roundtrip");
+        assert_eq!(r.u32().unwrap(), 7);
+        assert_eq!(r.bytes(7).unwrap(), b"payload");
+    }
+
+    #[test]
+    fn a_patch_must_match_the_span_it_was_given() {
+        let mut w = BinaryWriter::new(Endian::Little);
+        let narrow = w.reserve_u16().unwrap();
+        assert_eq!(w.patch_u32(narrow, 1).unwrap_err().code, "E7023");
+        w.patch_u16(narrow, 0xabcd).unwrap();
+        assert_eq!(w.as_slice(), &[0xcd, 0xab]);
+
+        // A patch from one writer cannot be used on another.
+        let mut other = BinaryWriter::new(Endian::Little);
+        assert_eq!(other.patch_u16(narrow, 1).unwrap_err().code, "E7024");
+    }
+
+    #[test]
+    fn alignment_pads_and_refuses_anything_that_is_not_a_power_of_two() {
+        let mut w = BinaryWriter::new(Endian::Little);
+        w.bytes(b"abc").unwrap();
+        w.align_to(4).unwrap();
+        assert_eq!(w.position(), 4);
+        w.align_to(4).unwrap();
+        assert_eq!(
+            w.position(),
+            4,
+            "aligning an aligned writer must do nothing"
+        );
+        w.align_to(8).unwrap();
+        assert_eq!(w.as_slice(), &[b'a', b'b', b'c', 0, 0, 0, 0, 0]);
+
+        assert_eq!(w.align_to(0).unwrap_err().code, "E7022");
+        assert_eq!(w.align_to(3).unwrap_err().code, "E7022");
+    }
+
+    #[test]
+    fn a_writer_refuses_to_grow_past_its_limit() {
+        // Directive section 60: an unbounded writer is a way to run a phone out
+        // of memory.
+        let mut w = BinaryWriter::with_limit(Endian::Little, 8);
+        w.bytes(&[0u8; 8]).unwrap();
+        let error = w.u8(0).unwrap_err();
+        assert_eq!(error.code, "E7021");
+        assert_eq!(error.class, FailureClass::ResourceExhaustion);
+        assert_eq!(w.position(), 8, "a refused write must not have written");
+    }
+
+    #[test]
+    fn uleb128_round_trips_through_the_writer_and_the_reader() {
+        let values = [
+            0u64,
+            1,
+            63,
+            64,
+            127,
+            128,
+            255,
+            256,
+            16_383,
+            16_384,
+            65_535,
+            65_536,
+            u64::from(u32::MAX),
+            u64::MAX / 2,
+            u64::MAX,
+        ];
+        for value in values {
+            let mut w = BinaryWriter::new(Endian::Little);
+            w.uleb128(value).unwrap();
+            let bytes = w.finish();
+            assert_eq!(
+                BinaryReader::new(&bytes, Endian::Little, "roundtrip")
+                    .uleb128()
+                    .unwrap(),
+                value,
+                "value {value}"
+            );
+        }
+    }
+
+    // --- binary core: sections and tables ------------------------------------
+
+    #[test]
+    fn a_section_must_lie_inside_the_file() {
+        let section = Section {
+            name: "header".into(),
+            offset: 0,
+            size: 16,
+        };
+        section.validate(16).unwrap();
+        assert_eq!(section.validate(15).unwrap_err().code, "E7031");
+
+        let overflowing = Section {
+            name: "bad".into(),
+            offset: u64::MAX,
+            size: 2,
+        };
+        assert_eq!(overflowing.validate(1024).unwrap_err().code, "E7030");
+    }
+
+    #[test]
+    fn overlapping_sections_are_detectable() {
+        let a = Section {
+            name: "a".into(),
+            offset: 0,
+            size: 16,
+        };
+        let b = Section {
+            name: "b".into(),
+            offset: 8,
+            size: 16,
+        };
+        let c = Section {
+            name: "c".into(),
+            offset: 16,
+            size: 16,
+        };
+        let empty = Section {
+            name: "empty".into(),
+            offset: 8,
+            size: 0,
+        };
+
+        assert!(a.overlaps(&b));
+        assert!(b.overlaps(&a));
+        assert!(!a.overlaps(&c), "touching is not overlapping");
+        assert!(!a.overlaps(&empty), "an empty section overlaps nothing");
+    }
+
+    #[test]
+    fn a_table_refuses_the_multiplication_that_hides_a_malformed_header() {
+        // entry_size * count is where a header claims a two-byte file holds an
+        // enormous table.
+        let table = BinaryTable {
+            name: "string_ids".into(),
+            offset: 32,
+            entry_size: 4,
+            count: 8,
+        };
+        assert_eq!(table.span().unwrap(), 32);
+        table.validate(64).unwrap();
+        assert_eq!(table.validate(63).unwrap_err().code, "E7031");
+
+        let overflowing = BinaryTable {
+            name: "evil".into(),
+            offset: 0,
+            entry_size: u64::MAX,
+            count: 2,
+        };
+        assert_eq!(overflowing.span().unwrap_err().code, "E7040");
+        assert_eq!(overflowing.validate(1024).unwrap_err().code, "E7040");
+    }
+
+    #[test]
+    fn table_entries_are_addressed_by_index_and_bounded_by_count() {
+        let table = BinaryTable {
+            name: "method_ids".into(),
+            offset: 100,
+            entry_size: 8,
+            count: 4,
+        };
+        assert_eq!(table.entry_offset(0).unwrap(), 100);
+        assert_eq!(table.entry_offset(3).unwrap(), 124);
+        assert_eq!(table.entry_offset(4).unwrap_err().code, "E7041");
+        assert_eq!(table.entry_offset(u64::MAX).unwrap_err().code, "E7041");
+    }
+
+    // --- binary core: robustness against malformed input ---------------------
+
+    /// A deterministic generator, so a failure can be reproduced from its seed.
+    ///
+    /// This is xorshift64*, chosen because it is four lines and needs no
+    /// dependency (ADR-0003). It is not a cryptographic generator and nothing
+    /// here needs one.
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        *state = x;
+        x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    #[test]
+    fn the_reader_survives_arbitrary_input() {
+        // Directive section 41 names BinaryReader as a fuzz target. This is not
+        // coverage-guided fuzzing and does not claim to be: it is a deterministic
+        // randomised robustness test over the operations a real parser performs.
+        // What it proves is that no sequence of them panics, hangs, or reads
+        // outside the buffer.
+        let mut seed = 0x0123_4567_89ab_cdefu64;
+
+        for _ in 0..4_000 {
+            let length = (xorshift(&mut seed) % 96) as usize;
+            let data: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+
+            for endian in [Endian::Little, Endian::Big] {
+                let mut r = BinaryReader::new(&data, endian, "fuzz");
+
+                for _ in 0..24 {
+                    let before = r.position();
+                    let operation = xorshift(&mut seed) % 11;
+
+                    let moved = match operation {
+                        0 => r.u8().is_ok(),
+                        1 => r.u16().is_ok(),
+                        2 => r.u32().is_ok(),
+                        3 => r.u64().is_ok(),
+                        4 => r.uleb128().is_ok(),
+                        5 => r.cstring().is_ok(),
+                        6 => {
+                            let count = (xorshift(&mut seed) % 200) as usize;
+                            r.bytes(count).is_ok()
+                        }
+                        7 => r.skip((xorshift(&mut seed) % 200) as usize).is_ok(),
+                        8 => r.seek(xorshift(&mut seed) % 200).is_ok(),
+                        9 => {
+                            let _ = r.checked_length(xorshift(&mut seed));
+                            let _ = r.checked_offset(xorshift(&mut seed));
+                            false
+                        }
+                        _ => {
+                            let offset = xorshift(&mut seed) % 200;
+                            let len = xorshift(&mut seed) % 200;
+                            let _ = r.slice_at(offset, len);
+                            false
+                        }
+                    };
+                    let _ = moved;
+
+                    // The cursor never leaves the buffer, whatever happened.
+                    assert!(r.position() <= data.len(), "cursor escaped the buffer");
+                    assert_eq!(r.remaining(), data.len() - r.position());
+                    if before > r.position() {
+                        // Only an explicit seek may move backwards.
+                        assert_eq!(operation, 8, "cursor moved backwards unexpectedly");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_writer_survives_arbitrary_use() {
+        let mut seed = 0xfedc_ba98_7654_3210u64;
+
+        for _ in 0..2_000 {
+            let limit = (xorshift(&mut seed) % 128) as usize;
+            let mut w = BinaryWriter::with_limit(Endian::Little, limit);
+            let mut patches: Vec<super::binary::Patch> = Vec::new();
+
+            for _ in 0..32 {
+                match xorshift(&mut seed) % 8 {
+                    0 => {
+                        let _ = w.u8((xorshift(&mut seed) & 0xff) as u8);
+                    }
+                    1 => {
+                        let _ = w.u32(xorshift(&mut seed) as u32);
+                    }
+                    2 => {
+                        let _ = w.uleb128(xorshift(&mut seed));
+                    }
+                    3 => {
+                        let count = (xorshift(&mut seed) % 64) as usize;
+                        let _ = w.bytes(&vec![0xaa; count]);
+                    }
+                    4 => {
+                        let alignment = 1usize << (xorshift(&mut seed) % 6);
+                        let _ = w.align_to(alignment);
+                    }
+                    5 => {
+                        if let Ok(patch) = w.reserve_u32() {
+                            patches.push(patch);
+                        }
+                    }
+                    6 => {
+                        if let Some(patch) = patches.first().copied() {
+                            let _ = w.patch_u32(patch, xorshift(&mut seed) as u32);
+                        }
+                    }
+                    _ => {
+                        let _ = w.align_to((xorshift(&mut seed) % 10) as usize);
+                    }
+                }
+
+                // The limit is never exceeded, whatever the sequence.
+                assert!(w.position() <= limit, "writer exceeded its limit");
+            }
+        }
+    }
+
+    #[test]
+    fn checksums_survive_arbitrary_input() {
+        let mut seed = 0x0f0f_0f0f_0f0f_0f0fu64;
+        for _ in 0..2_000 {
+            let length = (xorshift(&mut seed) % 12_000) as usize;
+            let data: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+            // Both must agree with themselves whatever the input; the point is
+            // that neither panics nor loops on any length, including zero and
+            // lengths either side of the Adler-32 reduction boundary.
+            assert_eq!(checksum::crc32(&data), checksum::crc32(&data));
+            assert_eq!(checksum::adler32(&data), checksum::adler32(&data));
         }
     }
 
@@ -8119,6 +9444,29 @@ Viewbinding   = false
                 hasher.finish()
             };
             assert_eq!(streamed, super::hash::sha256(&message), "length {length}");
+        }
+    }
+
+    #[test]
+    fn sha256_survives_arbitrary_input() {
+        // Directive section 41 applies to every parser and every primitive that
+        // reads untrusted bytes. SHA-256 has no parsing to get wrong, so what is
+        // checked here is that no length, including the padding boundaries, can
+        // make it disagree with itself or misbehave.
+        let mut seed = 0xdead_beef_cafe_1234u64;
+        for _ in 0..2_000 {
+            let length = (xorshift(&mut seed) % 4_096) as usize;
+            let data: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+
+            let one_shot = super::hash::sha256(&data);
+            let split = ((xorshift(&mut seed) % 200) + 1) as usize;
+            let mut hasher = super::hash::Sha256::new();
+            for piece in data.chunks(split) {
+                hasher.update(piece);
+            }
+            assert_eq!(hasher.finish(), one_shot, "length {length}, split {split}");
         }
     }
 
