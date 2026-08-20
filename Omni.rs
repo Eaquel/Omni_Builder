@@ -27,7 +27,7 @@ pub mod plugins {
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const CORE_PHASE: &str = "PHASE 9 — PACKAGING";
+pub const CORE_PHASE: &str = "PHASE 9 — TOOLCHAIN";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PhaseState {
@@ -89,7 +89,7 @@ pub const ROADMAP: &[Phase] = &[
         number: 6,
         name: "PHASE 6 — SIGNING",
         state: PhaseState::Delivered,
-        delivers: "A DER reader, X.509 certificates, and the APK signing block with its content digest recomputed and matched against apksigner. Signatures are read, never produced or verified.",
+        delivers: "A DER reader, X.509 certificates, and the APK signing block with its content digest recomputed and matched against apksigner. Signatures are read, never produced.",
     },
     Phase {
         number: 7,
@@ -101,73 +101,19 @@ pub const ROADMAP: &[Phase] = &[
         number: 8,
         name: "PHASE 8 — JVM CLASS FORMAT",
         state: PhaseState::Delivered,
-        delivers: "The class file the Kotlin front end must one day emit: constant pool, members, attributes and Kotlin metadata, matched against javap. A format reader, not a compiler.",
+        delivers: "The class file a front end must emit: constant pool, members, attributes and Kotlin metadata, matched against javap. A format reader, not a compiler.",
     },
     Phase {
         number: 9,
-        name: "PHASE 9 — PACKAGING",
+        name: "PHASE 9 — TOOLCHAIN",
         state: PhaseState::Current,
-        delivers: "The writers that turn a project into a package: binary XML, the resource table, a DEX writer, and RSA signing. The first APK Omni produces on its own.",
+        delivers: "Everything that turns a project into a package Omni made itself: binary XML, the resource table, a DEX writer, RSA signing, DEFLATE, an image codec with mipmap generation, APK optimisation, Omni_Guard, and the developer program that drives all of it from the device.",
     },
     Phase {
         number: 10,
-        name: "PHASE 10 — APK OPTIMIZATION",
+        name: "PHASE 10 — SELF-HOSTING",
         state: PhaseState::Planned,
-        delivers: "DEFLATE, entry layout, resource and DEX size reduction, measured against the package the bootstrap toolchain produces.",
-    },
-    Phase {
-        number: 11,
-        name: "PHASE 11 — ASSETS",
-        state: PhaseState::Planned,
-        delivers: "An image codec, mipmap generation from one source image, and lossless optimisation. No third-party library, so the DEFLATE encoder of phase 10 is a prerequisite.",
-    },
-    Phase {
-        number: 12,
-        name: "PHASE 12 — OMNI_DEVELOPER",
-        state: PhaseState::Planned,
-        delivers: "The developer program: creating a project, editing its files, configuring it, and driving a build from the device.",
-    },
-    Phase {
-        number: 13,
-        name: "PHASE 13 — KOTLIN",
-        state: PhaseState::Planned,
-        delivers: "A Kotlin front end: lexer, parser, symbol resolution, type analysis and a backend. None of it exists.",
-    },
-    Phase {
-        number: 14,
-        name: "PHASE 14 — JAVA",
-        state: PhaseState::Planned,
-        delivers: "A Java front end.",
-    },
-    Phase {
-        number: 15,
-        name: "PHASE 15 — C/C++",
-        state: PhaseState::Planned,
-        delivers: "Native compilation and linking.",
-    },
-    Phase {
-        number: 16,
-        name: "PHASE 16 — RUST",
-        state: PhaseState::Planned,
-        delivers: "Rust compilation for Android targets.",
-    },
-    Phase {
-        number: 17,
-        name: "PHASE 17 — OMNI_GUARD",
-        state: PhaseState::Planned,
-        delivers: "Detection, verification, integrity, provenance and policy enforcement (directive section 29).",
-    },
-    Phase {
-        number: 18,
-        name: "PHASE 18 — PERFORMANCE",
-        state: PhaseState::Planned,
-        delivers: "Parallel scheduling, memory and thermal awareness, and the measured budgets of directive sections 10 and 36.",
-    },
-    Phase {
-        number: 19,
-        name: "PHASE 19 — SELF-HOSTING",
-        state: PhaseState::Planned,
-        delivers: "Omni_Builder building Omni_Builder, with the bootstrap dependencies of directive section 15 removed one at a time.",
+        delivers: "The compilers Omni needs to build itself, and the removal of the bootstrap dependencies of directive section 15 one at a time.",
     },
 ];
 
@@ -380,6 +326,17 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Pinned versions with provenance, verified against an observed \
                   environment.",
         missing: &["Only two components can be observed from a device."],
+    },
+    Subsystem {
+        name: "Binary XML writer",
+        status: Status::Partial,
+        directive_section: 22,
+        summary: "The binary XML an APK carries, written from parsed text: string pool, resource map, namespaces, elements and typed attribute values. aapt2 reads what this writes and agrees on every value.",
+        missing: &[
+            "A resource reference by name is refused, not resolved: that needs the resource table, which is not written yet.",
+            "The attribute identifier table covers what a manifest uses, not every android attribute.",
+            "No styles, no CDATA nodes, and no reader: this writes binary XML and does not read it.",
+        ],
     },
     Subsystem {
         name: "JVM class file reader",
@@ -10558,6 +10515,424 @@ pub mod dex {
     }
 }
 
+pub mod axml {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::xml::Element;
+    use crate::FailureClass;
+
+    pub const ANDROID_NAMESPACE: &str = "http://schemas.android.com/apk/res/android";
+    pub const ANDROID_PREFIX: &str = "android";
+
+    pub const MAX_DOCUMENT_BYTES: usize = 16 * 1024 * 1024;
+    pub const MAX_STRINGS: usize = 65_535;
+
+    const RES_STRING_POOL_TYPE: u16 = 0x0001;
+    const RES_XML_TYPE: u16 = 0x0003;
+    const RES_XML_START_NAMESPACE_TYPE: u16 = 0x0100;
+    const RES_XML_END_NAMESPACE_TYPE: u16 = 0x0101;
+    const RES_XML_START_ELEMENT_TYPE: u16 = 0x0102;
+    const RES_XML_END_ELEMENT_TYPE: u16 = 0x0103;
+    const RES_XML_RESOURCE_MAP_TYPE: u16 = 0x0180;
+
+    const TYPE_REFERENCE: u8 = 0x01;
+    const TYPE_STRING: u8 = 0x03;
+    const TYPE_INT_DEC: u8 = 0x10;
+    const TYPE_INT_HEX: u8 = 0x11;
+    const TYPE_INT_BOOLEAN: u8 = 0x12;
+
+    const NO_ENTRY: u32 = 0xffff_ffff;
+    const BOOLEAN_TRUE: u32 = 0xffff_ffff;
+
+    pub const ATTRIBUTES: &[(&str, u32)] = &[
+        ("theme", 0x0101_0000),
+        ("label", 0x0101_0001),
+        ("icon", 0x0101_0002),
+        ("name", 0x0101_0003),
+        ("permission", 0x0101_0006),
+        ("sharedUserId", 0x0101_000b),
+        ("persistent", 0x0101_000d),
+        ("enabled", 0x0101_000e),
+        ("debuggable", 0x0101_000f),
+        ("exported", 0x0101_0010),
+        ("process", 0x0101_0011),
+        ("taskAffinity", 0x0101_0012),
+        ("authorities", 0x0101_0018),
+        ("grantUriPermissions", 0x0101_001b),
+        ("priority", 0x0101_001c),
+        ("launchMode", 0x0101_001d),
+        ("screenOrientation", 0x0101_001e),
+        ("configChanges", 0x0101_001f),
+        ("value", 0x0101_0024),
+        ("resource", 0x0101_0025),
+        ("minSdkVersion", 0x0101_020c),
+        ("versionCode", 0x0101_021b),
+        ("versionName", 0x0101_021c),
+        ("windowSoftInputMode", 0x0101_022b),
+        ("targetSdkVersion", 0x0101_0270),
+        ("maxSdkVersion", 0x0101_0271),
+        ("allowBackup", 0x0101_0280),
+        ("required", 0x0101_028e),
+        ("installLocation", 0x0101_02b7),
+        ("hardwareAccelerated", 0x0101_02d3),
+        ("largeHeap", 0x0101_035a),
+        ("supportsRtl", 0x0101_03af),
+        ("extractNativeLibs", 0x0101_04ea),
+        ("fullBackupContent", 0x0101_04eb),
+        ("networkSecurityConfig", 0x0101_0527),
+        ("roundIcon", 0x0101_052c),
+        ("compileSdkVersion", 0x0101_0572),
+        ("compileSdkVersionCodename", 0x0101_0573),
+        ("appComponentFactory", 0x0101_057a),
+        ("foregroundServiceType", 0x0101_0599),
+        ("hasFragileUserData", 0x0101_059a),
+    ];
+
+    pub fn attribute_id(name: &str) -> Option<u32> {
+        ATTRIBUTES
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, id)| *id)
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.axml",
+            message,
+        )
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Value {
+        Reference(u32),
+        Boolean(bool),
+        Decimal(i32),
+        Hex(u32),
+        Text,
+    }
+
+    pub fn classify(raw: &str) -> Result<Value, Diagnostic> {
+        if let Some(rest) = raw.strip_prefix('@') {
+            if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+                return u32::from_str_radix(hex, 16)
+                    .map(Value::Reference)
+                    .map_err(|_| {
+                        fail("EA020", "A resource reference is not a 32-bit value.")
+                            .with_context(format!("Value: {raw}"))
+                    });
+            }
+            return Err(fail(
+                "EA021",
+                "A resource reference by name needs a resource table, which this build does not write.",
+            )
+            .with_context(format!("Value: {raw}"))
+            .with_suggestion(
+                "Write the numeric form, for example @0x7f060000, until the resource table is implemented.",
+            ));
+        }
+
+        match raw {
+            "true" => return Ok(Value::Boolean(true)),
+            "false" => return Ok(Value::Boolean(false)),
+            _ => {}
+        }
+
+        if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+            if !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                if let Ok(value) = u32::from_str_radix(hex, 16) {
+                    return Ok(Value::Hex(value));
+                }
+            }
+        }
+
+        if let Ok(value) = raw.parse::<i32>() {
+            return Ok(Value::Decimal(value));
+        }
+
+        Ok(Value::Text)
+    }
+
+    fn split_name(qualified: &str) -> (Option<&str>, &str) {
+        match qualified.split_once(':') {
+            Some((prefix, local)) => (Some(prefix), local),
+            None => (None, qualified),
+        }
+    }
+
+    #[derive(Default)]
+    struct Pool {
+        keyed: Vec<String>,
+        ids: Vec<u32>,
+        others: Vec<String>,
+    }
+
+    impl Pool {
+        fn add_keyed(&mut self, name: &str, id: u32) {
+            if !self.keyed.iter().any(|held| held == name) {
+                self.keyed.push(name.to_string());
+                self.ids.push(id);
+            }
+        }
+
+        fn add_other(&mut self, text: &str) {
+            if !self.keyed.iter().any(|held| held == text)
+                && !self.others.iter().any(|held| held == text)
+            {
+                self.others.push(text.to_string());
+            }
+        }
+
+        fn index_of(&self, text: &str) -> Result<u32, Diagnostic> {
+            if let Some(at) = self.keyed.iter().position(|held| held == text) {
+                return Ok(at as u32);
+            }
+            if let Some(at) = self.others.iter().position(|held| held == text) {
+                return Ok((self.keyed.len() + at) as u32);
+            }
+            Err(
+                fail("EA001", "A string was not collected before it was written.")
+                    .with_context(format!("String: {text:?}")),
+            )
+        }
+
+        fn len(&self) -> usize {
+            self.keyed.len() + self.others.len()
+        }
+
+        fn strings(&self) -> impl Iterator<Item = &String> {
+            self.keyed.iter().chain(self.others.iter())
+        }
+    }
+
+    fn collect(element: &Element, pool: &mut Pool) -> Result<(), Diagnostic> {
+        for attribute in &element.attributes {
+            let (prefix, local) = split_name(&attribute.name);
+            if prefix == Some("xmlns") {
+                continue;
+            }
+            if prefix == Some(ANDROID_PREFIX) {
+                if let Some(id) = attribute_id(local) {
+                    pool.add_keyed(local, id);
+                }
+            }
+        }
+        for child in &element.children {
+            collect(child, pool)?;
+        }
+        Ok(())
+    }
+
+    fn collect_rest(element: &Element, pool: &mut Pool) -> Result<(), Diagnostic> {
+        pool.add_other(&element.name);
+        for attribute in &element.attributes {
+            let (prefix, local) = split_name(&attribute.name);
+            if prefix == Some("xmlns") {
+                continue;
+            }
+            pool.add_other(local);
+            if matches!(classify(&attribute.value)?, Value::Text) {
+                pool.add_other(&attribute.value);
+            }
+        }
+        for child in &element.children {
+            collect_rest(child, pool)?;
+        }
+        Ok(())
+    }
+
+    fn encode_string_pool(pool: &Pool) -> Result<Vec<u8>, Diagnostic> {
+        let count = pool.len();
+        if count > MAX_STRINGS {
+            return Err(fail(
+                "EA002",
+                "A document holds more strings than the format allows.",
+            )
+            .with_context(format!("Strings: {count}"))
+            .with_context(format!("Limit: {MAX_STRINGS}")));
+        }
+
+        let mut offsets: Vec<u32> = Vec::with_capacity(count);
+        let mut data: Vec<u8> = Vec::new();
+        for text in pool.strings() {
+            offsets.push(data.len() as u32);
+            let units: Vec<u16> = text.encode_utf16().collect();
+            if units.len() > 0x7fff {
+                return Err(fail("EA003", "A string is longer than the format allows.")
+                    .with_context(format!("Units: {}", units.len())));
+            }
+            data.extend_from_slice(&(units.len() as u16).to_le_bytes());
+            for unit in units {
+                data.extend_from_slice(&unit.to_le_bytes());
+            }
+            data.extend_from_slice(&0u16.to_le_bytes());
+        }
+        while !data.len().is_multiple_of(4) {
+            data.push(0);
+        }
+
+        let header_size = 28usize;
+        let strings_start = header_size + count * 4;
+        let total = strings_start + data.len();
+
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&RES_STRING_POOL_TYPE.to_le_bytes());
+        out.extend_from_slice(&(header_size as u16).to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&(count as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(strings_start as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        for offset in offsets {
+            out.extend_from_slice(&offset.to_le_bytes());
+        }
+        out.extend_from_slice(&data);
+        Ok(out)
+    }
+
+    fn encode_resource_map(pool: &Pool) -> Vec<u8> {
+        let total = 8 + pool.ids.len() * 4;
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&RES_XML_RESOURCE_MAP_TYPE.to_le_bytes());
+        out.extend_from_slice(&8u16.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        for id in &pool.ids {
+            out.extend_from_slice(&id.to_le_bytes());
+        }
+        out
+    }
+
+    fn node_header(out: &mut Vec<u8>, kind: u16, size: usize, line: u32) {
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(&16u16.to_le_bytes());
+        out.extend_from_slice(&(size as u32).to_le_bytes());
+        out.extend_from_slice(&line.to_le_bytes());
+        out.extend_from_slice(&NO_ENTRY.to_le_bytes());
+    }
+
+    fn encode_element(
+        element: &Element,
+        pool: &Pool,
+        namespace_uri: &str,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Diagnostic> {
+        let line = element.position.line;
+        let name_index = pool.index_of(&element.name)?;
+
+        let mut attributes: Vec<(&str, &str, &str)> = Vec::new();
+        for attribute in &element.attributes {
+            let (prefix, local) = split_name(&attribute.name);
+            if prefix == Some("xmlns") {
+                continue;
+            }
+            let uri = if prefix == Some(ANDROID_PREFIX) {
+                namespace_uri
+            } else {
+                ""
+            };
+            attributes.push((uri, local, &attribute.value));
+        }
+
+        let size = 16 + 20 + attributes.len() * 20;
+        node_header(out, RES_XML_START_ELEMENT_TYPE, size, line);
+        out.extend_from_slice(&NO_ENTRY.to_le_bytes());
+        out.extend_from_slice(&name_index.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&20u16.to_le_bytes());
+        out.extend_from_slice(&(attributes.len() as u16).to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+
+        for (uri, local, raw) in &attributes {
+            let namespace = if uri.is_empty() {
+                NO_ENTRY
+            } else {
+                pool.index_of(uri)?
+            };
+            out.extend_from_slice(&namespace.to_le_bytes());
+            out.extend_from_slice(&pool.index_of(local)?.to_le_bytes());
+
+            let value = classify(raw)?;
+            let (raw_index, kind, data) = match value {
+                Value::Text => {
+                    let index = pool.index_of(raw)?;
+                    (index, TYPE_STRING, index)
+                }
+                Value::Reference(id) => (NO_ENTRY, TYPE_REFERENCE, id),
+                Value::Boolean(true) => (NO_ENTRY, TYPE_INT_BOOLEAN, BOOLEAN_TRUE),
+                Value::Boolean(false) => (NO_ENTRY, TYPE_INT_BOOLEAN, 0),
+                Value::Decimal(number) => (NO_ENTRY, TYPE_INT_DEC, number as u32),
+                Value::Hex(number) => (NO_ENTRY, TYPE_INT_HEX, number),
+            };
+            out.extend_from_slice(&raw_index.to_le_bytes());
+            out.extend_from_slice(&8u16.to_le_bytes());
+            out.push(0);
+            out.push(kind);
+            out.extend_from_slice(&data.to_le_bytes());
+        }
+
+        for child in &element.children {
+            encode_element(child, pool, namespace_uri, out)?;
+        }
+
+        node_header(out, RES_XML_END_ELEMENT_TYPE, 24, line);
+        out.extend_from_slice(&NO_ENTRY.to_le_bytes());
+        out.extend_from_slice(&name_index.to_le_bytes());
+        Ok(())
+    }
+
+    pub fn encode(root: &Element) -> Result<Vec<u8>, Diagnostic> {
+        let namespace_uri = root
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == "xmlns:android")
+            .map(|attribute| attribute.value.clone())
+            .unwrap_or_else(|| ANDROID_NAMESPACE.to_string());
+
+        let mut pool = Pool::default();
+        collect(root, &mut pool)?;
+        pool.add_other(ANDROID_PREFIX);
+        pool.add_other(&namespace_uri);
+        collect_rest(root, &mut pool)?;
+
+        let string_pool = encode_string_pool(&pool)?;
+        let resource_map = encode_resource_map(&pool);
+
+        let mut nodes: Vec<u8> = Vec::new();
+        let line = root.position.line;
+        node_header(&mut nodes, RES_XML_START_NAMESPACE_TYPE, 24, line);
+        nodes.extend_from_slice(&pool.index_of(ANDROID_PREFIX)?.to_le_bytes());
+        nodes.extend_from_slice(&pool.index_of(&namespace_uri)?.to_le_bytes());
+
+        encode_element(root, &pool, &namespace_uri, &mut nodes)?;
+
+        node_header(&mut nodes, RES_XML_END_NAMESPACE_TYPE, 24, line);
+        nodes.extend_from_slice(&pool.index_of(ANDROID_PREFIX)?.to_le_bytes());
+        nodes.extend_from_slice(&pool.index_of(&namespace_uri)?.to_le_bytes());
+
+        let total = 8 + string_pool.len() + resource_map.len() + nodes.len();
+        if total > MAX_DOCUMENT_BYTES {
+            return Err(fail(
+                "EA004",
+                "The encoded document is larger than this writer allows.",
+            )
+            .with_context(format!("Bytes: {total}")));
+        }
+
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&RES_XML_TYPE.to_le_bytes());
+        out.extend_from_slice(&8u16.to_le_bytes());
+        out.extend_from_slice(&(total as u32).to_le_bytes());
+        out.extend_from_slice(&string_pool);
+        out.extend_from_slice(&resource_map);
+        out.extend_from_slice(&nodes);
+        Ok(out)
+    }
+}
+
 pub mod jvm {
     use crate::binary::{modified_utf8, Endian, Reader};
     use crate::diag::Diagnostic;
@@ -11273,6 +11648,7 @@ pub mod ffi {
 mod tests {
     use super::archive::{self, Builder as ArchiveBuilder};
     use super::artifact::{Artifact, ArtifactId, State as ArtifactState};
+    use super::axml;
     use super::binary::{
         checksum, modified_utf8, Endian, Reader as BinaryReader, Section, Table as BinaryTable,
         Writer as BinaryWriter,
@@ -13678,6 +14054,13 @@ mod tests {
         assert!(sink.entries().iter().any(|d| d.code == "ES030"));
     }
 
+    fn find_build_tool(tool: &str) -> Option<std::path::PathBuf> {
+        find_apksigner().and_then(|path| {
+            let candidate = path.parent()?.join(tool);
+            candidate.is_file().then_some(candidate)
+        })
+    }
+
     fn find_apksigner() -> Option<std::path::PathBuf> {
         let mut roots: Vec<std::path::PathBuf> = Vec::new();
         for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
@@ -14552,6 +14935,302 @@ mod tests {
         data.extend_from_slice(&0u16.to_be_bytes());
         data.extend_from_slice(&0u16.to_be_bytes());
         data
+    }
+
+    const ATTRIBUTE_PROBE_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.omni.probe"
+    android:versionCode="1" android:versionName="1.0"
+    android:installLocation="auto" android:sharedUserId="com.omni.probe.shared"
+    android:compileSdkVersion="36" android:compileSdkVersionCodename="16">
+  <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" android:maxSdkVersion="36"/>
+  <uses-permission android:name="android.permission.INTERNET"/>
+  <uses-feature android:name="android.hardware.camera" android:required="false"/>
+  <application android:label="L" android:icon="@android:drawable/ic_delete"
+      android:theme="@android:style/Theme" android:name="A" android:allowBackup="true"
+      android:supportsRtl="true" android:debuggable="true" android:extractNativeLibs="false"
+      android:hardwareAccelerated="true" android:largeHeap="true"
+      android:roundIcon="@android:drawable/ic_delete" android:appComponentFactory="F"
+      android:fullBackupContent="false" android:persistent="false" android:process=":p"
+      android:enabled="true" android:hasFragileUserData="false"
+      android:networkSecurityConfig="@android:drawable/ic_delete">
+    <activity android:name="B" android:exported="true" android:launchMode="singleTop"
+        android:screenOrientation="portrait" android:configChanges="orientation"
+        android:windowSoftInputMode="stateHidden" android:taskAffinity=""
+        android:permission="android.permission.INTERNET">
+      <intent-filter android:priority="1">
+        <action android:name="android.intent.action.MAIN"/>
+      </intent-filter>
+      <meta-data android:name="m" android:value="v" android:resource="@android:drawable/ic_delete"/>
+    </activity>
+    <provider android:name="P" android:authorities="a" android:exported="false" android:grantUriPermissions="true"/>
+    <service android:name="S" android:exported="false" android:foregroundServiceType="dataSync"/>
+  </application>
+</manifest>
+"#;
+
+    const PROBE_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.probe">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <application android:label="Omni" android:allowBackup="false" android:supportsRtl="true" android:extractNativeLibs="false" android:theme="@0x7f060000">
+        <activity android:name="com.omni.probe.Main" android:exported="true" />
+    </application>
+</manifest>"#;
+
+    fn android_jar() -> Option<std::path::PathBuf> {
+        let platforms = find_apksigner()?
+            .parent()?
+            .parent()?
+            .parent()?
+            .join("platforms");
+        let mut versions: Vec<std::path::PathBuf> = std::fs::read_dir(platforms)
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .collect();
+        versions.sort();
+        versions.into_iter().rev().find_map(|version| {
+            let jar = version.join("android.jar");
+            jar.is_file().then_some(jar)
+        })
+    }
+
+    #[test]
+    fn every_attribute_identifier_is_the_one_aapt2_uses() {
+        let (Some(aapt2), Some(jar)) = (find_build_tool("aapt2"), android_jar()) else {
+            eprintln!("axml conformance: aapt2 or android.jar is not available here");
+            return;
+        };
+
+        let directory = temp_directory("axml-ids");
+        let source = directory.join("AndroidManifest.xml");
+        std::fs::write(&source, ATTRIBUTE_PROBE_MANIFEST).unwrap();
+
+        let out = directory.join("probe.apk");
+        let linked = std::process::Command::new(&aapt2)
+            .args([
+                "link",
+                "--manifest",
+                source.to_str().unwrap(),
+                "-o",
+                out.to_str().unwrap(),
+                "-I",
+                jar.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "aapt2 link failed: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+
+        let dumped = std::process::Command::new(&aapt2)
+            .args([
+                "dump",
+                "xmltree",
+                out.to_str().unwrap(),
+                "--file",
+                "AndroidManifest.xml",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&dumped.stdout).to_string();
+
+        for (name, id) in axml::ATTRIBUTES {
+            let marker = format!("android:{name}(0x{id:08x})");
+            assert!(
+                text.contains(&marker),
+                "aapt2 does not agree that {name} is 0x{id:08x}"
+            );
+        }
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "axml conformance: {} attribute identifiers agree with aapt2",
+            axml::ATTRIBUTES.len()
+        );
+    }
+
+    #[test]
+    fn the_binary_xml_this_build_writes_is_read_by_aapt2() {
+        let (root, sink) = parse_xml(PROBE_MANIFEST);
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let root = root.expect("the manifest must parse");
+        let encoded = axml::encode(&root).expect("the manifest must encode");
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            eprintln!("axml conformance: aapt2 is not available here");
+            return;
+        };
+
+        let mut builder = ArchiveBuilder::for_android();
+        builder.add("AndroidManifest.xml", encoded).unwrap();
+        let apk = builder.finish().unwrap();
+
+        let directory = temp_directory("axml-dump");
+        let path = directory.join("ours.apk");
+        std::fs::write(&path, &apk).unwrap();
+
+        let dumped = std::process::Command::new(&aapt2)
+            .args([
+                "dump",
+                "xmltree",
+                path.to_str().unwrap(),
+                "--file",
+                "AndroidManifest.xml",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&dumped.stdout).to_string();
+        assert!(
+            dumped.status.success(),
+            "aapt2 refused what this build wrote: {}\n{text}",
+            String::from_utf8_lossy(&dumped.stderr)
+        );
+
+        let expected = [
+            "N: android=http://schemas.android.com/apk/res/android",
+            "E: manifest",
+            "A: package=\"com.omni.probe\"",
+            "E: uses-sdk",
+            "android:minSdkVersion(0x0101020c)=28",
+            "android:targetSdkVersion(0x01010270)=36",
+            "E: uses-permission",
+            "android:name(0x01010003)=\"android.permission.INTERNET\"",
+            "E: application",
+            "android:label(0x01010001)=\"Omni\"",
+            "android:allowBackup(0x01010280)=false",
+            "android:supportsRtl(0x010103af)=true",
+            "android:extractNativeLibs(0x010104ea)=false",
+            "android:theme(0x01010000)=@0x7f060000",
+            "E: activity",
+            "android:name(0x01010003)=\"com.omni.probe.Main\"",
+            "android:exported(0x01010010)=true",
+        ];
+        for line in expected {
+            assert!(
+                text.contains(line),
+                "aapt2 did not report {line:?}:\n{text}"
+            );
+        }
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("axml conformance: aapt2 read the binary XML this build wrote");
+    }
+
+    #[test]
+    fn encoding_the_same_document_twice_gives_the_same_bytes() {
+        let (root, _) = parse_xml(PROBE_MANIFEST);
+        let root = root.expect("the manifest must parse");
+        let first = axml::encode(&root).unwrap();
+        let second = axml::encode(&root).unwrap();
+        assert_eq!(first, second);
+        assert!(!first.is_empty());
+    }
+
+    #[test]
+    fn the_binary_xml_writer_survives_arbitrary_documents() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let names = [
+            "manifest",
+            "application",
+            "activity",
+            "meta-data",
+            "x",
+            "\u{00e7}\u{011f}\u{00fc}",
+            "\u{1f480}",
+        ];
+        let values = [
+            "true",
+            "false",
+            "0",
+            "-1",
+            "0x7f",
+            "@0x7f060000",
+            "text",
+            "",
+            "\u{1f480}",
+        ];
+        let attributes = [
+            "android:name",
+            "android:exported",
+            "package",
+            "android:label",
+            "other",
+        ];
+
+        fn build(
+            depth: u32,
+            seed: &mut u64,
+            names: &[&str],
+            values: &[&str],
+            attributes: &[&str],
+        ) -> super::xml::Element {
+            let pick = |seed: &mut u64, len: usize| (xorshift(seed) as usize) % len;
+            let mut element = super::xml::Element {
+                name: names[pick(seed, names.len())].to_string(),
+                attributes: Vec::new(),
+                children: Vec::new(),
+                text: String::new(),
+                position: super::xml::Position { line: 1, column: 1 },
+            };
+            for _ in 0..(xorshift(seed) % 5) {
+                element.attributes.push(super::xml::Attribute {
+                    name: attributes[pick(seed, attributes.len())].to_string(),
+                    value: values[pick(seed, values.len())].to_string(),
+                    position: super::xml::Position { line: 1, column: 1 },
+                });
+            }
+            if depth < 3 {
+                for _ in 0..(xorshift(seed) % 3) {
+                    element
+                        .children
+                        .push(build(depth + 1, seed, names, values, attributes));
+                }
+            }
+            element
+        }
+
+        for _ in 0..2_000 {
+            let root = build(0, &mut seed, &names, &values, &attributes);
+            match axml::encode(&root) {
+                Ok(bytes) => {
+                    assert!(bytes.len() >= 8);
+                    assert_eq!(&bytes[0..2], &[0x03, 0x00]);
+                }
+                Err(error) => assert!(!error.code.is_empty()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_reference_by_name_is_refused_rather_than_guessed() {
+        let text = PROBE_MANIFEST.replace("@0x7f060000", "@style/OmniTheme");
+        let (root, _) = parse_xml(&text);
+        let root = root.expect("the manifest must parse");
+        let error = axml::encode(&root).expect_err("a name reference cannot be resolved yet");
+        assert_eq!(error.code, "EA021");
+        assert!(error.suggestion.is_some());
+    }
+
+    #[test]
+    fn values_are_classified_the_way_the_format_types_them() {
+        use super::axml::Value;
+        let cases: &[(&str, Value)] = &[
+            ("true", Value::Boolean(true)),
+            ("false", Value::Boolean(false)),
+            ("28", Value::Decimal(28)),
+            ("-1", Value::Decimal(-1)),
+            ("0x20000", Value::Hex(0x20000)),
+            ("@0x7f060000", Value::Reference(0x7f06_0000)),
+            ("Omni", Value::Text),
+            ("com.omni.builder.Main", Value::Text),
+            ("1.0.0", Value::Text),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(axml::classify(raw).unwrap(), *expected, "{raw}");
+        }
     }
 
     #[test]

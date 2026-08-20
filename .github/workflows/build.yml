@@ -29,6 +29,8 @@
 #      header fields and class list agree with dexdump.
 #  12. The Core's class file reader reads every .class the Kotlin compiler
 #      produced here, and agrees with javap on all of them.
+#  13. aapt2 reads the binary XML the Core writes and agrees on every value,
+#      and every attribute identifier the Core carries is the one aapt2 uses.
 #
 # WHAT IT DOES NOT PROVE
 # -----------------------------------------------------------------------------

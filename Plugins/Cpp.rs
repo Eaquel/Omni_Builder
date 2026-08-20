@@ -28,7 +28,7 @@ pub static CONTRACT: Contract = Contract {
         "Providing a C or C++ standard library implementation.",
         "Deciding which ABIs a project targets; that comes from the project model.",
     ],
-    roadmap_phase: "PHASE 15 — C/C++",
+    roadmap_phase: "PHASE 10 — SELF-HOSTING",
 };
 
 pub struct CppPlugin;

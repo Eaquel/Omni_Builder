@@ -35,7 +35,7 @@ pub static CONTRACT: Contract = Contract {
         "Stealing credentials, escalating privilege, persisting covertly or performing surveillance.",
         "Reducing integrity to a single boolean.",
     ],
-    roadmap_phase: "PHASE 17 — OMNI_GUARD",
+    roadmap_phase: "PHASE 9 — TOOLCHAIN",
 };
 
 pub struct GuardPlugin;

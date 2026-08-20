@@ -28,7 +28,7 @@ pub static CONTRACT: Contract = Contract {
         "Providing a Java runtime or standard library.",
         "Annotation processing, until that is specified separately.",
     ],
-    roadmap_phase: "PHASE 14 — JAVA",
+    roadmap_phase: "PHASE 10 — SELF-HOSTING",
 };
 
 pub struct JavaPlugin;
