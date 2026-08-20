@@ -243,12 +243,22 @@ jobs:
 
           store="$RUNNER_TEMP/omni-release.jks"
 
-          # Strip every whitespace character before decoding. A secret pasted
-          # from a phone or a wrapped terminal picks up spaces, and GNU base64
-          # rejects the whole input over one of them - "base64: invalid input"
-          # and nothing else to go on. Newlines it tolerates; spaces it does
-          # not, which is a distinction nobody should have to know.
-          printf '%s' "$OMNI_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$store"
+          # Two kinds of paste damage, both seen in practice, neither of
+          # which base64 explains:
+          #
+          #   spaces          rejected outright - "base64: invalid input" and
+          #                   nothing else to go on. Newlines it tolerates;
+          #                   spaces it does not.
+          #   a leading "="   the secret was copied together with a separator
+          #                   line. "=" is padding and is only ever valid at
+          #                   the end, so one at the front voids the lot.
+          #
+          # Stripping both is safe: a valid base64 value contains no
+          # whitespace and never begins with padding.
+          printf '%s' "$OMNI_KEYSTORE_BASE64" \
+            | tr -d '[:space:]' \
+            | sed 's/^=*//' \
+            | base64 --decode > "$store"
           test -s "$store"
 
           # And prove it is actually the keystore before the build depends on
@@ -260,13 +270,22 @@ jobs:
           if ! keytool -list -keystore "$store" \
                 -storepass "$OMNI_KEYSTORE_PASSWORD" \
                 -alias "$OMNI_KEY_ALIAS" > /dev/null 2>&1; then
+            decoded=$(wc -c < "$store")
             echo "OMNI_KEYSTORE_BASE64 did not decode into a usable keystore."
             echo
-            echo "Decoded $(wc -c < "$store") bytes. Check, in this order:"
-            echo "  1. The secret holds the whole base64 value. It is one long"
-            echo "     line and a partial copy still decodes - into nothing."
-            echo "  2. It holds only the base64, with no surrounding text."
-            echo "  3. OMNI_KEYSTORE_PASSWORD and OMNI_KEY_ALIAS match the key."
+            echo "It decoded to $decoded bytes, which narrows it down:"
+            echo
+            echo "  Right size, still refused -> a character in the secret was"
+            echo "  altered in transit. One is enough, and the result decodes to"
+            echo "  the correct length, so size proves nothing. Re-copy the whole"
+            echo "  value from the file it was delivered in rather than hunting"
+            echo "  for the character."
+            echo
+            echo "  Wrong size -> the copy was partial, or it picked up text"
+            echo "  around the value. A partial copy decodes without complaint."
+            echo
+            echo "  Either way, also confirm OMNI_KEYSTORE_PASSWORD and"
+            echo "  OMNI_KEY_ALIAS belong to this key."
             exit 1
           fi
 
