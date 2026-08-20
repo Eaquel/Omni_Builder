@@ -16,9 +16,18 @@
     <string name="omni_core_unavailable">Omni Core is not available</string>
 
     <string name="omni_not_a_builder_yet">This build cannot compile or package
-        anything yet. It is the foundation: the Core, the capability model, the
-        toolchain lock and the plugin contracts. Every subsystem below states its
-        own maturity, and none of them is implemented.</string>
+        anything yet. No plugin can produce an artifact, so there is no Build
+        button and there will not be one until there is something behind it.
+        What does exist is listed below: every subsystem states its own maturity
+        and exactly what it still lacks, and none of them has reached
+        PRODUCTION.</string>
+
+    <string name="omni_section_roadmap">Roadmap</string>
+
+    <!-- %1$d phases whose work has landed, %2$d phases in total -->
+    <string name="omni_roadmap_summary">%1$d of %2$d phases delivered. A delivered
+        phase means its work landed, not that it is finished: what state that work
+        is in is what the subsystems below say.</string>
 
     <string name="omni_section_self_hosting">Self-hosting</string>
     <string name="omni_section_subsystems">Core subsystems</string>

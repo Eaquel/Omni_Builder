@@ -28,10 +28,15 @@
 #
 # WHAT IT DOES NOT PROVE
 # -----------------------------------------------------------------------------
-# Nothing here runs the application on a device. The release artifact is left
-# unsigned because no signing identity exists in this repository and none may be
-# committed (directive section 25); the debug artifact carries the standard debug
-# signature and installs.
+# Nothing here runs the application on a device.
+#
+# The published artifact is the release APK, signed with the key held in the
+# repository's OMNI_KEYSTORE_* secrets. No key material is in this repository
+# and none ever will be (directive section 25): the keystore arrives as a
+# secret, is written to the runner's temporary directory, and is never an
+# input or an output of the build. When the secrets are absent the release is
+# built unsigned and the job says so - an unsigned package cannot be installed,
+# and pretending otherwise would be worse than saying it plainly.
 #
 # Nothing here produces a signature with Omni's own code. The Core reads and
 # checks a signing block; it does not write one, and it never verifies the
@@ -212,6 +217,38 @@ jobs:
           } > local.properties
           cat local.properties
 
+      - name: Provision the release signing key
+        # The keystore is a secret, not a file in the repository. It is written
+        # to the runner's temporary directory, which is destroyed with the job,
+        # and the four values the build reads are exported from here. GitHub
+        # masks registered secrets in logs; nothing below echoes them anyway.
+        env:
+          OMNI_KEYSTORE_BASE64: ${{ secrets.OMNI_KEYSTORE_BASE64 }}
+          OMNI_KEYSTORE_PASSWORD: ${{ secrets.OMNI_KEYSTORE_PASSWORD }}
+          OMNI_KEY_ALIAS: ${{ secrets.OMNI_KEY_ALIAS }}
+          OMNI_KEY_PASSWORD: ${{ secrets.OMNI_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OMNI_KEYSTORE_BASE64:-}" ]; then
+            echo "No signing secrets are configured."
+            echo "The release APK will be built unsigned and cannot be installed."
+            echo "Add OMNI_KEYSTORE_BASE64, OMNI_KEYSTORE_PASSWORD, OMNI_KEY_ALIAS"
+            echo "and OMNI_KEY_PASSWORD as repository secrets to change that."
+            exit 0
+          fi
+
+          store="$RUNNER_TEMP/omni-release.jks"
+          printf '%s' "$OMNI_KEYSTORE_BASE64" | base64 --decode > "$store"
+          test -s "$store"
+
+          {
+            echo "OMNI_SIGNING_STORE_FILE=$store"
+            echo "OMNI_SIGNING_STORE_PASSWORD=$OMNI_KEYSTORE_PASSWORD"
+            echo "OMNI_SIGNING_KEY_ALIAS=$OMNI_KEY_ALIAS"
+            echo "OMNI_SIGNING_KEY_PASSWORD=$OMNI_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+          echo "Release signing is configured."
+
       - name: Verify the provisioned CMake
         run: ./gradlew :Builder:verifyCmakeToolchain --console=plain
 
@@ -224,7 +261,7 @@ jobs:
       - name: Build the debug APK
         run: ./gradlew :Builder:assembleDebug --console=plain
 
-      - name: Build the unsigned release APK
+      - name: Build the release APK
         run: ./gradlew :Builder:assembleRelease --console=plain
 
       - name: Confirm the Core is linked into every ABI
@@ -285,7 +322,8 @@ jobs:
           set -euo pipefail
           ./gradlew :Builder:assembleDebug --console=plain
           test -f Builder/build/outputs/apk/debug/Builder-debug.apk
-          test -f Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+          # Named "-unsigned" only while no signing identity is configured.
+          ls Builder/build/outputs/apk/release/*.apk
           echo "Both APKs are present; the checks below will see both."
 
       - name: Verify that the APKs contain the code they declare
@@ -298,17 +336,39 @@ jobs:
         # The Core's conformance tests sign an archive the Core itself wrote.
         # This points the same reader at a package the Android Gradle Plugin
         # laid out and apksigner signed, which is a different shape entirely.
-        env:
-          OMNI_PACKAGE_UNDER_TEST: Builder/build/outputs/apk/debug/Builder-debug.apk
         run: |
           set -euo pipefail
-          cargo test --locked the_package_this_build_produced -- --nocapture
+          # Prefer the release artifact: it is the deliverable, and a large RSA
+          # signing key makes it SHA-512 signed, which the debug key does not
+          # exercise. Fall back to the debug APK when no signing key is set,
+          # because an unsigned package has no block to read.
+          apk=$(ls Builder/build/outputs/apk/release/*.apk)
+          case "$apk" in
+            *-unsigned.apk) apk=Builder/build/outputs/apk/debug/Builder-debug.apk ;;
+          esac
+          echo "Reading $apk"
+          OMNI_PACKAGE_UNDER_TEST="$apk" \
+            cargo test --locked the_package_this_build_produced -- --nocapture
 
-      - name: Publish the APKs
+      - name: Report what the release artifact is
+        run: |
+          set -euo pipefail
+          apk=$(ls Builder/build/outputs/apk/release/*.apk)
+          echo "Release artifact: $(basename "$apk")"
+          echo "SHA-256: $(sha256sum "$apk" | cut -d' ' -f1)"
+          "$ANDROID_HOME/build-tools/$OMNI_BUILD_TOOLS_VERSION/apksigner" verify \
+            --print-certs "$apk" || {
+              echo
+              echo "This artifact is NOT signed and cannot be installed."
+              echo "Add the OMNI_KEYSTORE_* repository secrets to get a signed one."
+            }
+
+      - name: Publish the release APK
+        # The release artifact is the deliverable. The debug APK is built and
+        # checked above but not published: it carries the shared debug key, so
+        # it is a development build and not something to hand anyone.
         uses: actions/upload-artifact@v5
         with:
-          name: omni-builder-apks
-          path: |
-            Builder/build/outputs/apk/debug/*.apk
-            Builder/build/outputs/apk/release/*.apk
+          name: omni-builder-release
+          path: Builder/build/outputs/apk/release/*.apk
           if-no-files-found: error

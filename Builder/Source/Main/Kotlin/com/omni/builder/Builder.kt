@@ -524,31 +524,61 @@ object OmniLog {
         return if (detail == null) javaClass.simpleName else "${javaClass.simpleName}: $detail"
     }
 
+    /**
+     * Writes into shared Documents through MediaStore.
+     *
+     * ## Why this is written the way it is
+     *
+     * Two earlier attempts failed on a Galaxy S23 running Android 16, and both
+     * failed the same way:
+     *
+     *     SQLiteConstraintException: UNIQUE constraint failed: files._data
+     *
+     * `_data` is the absolute path column. That error means a row already holds
+     * `/storage/emulated/0/Documents/Omni_Builder/<name>`, and the insert is
+     * refused because two rows may not claim one path.
+     *
+     * The first attempt deleted by `DISPLAY_NAME` and `RELATIVE_PATH` and then
+     * inserted; the delete matched nothing. The second looked the row up by the
+     * same two columns and wrote into it; the lookup found nothing either. Both
+     * searched by the columns a person reads and were beaten by the column the
+     * constraint is actually on - and a row can be invisible to that search for
+     * reasons that have nothing to do with its name: it can be pending from a
+     * write that never finished, or trashed, and both are hidden from an
+     * ordinary query while still holding `_data`.
+     *
+     * So this searches by `_data` first, includes pending and trashed rows,
+     * clears those flags before writing, and if the insert is still refused,
+     * deletes the row holding that path and inserts again. Every step that can
+     * fail says which step it was, because the two previous fixes each removed
+     * one cause and left the message unable to distinguish the rest.
+     */
     private fun publishThroughMediaStore(context: Context, name: String, bytes: ByteArray) {
         val resolver = context.contentResolver
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME"
+        val absolutePath = expectedAbsolutePath(name)
+        val tried = StringBuilder()
 
-        // Reuse the entry if it is already there; only create one when it is not.
-        //
-        // The previous attempt deleted by a RELATIVE_PATH and DISPLAY_NAME
-        // selection and then inserted. On a Galaxy S23 running Android 16 the
-        // delete matched nothing - the stored RELATIVE_PATH did not equal what
-        // was searched for - and the insert then failed with
-        //
-        //   SQLiteConstraintException: UNIQUE constraint failed: files._data
-        //
-        // because a row already held that path. `_data` is the absolute path
-        // column, so that error is MediaStore saying "this file is already
-        // registered". Looking the row up and writing into it removes the whole
-        // question; the fallback below covers the case where it is found only
-        // after the insert has already objected.
-        val existing = findExisting(resolver, collection, relativePath, name)
-        if (existing != null) {
+        // 1. The row that holds the path the constraint is on, whatever it is
+        //    called and whether or not it is pending or trashed.
+        findByData(resolver, collection, absolutePath)?.let { existing ->
+            clearPendingAndTrashed(resolver, existing)
             writeTruncating(resolver, existing, bytes)
             return
         }
+        tried.append("no row holds $absolutePath")
 
+        // 2. The row with this name in this folder, in case the provider stores
+        //    a path that is spelled differently from the one built above.
+        findByName(resolver, collection, relativePath, name)?.let { existing ->
+            clearPendingAndTrashed(resolver, existing)
+            writeTruncating(resolver, existing, bytes)
+            return
+        }
+        tried.append("; no row named $name under $relativePath")
+
+        // 3. Nothing is there, so make it.
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
@@ -557,51 +587,132 @@ object OmniLog {
 
         val created = try {
             resolver.insert(collection, values)
-        } catch (constraint: Exception) {
-            // The row exists after all, under a path this query did not match.
-            findExisting(resolver, collection, relativePath, name)
-                ?: throw IOException(
-                    "MediaStore has a row for this file that cannot be found: " +
-                        "${constraint.javaClass.simpleName}: ${constraint.message}"
+        } catch (refused: Exception) {
+            tried.append("; insert refused: ${refused.describe()}")
+
+            // 4. A row holds the path and none of the searches above reached it.
+            //    Remove it by the one column that is certain to identify it.
+            val removed = try {
+                resolver.delete(
+                    collection,
+                    "${dataColumn()}=?",
+                    arrayOf(absolutePath),
                 )
-        } ?: throw IOException("MediaStore refused to create the entry")
+            } catch (denied: Exception) {
+                tried.append("; delete refused: ${denied.describe()}")
+                -1
+            }
+            tried.append("; deleted $removed row(s)")
+
+            if (removed <= 0) {
+                throw IOException("$tried")
+            }
+            try {
+                resolver.insert(collection, values)
+            } catch (again: Exception) {
+                throw IOException("$tried; insert refused again: ${again.describe()}")
+            }
+        } ?: throw IOException("MediaStore refused to create the entry ($tried)")
 
         writeTruncating(resolver, created, bytes)
     }
 
+    /** The absolute path MediaStore will store for this file. */
+    @Suppress("DEPRECATION")
+    private fun expectedAbsolutePath(name: String): String {
+        val documents =
+            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+        return File(File(documents, DIRECTORY_NAME), name).absolutePath
+    }
+
+    /** The column the UNIQUE constraint is on. Deprecated to write, fine to read. */
+    @Suppress("DEPRECATION")
+    private fun dataColumn(): String = MediaStore.MediaColumns.DATA
+
     /**
-     * Finds an existing entry, tolerating how the provider spells its path.
+     * Runs a query that also returns pending and trashed rows.
+     *
+     * Both are hidden from an ordinary query, and both still occupy `_data`.
+     * A row hidden this way is exactly the row that makes an insert fail while
+     * a search says the file is not there.
+     */
+    private fun queryIncludingHidden(
+        resolver: android.content.ContentResolver,
+        collection: Uri,
+        selection: String,
+        arguments: Array<String>,
+    ): Uri? = runCatching {
+        val projection = arrayOf(MediaStore.MediaColumns._ID)
+        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val query = Bundle().apply {
+                putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+                putStringArray(
+                    android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
+                    arguments,
+                )
+                putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
+                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
+            }
+            resolver.query(collection, projection, query, null)
+        } else {
+            resolver.query(collection, projection, selection, arguments, null)
+        }
+        cursor?.use {
+            if (it.moveToFirst()) ContentUris.withAppendedId(collection, it.getLong(0)) else null
+        }
+    }.getOrNull()
+
+    /** Finds the row holding an absolute path, which is what the constraint is on. */
+    private fun findByData(
+        resolver: android.content.ContentResolver,
+        collection: Uri,
+        absolutePath: String,
+    ): Uri? = queryIncludingHidden(
+        resolver,
+        collection,
+        "${dataColumn()}=?",
+        arrayOf(absolutePath),
+    )
+
+    /**
+     * Finds an entry by name, tolerating how the provider spells its path.
      *
      * `RELATIVE_PATH` is stored with a trailing slash on some devices and
-     * without on others, and an exact match on the wrong spelling is what let
-     * the previous attempt believe the file was not there.
+     * without on others, so this matches a prefix rather than the whole value.
      */
-    private fun findExisting(
+    private fun findByName(
         resolver: android.content.ContentResolver,
         collection: Uri,
         relativePath: String,
         name: String,
-    ): Uri? {
-        val selection =
-            "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND " +
-                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-        val arguments = arrayOf(name, "$relativePath%")
+    ): Uri? = queryIncludingHidden(
+        resolver,
+        collection,
+        "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND " +
+            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+        arrayOf(name, "$relativePath%"),
+    )
 
-        return runCatching {
-            resolver.query(
-                collection,
-                arrayOf(MediaStore.MediaColumns._ID),
-                selection,
-                arguments,
-                null,
-            )?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    ContentUris.withAppendedId(collection, cursor.getLong(0))
-                } else {
-                    null
-                }
+    /**
+     * Makes a row visible and writable again.
+     *
+     * A row left pending by a write that did not finish stays hidden for seven
+     * days and keeps its path the whole time. Clearing the flag is what turns
+     * the row found above into one that can actually be opened.
+     */
+    private fun clearPendingAndTrashed(
+        resolver: android.content.ContentResolver,
+        uri: Uri,
+    ) {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.IS_PENDING, 0)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                put(MediaStore.MediaColumns.IS_TRASHED, 0)
             }
-        }.getOrNull()
+        }
+        // Best effort: a row that is neither pending nor trashed rejects this on
+        // some providers, and that is not a reason to fail the write.
+        runCatching { resolver.update(uri, values, null, null) }
     }
 
     /**
@@ -801,6 +912,18 @@ data class PluginRow(
     val roadmapPhase: String,
 )
 
+/** One phase of the roadmap in directive section 52. */
+data class PhaseRow(
+    /** Its number in the roadmap. */
+    val number: Int,
+    /** Its name, as the Core spells it. */
+    val name: String,
+    /** `DELIVERED`, `CURRENT` or `PLANNED`, verbatim from the Core. */
+    val state: String,
+    /** What landed, or what is meant to land. */
+    val delivers: String,
+)
+
 /** One subsystem of the Core, with what it still lacks. */
 data class SubsystemRow(
     /** Human-facing name. */
@@ -840,6 +963,10 @@ data class CoreState(
     val status: String,
     /** Roadmap phase this build implements. */
     val phase: String,
+    /** Every phase of the roadmap, and where this build is on it. */
+    val roadmap: List<PhaseRow>,
+    /** How many phases have had their work land. */
+    val roadmapDelivered: Int,
     /** C ABI version in use. */
     val abiVersion: Int,
     /** Whether Omni_Builder builds itself. Always false for now. */
@@ -874,6 +1001,7 @@ data class CoreState(
         fun parse(document: String): CoreState {
             val root = JSONObject(document)
             val core = root.getJSONObject("core")
+            val roadmap = root.getJSONObject("roadmap")
             val subsystems = root.getJSONObject("subsystems")
             val toolchain = root.getJSONObject("toolchain")
             val plugins = root.getJSONObject("plugins")
@@ -882,6 +1010,15 @@ data class CoreState(
                 version = core.getString("version"),
                 status = core.getString("status"),
                 phase = core.getString("phase"),
+                roadmap = roadmap.getJSONArray("phases").map { item ->
+                    PhaseRow(
+                        number = item.getInt("number"),
+                        name = item.getString("name"),
+                        state = item.getString("state"),
+                        delivers = item.getString("delivers"),
+                    )
+                },
+                roadmapDelivered = roadmap.getInt("delivered"),
                 abiVersion = core.getInt("abiVersion"),
                 selfHosted = core.getBoolean("selfHosted"),
                 selfHostingNote = core.getString("selfHostingNote"),
@@ -1126,6 +1263,27 @@ class BuilderActivity : Activity() {
                 R.color.omni_warning,
             )
         )
+
+        section(root, R.string.omni_section_roadmap)
+        root.addView(
+            body(
+                getString(
+                    R.string.omni_roadmap_summary,
+                    state.roadmapDelivered,
+                    state.roadmap.size,
+                )
+            )
+        )
+        state.roadmap.forEach { phase ->
+            root.addView(
+                keyValue(
+                    phase.name,
+                    phase.delivers,
+                    phaseColor(phase.state),
+                    trailing = phase.state,
+                )
+            )
+        }
 
         section(root, R.string.omni_section_self_hosting)
         root.addView(
@@ -1401,6 +1559,12 @@ class BuilderActivity : Activity() {
     private fun stateColor(state: String) = when (state) {
         "MATCH" -> R.color.omni_ok
         "MISMATCH", "MISSING" -> R.color.omni_error
+        else -> R.color.omni_muted
+    }
+
+    private fun phaseColor(state: String) = when (state) {
+        "DELIVERED" -> R.color.omni_ok
+        "CURRENT" -> R.color.omni_warning
         else -> R.color.omni_muted
     }
 

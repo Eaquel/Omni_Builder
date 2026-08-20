@@ -141,7 +141,8 @@ val omniCmakeDirectory: String? = omniSetting("cmake.dir", "OMNI_CMAKE_DIR")
 // Bootstrap signing (directive sections 15 and 25)
 // -----------------------------------------------------------------------------
 // This is AGP signing the bootstrap APK, not the Omni signing subsystem. That is
-// directive section 25 and roadmap phase 12; Plugins/Sign.rs stays PLANNED.
+// directive section 25 and roadmap phase 6; the Core reads and checks a signing
+// block but writes none, so Plugins/Sign.rs stays PLANNED.
 //
 // No key material lives in this repository and none ever will. The keystore is
 // referenced from local.properties, which is not committed, or from the

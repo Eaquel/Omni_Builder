@@ -362,6 +362,136 @@ pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Phase of the roadmap in directive section 52 that this tree implements.
 pub const CORE_PHASE: &str = "PHASE 6 — SIGNING";
 
+/// How far a roadmap phase has got.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PhaseState {
+    /// The work of this phase has landed. It does not mean the subsystems it
+    /// produced are finished: every one of them reports its own maturity in
+    /// [`SUBSYSTEMS`], and none of them is PRODUCTION.
+    Delivered,
+    /// The phase this tree is working on now.
+    Current,
+    /// Not started.
+    Planned,
+}
+
+impl PhaseState {
+    /// Stable machine-readable name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            PhaseState::Delivered => "DELIVERED",
+            PhaseState::Current => "CURRENT",
+            PhaseState::Planned => "PLANNED",
+        }
+    }
+}
+
+/// One phase of the roadmap in directive section 52.
+#[derive(Clone, Copy, Debug)]
+pub struct Phase {
+    /// Its number in the roadmap.
+    pub number: u32,
+    /// Its name, spelled as the plugin contracts spell it.
+    pub name: &'static str,
+    /// How far it has got.
+    pub state: PhaseState,
+    /// What landed, or what is meant to land.
+    pub delivers: &'static str,
+}
+
+/// The roadmap of directive section 52, and where this tree is on it.
+///
+/// This exists because a person looking at the application could see the
+/// current phase and nothing else, which made six phases of work invisible.
+/// A phase marked DELIVERED says its work landed; what state that work is in is
+/// the subsystem inventory's answer, not this table's.
+pub const ROADMAP: &[Phase] = &[
+    Phase {
+        number: 1,
+        name: "PHASE 1 — FOUNDATION",
+        state: PhaseState::Delivered,
+        delivers: "The Core crate, the JNI bridge, the toolchain lock, diagnostics,                    the capability model and the plugin contracts.",
+    },
+    Phase {
+        number: 2,
+        name: "PHASE 2 — OMNI CORE",
+        state: PhaseState::Delivered,
+        delivers: "Virtual filesystem, project model, artifact lifecycle,                    incremental cache, build graph and scheduler.",
+    },
+    Phase {
+        number: 3,
+        name: "PHASE 3 — BINARY CORE",
+        state: PhaseState::Delivered,
+        delivers: "Bounded binary readers, patched writers, sections, tables and                    the CRC-32 and Adler-32 checksums the ZIP and DEX formats use.",
+    },
+    Phase {
+        number: 4,
+        name: "PHASE 4 — RESOURCE ENGINE",
+        state: PhaseState::Delivered,
+        delivers: "An XML reader, values files, identifier assignment and                    reference resolution with loop detection.",
+    },
+    Phase {
+        number: 5,
+        name: "PHASE 5 — APK ENGINE",
+        state: PhaseState::Delivered,
+        delivers: "The ZIP container an APK is: read, validated, and written                    deterministically with page-aligned native libraries.",
+    },
+    Phase {
+        number: 6,
+        name: "PHASE 6 — SIGNING",
+        state: PhaseState::Current,
+        delivers: "A DER reader, X.509 certificates, and the APK signing block                    with its content digest recomputed and matched against                    apksigner. Signatures are read, never produced or verified.",
+    },
+    Phase {
+        number: 7,
+        name: "PHASE 7 — DEX",
+        state: PhaseState::Planned,
+        delivers: "The Dalvik executable format.",
+    },
+    Phase {
+        number: 8,
+        name: "PHASE 8 — KOTLIN",
+        state: PhaseState::Planned,
+        delivers: "Kotlin compilation.",
+    },
+    Phase {
+        number: 9,
+        name: "PHASE 9 — JAVA",
+        state: PhaseState::Planned,
+        delivers: "Java compilation.",
+    },
+    Phase {
+        number: 10,
+        name: "PHASE 10 — C/C++",
+        state: PhaseState::Planned,
+        delivers: "Native compilation and linking.",
+    },
+    Phase {
+        number: 11,
+        name: "PHASE 11 — RUST",
+        state: PhaseState::Planned,
+        delivers: "Rust compilation for Android targets.",
+    },
+    Phase {
+        number: 12,
+        name: "PHASE 12 — OMNI_GUARD",
+        state: PhaseState::Planned,
+        delivers: "Detection, verification, integrity, provenance and policy                    enforcement (directive section 29).",
+    },
+    Phase {
+        number: 13,
+        name: "PHASE 13 — PERFORMANCE",
+        state: PhaseState::Planned,
+        delivers: "Parallel scheduling, memory and thermal awareness, and the                    measured budgets of directive sections 10 and 36.",
+    },
+    Phase {
+        number: 14,
+        name: "PHASE 14 — SELF-HOSTING",
+        state: PhaseState::Planned,
+        delivers: "Omni_Builder building Omni_Builder, with the bootstrap                    dependencies of directive section 15 removed one at a time.",
+    },
+];
+
 /// Maturity of the Core as a whole. Never raise this without the quality gates
 /// of directive section 51.
 pub const CORE_STATUS: Status = Status::Foundation;
@@ -484,10 +614,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         ],
     },
     Subsystem {
-        name: "SHA-256",
+        name: "SHA-2",
         status: Status::Beta,
         directive_section: 30,
-        summary: "FIPS 180-4 SHA-256, verified against the published NIST vectors.",
+        summary: "FIPS 180-4 SHA-256 and SHA-512, each verified against the \
+                  published NIST vectors including the long-message one.",
         missing: &["Randomised robustness testing only; not coverage-guided fuzzing."],
     },
     Subsystem {
@@ -645,13 +776,16 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         status: Status::Partial,
         directive_section: 25,
         summary: "Finds the APK signing block, reads its v2 signers and \
-                  certificates, and recomputes the chunked SHA-256 content digest \
-                  over the package's own bytes -- matched against apksigner.",
+                  certificates, and recomputes the chunked SHA-256 or SHA-512 \
+                  content digest over the package's own bytes -- both matched \
+                  against apksigner.",
         missing: &[
             "The signature over the signed data is never verified, because there \
              is no RSA or elliptic-curve arithmetic here. A digest match proves \
              the package is unchanged, not who signed it.",
             "Reads v2 only; v3 and v3.1 blocks are listed but not parsed.",
+            "A verity digest is reported as not recomputed: the fs-verity Merkle \
+             tree is a different construction and is not implemented.",
             "Nothing writes a signing block, so signing still belongs to the \
              bootstrap toolchain.",
         ],
@@ -2406,6 +2540,301 @@ pub mod hash {
                 *slot = slot.wrapping_add(value);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // SHA-512 (FIPS 180-4, sections 4.1.3, 4.2.3, 5.3.5 and 6.4)
+    // -----------------------------------------------------------------------
+    //
+    // The same construction as SHA-256 with 64-bit words: 128-byte blocks, 80
+    // rounds, a 128-bit length field, and rotation amounts of its own. It is
+    // here because the APK Signature Scheme defines SHA-512 content digests
+    // and any signer using a large RSA key produces one, so without this the
+    // Core has to decline to check a package rather than check it.
+
+    /// A 64-byte SHA-512 digest.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Digest512([u8; 64]);
+
+    impl Digest512 {
+        /// The raw bytes, most significant first.
+        pub const fn as_bytes(&self) -> &[u8; 64] {
+            &self.0
+        }
+
+        /// Lowercase hexadecimal, the form every report and log uses.
+        pub fn to_hex(self) -> String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut out = String::with_capacity(128);
+            for byte in self.0 {
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            out
+        }
+    }
+
+    impl core::fmt::Debug for Digest512 {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "sha512:{}", self.to_hex())
+        }
+    }
+
+    impl core::fmt::Display for Digest512 {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.to_hex())
+        }
+    }
+
+    /// Round constants: the first 64 bits of the fractional parts of the cube
+    /// roots of the first 80 primes (FIPS 180-4, section 4.2.3).
+    const K512: [u64; 80] = [
+        0x428a2f98d728ae22,
+        0x7137449123ef65cd,
+        0xb5c0fbcfec4d3b2f,
+        0xe9b5dba58189dbbc,
+        0x3956c25bf348b538,
+        0x59f111f1b605d019,
+        0x923f82a4af194f9b,
+        0xab1c5ed5da6d8118,
+        0xd807aa98a3030242,
+        0x12835b0145706fbe,
+        0x243185be4ee4b28c,
+        0x550c7dc3d5ffb4e2,
+        0x72be5d74f27b896f,
+        0x80deb1fe3b1696b1,
+        0x9bdc06a725c71235,
+        0xc19bf174cf692694,
+        0xe49b69c19ef14ad2,
+        0xefbe4786384f25e3,
+        0x0fc19dc68b8cd5b5,
+        0x240ca1cc77ac9c65,
+        0x2de92c6f592b0275,
+        0x4a7484aa6ea6e483,
+        0x5cb0a9dcbd41fbd4,
+        0x76f988da831153b5,
+        0x983e5152ee66dfab,
+        0xa831c66d2db43210,
+        0xb00327c898fb213f,
+        0xbf597fc7beef0ee4,
+        0xc6e00bf33da88fc2,
+        0xd5a79147930aa725,
+        0x06ca6351e003826f,
+        0x142929670a0e6e70,
+        0x27b70a8546d22ffc,
+        0x2e1b21385c26c926,
+        0x4d2c6dfc5ac42aed,
+        0x53380d139d95b3df,
+        0x650a73548baf63de,
+        0x766a0abb3c77b2a8,
+        0x81c2c92e47edaee6,
+        0x92722c851482353b,
+        0xa2bfe8a14cf10364,
+        0xa81a664bbc423001,
+        0xc24b8b70d0f89791,
+        0xc76c51a30654be30,
+        0xd192e819d6ef5218,
+        0xd69906245565a910,
+        0xf40e35855771202a,
+        0x106aa07032bbd1b8,
+        0x19a4c116b8d2d0c8,
+        0x1e376c085141ab53,
+        0x2748774cdf8eeb99,
+        0x34b0bcb5e19b48a8,
+        0x391c0cb3c5c95a63,
+        0x4ed8aa4ae3418acb,
+        0x5b9cca4f7763e373,
+        0x682e6ff3d6b2b8a3,
+        0x748f82ee5defb2fc,
+        0x78a5636f43172f60,
+        0x84c87814a1f0ab72,
+        0x8cc702081a6439ec,
+        0x90befffa23631e28,
+        0xa4506cebde82bde9,
+        0xbef9a3f7b2c67915,
+        0xc67178f2e372532b,
+        0xca273eceea26619c,
+        0xd186b8c721c0c207,
+        0xeada7dd6cde0eb1e,
+        0xf57d4f7fee6ed178,
+        0x06f067aa72176fba,
+        0x0a637dc5a2c898a6,
+        0x113f9804bef90dae,
+        0x1b710b35131c471b,
+        0x28db77f523047d84,
+        0x32caab7b40c72493,
+        0x3c9ebe0a15c9bebc,
+        0x431d67c49c100d4c,
+        0x4cc5d4becb3e42b6,
+        0x597f299cfc657e2a,
+        0x5fcb6fab3ad6faec,
+        0x6c44198c4a475817,
+    ];
+
+    /// Initial hash value: the first 64 bits of the fractional parts of the
+    /// square roots of the first 8 primes (FIPS 180-4, section 5.3.5).
+    const H0_512: [u64; 8] = [
+        0x6a09e667f3bcc908,
+        0xbb67ae8584caa73b,
+        0x3c6ef372fe94f82b,
+        0xa54ff53a5f1d36f1,
+        0x510e527fade682d1,
+        0x9b05688c2b3e6c1f,
+        0x1f83d9abfb41bd6b,
+        0x5be0cd19137e2179,
+    ];
+
+    /// Streaming SHA-512 state.
+    #[derive(Clone)]
+    pub struct Sha512 {
+        state: [u64; 8],
+        block: [u8; 128],
+        buffered: usize,
+        /// Message length in bits. The standard reserves 128 bits for this; a
+        /// `u64` of bits covers two exabytes of message, which is past every
+        /// bound in directive section 60, and the high half is written as zero.
+        length_bits: u64,
+    }
+
+    impl Default for Sha512 {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Sha512 {
+        /// A fresh hasher.
+        pub const fn new() -> Self {
+            Sha512 {
+                state: H0_512,
+                block: [0u8; 128],
+                buffered: 0,
+                length_bits: 0,
+            }
+        }
+
+        /// Absorbs more of the message.
+        pub fn update(&mut self, mut data: &[u8]) {
+            self.length_bits = self.length_bits.wrapping_add((data.len() as u64) * 8);
+
+            if self.buffered > 0 {
+                let want = 128 - self.buffered;
+                let take = want.min(data.len());
+                self.block[self.buffered..self.buffered + take].copy_from_slice(&data[..take]);
+                self.buffered += take;
+                data = &data[take..];
+                if self.buffered == 128 {
+                    let block = self.block;
+                    self.compress(&block);
+                    self.buffered = 0;
+                }
+            }
+
+            while data.len() >= 128 {
+                let (block, rest) = data.split_at(128);
+                let mut fixed = [0u8; 128];
+                fixed.copy_from_slice(block);
+                self.compress(&fixed);
+                data = rest;
+            }
+
+            if !data.is_empty() {
+                self.block[..data.len()].copy_from_slice(data);
+                self.buffered = data.len();
+            }
+        }
+
+        /// Applies the padding of FIPS 180-4 section 5.1.2 and returns the digest.
+        pub fn finish(mut self) -> Digest512 {
+            let length_bits = self.length_bits;
+
+            // A single 1 bit, then zeroes, then the 128-bit length.
+            self.append_padding_byte(0x80);
+            while self.buffered != 112 {
+                self.append_padding_byte(0x00);
+            }
+            for byte in 0u64.to_be_bytes() {
+                self.append_padding_byte(byte);
+            }
+            for byte in length_bits.to_be_bytes() {
+                self.append_padding_byte(byte);
+            }
+            debug_assert_eq!(self.buffered, 0);
+
+            let mut out = [0u8; 64];
+            for (index, word) in self.state.iter().enumerate() {
+                out[index * 8..index * 8 + 8].copy_from_slice(&word.to_be_bytes());
+            }
+            Digest512(out)
+        }
+
+        /// Appends one byte without touching the recorded message length.
+        fn append_padding_byte(&mut self, byte: u8) {
+            self.block[self.buffered] = byte;
+            self.buffered += 1;
+            if self.buffered == 128 {
+                let block = self.block;
+                self.compress(&block);
+                self.buffered = 0;
+            }
+        }
+
+        /// The compression function of FIPS 180-4, section 6.4.2.
+        fn compress(&mut self, block: &[u8; 128]) {
+            let mut w = [0u64; 80];
+            for (index, chunk) in block.chunks_exact(8).enumerate() {
+                let mut fixed = [0u8; 8];
+                fixed.copy_from_slice(chunk);
+                w[index] = u64::from_be_bytes(fixed);
+            }
+            for index in 16..80 {
+                let s0 = w[index - 15].rotate_right(1)
+                    ^ w[index - 15].rotate_right(8)
+                    ^ (w[index - 15] >> 7);
+                let s1 = w[index - 2].rotate_right(19)
+                    ^ w[index - 2].rotate_right(61)
+                    ^ (w[index - 2] >> 6);
+                w[index] = w[index - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[index - 7])
+                    .wrapping_add(s1);
+            }
+
+            let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
+
+            for index in 0..80 {
+                let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
+                let ch = (e & f) ^ ((!e) & g);
+                let temp1 = h
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K512[index])
+                    .wrapping_add(w[index]);
+                let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
+                let maj = (a & b) ^ (a & c) ^ (b & c);
+                let temp2 = s0.wrapping_add(maj);
+
+                h = g;
+                g = f;
+                f = e;
+                e = d.wrapping_add(temp1);
+                d = c;
+                c = b;
+                b = a;
+                a = temp1.wrapping_add(temp2);
+            }
+
+            for (slot, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+                *slot = slot.wrapping_add(value);
+            }
+        }
+    }
+
+    /// Hashes a byte slice with SHA-512 in one call.
+    pub fn sha512(data: &[u8]) -> Digest512 {
+        let mut hasher = Sha512::new();
+        hasher.update(data);
+        hasher.finish()
     }
 
     /// Hashes a byte slice in one call.
@@ -10483,7 +10912,7 @@ pub mod x509 {
 pub mod signing {
     use crate::binary::{Endian, Reader};
     use crate::diag::{Diagnostic, Severity, Sink};
-    use crate::hash::{Digest, Sha256};
+    use crate::hash::{Digest, Digest512, Sha256, Sha512};
     use crate::json::Writer;
     use crate::x509::Certificate;
     use crate::FailureClass;
@@ -10512,6 +10941,24 @@ pub mod signing {
     /// Largest signing block this reader accepts (directive section 60).
     pub const MAX_BLOCK_BYTES: u64 = 64 * 1024 * 1024;
 
+    /// How an algorithm's content digest is constructed.
+    ///
+    /// This is not the same question as which hash it names. The verity
+    /// algorithms hash the package into an fs-verity Merkle tree and record its
+    /// root; that value has nothing to do with the chunked digest, and
+    /// comparing the two would always disagree. Reporting that disagreement as
+    /// a tampered package would be a false accusation about a sound one, so the
+    /// construction is modelled explicitly rather than inferred from the name.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum DigestKind {
+        /// The scheme's chunked digest, with SHA-256 over every chunk.
+        Chunked256,
+        /// The same construction with SHA-512.
+        Chunked512,
+        /// The root of an fs-verity Merkle tree. Not implemented here.
+        VerityMerkle,
+    }
+
     /// A signature algorithm the scheme defines.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct SignatureAlgorithm {
@@ -10519,66 +10966,66 @@ pub mod signing {
         pub id: u32,
         /// Its name.
         pub name: &'static str,
-        /// Whether its content digest is SHA-256, which is the one this build
-        /// can recompute.
-        pub uses_sha256: bool,
+        /// How its content digest is built.
+        pub digest: DigestKind,
     }
 
-    /// Every algorithm the scheme defines, with whether this build can check it.
+    /// Every algorithm the scheme defines, and how each one's digest is built.
     const ALGORITHMS: &[SignatureAlgorithm] = &[
         SignatureAlgorithm {
             id: 0x0101,
             name: "RSASSA-PSS with SHA-256",
-            uses_sha256: true,
+            digest: DigestKind::Chunked256,
         },
         SignatureAlgorithm {
             id: 0x0102,
             name: "RSASSA-PSS with SHA-512",
-            uses_sha256: false,
+            digest: DigestKind::Chunked512,
         },
         SignatureAlgorithm {
             id: 0x0103,
             name: "RSASSA-PKCS1-v1_5 with SHA-256",
-            uses_sha256: true,
+            digest: DigestKind::Chunked256,
         },
         SignatureAlgorithm {
             id: 0x0104,
             name: "RSASSA-PKCS1-v1_5 with SHA-512",
-            uses_sha256: false,
+            digest: DigestKind::Chunked512,
         },
         SignatureAlgorithm {
             id: 0x0201,
             name: "ECDSA with SHA-256",
-            uses_sha256: true,
+            digest: DigestKind::Chunked256,
         },
         SignatureAlgorithm {
             id: 0x0202,
             name: "ECDSA with SHA-512",
-            uses_sha256: false,
+            digest: DigestKind::Chunked512,
         },
         SignatureAlgorithm {
             id: 0x0301,
             name: "DSA with SHA-256",
-            uses_sha256: true,
+            digest: DigestKind::Chunked256,
         },
         SignatureAlgorithm {
             id: 0x0421,
             name: "RSASSA-PKCS1-v1_5 with SHA-256 over a verity tree",
-            uses_sha256: true,
+            digest: DigestKind::VerityMerkle,
         },
         SignatureAlgorithm {
             id: 0x0423,
             name: "ECDSA with SHA-256 over a verity tree",
-            uses_sha256: true,
+            digest: DigestKind::VerityMerkle,
         },
         SignatureAlgorithm {
             id: 0x0425,
             name: "DSA with SHA-256 over a verity tree",
-            uses_sha256: true,
+            digest: DigestKind::VerityMerkle,
         },
     ];
 
-    fn algorithm(id: u32) -> Option<SignatureAlgorithm> {
+    /// The algorithm a scheme identifier names, if the scheme defines one.
+    pub fn algorithm(id: u32) -> Option<SignatureAlgorithm> {
         ALGORITHMS.iter().copied().find(|entry| entry.id == id)
     }
 
@@ -10862,23 +11309,38 @@ pub mod signing {
         Ok(signers)
     }
 
-    /// Computes the SHA-256 content digest the scheme defines.
+    /// The three spans of a package the content digest covers.
     ///
     /// The package is treated as three sections: everything before the signing
     /// block, the central directory, and the end record with its central
-    /// directory offset replaced by the signing block's offset. Each is split
-    /// into one-megabyte chunks, every chunk is hashed with a `0xa5` prefix and
-    /// its length, and the chunk hashes are hashed together with a `0x5a`
-    /// prefix and their count.
+    /// directory offset replaced by the signing block's offset. The
+    /// substitution in the third section is what lets the digest cover the end
+    /// record without covering the offset the signing block itself moved.
     ///
-    /// The substitution in the third section is what lets the digest cover the
-    /// end record without covering the offset the signing block itself moved.
-    pub fn content_digest_sha256(
+    /// The end record is held owned because it is the patched copy, not the
+    /// bytes in the file.
+    struct DigestSections<'a> {
+        /// Everything before the signing block.
+        contents: &'a [u8],
+        /// The central directory.
+        directory: &'a [u8],
+        /// The end record with its central directory offset substituted.
+        end_record: Vec<u8>,
+    }
+
+    impl DigestSections<'_> {
+        /// The three spans in the order the digest covers them.
+        fn each(&self) -> [&[u8]; 3] {
+            [self.contents, self.directory, self.end_record.as_slice()]
+        }
+    }
+
+    fn digest_sections(
         data: &[u8],
         block_offset: u64,
         central_directory_offset: u64,
         end_record_offset: u64,
-    ) -> Result<Digest, Diagnostic> {
+    ) -> Result<DigestSections<'_>, Diagnostic> {
         let reader = Reader::new(data, Endian::Little, "package");
 
         let contents = reader.slice_at(0, block_offset)?;
@@ -10887,10 +11349,9 @@ pub mod signing {
             end_record_offset.saturating_sub(central_directory_offset),
         )?;
 
-        let end_record = reader
+        let mut patched = reader
             .slice_at(end_record_offset, data.len() as u64 - end_record_offset)?
             .to_vec();
-        let mut patched = end_record;
         if patched.len() < 20 {
             return Err(fail("ES020", "The end record is too small to patch."));
         }
@@ -10902,8 +11363,33 @@ pub mod signing {
         })?;
         patched[16..20].copy_from_slice(&substitute.to_le_bytes());
 
+        Ok(DigestSections {
+            contents,
+            directory,
+            end_record: patched,
+        })
+    }
+
+    /// Computes the SHA-256 content digest the scheme defines.
+    ///
+    /// Each section is split into one-megabyte chunks, every chunk is hashed
+    /// with a `0xa5` prefix and its length, and the chunk hashes are hashed
+    /// together with a `0x5a` prefix and their count.
+    pub fn content_digest_sha256(
+        data: &[u8],
+        block_offset: u64,
+        central_directory_offset: u64,
+        end_record_offset: u64,
+    ) -> Result<Digest, Diagnostic> {
+        let sections = digest_sections(
+            data,
+            block_offset,
+            central_directory_offset,
+            end_record_offset,
+        )?;
+
         let mut chunk_digests: Vec<Digest> = Vec::new();
-        for section in [contents, directory, patched.as_slice()] {
+        for section in sections.each() {
             for chunk in section.chunks(CHUNK_SIZE) {
                 let mut hasher = Sha256::new();
                 hasher.update(&[CHUNK_PREFIX]);
@@ -10914,6 +11400,45 @@ pub mod signing {
         }
 
         let mut root = Sha256::new();
+        root.update(&[ROOT_PREFIX]);
+        root.update(&(chunk_digests.len() as u32).to_le_bytes());
+        for digest in &chunk_digests {
+            root.update(digest.as_bytes());
+        }
+        Ok(root.finish())
+    }
+
+    /// Computes the SHA-512 content digest the scheme defines.
+    ///
+    /// The identical construction to [`content_digest_sha256`] with SHA-512 in
+    /// place of SHA-256. A signer with a large RSA key produces this one, so
+    /// without it the Core would have to decline to check the very packages
+    /// this repository's own release build produces.
+    pub fn content_digest_sha512(
+        data: &[u8],
+        block_offset: u64,
+        central_directory_offset: u64,
+        end_record_offset: u64,
+    ) -> Result<Digest512, Diagnostic> {
+        let sections = digest_sections(
+            data,
+            block_offset,
+            central_directory_offset,
+            end_record_offset,
+        )?;
+
+        let mut chunk_digests: Vec<Digest512> = Vec::new();
+        for section in sections.each() {
+            for chunk in section.chunks(CHUNK_SIZE) {
+                let mut hasher = Sha512::new();
+                hasher.update(&[CHUNK_PREFIX]);
+                hasher.update(&(chunk.len() as u32).to_le_bytes());
+                hasher.update(chunk);
+                chunk_digests.push(hasher.finish());
+            }
+        }
+
+        let mut root = Sha512::new();
         root.update(&[ROOT_PREFIX]);
         root.update(&(chunk_digests.len() as u32).to_le_bytes());
         for digest in &chunk_digests {
@@ -11076,22 +11601,63 @@ pub mod signing {
             }
         }
 
-        let computed = match content_digest_sha256(
-            data,
-            block.offset(),
-            central_directory_offset,
-            end_record_offset,
-        ) {
-            Ok(digest) => digest,
-            Err(error) => {
-                sink.emit(error);
-                return report;
-            }
+        // Both digests are computed only if some signer actually claims one.
+        // A package is commonly signed with one algorithm, and hashing it twice
+        // to satisfy a claim nobody made would double the work for nothing.
+        let wanted = |kind: DigestKind| {
+            report
+                .signers
+                .iter()
+                .any(|signer| signer.digests.iter().any(|(a, _)| a.digest == kind))
         };
+
+        let mut sha256_digest: Option<Digest> = None;
+        if wanted(DigestKind::Chunked256) {
+            match content_digest_sha256(
+                data,
+                block.offset(),
+                central_directory_offset,
+                end_record_offset,
+            ) {
+                Ok(digest) => sha256_digest = Some(digest),
+                Err(error) => {
+                    sink.emit(error);
+                    return report;
+                }
+            }
+        }
+
+        let mut sha512_digest: Option<Digest512> = None;
+        if wanted(DigestKind::Chunked512) {
+            match content_digest_sha512(
+                data,
+                block.offset(),
+                central_directory_offset,
+                end_record_offset,
+            ) {
+                Ok(digest) => sha512_digest = Some(digest),
+                Err(error) => {
+                    sink.emit(error);
+                    return report;
+                }
+            }
+        }
 
         for signer in &report.signers {
             for (algorithm, claimed) in &signer.digests {
-                if !algorithm.uses_sha256 {
+                // What this build recomputed for the construction this
+                // algorithm uses, if it can build that construction at all.
+                let computed: Option<(&[u8], String)> = match algorithm.digest {
+                    DigestKind::Chunked256 => sha256_digest
+                        .as_ref()
+                        .map(|d| (d.as_bytes().as_slice(), d.to_hex())),
+                    DigestKind::Chunked512 => sha512_digest
+                        .as_ref()
+                        .map(|d| (d.as_bytes().as_slice(), d.to_hex())),
+                    DigestKind::VerityMerkle => None,
+                };
+
+                let Some((computed, computed_hex)) = computed else {
                     report.digests_unverifiable += 1;
                     sink.emit(
                         Diagnostic::new(
@@ -11105,14 +11671,16 @@ pub mod signing {
                             ),
                         )
                         .with_suggestion(
-                            "Only SHA-256 is implemented, so this claim is neither \
-                             confirmed nor disputed.",
+                            "A verity digest is the root of an fs-verity Merkle tree, \
+                             which is a different construction from the chunked digest \
+                             this build computes. The claim is neither confirmed nor \
+                             disputed; it is not compared against anything.",
                         ),
                     );
                     continue;
-                }
+                };
 
-                if claimed.as_slice() == computed.as_bytes() {
+                if claimed.as_slice() == computed {
                     report.digests_verified += 1;
                 } else {
                     report.digests_failed += 1;
@@ -11129,7 +11697,7 @@ pub mod signing {
                             "Recorded: {}",
                             crate::der::to_hex(claimed).to_lowercase()
                         ))
-                        .with_context(format!("Computed: {computed}"))
+                        .with_context(format!("Computed: {computed_hex}"))
                         .with_suggestion(
                             "The package has been changed since it was signed. Do not \
                              install it.",
@@ -11190,6 +11758,28 @@ pub fn state_report(observed_environment: &str) -> String {
     w.begin_array(Some("bootstrapDependencies"));
     for dependency in BOOTSTRAP_DEPENDENCIES {
         w.element_str(dependency);
+    }
+    w.end_array();
+    w.end_object();
+
+    w.begin_object(Some("roadmap"));
+    w.field_str("current", CORE_PHASE);
+    w.field_u64("count", ROADMAP.len() as u64);
+    w.field_u64(
+        "delivered",
+        ROADMAP
+            .iter()
+            .filter(|p| p.state == PhaseState::Delivered)
+            .count() as u64,
+    );
+    w.begin_array(Some("phases"));
+    for phase in ROADMAP {
+        w.begin_object(None);
+        w.field_u64("number", phase.number as u64);
+        w.field_str("name", phase.name);
+        w.field_str("state", phase.state.as_str());
+        w.field_str("delivers", phase.delivers);
+        w.end_object();
     }
     w.end_array();
     w.end_object();
@@ -14023,6 +14613,18 @@ mod tests {
     }
 
     fn sign_with_apksigner(label: &str) -> Option<(Vec<u8>, std::path::PathBuf)> {
+        sign_with_apksigner_using(label, 2048)
+    }
+
+    /// Signs a package with a key of the given size.
+    ///
+    /// The size decides the digest: apksigner picks SHA-256 for a 2048-bit RSA
+    /// key and SHA-512 for a 4096-bit one, so this is how both content-digest
+    /// constructions get exercised against the tool that defines them.
+    fn sign_with_apksigner_using(
+        label: &str,
+        key_bits: u32,
+    ) -> Option<(Vec<u8>, std::path::PathBuf)> {
         let apksigner = find_apksigner()?;
 
         let directory = temp_directory(label);
@@ -14053,7 +14655,7 @@ mod tests {
                 "-keyalg",
                 "RSA",
                 "-keysize",
-                "2048",
+                &key_bits.to_string(),
                 "-validity",
                 "30",
                 "-dname",
@@ -14218,6 +14820,87 @@ mod tests {
     }
 
     #[test]
+    fn a_sha512_signed_package_is_checked_rather_than_declined() {
+        // A 4096-bit key makes apksigner sign with SHA-512, which is what this
+        // repository's own release build produces. Before SHA-512 existed here
+        // the Core could only say "cannot recompute" about its own artifact.
+        let Some((bytes, directory)) = sign_with_apksigner_using("v2-sha512", 4096) else {
+            eprintln!("signing conformance: apksigner is not available here");
+            return;
+        };
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).expect("the signed package must read");
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+
+        // The point of the test: the digest is SHA-512, and it was checked.
+        let algorithms: Vec<&str> = report
+            .signers
+            .iter()
+            .flat_map(|signer| signer.digests.iter().map(|(a, _)| a.name))
+            .collect();
+        assert!(
+            algorithms.iter().any(|name| name.contains("SHA-512")),
+            "expected a SHA-512 signature, got {algorithms:?}"
+        );
+        assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
+        assert_eq!(
+            report.digests_unverifiable,
+            0,
+            "nothing here should be undecidable any more: {:?}",
+            sink.entries()
+        );
+        assert!(report.digests_verified > 0, "{:?}", sink.entries());
+        assert_eq!(
+            report.signers[0].certificates[0].public_key_bits,
+            Some(4096)
+        );
+        assert!(!report.signatures_checked);
+
+        eprintln!(
+            "signing conformance: SHA-512, {} digest(s) recomputed and matched apksigner",
+            report.digests_verified
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_verity_digest_is_never_compared_against_the_chunked_one() {
+        // A verity digest is the root of an fs-verity Merkle tree. It is not the
+        // chunked digest and will never equal it, so comparing the two would
+        // report a sound package as tampered with - telling a person not to
+        // install something that is perfectly fine. The table must classify the
+        // construction, not guess it from the algorithm's name.
+        for id in [0x0421u32, 0x0423, 0x0425] {
+            let algorithm = signing::algorithm(id).expect("a defined algorithm");
+            assert_eq!(
+                algorithm.digest,
+                signing::DigestKind::VerityMerkle,
+                "0x{id:04x} ({}) must not be treated as a chunked digest",
+                algorithm.name
+            );
+        }
+
+        // And the ones that really are chunked are classified by their hash.
+        for (id, kind) in [
+            (0x0101u32, signing::DigestKind::Chunked256),
+            (0x0102, signing::DigestKind::Chunked512),
+            (0x0103, signing::DigestKind::Chunked256),
+            (0x0104, signing::DigestKind::Chunked512),
+            (0x0201, signing::DigestKind::Chunked256),
+            (0x0202, signing::DigestKind::Chunked512),
+            (0x0301, signing::DigestKind::Chunked256),
+        ] {
+            assert_eq!(signing::algorithm(id).unwrap().digest, kind, "0x{id:04x}");
+        }
+    }
+
+    #[test]
     fn changing_one_byte_of_a_signed_package_is_detected() {
         // Threats T1, T3 and T4 of directive section 27: an APK modified after
         // signing, a modified DEX, a modified native library. All three are the
@@ -14313,6 +14996,76 @@ mod tests {
         }
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    // --- roadmap -------------------------------------------------------------
+
+    #[test]
+    fn the_roadmap_agrees_with_the_phase_this_tree_is_on() {
+        // One phase is CURRENT, it is the one CORE_PHASE names, and everything
+        // before it is DELIVERED while everything after it is PLANNED. A
+        // roadmap that drifts from CORE_PHASE would show a person the wrong
+        // place on it, which is the whole thing this table exists to prevent.
+        let current: Vec<&super::Phase> = super::ROADMAP
+            .iter()
+            .filter(|p| p.state == super::PhaseState::Current)
+            .collect();
+        assert_eq!(current.len(), 1, "exactly one phase is the current one");
+        assert_eq!(current[0].name, super::CORE_PHASE);
+
+        let here = current[0].number;
+        for phase in super::ROADMAP {
+            let expected = match phase.number.cmp(&here) {
+                std::cmp::Ordering::Less => super::PhaseState::Delivered,
+                std::cmp::Ordering::Equal => super::PhaseState::Current,
+                std::cmp::Ordering::Greater => super::PhaseState::Planned,
+            };
+            assert_eq!(phase.state, expected, "phase {}", phase.number);
+        }
+    }
+
+    #[test]
+    fn the_roadmap_is_numbered_without_a_gap() {
+        for (index, phase) in super::ROADMAP.iter().enumerate() {
+            assert_eq!(phase.number as usize, index + 1);
+            assert!(!phase.name.is_empty());
+            assert!(!phase.delivers.is_empty(), "phase {}", phase.number);
+        }
+    }
+
+    #[test]
+    fn every_plugin_names_a_phase_the_roadmap_has() {
+        // A plugin whose roadmap phase is spelled differently from the roadmap
+        // is a plugin the user interface cannot place.
+        let registry = super::plugin::Registry::builtin();
+        for contract in registry.all().iter().map(|plugin| plugin.contract()) {
+            assert!(
+                super::ROADMAP
+                    .iter()
+                    .any(|phase| phase.name == contract.roadmap_phase),
+                "{} names {:?}, which is not a phase",
+                contract.id,
+                contract.roadmap_phase
+            );
+        }
+    }
+
+    #[test]
+    fn a_delivered_phase_does_not_make_anything_production() {
+        // Directive section 1. DELIVERED means the work landed, not that it is
+        // finished, and nothing in the report may let those be confused.
+        let report = super::state_report("");
+        // Derived, not written down: a literal here would need editing on every
+        // phase and would be wrong until someone remembered to do it.
+        let delivered = super::ROADMAP
+            .iter()
+            .filter(|p| p.state == super::PhaseState::Delivered)
+            .count();
+        assert!(report.contains(&format!("\"delivered\":{delivered}")));
+        assert!(report.contains("\"production\":0"));
+        for phase in super::ROADMAP {
+            assert!(report.contains(phase.name), "missing: {}", phase.name);
+        }
     }
 
     // --- subsystem inventory -------------------------------------------------
@@ -15874,6 +16627,121 @@ Viewbinding   = false
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    // --- SHA-512 (official NIST vectors) -------------------------------------
+
+    #[test]
+    fn sha512_matches_the_nist_published_vectors() {
+        // FIPS 180-4 appendix C and the NIST Cryptographic Algorithm Validation
+        // Program publish these. Directive section 30 makes passing them the
+        // condition for using the primitive at all; nothing in the signing
+        // module may call SHA-512 unless this test passes.
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"",
+                "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+                 47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e",
+            ),
+            (
+                b"abc",
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+                 2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+            ),
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "204a8fc6dda82f0a0ced7beb8e08a41657c16ef468b228a8279be331a703c335\
+                 96fd15c13b1b07f9aa1d3bea57789ca031ad85c7a71dd70354ec631238ca3445",
+            ),
+            (
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno\
+                  ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+                "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018\
+                 501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            // The source layout wraps these, so strip what the wrapping added.
+            let cleaned: Vec<u8> = input.iter().copied().filter(|b| *b != b' ').collect();
+            let wanted: String = expected.chars().filter(|c| !c.is_whitespace()).collect();
+            assert_eq!(
+                super::hash::sha512(&cleaned).to_hex(),
+                wanted,
+                "input: {:?}",
+                String::from_utf8_lossy(&cleaned)
+            );
+        }
+    }
+
+    #[test]
+    fn sha512_matches_the_one_million_a_vector() {
+        // The long-message vector. It is the one that catches a broken length
+        // counter or a broken padding boundary, which for SHA-512 sits at a
+        // different place than for SHA-256.
+        let mut hasher = super::hash::Sha512::new();
+        let chunk = vec![b'a'; 1_000];
+        for _ in 0..1_000 {
+            hasher.update(&chunk);
+        }
+        assert_eq!(
+            hasher.finish().to_hex(),
+            "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973eb\
+             de0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b"
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        );
+    }
+
+    #[test]
+    fn sha512_is_insensitive_to_how_the_message_is_split() {
+        let message: Vec<u8> = (0u8..=255).cycle().take(2_000).collect();
+        let one_shot = super::hash::sha512(&message);
+
+        for split in [1usize, 7, 111, 112, 113, 127, 128, 129, 256, 1_999] {
+            let mut hasher = super::hash::Sha512::new();
+            for piece in message.chunks(split) {
+                hasher.update(piece);
+            }
+            assert_eq!(hasher.finish(), one_shot, "split at {split}");
+        }
+    }
+
+    #[test]
+    fn sha512_handles_every_padding_boundary() {
+        // 112 is where the 128-bit length field starts, and 128 is the block
+        // size. A padding bug lives on one side of one of these.
+        for length in [
+            0usize, 1, 110, 111, 112, 113, 127, 128, 129, 239, 240, 255, 256,
+        ] {
+            let message = vec![b'x'; length];
+            let streamed = {
+                let mut hasher = super::hash::Sha512::new();
+                hasher.update(&message);
+                hasher.finish()
+            };
+            assert_eq!(streamed, super::hash::sha512(&message), "length {length}");
+        }
+    }
+
+    #[test]
+    fn sha512_survives_arbitrary_input() {
+        let mut seed = 0x5151_2323_9797_0f0fu64;
+        for _ in 0..2_000 {
+            let length = (xorshift(&mut seed) % 4_096) as usize;
+            let data: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+
+            let one_shot = super::hash::sha512(&data);
+            let split = ((xorshift(&mut seed) % 300) + 1) as usize;
+            let mut hasher = super::hash::Sha512::new();
+            for piece in data.chunks(split) {
+                hasher.update(piece);
+            }
+            assert_eq!(hasher.finish(), one_shot, "length {length}, split {split}");
+        }
     }
 
     // --- SHA-256 (official NIST vectors) -------------------------------------
