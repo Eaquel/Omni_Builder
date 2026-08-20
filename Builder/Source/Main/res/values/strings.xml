@@ -22,6 +22,16 @@
         and exactly what it still lacks, and none of them has reached
         PRODUCTION.</string>
 
+    <string name="omni_section_build">Build a package</string>
+    <string name="omni_build_explain">This builds a real APK on this device with nothing but
+        Omni: the manifest is written as binary XML, packaged into a ZIP, signed with an RSA
+        key generated here, under a certificate written here. Every project is checked against
+        the security policy first, and a project that fails it produces no package.</string>
+    <string name="omni_build_action">BUILD APK NOW</string>
+    <string name="omni_build_running">Building…</string>
+    <string name="omni_build_no_code">The package carries a manifest only. There is no compiler
+        and no DEX writer yet, so it holds no code — that is phases 9 and 10.</string>
+
     <string name="omni_section_roadmap">Roadmap</string>
 
     <!-- %1$d phases whose work has landed, %2$d phases in total -->

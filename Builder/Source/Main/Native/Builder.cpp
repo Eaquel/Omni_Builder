@@ -152,6 +152,38 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCoreVersion(
   return result;
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildPackage(
+    JNIEnv *env, jobject , jstring manifest, jstring output_path) {
+  if (manifest == nullptr || output_path == nullptr) {
+    ThrowJava(env, kIllegalState, "A build needs a manifest and an output path.");
+    return nullptr;
+  }
+
+  std::string manifest_text;
+  std::string path_text;
+  if (!JavaStringToUtf8(env, manifest, &manifest_text) ||
+      !JavaStringToUtf8(env, output_path, &path_text)) {
+    return nullptr;
+  }
+
+  char *report = omni_build_package(manifest_text.c_str(), path_text.c_str());
+  if (report == nullptr) {
+    ThrowJava(env, kIllegalState,
+              "Omni Core could not report on the build. This is a defect in the "
+              "Core, not in the project being built.");
+    return nullptr;
+  }
+
+  jstring result = env->NewStringUTF(report);
+  omni_string_free(report);
+  if (result == nullptr) {
+    ThrowJava(env, kOutOfMemory,
+              "The build report could not be converted to a Java string.");
+    return nullptr;
+  }
+  return result;
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(
     JNIEnv *env, jobject , jstring observed_environment) {
   if (observed_environment == nullptr) {

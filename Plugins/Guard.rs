@@ -8,7 +8,7 @@ pub static CONTRACT: Contract = Contract {
     display_name: "Omni_Guard",
     version: Version::new(0, 1, 0),
     status: Status::Planned,
-    summary: "Evaluates build, artifact and signing integrity and produces evidence.",
+    summary: "Detection, verification, integrity, provenance and policy enforcement.",
     inputs: &[
         "apk.signed",
         "build.provenance",

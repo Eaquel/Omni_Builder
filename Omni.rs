@@ -328,6 +328,50 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &["Only two components can be observed from a device."],
     },
     Subsystem {
+        name: "Omni_Guard policy",
+        status: Status::Partial,
+        directive_section: 29,
+        summary: "Seven rules every project must pass before a package is produced: no debuggable build, no cleartext by default, backup off, no unguarded exported component, no exported provider handing out URI grants, a platform floor of API 28, and no high-risk permission.",
+        missing: &[
+            "Manifest rules only. Nothing inspects code, resources or native libraries.",
+            "Passing says the package does not carry these specific weaknesses. It is not a statement that the application is secure, and every report says so.",
+            "The rule set is fixed in code; a project cannot add to it or turn one off.",
+        ],
+    },
+    Subsystem {
+        name: "Build engine",
+        status: Status::Partial,
+        directive_section: 23,
+        summary: "A project becomes a signed package with nothing borrowed: the security policy runs first, then the manifest is encoded, the archive written, a key generated, a certificate written, and the package signed. apksigner verifies the result.",
+        missing: &[
+            "No compiler and no DEX writer, so a package carries a manifest and files handed to it, never compiled code.",
+            "No resource table, so a manifest may not name a resource.",
+            "The signing key is generated per build rather than kept, so two builds are not the same application to Android.",
+        ],
+    },
+    Subsystem {
+        name: "Key generation",
+        status: Status::Partial,
+        directive_section: 30,
+        summary: "RSA keys generated from the system random source with Miller-Rabin primality testing at 24 rounds, encoded as PKCS#8 and accepted by OpenSSL.",
+        missing: &[
+            "Miller-Rabin is probabilistic. At 24 rounds a composite survives with probability below 4 to the power of -24, which is small but not zero.",
+            "No key storage: a key exists for as long as the build does.",
+            "Not constant-time, and the primes are not checked against the distance requirements FIPS 186-5 places on them.",
+        ],
+    },
+    Subsystem {
+        name: "Certificate writer",
+        status: Status::Partial,
+        directive_section: 25,
+        summary: "Writes a self-signed X.509 v3 certificate with a random serial, proper UTC or generalised time, and an RSA public key, signed with SHA-256.",
+        missing: &[
+            "No extensions: no basic constraints, no key usage, no subject key identifier.",
+            "Self-signed only; there is no chain and no certificate authority.",
+            "Names carry a common name, organisation and country and nothing else.",
+        ],
+    },
+    Subsystem {
         name: "Big integers",
         status: Status::Partial,
         directive_section: 30,
@@ -10711,6 +10755,41 @@ pub mod dex {
     }
 }
 
+pub mod random {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+    use std::io::Read;
+
+    pub fn bytes(count: usize) -> Result<Vec<u8>, Diagnostic> {
+        let mut out = vec![0u8; count];
+        let mut source = std::fs::File::open("/dev/urandom").map_err(|why| {
+            Diagnostic::new(
+                "EQ001",
+                Severity::Fatal,
+                FailureClass::SecurityFailure,
+                "core.random",
+                "The system random source could not be opened.",
+            )
+            .with_context(format!("Reason: {why}"))
+            .with_suggestion(
+                "Nothing that needs randomness may proceed without it. A key made from a \
+                 guessable source is worse than no key.",
+            )
+        })?;
+        source.read_exact(&mut out).map_err(|why| {
+            Diagnostic::new(
+                "EQ002",
+                Severity::Fatal,
+                FailureClass::SecurityFailure,
+                "core.random",
+                "The system random source ran short.",
+            )
+            .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(out)
+    }
+}
+
 pub mod bignum {
     use crate::diag::{Diagnostic, Severity};
     use crate::FailureClass;
@@ -11025,6 +11104,97 @@ pub mod bignum {
             self.mul(other).modulus(modulus)
         }
 
+        pub fn mod_inverse(&self, modulus: &Natural) -> Result<Natural, Diagnostic> {
+            if modulus.is_zero() || modulus.compare(&Natural::one()) == Ordering::Equal {
+                return Err(fail(
+                    "EN020",
+                    "A modular inverse needs a modulus above one.",
+                ));
+            }
+            let mut r = modulus.clone();
+            let mut new_r = self.modulus(modulus)?;
+            let mut t = Natural::zero();
+            let mut new_t = Natural::one();
+
+            while !new_r.is_zero() {
+                let (quotient, remainder) = r.divmod(&new_r)?;
+                let shift = quotient.mul(&new_t).modulus(modulus)?;
+                let next_t = t.add(modulus).sub(&shift)?.modulus(modulus)?;
+                t = new_t;
+                new_t = next_t;
+                r = new_r;
+                new_r = remainder;
+            }
+
+            if r.compare(&Natural::one()) != Ordering::Equal {
+                return Err(fail("EN021", "A value has no inverse for this modulus."));
+            }
+            Ok(t)
+        }
+
+        pub fn is_probable_prime(&self, rounds: usize) -> Result<bool, Diagnostic> {
+            const SMALL_PRIMES: &[u32] = &[
+                2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79,
+                83, 89, 97, 101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167,
+                173, 179, 181, 191, 193, 197, 199, 211, 223, 227, 229, 233, 239, 241, 251,
+            ];
+
+            let two = Natural::from_u32(2);
+            if self.compare(&two) == Ordering::Less {
+                return Ok(false);
+            }
+            for prime in SMALL_PRIMES {
+                let small = Natural::from_u32(*prime);
+                match self.compare(&small) {
+                    Ordering::Equal => return Ok(true),
+                    Ordering::Less => return Ok(false),
+                    Ordering::Greater => {}
+                }
+                if self.modulus(&small)?.is_zero() {
+                    return Ok(false);
+                }
+            }
+
+            let one = Natural::one();
+            let minus_one = self.sub(&one)?;
+            let mut d = minus_one.clone();
+            let mut shifts = 0u32;
+            while !d.bit(0) {
+                d = d.shr_bits(1);
+                shifts += 1;
+            }
+
+            let width = self.byte_len();
+            for _ in 0..rounds {
+                let base = loop {
+                    let raw = crate::random::bytes(width)?;
+                    let candidate = Natural::from_bytes_be(&raw).modulus(self)?;
+                    if candidate.compare(&two) != Ordering::Less
+                        && candidate.compare(&minus_one) == Ordering::Less
+                    {
+                        break candidate;
+                    }
+                };
+
+                let mut x = base.mod_pow(&d, self)?;
+                if x.compare(&one) == Ordering::Equal || x.compare(&minus_one) == Ordering::Equal {
+                    continue;
+                }
+                let mut witnessed = false;
+                for _ in 1..shifts {
+                    x = x.mul(&x).modulus(self)?;
+                    if x.compare(&minus_one) == Ordering::Equal {
+                        witnessed = true;
+                        break;
+                    }
+                }
+                if !witnessed {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+
         pub fn mod_pow(
             &self,
             exponent: &Natural,
@@ -11234,10 +11404,140 @@ pub mod rsa {
         parse_pkcs1(wrapped.contents)
     }
 
+    pub fn encode_pkcs8(key: &PrivateKey) -> Result<Vec<u8>, Diagnostic> {
+        let integer = |value: &Natural| -> Result<Vec<u8>, Diagnostic> {
+            let mut bytes = value.to_bytes_be(value.byte_len().max(1))?;
+            if bytes[0] & 0x80 != 0 {
+                bytes.insert(0, 0);
+            }
+            Ok(der::encode_element(der::tag::INTEGER, &bytes))
+        };
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&der::encode_element(der::tag::INTEGER, &[0]));
+        for value in [
+            &key.modulus,
+            &key.public_exponent,
+            &key.private_exponent,
+            &key.prime1,
+            &key.prime2,
+            &key.exponent1,
+            &key.exponent2,
+            &key.coefficient,
+        ] {
+            body.extend_from_slice(&integer(value)?);
+        }
+        let pkcs1 = der::encode_element(der::tag::SEQUENCE, &body);
+
+        let mut algorithm = Vec::new();
+        algorithm.extend_from_slice(&der::encode_element(
+            der::tag::OID,
+            &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01],
+        ));
+        algorithm.extend_from_slice(&der::encode_element(der::tag::NULL, &[]));
+
+        let mut outer = Vec::new();
+        outer.extend_from_slice(&der::encode_element(der::tag::INTEGER, &[0]));
+        outer.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &algorithm));
+        outer.extend_from_slice(&der::encode_element(der::tag::OCTET_STRING, &pkcs1));
+        Ok(der::encode_element(der::tag::SEQUENCE, &outer))
+    }
+
     pub fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey, Diagnostic> {
         match parse_pkcs8(bytes) {
             Ok(key) => Ok(key),
             Err(_) => parse_pkcs1(bytes),
+        }
+    }
+
+    pub const PUBLIC_EXPONENT: u32 = 65_537;
+
+    fn random_prime(bits: usize) -> Result<Natural, Diagnostic> {
+        let width = bits.div_ceil(8);
+        loop {
+            let mut raw = crate::random::bytes(width)?;
+            raw[0] |= 0b1100_0000;
+            let last = raw.len() - 1;
+            raw[last] |= 1;
+            let candidate = Natural::from_bytes_be(&raw);
+            if candidate.bit_len() != bits {
+                continue;
+            }
+            if candidate.is_probable_prime(24)? {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    pub fn generate(bits: usize) -> Result<PrivateKey, Diagnostic> {
+        if !(MIN_MODULUS_BITS..=MAX_MODULUS_BITS).contains(&bits) || !bits.is_multiple_of(2) {
+            return Err(fail(
+                "ER030",
+                "A key size outside the accepted range was asked for.",
+            )
+            .with_context(format!("Bits: {bits}"))
+            .with_context(format!(
+                "Accepted: even, {MIN_MODULUS_BITS} to {MAX_MODULUS_BITS}"
+            )));
+        }
+
+        let one = Natural::one();
+        let public_exponent = Natural::from_u32(PUBLIC_EXPONENT);
+
+        loop {
+            let p = random_prime(bits / 2)?;
+            let q = random_prime(bits / 2)?;
+            if p.compare(&q) == Ordering::Equal {
+                continue;
+            }
+            let (prime1, prime2) = if p.compare(&q) == Ordering::Greater {
+                (p, q)
+            } else {
+                (q, p)
+            };
+
+            let modulus = prime1.mul(&prime2);
+            if modulus.bit_len() != bits {
+                continue;
+            }
+
+            let p_less = prime1.sub(&one)?;
+            let q_less = prime2.sub(&one)?;
+            let product = p_less.mul(&q_less);
+            let mut a = p_less.clone();
+            let mut b = q_less.clone();
+            while !b.is_zero() {
+                let remainder = a.divmod(&b)?.1;
+                a = b;
+                b = remainder;
+            }
+            let lambda = product.divmod(&a)?.0;
+
+            let Ok(private_exponent) = public_exponent.mod_inverse(&lambda) else {
+                continue;
+            };
+
+            let key = PrivateKey {
+                exponent1: private_exponent.modulus(&p_less)?,
+                exponent2: private_exponent.modulus(&q_less)?,
+                coefficient: prime2.mod_inverse(&prime1)?,
+                modulus,
+                public_exponent: public_exponent.clone(),
+                private_exponent,
+                prime1,
+                prime2,
+            };
+
+            let probe = Natural::from_u32(0x1234_5678);
+            let signed = exponentiate(&key, &probe)?;
+            if signed
+                .mod_pow(&key.public_exponent, &key.modulus)?
+                .compare(&probe)
+                != Ordering::Equal
+            {
+                continue;
+            }
+            return Ok(key);
         }
     }
 
@@ -11338,6 +11638,445 @@ pub mod rsa {
         let recovered = value.mod_pow(public_exponent, modulus)?;
         let expected = encode_pkcs1_v15(algorithm, digest, width)?;
         Ok(recovered.to_bytes_be(width)? == expected)
+    }
+}
+
+pub mod certificate {
+    use crate::der;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::rsa;
+    use crate::FailureClass;
+
+    const RSA_ENCRYPTION: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01];
+    const SHA256_WITH_RSA: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b];
+    const COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
+    const ORGANISATION: &[u8] = &[0x55, 0x04, 0x0a];
+    const COUNTRY: &[u8] = &[0x55, 0x04, 0x06];
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.certificate",
+            message,
+        )
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Moment {
+        pub year: i64,
+        pub month: u32,
+        pub day: u32,
+        pub hour: u32,
+        pub minute: u32,
+        pub second: u32,
+    }
+
+    pub fn moment_from_epoch(seconds: i64) -> Moment {
+        let days = seconds.div_euclid(86_400);
+        let rest = seconds.rem_euclid(86_400);
+
+        let z = days + 719_468;
+        let era = z.div_euclid(146_097);
+        let day_of_era = z - era * 146_097;
+        let year_of_era =
+            (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let year = year_of_era + era * 400;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let shifted = (5 * day_of_year + 2) / 153;
+        let day = (day_of_year - (153 * shifted + 2) / 5 + 1) as u32;
+        let month = if shifted < 10 {
+            shifted + 3
+        } else {
+            shifted - 9
+        } as u32;
+
+        Moment {
+            year: if month <= 2 { year + 1 } else { year },
+            month,
+            day,
+            hour: (rest / 3_600) as u32,
+            minute: ((rest % 3_600) / 60) as u32,
+            second: (rest % 60) as u32,
+        }
+    }
+
+    fn encode_time(moment: Moment) -> Vec<u8> {
+        if (1950..2050).contains(&moment.year) {
+            let text = format!(
+                "{:02}{:02}{:02}{:02}{:02}{:02}Z",
+                moment.year % 100,
+                moment.month,
+                moment.day,
+                moment.hour,
+                moment.minute,
+                moment.second
+            );
+            der::encode_element(der::tag::UTC_TIME, text.as_bytes())
+        } else {
+            let text = format!(
+                "{:04}{:02}{:02}{:02}{:02}{:02}Z",
+                moment.year, moment.month, moment.day, moment.hour, moment.minute, moment.second
+            );
+            der::encode_element(der::tag::GENERALIZED_TIME, text.as_bytes())
+        }
+    }
+
+    fn relative_name(oid: &[u8], value: &str) -> Vec<u8> {
+        let mut pair = Vec::new();
+        pair.extend_from_slice(&der::encode_element(der::tag::OID, oid));
+        pair.extend_from_slice(&der::encode_element(0x0c, value.as_bytes()));
+        let attribute = der::encode_element(der::tag::SEQUENCE, &pair);
+        der::encode_element(der::tag::SET, &attribute)
+    }
+
+    fn algorithm(oid: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&der::encode_element(der::tag::OID, oid));
+        body.extend_from_slice(&der::encode_element(der::tag::NULL, &[]));
+        der::encode_element(der::tag::SEQUENCE, &body)
+    }
+
+    fn integer(bytes: &[u8]) -> Vec<u8> {
+        let mut value = bytes.to_vec();
+        while value.len() > 1 && value[0] == 0 && value[1] & 0x80 == 0 {
+            value.remove(0);
+        }
+        if value[0] & 0x80 != 0 {
+            value.insert(0, 0);
+        }
+        der::encode_element(der::tag::INTEGER, &value)
+    }
+
+    pub fn public_key_info(key: &rsa::PrivateKey) -> Result<Vec<u8>, Diagnostic> {
+        let modulus = key.modulus();
+        let exponent = key.public_exponent();
+        let mut numbers = Vec::new();
+        numbers.extend_from_slice(&integer(&modulus.to_bytes_be(modulus.byte_len())?));
+        numbers.extend_from_slice(&integer(&exponent.to_bytes_be(exponent.byte_len())?));
+        let public_key = der::encode_element(der::tag::SEQUENCE, &numbers);
+
+        let mut wrapped = vec![0u8];
+        wrapped.extend_from_slice(&public_key);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&algorithm(RSA_ENCRYPTION));
+        body.extend_from_slice(&der::encode_element(der::tag::BIT_STRING, &wrapped));
+        Ok(der::encode_element(der::tag::SEQUENCE, &body))
+    }
+
+    pub fn self_signed(
+        key: &rsa::PrivateKey,
+        common_name: &str,
+        organisation: &str,
+        country: &str,
+        not_before: Moment,
+        not_after: Moment,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        for text in [common_name, organisation, country] {
+            if text.is_empty() || text.len() > 64 || text.contains('\u{0}') {
+                return Err(fail("EC001", "A certificate name is empty or too long.")
+                    .with_context(format!("Value: {text:?}")));
+            }
+        }
+
+        let mut name_body = Vec::new();
+        name_body.extend_from_slice(&relative_name(COUNTRY, country));
+        name_body.extend_from_slice(&relative_name(ORGANISATION, organisation));
+        name_body.extend_from_slice(&relative_name(COMMON_NAME, common_name));
+        let name = der::encode_element(der::tag::SEQUENCE, &name_body);
+
+        let mut validity_body = Vec::new();
+        validity_body.extend_from_slice(&encode_time(not_before));
+        validity_body.extend_from_slice(&encode_time(not_after));
+        let validity = der::encode_element(der::tag::SEQUENCE, &validity_body);
+
+        let serial_bytes = crate::random::bytes(16)?;
+        let mut serial = serial_bytes;
+        serial[0] &= 0x7f;
+        if serial[0] == 0 {
+            serial[0] = 1;
+        }
+
+        let mut tbs_body = Vec::new();
+        tbs_body.extend_from_slice(&der::encode_element(
+            0xa0,
+            &der::encode_element(der::tag::INTEGER, &[2]),
+        ));
+        tbs_body.extend_from_slice(&integer(&serial));
+        tbs_body.extend_from_slice(&algorithm(SHA256_WITH_RSA));
+        tbs_body.extend_from_slice(&name);
+        tbs_body.extend_from_slice(&validity);
+        tbs_body.extend_from_slice(&name);
+        tbs_body.extend_from_slice(&public_key_info(key)?);
+        let tbs = der::encode_element(der::tag::SEQUENCE, &tbs_body);
+
+        let signature = rsa::sign(key, rsa::DigestAlgorithm::Sha256, &tbs)?;
+        let mut wrapped = vec![0u8];
+        wrapped.extend_from_slice(&signature);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&tbs);
+        body.extend_from_slice(&algorithm(SHA256_WITH_RSA));
+        body.extend_from_slice(&der::encode_element(der::tag::BIT_STRING, &wrapped));
+        Ok(der::encode_element(der::tag::SEQUENCE, &body))
+    }
+}
+
+pub mod guard {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::json::Writer;
+    use crate::xml::Element;
+    use crate::FailureClass;
+
+    pub const MINIMUM_SDK: i64 = 28;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Verdict {
+        Passed,
+        Refused,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Finding {
+        pub rule: &'static str,
+        pub code: &'static str,
+        pub what: String,
+        pub why: String,
+        pub remedy: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Report {
+        pub findings: Vec<Finding>,
+        pub rules_applied: usize,
+    }
+
+    impl Report {
+        pub fn verdict(&self) -> Verdict {
+            if self.findings.is_empty() {
+                Verdict::Passed
+            } else {
+                Verdict::Refused
+            }
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str(
+                "verdict",
+                match self.verdict() {
+                    Verdict::Passed => "PASSED",
+                    Verdict::Refused => "REFUSED",
+                },
+            );
+            w.field_u64("rulesApplied", self.rules_applied as u64);
+            w.begin_array(Some("findings"));
+            for finding in &self.findings {
+                w.begin_object(None);
+                w.field_str("rule", finding.rule);
+                w.field_str("code", finding.code);
+                w.field_str("what", &finding.what);
+                w.field_str("why", &finding.why);
+                w.field_str("remedy", &finding.remedy);
+                w.end_object();
+            }
+            w.end_array();
+            w.field_str(
+                "note",
+                "These rules are the ones a manifest can be checked against. Passing them says the package does not carry these specific weaknesses; it is not a statement that the application is secure.",
+            );
+            w.end_object();
+        }
+    }
+
+    fn attribute<'a>(element: &'a Element, name: &str) -> Option<&'a str> {
+        element
+            .attributes
+            .iter()
+            .find(|attribute| attribute.name == name)
+            .map(|attribute| attribute.value.as_str())
+    }
+
+    fn walk<'a>(element: &'a Element, out: &mut Vec<&'a Element>) {
+        out.push(element);
+        for child in &element.children {
+            walk(child, out);
+        }
+    }
+
+    pub fn inspect_manifest(root: &Element) -> Report {
+        let mut report = Report::default();
+        let mut elements = Vec::new();
+        walk(root, &mut elements);
+
+        let application = elements
+            .iter()
+            .find(|element| element.name == "application");
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            if attribute(application, "android:debuggable") == Some("true") {
+                report.findings.push(Finding {
+                    rule: "no-debuggable",
+                    code: "EG001",
+                    what: "The application is marked debuggable.".to_string(),
+                    why: "A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.".to_string(),
+                    remedy: "Remove android:debuggable, or set it to false.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            if attribute(application, "android:usesCleartextTraffic") == Some("true") {
+                report.findings.push(Finding {
+                    rule: "no-cleartext",
+                    code: "EG002",
+                    what: "The application permits cleartext HTTP.".to_string(),
+                    why: "Traffic without TLS can be read and rewritten by anything on the path.".to_string(),
+                    remedy: "Set android:usesCleartextTraffic to false, or configure a network security policy that allows it for named hosts only.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            match attribute(application, "android:allowBackup") {
+                Some("false") => {}
+                _ => report.findings.push(Finding {
+                    rule: "no-backup",
+                    code: "EG003",
+                    what: "The application allows its data to be backed up.".to_string(),
+                    why: "With backup enabled, application data can be copied off the device over adb without unlocking it.".to_string(),
+                    remedy: "Set android:allowBackup to false, or declare rules that exclude anything sensitive.".to_string(),
+                }),
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if !matches!(
+                element.name.as_str(),
+                "activity" | "service" | "receiver" | "provider"
+            ) {
+                continue;
+            }
+            let exported = attribute(element, "android:exported") == Some("true");
+            let has_filter = element
+                .children
+                .iter()
+                .any(|child| child.name == "intent-filter");
+            let guarded = attribute(element, "android:permission").is_some();
+            let launcher = element.children.iter().any(|filter| {
+                filter.name == "intent-filter"
+                    && filter.children.iter().any(|entry| {
+                        entry.name == "category"
+                            && attribute(entry, "android:name")
+                                == Some("android.intent.category.LAUNCHER")
+                    })
+            });
+            if exported && has_filter && !guarded && !launcher {
+                let name = attribute(element, "android:name").unwrap_or("(unnamed)");
+                report.findings.push(Finding {
+                    rule: "guard-exported",
+                    code: "EG004",
+                    what: format!("{} {name} is exported with no permission.", element.name),
+                    why: "Any application on the device can reach an exported component that no permission guards.".to_string(),
+                    remedy: "Set android:exported to false, or require a permission with android:permission.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "provider" {
+                continue;
+            }
+            if attribute(element, "android:grantUriPermissions") == Some("true")
+                && attribute(element, "android:exported") == Some("true")
+            {
+                let name = attribute(element, "android:name").unwrap_or("(unnamed)");
+                report.findings.push(Finding {
+                    rule: "provider-uri-grants",
+                    code: "EG005",
+                    what: format!("provider {name} is exported and grants URI permissions."),
+                    why: "An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.".to_string(),
+                    remedy: "Set android:exported to false; a content provider is reachable through grants without being exported.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        let declared = elements
+            .iter()
+            .find(|element| element.name == "uses-sdk")
+            .and_then(|element| attribute(element, "android:minSdkVersion"))
+            .and_then(|text| text.parse::<i64>().ok());
+        match declared {
+            Some(value) if value >= MINIMUM_SDK => {}
+            _ => report.findings.push(Finding {
+                rule: "minimum-platform",
+                code: "EG006",
+                what: format!("The package does not require API {MINIMUM_SDK} or later."),
+                why: "Below API 28 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.".to_string(),
+                remedy: format!("Declare android:minSdkVersion at {MINIMUM_SDK} or above."),
+            }),
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "uses-permission" {
+                continue;
+            }
+            let name = attribute(element, "android:name").unwrap_or("");
+            const REFUSED: &[(&str, &str)] = &[
+                (
+                    "android.permission.REQUEST_INSTALL_PACKAGES",
+                    "installing other applications",
+                ),
+                (
+                    "android.permission.MANAGE_EXTERNAL_STORAGE",
+                    "reading all of shared storage",
+                ),
+                (
+                    "android.permission.SYSTEM_ALERT_WINDOW",
+                    "drawing over other applications",
+                ),
+                (
+                    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    "observing and acting on every screen",
+                ),
+            ];
+            if let Some((_, what)) = REFUSED.iter().find(|(permission, _)| *permission == name) {
+                report.findings.push(Finding {
+                    rule: "high-risk-permission",
+                    code: "EG007",
+                    what: format!("The package requests {name}."),
+                    why: format!("This permission grants {what}, which is far beyond what a build tool's output needs and is the usual shape of an abusive application."),
+                    remedy: "Remove the permission. If the application genuinely needs it, it is not something this build engine will produce without the request being made deliberately and reviewed.".to_string(),
+                });
+            }
+        }
+
+        report
+    }
+
+    pub fn emit(report: &Report, sink: &mut Sink) {
+        for finding in &report.findings {
+            sink.emit(
+                Diagnostic::new(
+                    finding.code,
+                    Severity::Fatal,
+                    FailureClass::SecurityFailure,
+                    "core.guard",
+                    finding.what.clone(),
+                )
+                .with_context(finding.why.clone())
+                .with_suggestion(finding.remedy.clone()),
+            );
+        }
     }
 }
 
@@ -11756,6 +12495,153 @@ pub mod axml {
         out.extend_from_slice(&resource_map);
         out.extend_from_slice(&nodes);
         Ok(out)
+    }
+}
+
+pub mod builder {
+    use crate::archive::Builder as ArchiveBuilder;
+    use crate::certificate;
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::guard;
+    use crate::json::Writer;
+    use crate::rsa;
+    use crate::FailureClass;
+
+    pub const PAGE_ALIGNMENT: u64 = 16_384;
+
+    #[derive(Clone, Debug)]
+    pub struct Identity {
+        pub common_name: String,
+        pub organisation: String,
+        pub country: String,
+    }
+
+    impl Default for Identity {
+        fn default() -> Identity {
+            Identity {
+                common_name: "Omni_Builder".to_string(),
+                organisation: "Omni".to_string(),
+                country: "TR".to_string(),
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Project {
+        pub manifest: String,
+        pub files: Vec<(String, Vec<u8>)>,
+        pub identity: Identity,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Outcome {
+        pub package: Vec<u8>,
+        pub guard: guard::Report,
+        pub entries: usize,
+        pub signed: bool,
+        pub certificate_fingerprint: String,
+    }
+
+    impl Outcome {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_u64("bytes", self.package.len() as u64);
+            w.field_u64("entries", self.entries as u64);
+            w.field_bool("signed", self.signed);
+            w.field_str("certificate", &self.certificate_fingerprint);
+            self.guard.write_json(w, "guard");
+            w.end_object();
+        }
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.builder",
+            message,
+        )
+    }
+
+    pub fn signing_identity(
+        key: &rsa::PrivateKey,
+        identity: &Identity,
+        now_seconds: i64,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let not_before = certificate::moment_from_epoch(now_seconds - 86_400);
+        let not_after = certificate::moment_from_epoch(now_seconds + 86_400 * 365 * 30);
+        certificate::self_signed(
+            key,
+            &identity.common_name,
+            &identity.organisation,
+            &identity.country,
+            not_before,
+            not_after,
+        )
+    }
+
+    pub fn build(
+        project: &Project,
+        key: &rsa::PrivateKey,
+        now_seconds: i64,
+        sink: &mut Sink,
+    ) -> Result<Outcome, Diagnostic> {
+        let root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", sink)
+            .ok_or_else(|| fail("EB001", "The manifest could not be read."))?;
+
+        let report = guard::inspect_manifest(&root);
+        if report.verdict() == guard::Verdict::Refused {
+            guard::emit(&report, sink);
+            return Err(fail(
+                "EB010",
+                "The project does not meet the security policy, so no package was produced.",
+            )
+            .with_context(format!("Findings: {}", report.findings.len()))
+            .with_suggestion(
+                "Every finding above names what is wrong and what to change. A package is \
+                 produced only when none of them is left.",
+            ));
+        }
+
+        let manifest = crate::axml::encode(&root)?;
+
+        let mut archive = ArchiveBuilder::for_android();
+        archive.add("AndroidManifest.xml", manifest)?;
+        for (name, bytes) in &project.files {
+            if name == "AndroidManifest.xml" {
+                return Err(fail(
+                    "EB002",
+                    "A project may not supply its own binary AndroidManifest.xml.",
+                )
+                .with_suggestion("The manifest is written from the project's text manifest."));
+            }
+            if name.ends_with(".so") {
+                archive.add_aligned(name.clone(), bytes.clone(), PAGE_ALIGNMENT)?;
+            } else {
+                archive.add(name.clone(), bytes.clone())?;
+            }
+        }
+        let entries = archive.len();
+        let unsigned = archive.finish()?;
+
+        let certificate_der = signing_identity(key, &project.identity, now_seconds)?;
+        let package = crate::signing::sign_v2(
+            &unsigned,
+            key,
+            &certificate_der,
+            rsa::DigestAlgorithm::Sha256,
+        )?;
+
+        let parsed = crate::x509::Certificate::parse(&certificate_der)?;
+
+        Ok(Outcome {
+            package,
+            guard: report,
+            entries,
+            signed: true,
+            certificate_fingerprint: parsed.fingerprint_display(),
+        })
     }
 }
 
@@ -12456,6 +13342,75 @@ pub mod ffi {
             }
         });
 
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_build_package(
+        manifest: *const c_char,
+        output_path: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            if manifest.is_null() || output_path.is_null() {
+                return std::ptr::null_mut();
+            }
+            let manifest = match unsafe { CStr::from_ptr(manifest) }.to_str() {
+                Ok(text) => text.to_string(),
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let output_path = match unsafe { CStr::from_ptr(output_path) }.to_str() {
+                Ok(text) => text.to_string(),
+                Err(_) => return std::ptr::null_mut(),
+            };
+
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+
+            let mut sink = crate::diag::Sink::new();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs() as i64)
+                .unwrap_or(0);
+
+            let outcome = crate::rsa::generate(2048).and_then(|key| {
+                let project = crate::builder::Project {
+                    manifest,
+                    files: Vec::new(),
+                    identity: crate::builder::Identity::default(),
+                };
+                crate::builder::build(&project, &key, now, &mut sink)
+            });
+
+            match outcome {
+                Ok(outcome) => match std::fs::write(&output_path, &outcome.package) {
+                    Ok(()) => {
+                        w.field_bool("built", true);
+                        w.field_str("path", &output_path);
+                        outcome.write_json(&mut w, "package");
+                    }
+                    Err(why) => {
+                        w.field_bool("built", false);
+                        w.field_str("path", &output_path);
+                        w.field_str("error", &format!("the package could not be written: {why}"));
+                    }
+                },
+                Err(error) => {
+                    w.field_bool("built", false);
+                    w.field_str("error", &error.message);
+                    if let Some(suggestion) = &error.suggestion {
+                        w.field_str("suggestion", suggestion);
+                    }
+                }
+            }
+
+            sink.write_json(&mut w, "diagnostics");
+            w.end_object();
+
+            match CString::new(w.finish()) {
+                Ok(report) => report.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        });
         result.unwrap_or(std::ptr::null_mut())
     }
 
@@ -16372,6 +17327,375 @@ mod tests {
                 "a changed package must not pass its own digest"
             );
         }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_generated_key_signs_what_an_independent_verifier_accepts() {
+        let key = super::rsa::generate(1024).expect("key generation must work");
+        assert_eq!(key.bits(), 1024);
+
+        let message = b"a key this build made, signing with arithmetic it wrote";
+        let signature = super::rsa::sign(&key, super::rsa::DigestAlgorithm::Sha256, message)
+            .expect("signing must work");
+        let digest = super::rsa::DigestAlgorithm::Sha256.digest(message);
+        assert!(super::rsa::verify(
+            key.modulus(),
+            key.public_exponent(),
+            super::rsa::DigestAlgorithm::Sha256,
+            &digest,
+            &signature
+        )
+        .unwrap());
+
+        let Some(tool) = openssl() else {
+            eprintln!("keygen conformance: openssl is not available here");
+            return;
+        };
+        let directory = temp_directory("omni-keygen");
+        let package = super::rsa::encode_pkcs8(&key).expect("the key must encode");
+        let path = directory.join("generated.pk8");
+        std::fs::write(&path, &package).unwrap();
+
+        let checked = std::process::Command::new(&tool)
+            .args([
+                "pkey",
+                "-inform",
+                "DER",
+                "-in",
+                path.to_str().unwrap(),
+                "-check",
+                "-noout",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            checked.status.success(),
+            "openssl rejected a key this build generated: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+
+        let reparsed = super::rsa::parse_pkcs8(&package).expect("our own key must parse back");
+        assert_eq!(reparsed.modulus(), key.modulus());
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("keygen conformance: openssl accepts a 1024-bit key this build generated");
+    }
+
+    #[test]
+    fn primality_agrees_with_known_primes_and_composites() {
+        let primes: &[u32] = &[2, 3, 5, 7, 97, 251, 257, 65_537, 104_729, 1_000_003];
+        for prime in primes {
+            assert!(
+                super::bignum::Natural::from_u32(*prime)
+                    .is_probable_prime(16)
+                    .unwrap(),
+                "{prime} is prime"
+            );
+        }
+        let composites: &[u32] = &[0, 1, 4, 9, 15, 91, 561, 1_105, 1_729, 65_535, 1_000_001];
+        for composite in composites {
+            assert!(
+                !super::bignum::Natural::from_u32(*composite)
+                    .is_probable_prime(16)
+                    .unwrap(),
+                "{composite} is not prime"
+            );
+        }
+    }
+
+    #[test]
+    fn modular_inverses_are_actual_inverses() {
+        let cases: &[(u32, u32)] = &[(3, 7), (65_537, 1_000_003), (5, 12), (7, 26), (11, 1_009)];
+        for (value, modulus) in cases {
+            let a = super::bignum::Natural::from_u32(*value);
+            let m = super::bignum::Natural::from_u32(*modulus);
+            let inverse = a.mod_inverse(&m).unwrap();
+            let product = a.mod_mul(&inverse, &m).unwrap();
+            assert_eq!(
+                product,
+                super::bignum::Natural::one(),
+                "{value} mod {modulus}"
+            );
+        }
+        assert!(super::bignum::Natural::from_u32(4)
+            .mod_inverse(&super::bignum::Natural::from_u32(8))
+            .is_err());
+    }
+
+    const SAFE_PROJECT_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.made" android:versionCode="1" android:versionName="1.0">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <application android:label="Made By Omni" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
+</manifest>"#;
+
+    fn sample_project() -> super::builder::Project {
+        super::builder::Project {
+            manifest: SAFE_PROJECT_MANIFEST.to_string(),
+            files: vec![
+                ("lib/arm64-v8a/libomni.so".to_string(), vec![0x7f; 2_048]),
+                ("assets/notes.txt".to_string(), b"made by omni".to_vec()),
+            ],
+            identity: super::builder::Identity::default(),
+        }
+    }
+
+    #[test]
+    fn the_build_engine_produces_a_package_apksigner_accepts() {
+        let Some(apksigner) = find_apksigner() else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_SELF_BUILT_APK").is_err(),
+                "OMNI_REQUIRE_SELF_BUILT_APK is set but apksigner is missing"
+            );
+            eprintln!("build engine: apksigner is not available here");
+            return;
+        };
+
+        let key = super::rsa::generate(2048).expect("the engine must be able to make a key");
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&sample_project(), &key, 1_787_000_000, &mut sink)
+            .expect("a compliant project must build");
+
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert_eq!(outcome.guard.verdict(), super::guard::Verdict::Passed);
+        assert!(outcome.guard.rules_applied >= 7);
+        assert!(outcome.signed);
+        assert_eq!(outcome.entries, 3);
+
+        let directory = temp_directory("omni-engine");
+        let path = directory.join("made-by-omni.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+
+        let verified = std::process::Command::new(&apksigner)
+            .args([
+                "verify",
+                "--verbose",
+                "--print-certs",
+                "--min-sdk-version",
+                "28",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verified.stdout),
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        assert!(
+            verified.status.success(),
+            "apksigner rejected it:\n{report}"
+        );
+        assert!(
+            report.contains("Verified using v2 scheme (APK Signature Scheme v2): true"),
+            "{report}"
+        );
+        assert!(report.contains("CN=Omni_Builder"), "{report}");
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "build engine: {} bytes, {} entries, key and certificate both made here, apksigner verified it",
+            outcome.package.len(),
+            outcome.entries
+        );
+    }
+
+    #[test]
+    fn the_security_policy_refuses_to_produce_a_weak_package() {
+        let key = super::rsa::generate(1024).unwrap();
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "debuggable",
+                r#"<application android:label="X" android:allowBackup="false" android:debuggable="true" />"#,
+                "EG001",
+            ),
+            (
+                "cleartext",
+                r#"<application android:label="X" android:allowBackup="false" android:usesCleartextTraffic="true" />"#,
+                "EG002",
+            ),
+            ("backup", r#"<application android:label="X" />"#, "EG003"),
+            (
+                "exported",
+                r#"<application android:label="X" android:allowBackup="false"><activity android:name="A" android:exported="true"><intent-filter><action android:name="x" /></intent-filter></activity></application>"#,
+                "EG004",
+            ),
+            (
+                "provider",
+                r#"<application android:label="X" android:allowBackup="false"><provider android:name="P" android:authorities="a" android:exported="true" android:grantUriPermissions="true" /></application>"#,
+                "EG005",
+            ),
+        ];
+
+        for (name, application, code) in cases {
+            let manifest = format!(
+                r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    {application}
+</manifest>"#
+            );
+            let project = super::builder::Project {
+                manifest,
+                files: Vec::new(),
+                identity: super::builder::Identity::default(),
+            };
+            let mut sink = Sink::new();
+            let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
+                .expect_err(&format!("{name} must be refused"));
+            assert_eq!(error.code, "EB010", "{name}");
+            let codes: Vec<&str> = sink.entries().iter().map(|d| d.code.as_str()).collect();
+            assert!(
+                codes.contains(code),
+                "{name}: expected {code}, got {codes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_low_platform_floor_and_a_high_risk_permission_are_refused() {
+        let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak">
+    <uses-sdk android:minSdkVersion="21" android:targetSdkVersion="36" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <application android:label="X" android:allowBackup="false" />
+</manifest>"#;
+        let (root, _) = parse_xml(manifest);
+        let report = super::guard::inspect_manifest(&root.unwrap());
+        assert_eq!(report.verdict(), super::guard::Verdict::Refused);
+        let codes: Vec<&str> = report.findings.iter().map(|f| f.code).collect();
+        assert!(codes.contains(&"EG006"), "{codes:?}");
+        assert!(codes.contains(&"EG007"), "{codes:?}");
+    }
+
+    #[test]
+    fn a_launcher_activity_is_allowed_to_be_exported() {
+        let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.app">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <application android:label="X" android:allowBackup="false">
+        <activity android:name="Main" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>"#;
+        let (root, _) = parse_xml(manifest);
+        let report = super::guard::inspect_manifest(&root.unwrap());
+        assert_eq!(
+            report.verdict(),
+            super::guard::Verdict::Passed,
+            "an application must be able to have a launcher: {:?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    fn the_guard_report_never_claims_the_application_is_secure() {
+        let (root, _) = parse_xml(SAFE_PROJECT_MANIFEST);
+        let report = super::guard::inspect_manifest(&root.unwrap());
+        let mut w = Writer::new();
+        w.begin_object(None);
+        report.write_json(&mut w, "guard");
+        w.end_object();
+        let document = w.finish();
+        assert!(is_structurally_valid(&document));
+        assert!(document.contains("\"verdict\":\"PASSED\""));
+        assert!(document.contains("not a statement that the application is secure"));
+    }
+
+    #[test]
+    fn civil_time_matches_known_instants() {
+        let cases: &[(i64, i64, u32, u32, u32, u32, u32)] = &[
+            (0, 1970, 1, 1, 0, 0, 0),
+            (1_000_000_000, 2001, 9, 9, 1, 46, 40),
+            (1_787_000_000, 2026, 8, 17, 20, 53, 20),
+            (951_782_400, 2000, 2, 29, 0, 0, 0),
+            (2_713_910_400, 2056, 1, 1, 0, 0, 0),
+        ];
+        for (epoch, year, month, day, hour, minute, second) in cases {
+            let moment = super::certificate::moment_from_epoch(*epoch);
+            assert_eq!(
+                (
+                    moment.year,
+                    moment.month,
+                    moment.day,
+                    moment.hour,
+                    moment.minute,
+                    moment.second
+                ),
+                (*year, *month, *day, *hour, *minute, *second),
+                "epoch {epoch}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_path_the_application_takes_produces_a_package_on_disk() {
+        let directory = temp_directory("omni-ffi-build");
+        let output = directory.join("made-by-omni.apk");
+        let manifest = std::ffi::CString::new(SAFE_PROJECT_MANIFEST).unwrap();
+        let path = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+
+        let report = unsafe {
+            let raw = super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr());
+            assert!(!raw.is_null(), "the bridge must always report");
+            let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
+            super::ffi::omni_string_free(raw);
+            text
+        };
+
+        assert!(is_structurally_valid(&report), "{report}");
+        assert!(report.contains("\"built\":true"), "{report}");
+        assert!(report.contains("\"verdict\":\"PASSED\""), "{report}");
+        assert!(output.is_file(), "the package must be on disk");
+
+        let bytes = std::fs::read(&output).unwrap();
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).expect("what it wrote must read back");
+        let signing_report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+        assert!(signing_report.has_block);
+        assert_eq!(signing_report.digests_failed, 0, "{:?}", sink.entries());
+        assert!(signing_report.digests_verified > 0);
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "application path: {} bytes written and read back through the bridge",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn the_bridge_refuses_a_weak_project_without_writing_anything() {
+        let directory = temp_directory("omni-ffi-refuse");
+        let output = directory.join("should-not-exist.apk");
+        let weak = SAFE_PROJECT_MANIFEST.replace(
+            "android:allowBackup=\"false\"",
+            "android:allowBackup=\"true\" android:debuggable=\"true\"",
+        );
+        let manifest = std::ffi::CString::new(weak).unwrap();
+        let path = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+
+        let report = unsafe {
+            let raw = super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr());
+            let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
+            super::ffi::omni_string_free(raw);
+            text
+        };
+
+        assert!(report.contains("\"built\":false"), "{report}");
+        assert!(report.contains("EG001"), "{report}");
+        assert!(
+            !output.exists(),
+            "a refused project must leave nothing behind"
+        );
         std::fs::remove_dir_all(&directory).ok();
     }
 

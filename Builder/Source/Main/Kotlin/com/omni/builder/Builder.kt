@@ -576,6 +576,8 @@ object Builder {
 
     external fun nativeStateReport(observedEnvironment: String?): String
 
+    external fun nativeBuildPackage(manifest: String, outputPath: String): String
+
     fun observedEnvironment(context: Context): String {
         val info = context.applicationInfo
         return buildString {
@@ -599,6 +601,63 @@ data class PluginRow(
     val status: String,
     val roadmapPhase: String,
 )
+
+const val STARTER_MANIFEST: String =
+    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
+        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n" +
+        "    package=\"com.omni.made\"\n" +
+        "    android:versionCode=\"1\" android:versionName=\"1.0\">\n" +
+        "    <uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />\n" +
+        "    <application android:label=\"Made By Omni\" android:hasCode=\"false\"\n" +
+        "        android:allowBackup=\"false\" android:extractNativeLibs=\"false\" />\n" +
+        "</manifest>\n"
+
+data class BuildOutcome(
+    val built: Boolean,
+    val path: String?,
+    val bytes: Long,
+    val entries: Long,
+    val signed: Boolean,
+    val certificate: String?,
+    val guardVerdict: String?,
+    val rulesApplied: Long,
+    val findings: List<String>,
+    val error: String?,
+) {
+    companion object {
+        fun parse(document: String): BuildOutcome {
+            val root = JSONObject(document)
+            val package_ = root.optJSONObject("package")
+            val guard = package_?.optJSONObject("guard")
+            val findings = mutableListOf<String>()
+            guard?.optJSONArray("findings")?.let { array ->
+                for (index in 0 until array.length()) {
+                    val item = array.getJSONObject(index)
+                    findings.add("${item.getString("what")} — ${item.getString("remedy")}")
+                }
+            }
+            root.optJSONArray("diagnostics")?.let { array ->
+                for (index in 0 until array.length()) {
+                    val item = array.getJSONObject(index)
+                    val text = "${item.getString("code")}: ${item.getString("message")}"
+                    if (!findings.contains(text)) findings.add(text)
+                }
+            }
+            return BuildOutcome(
+                built = root.optBoolean("built", false),
+                path = root.optString("path").ifEmpty { null },
+                bytes = package_?.optLong("bytes") ?: 0L,
+                entries = package_?.optLong("entries") ?: 0L,
+                signed = package_?.optBoolean("signed", false) ?: false,
+                certificate = package_?.optString("certificate")?.ifEmpty { null },
+                guardVerdict = guard?.optString("verdict")?.ifEmpty { null },
+                rulesApplied = guard?.optLong("rulesApplied") ?: 0L,
+                findings = findings,
+                error = root.optString("error").ifEmpty { null },
+            )
+        }
+    }
+}
 
 data class PhaseRow(
     val number: Int,
@@ -864,6 +923,8 @@ class BuilderActivity : Activity() {
             )
         )
 
+        renderBuildSection(root)
+
         section(root, R.string.omni_section_roadmap)
         root.addView(
             body(
@@ -1047,6 +1108,86 @@ class BuilderActivity : Activity() {
                     },
                 )
             )
+        }
+    }
+
+    private fun renderBuildSection(root: LinearLayout) {
+        section(root, R.string.omni_section_build)
+        root.addView(body(getString(R.string.omni_build_explain)))
+
+        val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val action = TextView(this).apply {
+            text = getString(R.string.omni_build_action)
+            setTextColor(color(R.color.omni_ok))
+            setTypeface(typeface, Typeface.BOLD)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            gravity = Gravity.CENTER
+            setPadding(dp(R.dimen.omni_gap))
+            isClickable = true
+        }
+        action.setOnClickListener {
+            action.isClickable = false
+            action.text = getString(R.string.omni_build_running)
+            results.removeAllViews()
+            OmniLog.event(LogLevel.INFO, "build", "Build requested.")
+
+            val destination = File(getExternalFilesDir(null) ?: filesDir, "made-by-omni.apk")
+            val started = System.nanoTime()
+            val outcome = try {
+                BuildOutcome.parse(
+                    Builder.nativeBuildPackage(STARTER_MANIFEST, destination.absolutePath)
+                )
+            } catch (error: Throwable) {
+                OmniLog.recordCrash(Thread.currentThread(), error)
+                null
+            }
+            val elapsed = (System.nanoTime() - started) / 1_000_000
+
+            action.text = getString(R.string.omni_build_action)
+            action.isClickable = true
+            renderBuildOutcome(results, outcome, elapsed)
+        }
+        root.addView(action)
+        root.addView(results)
+    }
+
+    private fun renderBuildOutcome(into: LinearLayout, outcome: BuildOutcome?, elapsedMs: Long) {
+        if (outcome == null) {
+            into.addView(banner("The build threw. See Crash_Log.txt.", R.color.omni_error))
+            return
+        }
+
+        if (outcome.built) {
+            OmniLog.event(
+                LogLevel.INFO,
+                "build",
+                "Built ${outcome.bytes} bytes in ${elapsedMs} ms at ${outcome.path}",
+            )
+            into.addView(banner("PACKAGE BUILT", R.color.omni_ok))
+            into.addView(keyValue("Size", "${outcome.bytes} bytes", R.color.omni_ok))
+            into.addView(keyValue("Entries", "${outcome.entries}", R.color.omni_muted))
+            into.addView(
+                keyValue(
+                    "Signature",
+                    if (outcome.signed) "v2, RSA-2048, key made here" else "none",
+                    if (outcome.signed) R.color.omni_ok else R.color.omni_error,
+                )
+            )
+            outcome.certificate?.let { into.addView(keyValue("Certificate", it, R.color.omni_muted)) }
+            into.addView(
+                keyValue(
+                    "Security policy",
+                    "${outcome.guardVerdict} · ${outcome.rulesApplied} rules",
+                    if (outcome.guardVerdict == "PASSED") R.color.omni_ok else R.color.omni_error,
+                )
+            )
+            outcome.path?.let { into.addView(bullet(it)) }
+            into.addView(body(getString(R.string.omni_build_no_code)))
+        } else {
+            OmniLog.event(LogLevel.ERROR, "build", "Build refused: ${outcome.error}")
+            into.addView(banner("NO PACKAGE PRODUCED", R.color.omni_error))
+            outcome.error?.let { into.addView(body(it)) }
+            outcome.findings.forEach { into.addView(bullet(it)) }
         }
     }
 
