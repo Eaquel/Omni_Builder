@@ -18,7 +18,8 @@
 #   5. A debug APK and an unsigned release APK build from source, with the Core
 #      linked into libomni_builder.so for every target ABI.
 #   6. Two clean release builds produce a byte-identical APK.
-#   7. Every APK the build produces can actually be installed: native libraries
+#   7. Every APK the build produces contains every class its manifest names.
+#   8. Every APK the build produces can actually be installed: native libraries
 #      stored and 16 KB aligned, and a signature the platform accepts.
 #
 # WHAT IT DOES NOT PROVE
@@ -240,6 +241,9 @@ jobs:
             exit 1
           fi
           echo "The release APK is byte-identical across clean rebuilds."
+
+      - name: Verify that the APKs contain the code they declare
+        run: ./gradlew :Builder:verifyApkClasses --console=plain --rerun-tasks
 
       - name: Verify that the APKs can be installed
         run: ./gradlew :Builder:verifyApkInstallability --console=plain --rerun-tasks

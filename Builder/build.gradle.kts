@@ -18,6 +18,11 @@
 // The CMake file fails loudly if the archive is missing, so an APK can never be
 // produced without the Core actually linked into it.
 
+// `compilerVersion` below is marked experimental by the Kotlin Gradle Plugin.
+// The alternative is to let AGP choose the compiler, which directive section 14
+// does not allow, so the opt-in is deliberate and recorded in ADR-0006.
+@file:OptIn(org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi::class)
+
 import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -269,6 +274,20 @@ android {
     // default. Every path below points at a directory the directive defines.
     sourceSets.getByName("main") {
         manifest.srcFile("Source/Main/AndroidManifest.xml")
+
+        // Both source sets are redirected, and both matter.
+        //
+        // AGP's built-in Kotlin compiles what `kotlin.directories` names, not what
+        // `java.directories` names. Redirecting only the latter left
+        // compileDebugKotlin reporting NO-SOURCE: the build succeeded, the APK was
+        // well formed, signed and installable, and it contained none of this
+        // module's code - only the generated R classes. The application then died
+        // at launch with ClassNotFoundException for its own activity.
+        //
+        // `verifyApkClasses` below exists so that this cannot happen again
+        // without the build failing first.
+        kotlin.directories.clear()
+        kotlin.directories.add("Source/Main/Kotlin")
         java.directories.clear()
         java.directories.add("Source/Main/Kotlin")
         res.directories.clear()
@@ -355,6 +374,12 @@ android {
 }
 
 kotlin {
+    // Directive section 14 pins this version. It takes effect only because
+    // kotlin.compiler.runViaBuildToolsApi is enabled in gradle.properties; the
+    // Build Tools API is the supported way to drive a compiler other than the one
+    // the Android Gradle Plugin ships with (ADR-0006).
+    compilerVersion.set(omniKotlinPin)
+
     compilerOptions {
         // jvmTarget is intentionally not set: with AGP's built-in Kotlin it
         // defaults to android.compileOptions.targetCompatibility, so setting it
@@ -643,6 +668,137 @@ tasks.register("verifyApkInstallability") {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Class presence (directive sections 51 and 55)
+// -----------------------------------------------------------------------------
+// The bug this exists for: the Kotlin source directory was redirected on the
+// `java` source set but not on the `kotlin` one, so compileDebugKotlin reported
+// NO-SOURCE. The build succeeded, the APK was well formed, correctly aligned,
+// signed and installable - and it contained none of this module's code. The
+// application died at launch with ClassNotFoundException for its own activity.
+//
+// Nothing in the build objected, because nothing was looking. This does.
+tasks.register("verifyApkClasses") {
+    group = "verification"
+    description = "Checks that every class the manifest names is really in the APK."
+
+    val apkDirectory = layout.buildDirectory.dir("outputs/apk")
+    val manifestFile = file("Source/Main/AndroidManifest.xml")
+    val namespace = "com.omni.builder"
+    val dexdump = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion/dexdump"
+    val scratch = layout.buildDirectory.dir("tmp/verifyApkClasses")
+
+    // Named in code rather than in the manifest, and just as fatal when absent:
+    // the JNI symbols in Builder.cpp are bound to this class by name.
+    val alsoRequired = listOf("$namespace.Builder")
+
+    inputs.file(manifestFile)
+
+    doLast {
+        val directory = apkDirectory.get().asFile
+        val packages = directory.walkTopDown().filter { it.extension == "apk" }.sorted().toList()
+        if (packages.isEmpty()) {
+            logger.lifecycle("No APK found under $directory; nothing to check.")
+            return@doLast
+        }
+
+        // Every component Android will try to instantiate by name.
+        val document = javax.xml.parsers.DocumentBuilderFactory.newInstance()
+            .apply { isNamespaceAware = true }
+            .newDocumentBuilder()
+            .parse(manifestFile)
+
+        val androidNamespace = "http://schemas.android.com/apk/res/android"
+        val declared = listOf("application", "activity", "service", "receiver", "provider")
+            .flatMap { tag ->
+                val nodes = document.getElementsByTagName(tag)
+                (0 until nodes.length).mapNotNull { index ->
+                    (nodes.item(index) as? org.w3c.dom.Element)
+                        ?.getAttributeNS(androidNamespace, "name")
+                        ?.takeIf { it.isNotBlank() }
+                }
+            }
+            .map { name ->
+                when {
+                    name.startsWith(".") -> namespace + name
+                    !name.contains('.') -> "$namespace.$name"
+                    else -> name
+                }
+            }
+
+        val required = (declared + alsoRequired).distinct().sorted()
+        if (required.isEmpty()) {
+            throw GradleException(
+                "No component could be read from ${manifestFile.name}. The check " +
+                    "cannot pass by finding nothing to look for."
+            )
+        }
+
+        val work = scratch.get().asFile
+        val problems = mutableListOf<String>()
+
+        for (apk in packages) {
+            work.deleteRecursively()
+            work.mkdirs()
+
+            val present = mutableSetOf<String>()
+            ZipFile(apk).use { zip ->
+                zip.entries().toList()
+                    .filter { it.name.matches(Regex("""classes\d*\.dex""")) }
+                    .forEach { entry ->
+                        val dex = File(work, entry.name)
+                        zip.getInputStream(entry).use { input ->
+                            dex.outputStream().use { output -> input.copyTo(output) }
+                        }
+
+                        val process = ProcessBuilder(dexdump, "-f", dex.path)
+                            .redirectErrorStream(true)
+                            .start()
+                        process.inputStream.bufferedReader().useLines { lines ->
+                            lines.forEach { line ->
+                                val descriptor = Regex("""Class descriptor\s*:\s*'L([^;]+);'""")
+                                    .find(line)
+                                    ?.groupValues
+                                    ?.get(1)
+                                if (descriptor != null) {
+                                    present += descriptor.replace('/', '.')
+                                }
+                            }
+                        }
+                        check(process.waitFor() == 0) { "dexdump failed on ${entry.name}" }
+                    }
+            }
+
+            if (present.isEmpty()) {
+                problems += "${apk.name}: no classes could be read from the APK at all."
+                continue
+            }
+
+            val missing = required.filterNot { present.contains(it) }
+            if (missing.isNotEmpty()) {
+                problems += "${apk.name}: declared but not packaged: " +
+                    missing.joinToString(", ") +
+                    "\n    Android instantiates these by name and will throw " +
+                    "ClassNotFoundException at launch.\n    Check that " +
+                    "compileKotlin actually had sources: a source set pointed at " +
+                    "the wrong directory produces exactly this, and reports " +
+                    "NO-SOURCE rather than failing."
+            } else {
+                logger.lifecycle("${apk.name}: all ${required.size} required classes present")
+            }
+        }
+
+        work.deleteRecursively()
+
+        if (problems.isNotEmpty()) {
+            throw GradleException(
+                "These APKs are missing code they declare:\n\n" +
+                    problems.joinToString("\n\n") { "  - $it" }
+            )
+        }
+    }
+}
+
 tasks.register("signingHelp") {
     group = "help"
     description = "Explains how to sign the release APK without breaking it."
@@ -728,5 +884,5 @@ tasks.matching { it.name.startsWith("assemble") }.configureEach {
     dependsOn(":verifyToolchainLock", "verifyCmakeToolchain", "verifyKotlinToolchain")
     // Checked after the APK exists, so a package that cannot be installed is a
     // build failure rather than a discovery made on a device.
-    finalizedBy("verifyApkInstallability")
+    finalizedBy("verifyApkInstallability", "verifyApkClasses")
 }

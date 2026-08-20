@@ -40,6 +40,18 @@
 
     <string name="omni_no_diagnostics">The Core reported no diagnostics.</string>
 
+    <string name="omni_section_logs">Logs</string>
+
+    <!-- %1$s the directory name created under the shared Documents folder -->
+    <string name="omni_log_explanation">Every run appends to these files. A copy
+        always stays in the application\'s own storage, so a log is never lost
+        when shared storage is unavailable; the copy under Documents/%1$s is the
+        one you can open with a file manager.</string>
+
+    <string name="omni_no_crash">No crash has been recorded.</string>
+    <string name="omni_crash_recorded">A crash was recorded. The most recent
+        record starts below; the full trace is in the file.</string>
+
     <!-- %1$s the text of the bullet point -->
     <string name="omni_bullet">•  %1$s</string>
 </resources>

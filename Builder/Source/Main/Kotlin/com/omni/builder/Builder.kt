@@ -1,8 +1,19 @@
 package com.omni.builder
 
+import android.Manifest
 import android.app.Activity
+import android.app.Application
+import android.content.ContentUris
+import android.content.ContentValues
+import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Typeface
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.MediaStore
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
@@ -11,8 +22,378 @@ import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import java.io.File
+import java.io.FileOutputStream
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import org.json.JSONArray
 import org.json.JSONObject
+
+// ---------------------------------------------------------------------------
+// Logging (directive sections 33, 34, 56 and 57)
+// ---------------------------------------------------------------------------
+
+/** Severity of a session log entry. */
+enum class LogLevel {
+    /** Fine-grained detail. */
+    TRACE,
+
+    /** Something happened that is worth a record. */
+    INFO,
+
+    /** Something is suspicious but the application continues. */
+    WARN,
+
+    /** Something failed. */
+    ERROR,
+}
+
+/**
+ * Where a log file could be written.
+ *
+ * The application always keeps a copy it controls. Publishing to shared storage
+ * can fail for reasons the application does not govern - a denied permission, a
+ * provider that refuses - and when it does, the reason is recorded rather than
+ * swallowed.
+ */
+sealed interface LogDestination {
+    /** The file reached shared storage. */
+    data class Published(val location: String) : LogDestination
+
+    /** Only the private copy exists. */
+    data class PrivateOnly(val location: String, val reason: String) : LogDestination
+}
+
+/**
+ * The application's log.
+ *
+ * ## Contract (directive section 2)
+ *
+ * * **Purpose** — record what the application did and why it stopped, in a place
+ *   the person using it can actually reach.
+ * * **Outputs** — `Documents/Omni_Builder/Session_Log.txt` and
+ *   `Documents/Omni_Builder/Crash_Log.txt`, plus a private copy of each.
+ * * **Security** — the log carries no credential, no key and no file content
+ *   from a user's project (directive sections 25 and 57). It records what
+ *   happened, not what was processed.
+ * * **Failure modes** — writing the private copy is the operation that must not
+ *   fail; publishing to shared storage may, and the reason becomes a log entry
+ *   of its own. A failure inside the logger never propagates to the caller,
+ *   because a broken logger must not be the thing that breaks the application.
+ * * **Resource bounds** — each file is capped, and the oldest half is dropped
+ *   when the cap is reached (directive section 60).
+ * * **Status** — FOUNDATION.
+ */
+object OmniLog {
+
+    /** Directory created under the shared Documents folder. */
+    const val DIRECTORY_NAME: String = "Omni_Builder"
+
+    /** File holding this run's events. */
+    const val SESSION_FILE: String = "Session_Log.txt"
+
+    /** File holding every crash the application has recorded. */
+    const val CRASH_FILE: String = "Crash_Log.txt"
+
+    /**
+     * Largest a log file may become, in bytes.
+     *
+     * A log that grows without bound is a resource-exhaustion bug wearing a
+     * useful disguise (directive section 60). On overflow the newest half is
+     * kept: the entries near a failure are the ones worth having.
+     */
+    const val MAX_BYTES: Int = 256 * 1024
+
+    private const val TAG = "OmniBuilder"
+
+    private val lock = Any()
+    private val session = StringBuilder(8 * 1024)
+
+    @Volatile
+    private var context: Context? = null
+
+    @Volatile
+    private var installedAt: String = "not started"
+
+    private fun timestamp(): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US).format(Date())
+
+    /**
+     * Binds the log to an application context and installs the crash handler.
+     *
+     * Called from [BuilderApplication] rather than from the activity, so a crash
+     * during activity creation is still recorded.
+     */
+    fun install(application: Application) {
+        context = application.applicationContext
+        installedAt = timestamp()
+
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, error ->
+            try {
+                recordCrash(thread, error)
+            } catch (secondary: Throwable) {
+                // The crash handler must never become the crash. Logcat is the
+                // last resort and is always available.
+                Log.e(TAG, "The crash could not be written to the log.", secondary)
+            }
+            if (previous != null) {
+                previous.uncaughtException(thread, error)
+            } else {
+                android.os.Process.killProcess(android.os.Process.myPid())
+            }
+        }
+
+        event(LogLevel.INFO, "session", "Session started.")
+        event(LogLevel.INFO, "session", describeEnvironment(application))
+    }
+
+    /** Records one event. Never throws. */
+    fun event(level: LogLevel, tag: String, message: String) {
+        val line = "${timestamp()}  ${level.name.padEnd(5)}  ${tag.padEnd(12)}  $message"
+        synchronized(lock) { session.append(line).append('\n') }
+        when (level) {
+            LogLevel.ERROR -> Log.e(TAG, "$tag: $message")
+            LogLevel.WARN -> Log.w(TAG, "$tag: $message")
+            else -> Log.i(TAG, "$tag: $message")
+        }
+    }
+
+    /**
+     * Writes this run's events to storage.
+     *
+     * Safe to call repeatedly; each call rewrites the session file with
+     * everything recorded so far.
+     */
+    fun flushSession(): LogDestination {
+        val started = System.nanoTime()
+        val body = synchronized(lock) { session.toString() }
+        val header = buildString {
+            append("Omni_Builder session log\n")
+            append("Started: ").append(installedAt).append('\n')
+            append("Written: ").append(timestamp()).append('\n')
+            append("-".repeat(72)).append('\n')
+        }
+        val destination = write(SESSION_FILE, header + body, append = false)
+
+        // Writing the log is I/O on whichever thread asked for it, and on a
+        // phone that is usually the main thread. The cost is recorded rather
+        // than assumed (directive section 38): if it ever stops being a few
+        // milliseconds, this belongs on a background thread and the measurement
+        // in the log is what will say so.
+        val elapsedMilliseconds = (System.nanoTime() - started) / 1_000_000
+        event(
+            LogLevel.TRACE,
+            "log",
+            "Session flushed in ${elapsedMilliseconds} ms to " +
+                describeDestination(destination),
+        )
+        return destination
+    }
+
+    /**
+     * Appends a crash record and flushes the session alongside it.
+     *
+     * The record is deliberately self-contained: the events leading up to the
+     * failure are written into the crash file too, so one file is enough to
+     * understand what happened.
+     */
+    fun recordCrash(thread: Thread, error: Throwable) {
+        event(LogLevel.ERROR, "crash", "${error.javaClass.name}: ${error.message}")
+
+        val record = buildString {
+            append('\n').append("=".repeat(72)).append('\n')
+            append("CRASH  ").append(timestamp()).append('\n')
+            append("=".repeat(72)).append('\n')
+            append("Thread: ").append(thread.name).append('\n')
+            context?.let { append(describeEnvironment(it)).append('\n') }
+            append('\n')
+            append(Log.getStackTraceString(error))
+            append('\n')
+            append("Events leading up to the failure:").append('\n')
+            append(synchronized(lock) { session.toString() })
+        }
+
+        write(CRASH_FILE, record, append = true)
+        flushSession()
+    }
+
+    /** The most recent crash record, if there is one. */
+    fun lastCrash(): String? {
+        val file = privateFile(CRASH_FILE) ?: return null
+        if (!file.isFile || file.length() == 0L) {
+            return null
+        }
+        return runCatching {
+            val text = file.readText()
+            val start = text.lastIndexOf("CRASH  ")
+            if (start < 0) null else text.substring(start).lineSequence().take(12).joinToString("\n")
+        }.getOrNull()
+    }
+
+    /** Human-readable description of where the logs went. */
+    fun describeDestination(destination: LogDestination): String = when (destination) {
+        is LogDestination.Published -> destination.location
+        is LogDestination.PrivateOnly ->
+            "${destination.location} (shared storage unavailable: ${destination.reason})"
+    }
+
+    private fun describeEnvironment(context: Context): String {
+        val info = context.applicationInfo
+        return buildString {
+            append("device=").append(Build.MANUFACTURER).append(' ').append(Build.MODEL)
+            append("; android=").append(Build.VERSION.RELEASE)
+            append(" (API ").append(Build.VERSION.SDK_INT).append(')')
+            append("; abis=").append(Build.SUPPORTED_ABIS.joinToString("/"))
+            append("; package=").append(context.packageName)
+            append("; minSdk=").append(info.minSdkVersion)
+            append("; targetSdk=").append(info.targetSdkVersion)
+        }
+    }
+
+    private fun privateFile(name: String): File? = context?.let { File(it.filesDir, name) }
+
+    /**
+     * Writes the private copy, then tries to publish it.
+     *
+     * The private copy is written first and on its own, because it is the one
+     * that must survive. Publishing is best effort by nature: on Android 10 and
+     * later it goes through MediaStore, which needs no permission; on Android 9
+     * it needs a storage permission the user may not have granted.
+     */
+    private fun write(name: String, text: String, append: Boolean): LogDestination {
+        val target = privateFile(name)
+            ?: return LogDestination.PrivateOnly("(not started)", "no application context")
+
+        val privatePath = runCatching {
+            FileOutputStream(target, append).use { it.write(text.toByteArray(Charsets.UTF_8)) }
+            trim(target)
+            target.absolutePath
+        }.getOrElse { failure ->
+            Log.e(TAG, "The private log copy could not be written.", failure)
+            return LogDestination.PrivateOnly("(unwritable)", failure.messageOrType())
+        }
+
+        val bytes = runCatching { target.readBytes() }.getOrElse {
+            return LogDestination.PrivateOnly(privatePath, it.messageOrType())
+        }
+
+        return runCatching { LogDestination.Published(publish(name, bytes)) }
+            .getOrElse { failure -> LogDestination.PrivateOnly(privatePath, failure.messageOrType()) }
+    }
+
+    private fun Throwable.messageOrType(): String = message ?: javaClass.simpleName
+
+    /** Drops the oldest half once the cap is reached. */
+    private fun trim(file: File) {
+        if (file.length() <= MAX_BYTES) {
+            return
+        }
+        val keep = file.readBytes().let { it.copyOfRange(it.size - MAX_BYTES / 2, it.size) }
+        FileOutputStream(file, false).use { stream ->
+            stream.write("[earlier entries dropped at ${timestamp()}]\n".toByteArray(Charsets.UTF_8))
+            stream.write(keep)
+        }
+    }
+
+    private fun publish(name: String, bytes: ByteArray): String {
+        val active = context ?: throw IOException("no application context")
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            publishThroughMediaStore(active, name, bytes)
+        } else {
+            publishThroughLegacyStorage(active, name, bytes)
+        }
+    }
+
+    /**
+     * Publishes through MediaStore, which is how an application writes into a
+     * shared collection on Android 10 and later without holding any permission.
+     *
+     * The whole file is rewritten rather than appended: append semantics differ
+     * between providers, and rewriting is idempotent.
+     */
+    private fun publishThroughMediaStore(context: Context, name: String, bytes: ByteArray): String {
+        val resolver = context.contentResolver
+        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+        val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME"
+
+        var uri: Uri? = null
+        resolver.query(
+            collection,
+            arrayOf(MediaStore.MediaColumns._ID),
+            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
+            arrayOf("$relativePath/", name),
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                uri = ContentUris.withAppendedId(collection, cursor.getLong(0))
+            }
+        }
+
+        if (uri == null) {
+            uri = resolver.insert(
+                collection,
+                ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                },
+            )
+        }
+
+        val destination = uri ?: throw IOException("MediaStore refused to create $name")
+        resolver.openOutputStream(destination, "wt")?.use { it.write(bytes) }
+            ?: throw IOException("MediaStore returned no stream for $name")
+
+        return "$relativePath/$name"
+    }
+
+    /**
+     * Publishes on Android 9, where shared storage is still a filesystem path
+     * and writing to it requires a permission the user grants at runtime.
+     */
+    @Suppress("DEPRECATION")
+    private fun publishThroughLegacyStorage(
+        context: Context,
+        name: String,
+        bytes: ByteArray,
+    ): String {
+        if (context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            throw IOException("the storage permission has not been granted")
+        }
+
+        val documents = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+        val directory = File(documents, DIRECTORY_NAME)
+        if (!directory.isDirectory && !directory.mkdirs()) {
+            throw IOException("could not create ${directory.absolutePath}")
+        }
+
+        val file = File(directory, name)
+        FileOutputStream(file, false).use { it.write(bytes) }
+        return file.absolutePath
+    }
+}
+
+/**
+ * Application entry point.
+ *
+ * It exists for one reason: the crash handler has to be installed before any
+ * activity is created, or the first thing that goes wrong goes unrecorded.
+ */
+class BuilderApplication : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        OmniLog.install(this)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bridge to the Omni Core
+// ---------------------------------------------------------------------------
 
 /**
  * Bridge to the Omni Core.
@@ -60,13 +441,15 @@ object Builder {
         loadState?.let { return it }
         val state = try {
             System.loadLibrary("omni_builder")
+            OmniLog.event(LogLevel.INFO, "native", "libomni_builder.so loaded.")
             LoadState.Loaded
         } catch (error: UnsatisfiedLinkError) {
-            LoadState.Failed(
-                "The native library could not be loaded: ${error.message ?: "no detail"}. " +
-                    "This usually means the Omni Core was not linked into this build, " +
-                    "or the bridge and the Core disagree on the ABI version."
-            )
+            val reason = "The native library could not be loaded: " +
+                "${error.message ?: "no detail"}. This usually means the Omni Core " +
+                "was not linked into this build, or the bridge and the Core " +
+                "disagree on the ABI version."
+            OmniLog.event(LogLevel.ERROR, "native", reason)
+            LoadState.Failed(reason)
         }
         loadState = state
         return state
@@ -94,7 +477,7 @@ object Builder {
      * device, so they are deliberately absent: the Core reports them as
      * `NOT_OBSERVABLE` rather than guessing (directive section 15).
      */
-    fun observedEnvironment(context: Activity): String {
+    fun observedEnvironment(context: Context): String {
         val info = context.applicationInfo
         return buildString {
             append("minSdk=").append(info.minSdkVersion)
@@ -246,15 +629,24 @@ data class CoreState(
  * a feature that only exists in the interface, and no plugin in this tree can
  * produce an artifact yet. The screen's job is to state the truth: what the Core
  * is, what the toolchain lock demands, what could be verified here, which
- * subsystems exist only as contracts, and what the build still borrows.
+ * subsystems exist only as contracts, what the build still borrows, and where
+ * the logs went.
  *
  * The view is built in code rather than from a layout resource because directive
  * section 46 defines no `res/layout` directory.
  */
 class BuilderActivity : Activity() {
 
+    private companion object {
+        /** Identifies the storage permission request on Android 9. */
+        const val STORAGE_PERMISSION_REQUEST = 1
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
+
+        requestLegacyStoragePermissionIfNeeded()
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -267,6 +659,8 @@ class BuilderActivity : Activity() {
             is Builder.LoadState.Loaded -> renderCoreState(root)
         }
 
+        renderLogSection(root)
+
         setContentView(
             ScrollView(this).apply {
                 setBackgroundColor(color(R.color.omni_background))
@@ -274,6 +668,80 @@ class BuilderActivity : Activity() {
                 addView(root, MATCH_PARENT, WRAP_CONTENT)
             }
         )
+    }
+
+    override fun onResume() {
+        super.onResume()
+        OmniLog.event(LogLevel.INFO, "lifecycle", "Activity resumed.")
+    }
+
+    /**
+     * Flushes the log when the activity stops being interactive.
+     *
+     * A mobile process can be terminated at any point after this (directive
+     * section 36), so this is the last reliable moment to persist the session.
+     */
+    override fun onPause() {
+        super.onPause()
+        OmniLog.event(LogLevel.INFO, "lifecycle", "Activity paused.")
+        OmniLog.flushSession()
+    }
+
+    override fun onDestroy() {
+        OmniLog.event(LogLevel.INFO, "lifecycle", "Activity destroyed.")
+        OmniLog.flushSession()
+        super.onDestroy()
+    }
+
+    /**
+     * Asks for the storage permission, but only where it is the sole way to
+     * write into shared Documents.
+     *
+     * On Android 10 and later MediaStore needs no permission, so none is asked
+     * for. The manifest caps the declaration at API 28 for the same reason.
+     */
+    private fun requestLegacyStoragePermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            return
+        }
+        OmniLog.event(
+            LogLevel.INFO,
+            "log",
+            "Requesting the storage permission; on Android 9 it is the only way " +
+                "to write into shared Documents.",
+        )
+        requestPermissions(
+            arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+            STORAGE_PERMISSION_REQUEST,
+        )
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != STORAGE_PERMISSION_REQUEST) {
+            return
+        }
+        val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+        OmniLog.event(
+            if (granted) LogLevel.INFO else LogLevel.WARN,
+            "log",
+            if (granted) {
+                "Storage permission granted; logs will be published to Documents."
+            } else {
+                "Storage permission denied; logs stay in the application's own " +
+                    "storage and are not published to Documents."
+            },
+        )
+        OmniLog.flushSession()
     }
 
     /**
@@ -289,19 +757,30 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderCoreState(root: LinearLayout) {
+        val started = System.nanoTime()
         val state = try {
             // Measured at roughly 0.1 ms per call on a desktop host for a 14 KB
             // report. It is called once per screen creation, so it stays on the
             // main thread; if that measurement ever changes, so must this.
             CoreState.parse(Builder.nativeStateReport(Builder.observedEnvironment(this)))
         } catch (error: RuntimeException) {
-            renderLoadFailure(
-                root,
-                "The Core produced a report this build cannot read: ${error.message}. " +
-                    "The interface and the Core are out of step."
-            )
+            val reason = "The Core produced a report this build cannot read: " +
+                "${error.message}. The interface and the Core are out of step."
+            OmniLog.event(LogLevel.ERROR, "core", reason)
+            renderLoadFailure(root, reason)
             return
         }
+
+        val elapsedMicroseconds = (System.nanoTime() - started) / 1_000
+        OmniLog.event(
+            LogLevel.INFO,
+            "core",
+            "State report read in ${elapsedMicroseconds} us: core ${state.version} " +
+                "(${state.status}), ABI ${state.abiVersion}, " +
+                "${state.toolchainVerified}/${state.toolchain.size} pins verified, " +
+                "${state.pluginsImplemented}/${state.plugins.size} plugins implemented, " +
+                "${state.diagnostics.size} diagnostics.",
+        )
 
         root.addView(title(getString(R.string.omni_app_name)))
         root.addView(
@@ -397,6 +876,43 @@ class BuilderActivity : Activity() {
         }
     }
 
+    /**
+     * Shows where the logs went, and the last crash if there was one.
+     *
+     * The location is not assumed: it is whatever the logger reports after
+     * actually writing, so a screen that says "published" means published.
+     */
+    private fun renderLogSection(root: LinearLayout) {
+        section(root, R.string.omni_section_logs)
+
+        val destination = OmniLog.flushSession()
+        root.addView(
+            keyValue(
+                OmniLog.SESSION_FILE,
+                OmniLog.describeDestination(destination),
+                when (destination) {
+                    is LogDestination.Published -> R.color.omni_ok
+                    is LogDestination.PrivateOnly -> R.color.omni_warning
+                },
+            )
+        )
+        root.addView(body(getString(R.string.omni_log_explanation, OmniLog.DIRECTORY_NAME)))
+
+        val crash = OmniLog.lastCrash()
+        if (crash == null) {
+            root.addView(body(getString(R.string.omni_no_crash)))
+        } else {
+            root.addView(
+                keyValue(
+                    OmniLog.CRASH_FILE,
+                    getString(R.string.omni_crash_recorded),
+                    R.color.omni_error,
+                )
+            )
+            root.addView(mono(crash))
+        }
+    }
+
     // --- view helpers ------------------------------------------------------
 
     private fun section(root: LinearLayout, titleRes: Int) {
@@ -423,6 +939,14 @@ class BuilderActivity : Activity() {
         text = value
         setTextColor(color(R.color.omni_muted))
         setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_body).toFloat())
+        setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
+    }
+
+    private fun mono(value: String) = TextView(this).apply {
+        text = value
+        setTextColor(color(R.color.omni_muted))
+        setTypeface(Typeface.MONOSPACE)
+        setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_small).toFloat())
         setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
     }
 

@@ -123,7 +123,7 @@
 //!   step can be replaced by an `sdkmanager` package and this ADR superseded.
 //! * **Status.** ACCEPTED.
 //!
-//! ### ADR-0006 — Kotlin is pinned by dependency resolution, not by AGP
+//! ### ADR-0006 — Kotlin is pinned through the Build Tools API
 //!
 //! * **Context.** From AGP 9.0 the Android plugin carries its own Kotlin and
 //!   offers no DSL to select the version; `android.builtInKotlin` only turns the
@@ -132,24 +132,58 @@
 //! * **Alternatives.** (a) Accept 2.2.10 and record the drift. (b) Set
 //!   `android.builtInKotlin=false`, which also requires `android.newDsl=false`,
 //!   and apply the standalone Kotlin plugin. (c) Force every
-//!   `org.jetbrains.kotlin` module to 2.4.10 through a resolution rule.
-//! * **Decision.** (c).
+//!   `org.jetbrains.kotlin` module to 2.4.10 with a resolution rule alone.
+//!   (d) Compile through the Kotlin Build Tools API, which is the mechanism
+//!   Kotlin provides for driving a compiler other than the plugin's own, and set
+//!   `compilerVersion` to the pinned value.
+//! * **Decision.** (d), with (c) kept alongside so the standard library that
+//!   reaches the APK matches the compiler that produced the bytecode.
 //! * **Reason.** (a) leaves the toolchain lock unmet, which section 14 does not
 //!   permit. (b) works today but is removed in AGP 10 and would force this
-//!   project back onto a deprecated DSL. (c) uses the mechanism the Kotlin Build
-//!   Tools API exists for — letting a build system drive a compiler version it
-//!   was not shipped with — and it was verified that
-//!   `kotlin-compiler-embeddable-2.4.10.jar` is the compiler that actually runs,
-//!   not merely the standard library on the classpath.
-//! * **Tradeoffs.** AGP 9.3.0 was not tested by Google against Kotlin 2.4.10, so
-//!   the combination is this project's responsibility. `verifyKotlinToolchain`
-//!   fails the build if the forced version ever stops taking effect, which keeps
-//!   a silent regression impossible.
+//!   project back onto a deprecated DSL. (c) was tried first and is **not
+//!   sufficient on its own**: the Build Tools API refuses a
+//!   `kotlin-build-tools-impl` whose version differs from the plugin's unless
+//!   `kotlin.compiler.runViaBuildToolsApi` is enabled. That refusal stayed
+//!   hidden for a while because no Kotlin source was reaching the compiler at
+//!   all, so the compile task never ran; see ADR-0008.
+//! * **Tradeoffs.** `compilerVersion` is marked experimental by the Kotlin
+//!   Gradle Plugin, so the opt-in is explicit in the build script. AGP 9.3.0 was
+//!   not tested by Google against Kotlin 2.4.10, which makes the combination
+//!   this project's responsibility. `verifyKotlinToolchain` fails the build if
+//!   the pin stops taking effect.
 //! * **Security impact.** None. Both versions come from the same pinned
 //!   repository.
 //! * **Performance impact.** None measured.
-//! * **Migration plan.** When AGP ships 2.4.10 or later, the resolution rule
-//!   becomes a no-op and can be removed without changing behaviour.
+//! * **Migration plan.** When AGP ships 2.4.10 or later, the compilerVersion
+//!   setting and the resolution rule both become no-ops and can be removed.
+//! * **Status.** ACCEPTED.
+//!
+//! ### ADR-0008 — The build proves the APK contains the code it declares
+//!
+//! * **Context.** The Kotlin source directory was redirected on the `java`
+//!   source set but not on the `kotlin` one. AGP's built-in Kotlin compiles what
+//!   `kotlin.directories` names, so `compileDebugKotlin` reported `NO-SOURCE`.
+//!   The build succeeded. The APK was well formed, correctly aligned, signed and
+//!   installable, and it contained none of the module's code — only the
+//!   generated resource classes. The application died at launch with
+//!   `ClassNotFoundException` for its own activity.
+//! * **Alternatives.** (a) Fix the source set and move on. (b) Fix it, and make
+//!   the build check that every class the manifest names is actually present.
+//! * **Decision.** (b).
+//! * **Reason.** Every existing gate passed on that APK, because every gate was
+//!   asking about packaging and none was asking whether the application was in
+//!   there. A missing-source failure is silent by construction: an empty source
+//!   set is indistinguishable from a module with nothing to compile. Directive
+//!   section 55 requires a regression test for every defect, and the only
+//!   meaningful one here inspects the finished artifact.
+//! * **Tradeoffs.** The check unpacks each APK and reads its dex files, costing
+//!   about a second per build.
+//! * **Security impact.** None directly, though an artifact that does not
+//!   contain the code it claims to is an integrity problem in the sense of
+//!   directive section 58.
+//! * **Performance impact.** Negligible against a full build.
+//! * **Migration plan.** When the Omni build engine replaces AGP, this check
+//!   moves with the packaging step rather than being dropped.
 //! * **Status.** ACCEPTED.
 //!
 //! ### ADR-0007 — The bootstrap APK is signed by the build, not by a repacker

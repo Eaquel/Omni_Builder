@@ -11,8 +11,10 @@
 }
 -keep class com.omni.builder.Builder { *; }
 
-# BuilderActivity is referenced from AndroidManifest.xml, not from code.
+# BuilderActivity and BuilderApplication are referenced from
+# AndroidManifest.xml, not from code.
 -keep class com.omni.builder.BuilderActivity { *; }
+-keep class com.omni.builder.BuilderApplication { *; }
 
 # Keep the source file and line numbers in stack traces, and nothing more.
 # Diagnostics that cannot be located are not actionable (directive section 33).

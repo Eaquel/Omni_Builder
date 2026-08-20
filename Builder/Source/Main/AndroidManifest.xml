@@ -2,9 +2,9 @@
 <!--
   Omni_Builder — application manifest.
 
-  Security note (directive sections 7 and 29): this application declares no
-  permission at all. It reads no file outside its own sandbox, opens no socket
-  and starts no process. When a subsystem eventually needs one of those, the
+  Security note (directive sections 7 and 29): this application declares exactly
+  one permission, and only where it is the sole way to do the job. It opens no
+  socket and starts no process. When a subsystem eventually needs more, the
   permission is added together with the capability that governs it, an entry in
   the threat model, and an architectural decision record — never on its own.
 
@@ -13,7 +13,18 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      Writing the log into the shared Documents folder needs this permission on
+      Android 9 and nowhere else: from Android 10 the same write goes through
+      MediaStore, which needs none. The cap makes that explicit rather than
+      leaving a permission declared for versions that ignore it.
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <application
+        android:name=".BuilderApplication"
         android:allowBackup="false"
         android:extractNativeLibs="false"
         android:fullBackupContent="false"
