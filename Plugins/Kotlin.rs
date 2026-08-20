@@ -44,16 +44,29 @@
 //!
 //! ## Implementation status
 //!
-//! None of the pipeline above is implemented. This file declares the contract
-//! so that the registry, the capability policy and the user interface can
-//! reason about the plugin honestly; [`Plugin::execute`] refuses to run and
-//! says why.
+//! `PLANNED`. Not one stage of the pipeline above is implemented:
+//! **no lexer, no parser, no symbol table, no type checker, no HIR, no MIR and
+//! no backend exists in this tree.** [`Plugin::execute`] refuses to run and
+//! says why. This file declares the contract so that the registry, the
+//! capability policy and the user interface can reason about the plugin
+//! honestly.
 //!
-//! No lexer, parser, symbol table or type checker exists in this tree yet.
+//! One thing this plugin's contract names does exist, and it belongs to the
+//! Core rather than to this plugin: `jvm.class`, the last of the declared
+//! outputs, is a published format, so `omni_core::jvm` reads one. It covers the
+//! constant pool, access flags, superclass, interfaces, fields, methods,
+//! attributes and the `kotlin.Metadata` annotation, and it is checked against
+//! `javap` on the classes this repository's own build produces.
+//!
+//! That is the *shape of the artifact* a front end will have to emit, defined
+//! and verified in advance. It is not a front end and it is not progress
+//! towards one: a reader for a format says nothing about the ability to produce
+//! its content.
 //!
 //! The bootstrap build uses the upstream Kotlin compiler through Gradle. That
 //! compiler is not part of Omni_Builder and directive section 16 forbids
-//! treating its output as evidence that this plugin works.
+//! treating its output as evidence that this plugin works. Reading that output
+//! does not change what it is evidence of.
 //!
 //! ## Acceptance criteria before the status may change
 //!

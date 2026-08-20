@@ -27,6 +27,8 @@
 #      Gradle Plugin layout, not one the Core wrote -- and its digest holds.
 #  11. The Core's DEX reader reads the classes.dex this build produced, and its
 #      header fields and class list agree with dexdump.
+#  12. The Core's class file reader reads every .class the Kotlin compiler
+#      produced here, and agrees with javap on all of them.
 #
 # WHAT IT DOES NOT PROVE
 # -----------------------------------------------------------------------------
@@ -333,6 +335,16 @@ jobs:
 
       - name: Verify that the APKs can be installed
         run: ./gradlew :Builder:verifyApkInstallability --console=plain --rerun-tasks
+
+      - name: Read the classes this build produced with the Core's own reader
+        # Every class file the Kotlin compiler just produced, compared field for
+        # field with javap: version, name, superclass, interfaces, fields,
+        # methods, constant pool size and the Kotlin metadata version.
+        env:
+          OMNI_REQUIRE_CLASS_CONFORMANCE: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked every_class_this_build_produced -- --nocapture
 
       - name: Read the DEX this build produced with the Core's own reader
         # Reading a format correctly is not something a self-consistent parser
