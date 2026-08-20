@@ -281,24 +281,36 @@
 // repository grows no new Rust files and no new directories.
 // ---------------------------------------------------------------------------
 
-#[path = "Plugins/Apk.rs"]
-pub mod apk;
-#[path = "Plugins/Cpp.rs"]
-pub mod cpp;
-#[path = "Plugins/Dex.rs"]
-pub mod dex;
-#[path = "Plugins/Guard.rs"]
-pub mod guard;
-#[path = "Plugins/Java.rs"]
-pub mod java;
-#[path = "Plugins/Kotlin.rs"]
-pub mod kotlin;
-#[path = "Plugins/Resources.rs"]
-pub mod resources;
-#[path = "Plugins/Rust.rs"]
-pub mod rust;
-#[path = "Plugins/Sign.rs"]
-pub mod sign;
+/// The nine plugins of directive section 6.
+///
+/// They are grouped under one module so that a plugin's name cannot collide
+/// with a Core subsystem's: `plugins::resources` declares what a resource
+/// plugin would do, and [`crate::resources`] is the engine that does it.
+///
+/// The `#[path = "."]` keeps the nine files where directive section 46 puts
+/// them: without it, an inline module makes its children resolve under a
+/// directory named after the module.
+#[path = "."]
+pub mod plugins {
+    #[path = "Plugins/Apk.rs"]
+    pub mod apk;
+    #[path = "Plugins/Cpp.rs"]
+    pub mod cpp;
+    #[path = "Plugins/Dex.rs"]
+    pub mod dex;
+    #[path = "Plugins/Guard.rs"]
+    pub mod guard;
+    #[path = "Plugins/Java.rs"]
+    pub mod java;
+    #[path = "Plugins/Kotlin.rs"]
+    pub mod kotlin;
+    #[path = "Plugins/Resources.rs"]
+    pub mod resources;
+    #[path = "Plugins/Rust.rs"]
+    pub mod rust;
+    #[path = "Plugins/Sign.rs"]
+    pub mod sign;
+}
 
 // ===========================================================================
 // Core identity
@@ -308,7 +320,7 @@ pub mod sign;
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Phase of the roadmap in directive section 52 that this tree implements.
-pub const CORE_PHASE: &str = "PHASE 3 — BINARY CORE";
+pub const CORE_PHASE: &str = "PHASE 4 — RESOURCE ENGINE";
 
 /// Maturity of the Core as a whole. Never raise this without the quality gates
 /// of directive section 51.
@@ -514,6 +526,30 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
             "No format is implemented on top of it yet.",
             "Randomised robustness testing only; not coverage-guided fuzzing.",
             "The Validator trait has no implementations.",
+        ],
+    },
+    Subsystem {
+        name: "XML reader",
+        status: Status::Partial,
+        directive_section: 22,
+        summary: "Enough XML to read resource files, with document type \
+                  declarations and custom entities refused outright.",
+        missing: &[
+            "Namespaces are carried as part of a name, not resolved.",
+            "No schema validation.",
+        ],
+    },
+    Subsystem {
+        name: "Resource engine",
+        status: Status::Partial,
+        directive_section: 22,
+        summary: "Values files parsed and validated, identifiers assigned from \
+                  sorted order, references resolved and reference loops refused.",
+        missing: &[
+            "No binary resource table is written; that belongs with packaging.",
+            "Only density qualifiers are modelled; a locale directory is refused.",
+            "Styles can be referred to but not declared.",
+            "Nothing reads resource files through the virtual filesystem yet.",
         ],
     },
     Subsystem {
@@ -868,6 +904,16 @@ pub mod diag {
         /// Appends a line of context.
         pub fn with_context(mut self, line: impl Into<String>) -> Self {
             self.context.push(line.into());
+            self
+        }
+
+        /// Reclassifies the failure.
+        ///
+        /// A diagnostic is usually built with the class it will keep, but a
+        /// parser reports most problems as user error and a handful as resource
+        /// exhaustion; this keeps those from needing a second constructor.
+        pub fn with_class(mut self, class: FailureClass) -> Self {
+            self.class = class;
             self
         }
 
@@ -1436,15 +1482,15 @@ pub mod plugin {
     /// Declaration order is part of the contract: it is what makes every report
     /// byte-stable across runs (directive section 12).
     static BUILTIN: &[&'static dyn Plugin] = &[
-        &crate::kotlin::PLUGIN,
-        &crate::java::PLUGIN,
-        &crate::cpp::PLUGIN,
-        &crate::rust::PLUGIN,
-        &crate::resources::PLUGIN,
-        &crate::dex::PLUGIN,
-        &crate::apk::PLUGIN,
-        &crate::sign::PLUGIN,
-        &crate::guard::PLUGIN,
+        &crate::plugins::kotlin::PLUGIN,
+        &crate::plugins::java::PLUGIN,
+        &crate::plugins::cpp::PLUGIN,
+        &crate::plugins::rust::PLUGIN,
+        &crate::plugins::resources::PLUGIN,
+        &crate::plugins::dex::PLUGIN,
+        &crate::plugins::apk::PLUGIN,
+        &crate::plugins::sign::PLUGIN,
+        &crate::plugins::guard::PLUGIN,
     ];
 
     /// Ordered, read-only view of every plugin compiled into this build.
@@ -6417,6 +6463,2106 @@ pub mod binary {
 }
 
 // ===========================================================================
+// xml — a deliberately small XML reader (sections 22, 41, 60, 61)
+// ===========================================================================
+
+/// Enough XML to read Android resources, and nothing more.
+///
+/// ## Contract (directive section 2)
+///
+/// * **Purpose** — turn a resource file into a tree, or into diagnostics with a
+///   line and a column.
+/// * **Inputs** — text from a user's project. Untrusted (directive section 61).
+/// * **Non-Responsibilities** — namespaces as a resolution mechanism, schema
+///   validation, XPath, and every other thing a general XML library does. This
+///   reads resource files.
+/// * **Status** — PARTIAL. It reads what Android resource files contain.
+///
+/// ## What it refuses, and why
+///
+/// * **`<!DOCTYPE`** — refused outright. A document type declaration is the
+///   entry point for both external entity expansion, which turns a resource file
+///   into a way to read `/etc/passwd`, and for the nested entity definitions that
+///   make a two-kilobyte file expand to gigabytes. Neither is defended against
+///   here; both are simply unavailable.
+/// * **Custom entities** — only the five XML predefines and numeric character
+///   references are recognised. There is no entity table, so there is nothing to
+///   expand recursively.
+/// * **Depth, size, attribute count, name and text length** — all bounded
+///   (directive section 60).
+///
+/// The parser holds its own stack rather than recursing, so a deeply nested
+/// document cannot overflow the machine stack no matter what the depth limit is
+/// set to.
+pub mod xml {
+    use crate::diag::{Diagnostic, Location, Severity, Sink};
+    use crate::FailureClass;
+
+    /// Largest accepted document, in bytes.
+    pub const MAX_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
+
+    /// Deepest accepted nesting.
+    pub const MAX_DEPTH: usize = 64;
+
+    /// Most attributes accepted on one element.
+    pub const MAX_ATTRIBUTES: usize = 128;
+
+    /// Longest accepted element or attribute name, in bytes.
+    pub const MAX_NAME_BYTES: usize = 256;
+
+    /// Longest accepted run of text, in bytes.
+    pub const MAX_TEXT_BYTES: usize = 256 * 1024;
+
+    /// Most elements accepted in one document.
+    pub const MAX_ELEMENTS: usize = 50_000;
+
+    /// Where something appeared in the source.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub struct Position {
+        /// 1-based line.
+        pub line: u32,
+        /// 1-based column.
+        pub column: u32,
+    }
+
+    /// One attribute of an element.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Attribute {
+        /// Name as written, including any namespace prefix.
+        pub name: String,
+        /// Value, with references already decoded.
+        pub value: String,
+        /// Where the name started.
+        pub position: Position,
+    }
+
+    /// An element and everything inside it.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Element {
+        /// Name as written, including any namespace prefix.
+        pub name: String,
+        /// Attributes, in document order.
+        pub attributes: Vec<Attribute>,
+        /// Child elements, in document order.
+        pub children: Vec<Element>,
+        /// All text directly inside this element, concatenated and decoded.
+        pub text: String,
+        /// Where the element started.
+        pub position: Position,
+    }
+
+    impl Element {
+        /// Looks an attribute up by name.
+        pub fn attribute(&self, name: &str) -> Option<&str> {
+            self.attributes
+                .iter()
+                .find(|attribute| attribute.name == name)
+                .map(|attribute| attribute.value.as_str())
+        }
+
+        /// Child elements with a given name.
+        pub fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Element> {
+            self.children.iter().filter(move |child| child.name == name)
+        }
+    }
+
+    /// Reads a document and returns its root element.
+    ///
+    /// Returns `None` when the document cannot be trusted; every reason is in
+    /// `sink`, with a position.
+    pub fn parse(text: &str, origin: &str, sink: &mut Sink) -> Option<Element> {
+        Parser::new(text, origin).run(sink)
+    }
+
+    struct Parser<'a> {
+        text: &'a [u8],
+        source: &'a str,
+        origin: String,
+        offset: usize,
+        line: u32,
+        column: u32,
+        elements: usize,
+    }
+
+    /// An element being built, held on the parser's own stack.
+    struct Open {
+        name: String,
+        attributes: Vec<Attribute>,
+        children: Vec<Element>,
+        text: String,
+        position: Position,
+    }
+
+    impl<'a> Parser<'a> {
+        fn new(source: &'a str, origin: &str) -> Parser<'a> {
+            Parser {
+                text: source.as_bytes(),
+                source,
+                origin: origin.to_string(),
+                offset: 0,
+                line: 1,
+                column: 1,
+                elements: 0,
+            }
+        }
+
+        fn position(&self) -> Position {
+            Position {
+                line: self.line,
+                column: self.column,
+            }
+        }
+
+        fn error(&self, code: &str, message: impl Into<String>, at: Position) -> Diagnostic {
+            Diagnostic::new(
+                code,
+                Severity::Error,
+                FailureClass::UserError,
+                "core.xml",
+                message,
+            )
+            .with_location(Location::at(&self.origin, at.line, at.column))
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.text.get(self.offset).copied()
+        }
+
+        fn starts_with(&self, prefix: &str) -> bool {
+            self.source[self.offset..].starts_with(prefix)
+        }
+
+        fn advance(&mut self) -> Option<u8> {
+            let byte = self.peek()?;
+            self.offset += 1;
+            if byte == b'\n' {
+                self.line += 1;
+                self.column = 1;
+            } else if byte & 0xc0 != 0x80 {
+                // Count characters, not bytes, so a column number means something
+                // in a file with Turkish or any other non-ASCII text in it.
+                self.column += 1;
+            }
+            Some(byte)
+        }
+
+        fn skip(&mut self, count: usize) {
+            for _ in 0..count {
+                self.advance();
+            }
+        }
+
+        fn skip_whitespace(&mut self) {
+            while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+                self.advance();
+            }
+        }
+
+        fn run(&mut self, sink: &mut Sink) -> Option<Element> {
+            if self.text.len() > MAX_DOCUMENT_BYTES {
+                sink.emit(
+                    self.error(
+                        "E8001",
+                        "The document is larger than the accepted limit.",
+                        Position { line: 0, column: 0 },
+                    )
+                    .with_context(format!("Limit: {MAX_DOCUMENT_BYTES} bytes"))
+                    .with_context(format!("Received: {} bytes", self.text.len()))
+                    .with_class(FailureClass::ResourceExhaustion),
+                );
+                return None;
+            }
+
+            // A byte order mark is legal at the start and means nothing here.
+            if self.starts_with("\u{feff}") {
+                self.skip("\u{feff}".len());
+            }
+
+            let mut stack: Vec<Open> = Vec::new();
+            let mut root: Option<Element> = None;
+
+            loop {
+                if self.peek().is_none() {
+                    break;
+                }
+
+                if self.starts_with("<") {
+                    let at = self.position();
+
+                    if self.starts_with("<!--") {
+                        if !self.skip_comment(sink) {
+                            return None;
+                        }
+                        continue;
+                    }
+
+                    if self.starts_with("<![CDATA[") {
+                        let text = self.read_cdata(sink)?;
+                        if let Some(open) = stack.last_mut() {
+                            if !push_text(open, &text, self, sink, at) {
+                                return None;
+                            }
+                        }
+                        continue;
+                    }
+
+                    if self.starts_with("<!DOCTYPE") || self.starts_with("<!ENTITY") {
+                        sink.emit(
+                            self.error(
+                                "E8002",
+                                "Document type and entity declarations are not accepted.",
+                                at,
+                            )
+                            .with_suggestion(
+                                "They are the way an XML file is made to read other \
+                                 files, or to expand to a size that exhausts memory. \
+                                 A resource file needs neither, so neither is \
+                                 available.",
+                            )
+                            .with_class(FailureClass::SecurityFailure),
+                        );
+                        return None;
+                    }
+
+                    if self.starts_with("<?") {
+                        if !self.skip_processing_instruction(sink) {
+                            return None;
+                        }
+                        continue;
+                    }
+
+                    if self.starts_with("</") {
+                        let name = self.read_closing_tag(sink)?;
+                        let Some(open) = stack.pop() else {
+                            sink.emit(
+                                self.error("E8003", format!("</{name}> closes nothing."), at)
+                                    .with_suggestion("There is no open element here."),
+                            );
+                            return None;
+                        };
+                        if open.name != name {
+                            sink.emit(
+                                self.error(
+                                    "E8004",
+                                    format!("</{name}> closes <{}>.", open.name),
+                                    at,
+                                )
+                                .with_context(format!(
+                                    "<{}> opened at line {}",
+                                    open.name, open.position.line
+                                ))
+                                .with_suggestion("Tags must be closed in the order they open."),
+                            );
+                            return None;
+                        }
+                        let finished = finish(open);
+                        match stack.last_mut() {
+                            Some(parent) => parent.children.push(finished),
+                            None => {
+                                if root.is_some() {
+                                    sink.emit(
+                                        self.error(
+                                            "E8005",
+                                            "The document has more than one root element.",
+                                            at,
+                                        )
+                                        .with_suggestion("An XML document has exactly one."),
+                                    );
+                                    return None;
+                                }
+                                root = Some(finished);
+                            }
+                        }
+                        continue;
+                    }
+
+                    // An opening tag.
+                    self.elements += 1;
+                    if self.elements > MAX_ELEMENTS {
+                        sink.emit(
+                            self.error(
+                                "E8006",
+                                "The document has more elements than the accepted limit.",
+                                at,
+                            )
+                            .with_context(format!("Limit: {MAX_ELEMENTS}"))
+                            .with_class(FailureClass::ResourceExhaustion),
+                        );
+                        return None;
+                    }
+
+                    let (name, attributes, self_closing) = self.read_opening_tag(sink)?;
+
+                    let element = Open {
+                        name,
+                        attributes,
+                        children: Vec::new(),
+                        text: String::new(),
+                        position: at,
+                    };
+
+                    if self_closing {
+                        let finished = finish(element);
+                        match stack.last_mut() {
+                            Some(parent) => parent.children.push(finished),
+                            None => {
+                                if root.is_some() {
+                                    sink.emit(self.error(
+                                        "E8005",
+                                        "The document has more than one root element.",
+                                        at,
+                                    ));
+                                    return None;
+                                }
+                                root = Some(finished);
+                            }
+                        }
+                    } else {
+                        if stack.len() >= MAX_DEPTH {
+                            sink.emit(
+                                self.error(
+                                    "E8007",
+                                    "The document is nested more deeply than the accepted limit.",
+                                    at,
+                                )
+                                .with_context(format!("Limit: {MAX_DEPTH}"))
+                                .with_class(FailureClass::ResourceExhaustion),
+                            );
+                            return None;
+                        }
+                        stack.push(element);
+                    }
+                    continue;
+                }
+
+                // Text.
+                let at = self.position();
+                let start = self.offset;
+                while let Some(byte) = self.peek() {
+                    if byte == b'<' {
+                        break;
+                    }
+                    self.advance();
+                }
+                let raw = &self.source[start..self.offset];
+                let decoded = self.decode(raw, at, sink)?;
+
+                if let Some(open) = stack.last_mut() {
+                    if !push_text(open, &decoded, self, sink, at) {
+                        return None;
+                    }
+                } else if !decoded.trim().is_empty() {
+                    sink.emit(
+                        self.error("E8008", "There is text outside the root element.", at)
+                            .with_suggestion("Only whitespace may appear there."),
+                    );
+                    return None;
+                }
+            }
+
+            if let Some(open) = stack.last() {
+                sink.emit(
+                    self.error(
+                        "E8009",
+                        format!("<{}> is never closed.", open.name),
+                        open.position,
+                    )
+                    .with_suggestion("Close it."),
+                );
+                return None;
+            }
+
+            if root.is_none() {
+                sink.emit(self.error(
+                    "E8010",
+                    "The document has no element in it.",
+                    Position {
+                        line: self.line,
+                        column: self.column,
+                    },
+                ));
+            }
+
+            root
+        }
+
+        fn skip_comment(&mut self, sink: &mut Sink) -> bool {
+            let at = self.position();
+            self.skip(4);
+            loop {
+                if self.starts_with("-->") {
+                    self.skip(3);
+                    return true;
+                }
+                if self.advance().is_none() {
+                    sink.emit(
+                        self.error("E8011", "A comment is never closed.", at)
+                            .with_suggestion("Close it with -->."),
+                    );
+                    return false;
+                }
+            }
+        }
+
+        fn skip_processing_instruction(&mut self, sink: &mut Sink) -> bool {
+            let at = self.position();
+            self.skip(2);
+            loop {
+                if self.starts_with("?>") {
+                    self.skip(2);
+                    return true;
+                }
+                if self.advance().is_none() {
+                    sink.emit(self.error("E8012", "A processing instruction is never closed.", at));
+                    return false;
+                }
+            }
+        }
+
+        fn read_cdata(&mut self, sink: &mut Sink) -> Option<String> {
+            let at = self.position();
+            self.skip("<![CDATA[".len());
+            let start = self.offset;
+            loop {
+                if self.starts_with("]]>") {
+                    let text = self.source[start..self.offset].to_string();
+                    self.skip(3);
+                    return Some(text);
+                }
+                if self.advance().is_none() {
+                    sink.emit(
+                        self.error("E8013", "A CDATA section is never closed.", at)
+                            .with_suggestion("Close it with ]]>."),
+                    );
+                    return None;
+                }
+            }
+        }
+
+        fn read_name(&mut self, sink: &mut Sink) -> Option<String> {
+            let at = self.position();
+            let start = self.offset;
+            while let Some(byte) = self.peek() {
+                let usable = byte.is_ascii_alphanumeric()
+                    || matches!(byte, b'_' | b'-' | b'.' | b':')
+                    || byte >= 0x80;
+                if !usable {
+                    break;
+                }
+                self.advance();
+            }
+            let name = &self.source[start..self.offset];
+
+            if name.is_empty() {
+                sink.emit(
+                    self.error("E8014", "A name was expected here.", at)
+                        .with_context(format!("Found: {:?}", self.peek().map(char::from))),
+                );
+                return None;
+            }
+            if name.len() > MAX_NAME_BYTES {
+                sink.emit(
+                    self.error("E8015", "A name is longer than the accepted limit.", at)
+                        .with_context(format!("Limit: {MAX_NAME_BYTES} bytes"))
+                        .with_class(FailureClass::ResourceExhaustion),
+                );
+                return None;
+            }
+            Some(name.to_string())
+        }
+
+        fn read_closing_tag(&mut self, sink: &mut Sink) -> Option<String> {
+            self.skip(2);
+            let name = self.read_name(sink)?;
+            self.skip_whitespace();
+            if self.peek() != Some(b'>') {
+                sink.emit(self.error(
+                    "E8016",
+                    format!("</{name}> is not closed with '>'."),
+                    self.position(),
+                ));
+                return None;
+            }
+            self.advance();
+            Some(name)
+        }
+
+        #[allow(clippy::type_complexity)]
+        fn read_opening_tag(&mut self, sink: &mut Sink) -> Option<(String, Vec<Attribute>, bool)> {
+            self.advance();
+            let name = self.read_name(sink)?;
+            let mut attributes: Vec<Attribute> = Vec::new();
+
+            loop {
+                self.skip_whitespace();
+
+                match self.peek() {
+                    None => {
+                        sink.emit(self.error(
+                            "E8017",
+                            format!("<{name}> is never closed."),
+                            self.position(),
+                        ));
+                        return None;
+                    }
+                    Some(b'>') => {
+                        self.advance();
+                        return Some((name, attributes, false));
+                    }
+                    Some(b'/') => {
+                        self.advance();
+                        if self.peek() != Some(b'>') {
+                            sink.emit(self.error(
+                                "E8018",
+                                "A '/' here must be followed by '>'.",
+                                self.position(),
+                            ));
+                            return None;
+                        }
+                        self.advance();
+                        return Some((name, attributes, true));
+                    }
+                    _ => {}
+                }
+
+                if attributes.len() >= MAX_ATTRIBUTES {
+                    sink.emit(
+                        self.error(
+                            "E8019",
+                            "An element has more attributes than the accepted limit.",
+                            self.position(),
+                        )
+                        .with_context(format!("Limit: {MAX_ATTRIBUTES}"))
+                        .with_class(FailureClass::ResourceExhaustion),
+                    );
+                    return None;
+                }
+
+                let at = self.position();
+                let attribute_name = self.read_name(sink)?;
+                self.skip_whitespace();
+
+                if self.peek() != Some(b'=') {
+                    sink.emit(
+                        self.error(
+                            "E8020",
+                            format!("The attribute '{attribute_name}' has no value."),
+                            at,
+                        )
+                        .with_suggestion("Write it as name=\"value\"."),
+                    );
+                    return None;
+                }
+                self.advance();
+                self.skip_whitespace();
+
+                let Some(quote) = self.peek().filter(|byte| *byte == b'"' || *byte == b'\'') else {
+                    sink.emit(
+                        self.error(
+                            "E8021",
+                            format!("The value of '{attribute_name}' is not quoted."),
+                            self.position(),
+                        )
+                        .with_suggestion("Wrap it in \" or '."),
+                    );
+                    return None;
+                };
+                self.advance();
+
+                let start = self.offset;
+                loop {
+                    match self.peek() {
+                        None => {
+                            sink.emit(self.error(
+                                "E8022",
+                                format!("The value of '{attribute_name}' is not closed."),
+                                at,
+                            ));
+                            return None;
+                        }
+                        Some(byte) if byte == quote => break,
+                        Some(b'<') => {
+                            sink.emit(
+                                self.error(
+                                    "E8023",
+                                    format!("The value of '{attribute_name}' contains '<'."),
+                                    self.position(),
+                                )
+                                .with_suggestion("Write it as &lt;."),
+                            );
+                            return None;
+                        }
+                        _ => {
+                            self.advance();
+                        }
+                    }
+                }
+                let raw = &self.source[start..self.offset];
+                self.advance();
+
+                let value = self.decode(raw, at, sink)?;
+
+                if attributes
+                    .iter()
+                    .any(|existing| existing.name == attribute_name)
+                {
+                    sink.emit(
+                        self.error(
+                            "E8024",
+                            format!("'{attribute_name}' is given twice on <{name}>."),
+                            at,
+                        )
+                        .with_suggestion(
+                            "Remove one. Keeping the last would make the file depend \
+                             on attribute order.",
+                        ),
+                    );
+                    return None;
+                }
+
+                attributes.push(Attribute {
+                    name: attribute_name,
+                    value,
+                    position: at,
+                });
+            }
+        }
+
+        /// Decodes the five predefined entities and numeric character references.
+        ///
+        /// There is no entity table, so there is nothing that can be defined in
+        /// terms of itself. An unrecognised reference is an error rather than
+        /// something passed through, because passing it through would put a
+        /// literal `&foo;` into a string and leave the author wondering.
+        fn decode(&self, raw: &str, at: Position, sink: &mut Sink) -> Option<String> {
+            if !raw.contains('&') {
+                return Some(raw.to_string());
+            }
+
+            let mut out = String::with_capacity(raw.len());
+            let mut rest = raw;
+
+            while let Some(index) = rest.find('&') {
+                out.push_str(&rest[..index]);
+                let tail = &rest[index..];
+
+                let Some(end) = tail.find(';').filter(|end| *end <= 12) else {
+                    sink.emit(
+                        self.error("E8030", "An '&' starts a reference that never ends.", at)
+                            .with_suggestion("Write a literal ampersand as &amp;."),
+                    );
+                    return None;
+                };
+
+                let entity = &tail[1..end];
+                let decoded = match entity {
+                    "amp" => Some('&'),
+                    "lt" => Some('<'),
+                    "gt" => Some('>'),
+                    "quot" => Some('"'),
+                    "apos" => Some('\''),
+                    numeric if numeric.starts_with('#') => {
+                        let (digits, radix) = match numeric.strip_prefix("#x") {
+                            Some(hex) => (hex, 16),
+                            None => (&numeric[1..], 10),
+                        };
+                        u32::from_str_radix(digits, radix)
+                            .ok()
+                            .and_then(char::from_u32)
+                    }
+                    _ => None,
+                };
+
+                let Some(character) = decoded else {
+                    sink.emit(
+                        self.error(
+                            "E8031",
+                            format!("'&{entity};' is not a reference this reader knows."),
+                            at,
+                        )
+                        .with_suggestion(
+                            "Only &amp; &lt; &gt; &quot; &apos; and numeric references \
+                             are accepted. Custom entities are not defined, which is \
+                             what keeps a file from expanding into memory it does not \
+                             have.",
+                        ),
+                    );
+                    return None;
+                };
+
+                out.push(character);
+                rest = &tail[end + 1..];
+            }
+
+            out.push_str(rest);
+            Some(out)
+        }
+    }
+
+    fn finish(open: Open) -> Element {
+        Element {
+            name: open.name,
+            attributes: open.attributes,
+            children: open.children,
+            text: open.text,
+            position: open.position,
+        }
+    }
+
+    fn push_text(
+        open: &mut Open,
+        text: &str,
+        parser: &Parser<'_>,
+        sink: &mut Sink,
+        at: Position,
+    ) -> bool {
+        if open.text.len() + text.len() > MAX_TEXT_BYTES {
+            sink.emit(
+                parser
+                    .error(
+                        "E8032",
+                        "An element holds more text than the accepted limit.",
+                        at,
+                    )
+                    .with_context(format!("Limit: {MAX_TEXT_BYTES} bytes"))
+                    .with_class(FailureClass::ResourceExhaustion),
+            );
+            return false;
+        }
+        open.text.push_str(text);
+        true
+    }
+}
+
+// ===========================================================================
+// resources — the resource engine (directive section 22)
+// ===========================================================================
+
+/// Android resources: parsed, validated, numbered and resolved.
+///
+/// ## Contract (directive section 2)
+///
+/// | Field                | Value                                                       |
+/// |----------------------|-------------------------------------------------------------|
+/// | Module               | `omni_core::resources`                                      |
+/// | Purpose              | Turn a project's resource files into a table with stable     |
+/// |                      | identifiers and resolved references.                         |
+/// | Inputs               | `values/*.xml` documents and resource file names. Untrusted.  |
+/// | Outputs              | A [`Table`], plus diagnostics with a line and a column.       |
+/// | Non-Responsibilities | Writing the binary resource table, rendering drawables, and   |
+/// |                      | reading anything from the Android platform.                   |
+/// | Determinism          | Identifiers come from sorted order, never from the order      |
+/// |                      | files happened to be read (directive section 12).             |
+/// | Status               | PARTIAL — see the subsystem inventory.                        |
+///
+/// ## The pipeline of directive section 22
+///
+/// ```text
+/// Source -> Validation -> Parse -> Resource Model -> ID Assignment ->
+/// Reference Resolution -> Table Construction -> Compiled Resources -> Verification
+/// ```
+///
+/// Everything up to and including verification is implemented. "Compiled
+/// Resources" means the binary table an Android package carries, and that is not
+/// written here: it belongs with the packaging engine, and claiming it now would
+/// be exactly the kind of overstatement directive section 1 forbids.
+pub mod resources {
+    use crate::diag::{Diagnostic, Location, Severity, Sink};
+    use crate::json::Writer;
+    use crate::xml::{self, Element, Position};
+    use crate::FailureClass;
+
+    /// Package identifier an application's own resources use.
+    ///
+    /// `0x01` belongs to the platform and `0x7f` to the application; everything
+    /// between is for shared libraries. Nothing here allocates a library id.
+    pub const APPLICATION_PACKAGE_ID: u8 = 0x7f;
+
+    /// Most resources accepted in one project (directive section 60).
+    pub const MAX_ENTRIES: usize = 65_535;
+
+    /// What kind of resource something is.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub enum Kind {
+        /// `<bool>`
+        Bool,
+        /// `<color>` and colour files.
+        Color,
+        /// `<dimen>`
+        Dimension,
+        /// Files under `drawable/`.
+        Drawable,
+        /// Identifiers declared with `@+id/`.
+        Id,
+        /// `<integer>`
+        Integer,
+        /// Files under `mipmap/`.
+        Mipmap,
+        /// `<string>`
+        String,
+        /// `<style>`
+        Style,
+    }
+
+    impl Kind {
+        /// The name Android uses, which is also the directory or element name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Kind::Bool => "bool",
+                Kind::Color => "color",
+                Kind::Dimension => "dimen",
+                Kind::Drawable => "drawable",
+                Kind::Id => "id",
+                Kind::Integer => "integer",
+                Kind::Mipmap => "mipmap",
+                Kind::String => "string",
+                Kind::Style => "style",
+            }
+        }
+
+        /// Every kind, in the order identifiers are assigned.
+        ///
+        /// Alphabetical, and therefore stable: a type's number must not depend on
+        /// which file happened to mention it first.
+        pub const ALL: &'static [Kind] = &[
+            Kind::Bool,
+            Kind::Color,
+            Kind::Dimension,
+            Kind::Drawable,
+            Kind::Id,
+            Kind::Integer,
+            Kind::Mipmap,
+            Kind::String,
+            Kind::Style,
+        ];
+
+        /// Looks a kind up by name.
+        pub fn parse(value: &str) -> Option<Kind> {
+            Kind::ALL
+                .iter()
+                .copied()
+                .find(|kind| kind.as_str() == value)
+        }
+    }
+
+    impl core::fmt::Display for Kind {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
+
+    /// Screen density a resource is meant for.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
+    pub enum Density {
+        /// No qualifier: used when nothing more specific matches.
+        #[default]
+        Default,
+        /// `ldpi`
+        Low,
+        /// `mdpi`
+        Medium,
+        /// `hdpi`
+        High,
+        /// `xhdpi`
+        ExtraHigh,
+        /// `xxhdpi`
+        ExtraExtraHigh,
+        /// `xxxhdpi`
+        ExtraExtraExtraHigh,
+        /// `nodpi`: never scaled.
+        None,
+        /// `anydpi`: matches any density, used by adaptive icons.
+        Any,
+    }
+
+    impl Density {
+        /// The qualifier as written in a directory name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Density::Default => "default",
+                Density::Low => "ldpi",
+                Density::Medium => "mdpi",
+                Density::High => "hdpi",
+                Density::ExtraHigh => "xhdpi",
+                Density::ExtraExtraHigh => "xxhdpi",
+                Density::ExtraExtraExtraHigh => "xxxhdpi",
+                Density::None => "nodpi",
+                Density::Any => "anydpi",
+            }
+        }
+
+        /// Every density, in declaration order.
+        pub const ALL: &'static [Density] = &[
+            Density::Default,
+            Density::Low,
+            Density::Medium,
+            Density::High,
+            Density::ExtraHigh,
+            Density::ExtraExtraHigh,
+            Density::ExtraExtraExtraHigh,
+            Density::None,
+            Density::Any,
+        ];
+
+        /// Looks a density up by qualifier.
+        pub fn parse(value: &str) -> Option<Density> {
+            Density::ALL
+                .iter()
+                .copied()
+                .find(|density| density.as_str() == value)
+        }
+    }
+
+    /// The qualifiers that select between resources of the same name.
+    ///
+    /// Only density is modelled. Locale, orientation, size and the rest of the
+    /// qualifier set are not, and a directory carrying one is refused rather than
+    /// silently treated as the default (directive section 64).
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
+    pub struct Config {
+        /// Density this resource is for.
+        pub density: Density,
+    }
+
+    impl Config {
+        /// The default configuration.
+        pub const DEFAULT: Config = Config {
+            density: Density::Default,
+        };
+
+        /// Reads the qualifiers from a resource directory name.
+        ///
+        /// `drawable` yields the default; `drawable-hdpi` yields high density.
+        pub fn parse_directory(name: &str) -> Result<(Kind, Config), String> {
+            let mut parts = name.split('-');
+            let Some(kind_name) = parts.next() else {
+                return Err(format!("'{name}' does not name a resource directory."));
+            };
+            let Some(kind) = Kind::parse(kind_name) else {
+                return Err(format!("'{kind_name}' is not a resource type."));
+            };
+
+            let mut config = Config::DEFAULT;
+            for qualifier in parts {
+                match Density::parse(qualifier) {
+                    Some(density) => config.density = density,
+                    None => {
+                        return Err(format!(
+                            "'{qualifier}' is a qualifier this build does not model."
+                        ))
+                    }
+                }
+            }
+            Ok((kind, config))
+        }
+    }
+
+    impl core::fmt::Display for Config {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(self.density.as_str())
+        }
+    }
+
+    /// The unit a dimension is written in.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Unit {
+        /// Density-independent pixels.
+        Dp,
+        /// Scale-independent pixels, which follow the user's font size.
+        Sp,
+        /// Physical pixels.
+        Px,
+        /// Points.
+        Pt,
+        /// Inches.
+        In,
+        /// Millimetres.
+        Mm,
+    }
+
+    impl Unit {
+        /// The suffix as written.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Unit::Dp => "dp",
+                Unit::Sp => "sp",
+                Unit::Px => "px",
+                Unit::Pt => "pt",
+                Unit::In => "in",
+                Unit::Mm => "mm",
+            }
+        }
+
+        /// Every unit, longest suffix first so parsing is unambiguous.
+        pub const ALL: &'static [Unit] =
+            &[Unit::Dp, Unit::Sp, Unit::Px, Unit::Pt, Unit::In, Unit::Mm];
+    }
+
+    /// A reference to another resource.
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub struct Reference {
+        /// Package, when one is named. `android` means the platform.
+        pub package: Option<String>,
+        /// What kind of resource is referred to.
+        pub kind: Kind,
+        /// Its name.
+        pub name: String,
+        /// Whether the reference also declares the resource, as `@+id/` does.
+        pub declares: bool,
+    }
+
+    impl Reference {
+        /// Reads `@[package:]type/name` or `@+id/name`.
+        pub fn parse(value: &str) -> Option<Reference> {
+            let body = value.strip_prefix('@')?;
+            let (body, declares) = match body.strip_prefix('+') {
+                Some(rest) => (rest, true),
+                None => (body, false),
+            };
+
+            let (package, rest) = match body.split_once(':') {
+                Some((package, rest)) if !package.is_empty() => (Some(package.to_string()), rest),
+                Some(_) => return None,
+                None => (None, body),
+            };
+
+            let (kind_name, name) = rest.split_once('/')?;
+            let kind = Kind::parse(kind_name)?;
+            if name.is_empty() {
+                return None;
+            }
+
+            Some(Reference {
+                package,
+                kind,
+                name: name.to_string(),
+                declares,
+            })
+        }
+
+        /// Whether this points at the Android platform rather than the project.
+        pub fn is_platform(&self) -> bool {
+            self.package.as_deref() == Some("android")
+        }
+    }
+
+    impl core::fmt::Display for Reference {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "@")?;
+            if self.declares {
+                write!(f, "+")?;
+            }
+            if let Some(package) = &self.package {
+                write!(f, "{package}:")?;
+            }
+            write!(f, "{}/{}", self.kind, self.name)
+        }
+    }
+
+    /// What a resource holds.
+    ///
+    /// A dimension is stored in thousandths rather than as a float. A build that
+    /// rounds differently on two machines is not reproducible, and directive
+    /// section 12 does not leave room for "close enough".
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub enum Value {
+        /// Text.
+        Text(String),
+        /// A colour, as 0xAARRGGBB.
+        Color(u32),
+        /// A dimension, in thousandths of its unit.
+        Dimension {
+            /// The value multiplied by one thousand.
+            milli: i64,
+            /// The unit it was written in.
+            unit: Unit,
+        },
+        /// A boolean.
+        Bool(bool),
+        /// A whole number.
+        Integer(i32),
+        /// A reference to another resource.
+        Reference(Reference),
+        /// A file, named by its path inside the project.
+        File(String),
+        /// The resource exists and holds nothing.
+        ///
+        /// An identifier declared with `<id name="…"/>` is exactly this: a name
+        /// that other resources can point at. Encoding it as a false boolean
+        /// would be a lie that happens to compile.
+        Empty,
+    }
+
+    impl Value {
+        /// Stable name of the value's form.
+        pub const fn type_name(&self) -> &'static str {
+            match self {
+                Value::Text(_) => "text",
+                Value::Color(_) => "color",
+                Value::Dimension { .. } => "dimension",
+                Value::Bool(_) => "bool",
+                Value::Integer(_) => "integer",
+                Value::Reference(_) => "reference",
+                Value::File(_) => "file",
+                Value::Empty => "empty",
+            }
+        }
+
+        /// Renders the value the way it would be written in a resource file.
+        pub fn to_source(&self) -> String {
+            match self {
+                Value::Text(text) => text.clone(),
+                Value::Color(argb) => format!("#{argb:08x}"),
+                Value::Dimension { milli, unit } => {
+                    let whole = milli / 1000;
+                    let fraction = (milli % 1000).abs();
+                    if fraction == 0 {
+                        format!("{whole}{}", unit.as_str())
+                    } else {
+                        format!(
+                            "{whole}.{}{}",
+                            format!("{fraction:03}").trim_end_matches('0'),
+                            unit.as_str()
+                        )
+                    }
+                }
+                Value::Bool(flag) => flag.to_string(),
+                Value::Integer(number) => number.to_string(),
+                Value::Reference(reference) => reference.to_string(),
+                Value::File(path) => path.clone(),
+                Value::Empty => String::new(),
+            }
+        }
+    }
+
+    /// One resource.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Entry {
+        /// What kind it is.
+        pub kind: Kind,
+        /// Its name, which must be a usable Java identifier.
+        pub name: String,
+        /// Which configuration it belongs to.
+        pub config: Config,
+        /// What it holds.
+        pub value: Value,
+        /// Where it was declared.
+        pub origin: String,
+        /// Where in that file.
+        pub position: Position,
+    }
+
+    impl Entry {
+        /// Sort key that makes identifier assignment deterministic.
+        fn order_key(&self) -> (Kind, &str, Config) {
+            (self.kind, self.name.as_str(), self.config)
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Table construction
+    // -----------------------------------------------------------------------
+
+    /// A resource identifier, `0xPPTTEEEE`.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub struct ResourceId(u32);
+
+    impl ResourceId {
+        /// Builds an identifier from its three parts.
+        pub const fn new(package: u8, type_index: u8, entry_index: u16) -> ResourceId {
+            ResourceId(((package as u32) << 24) | ((type_index as u32) << 16) | entry_index as u32)
+        }
+
+        /// The raw value.
+        pub const fn raw(self) -> u32 {
+            self.0
+        }
+
+        /// Which package it belongs to.
+        pub const fn package(self) -> u8 {
+            (self.0 >> 24) as u8
+        }
+
+        /// Which type, 1-based.
+        pub const fn type_index(self) -> u8 {
+            ((self.0 >> 16) & 0xff) as u8
+        }
+
+        /// Which entry within that type, 0-based.
+        pub const fn entry_index(self) -> u16 {
+            (self.0 & 0xffff) as u16
+        }
+    }
+
+    impl core::fmt::Display for ResourceId {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "0x{:08x}", self.0)
+        }
+    }
+
+    /// Resources being collected.
+    #[derive(Clone, Debug)]
+    pub struct Table {
+        package_id: u8,
+        entries: Vec<Entry>,
+    }
+
+    impl Table {
+        /// A table for an application's own resources.
+        pub fn new() -> Table {
+            Table::for_package(APPLICATION_PACKAGE_ID)
+        }
+
+        /// A table for a named package identifier.
+        pub fn for_package(package_id: u8) -> Table {
+            Table {
+                package_id,
+                entries: Vec::new(),
+            }
+        }
+
+        /// Everything collected so far.
+        pub fn entries(&self) -> &[Entry] {
+            &self.entries
+        }
+
+        /// How many resources are held.
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        /// Whether nothing has been collected.
+        pub fn is_empty(&self) -> bool {
+            self.entries.is_empty()
+        }
+
+        /// Reads a `values/*.xml` document.
+        ///
+        /// Returns whether everything in it was understood. A document with a
+        /// problem still contributes what was valid, so one broken entry does not
+        /// hide every other mistake in the file (directive section 33).
+        pub fn read_values(&mut self, text: &str, origin: &str, sink: &mut Sink) -> bool {
+            let Some(root) = xml::parse(text, origin, sink) else {
+                return false;
+            };
+
+            if root.name != "resources" {
+                sink.emit(
+                    self.problem(
+                        "E9001",
+                        format!(
+                            "A values file's root element is <resources>, not <{}>.",
+                            root.name
+                        ),
+                        origin,
+                        root.position,
+                    )
+                    .with_suggestion("Wrap the entries in <resources> … </resources>."),
+                );
+                return false;
+            }
+
+            let mut ok = true;
+            for child in &root.children {
+                ok &= self.read_entry(child, origin, sink);
+            }
+            ok
+        }
+
+        fn read_entry(&mut self, element: &Element, origin: &str, sink: &mut Sink) -> bool {
+            let Some(kind) = Kind::parse(&element.name) else {
+                sink.emit(
+                    self.problem(
+                        "E9002",
+                        format!(
+                            "<{}> is not a resource this build understands.",
+                            element.name
+                        ),
+                        origin,
+                        element.position,
+                    )
+                    .with_context(format!(
+                        "Understood: {}",
+                        Kind::ALL
+                            .iter()
+                            .filter(|kind| kind.declarable())
+                            .map(|kind| kind.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .with_suggestion(
+                        "An element that is not modelled is reported rather than \
+                         skipped: a resource that silently never existed is harder \
+                         to find than one that was refused.",
+                    ),
+                );
+                return false;
+            };
+
+            if !kind.declarable() {
+                sink.emit(
+                    self.problem(
+                        "E9003",
+                        format!("<{kind}> is recognised but not yet modelled."),
+                        origin,
+                        element.position,
+                    )
+                    .with_suggestion(
+                        "It can be referred to with @style/name; declaring one needs \
+                         the attribute system, which is not built.",
+                    ),
+                );
+                return false;
+            }
+
+            let Some(name) = element.attribute("name") else {
+                sink.emit(
+                    self.problem(
+                        "E9004",
+                        format!("<{kind}> has no name."),
+                        origin,
+                        element.position,
+                    )
+                    .with_suggestion("Every resource is declared as <type name=\"…\">."),
+                );
+                return false;
+            };
+
+            if let Err(reason) = validate_name(name) {
+                sink.emit(
+                    self.problem("E9005", reason, origin, element.position)
+                        .with_context(format!("Name: {name}"))
+                        .with_suggestion(
+                            "A resource name becomes a field in generated code, so it \
+                             must be usable as an identifier.",
+                        ),
+                );
+                return false;
+            }
+
+            if !element.children.is_empty() {
+                sink.emit(
+                    self.problem(
+                        "E9006",
+                        format!("<{kind} name=\"{name}\"> contains other elements."),
+                        origin,
+                        element.position,
+                    )
+                    .with_suggestion(
+                        "Inline markup inside a resource is not modelled. Its text is \
+                         taken as written, so anything nested would be silently lost.",
+                    ),
+                );
+                return false;
+            }
+
+            let Some(value) = parse_value(kind, &element.text, origin, element.position, sink)
+            else {
+                return false;
+            };
+
+            self.push(
+                Entry {
+                    kind,
+                    name: name.to_string(),
+                    config: Config::DEFAULT,
+                    value,
+                    origin: origin.to_string(),
+                    position: element.position,
+                },
+                sink,
+            )
+        }
+
+        /// Records a resource that is a file, such as a drawable.
+        ///
+        /// `directory` is the resource directory name, `file_name` the file
+        /// inside it, and `path` how the file is addressed in the project.
+        pub fn read_file(
+            &mut self,
+            directory: &str,
+            file_name: &str,
+            path: &str,
+            sink: &mut Sink,
+        ) -> bool {
+            let (kind, config) = match Config::parse_directory(directory) {
+                Ok(parsed) => parsed,
+                Err(reason) => {
+                    sink.emit(
+                        self.problem("E9010", reason, path, Position::default())
+                            .with_suggestion(
+                                "A qualifier that is not modelled is refused rather \
+                                 than treated as the default, which would put the \
+                                 wrong file on every device.",
+                            ),
+                    );
+                    return false;
+                }
+            };
+
+            let stem = file_name
+                .rsplit_once('.')
+                .map(|(stem, _)| stem)
+                .unwrap_or(file_name);
+            if let Err(reason) = validate_name(stem) {
+                sink.emit(
+                    self.problem("E9011", reason, path, Position::default())
+                        .with_context(format!("File: {file_name}")),
+                );
+                return false;
+            }
+
+            self.push(
+                Entry {
+                    kind,
+                    name: stem.to_string(),
+                    config,
+                    value: Value::File(path.to_string()),
+                    origin: path.to_string(),
+                    position: Position::default(),
+                },
+                sink,
+            )
+        }
+
+        fn push(&mut self, entry: Entry, sink: &mut Sink) -> bool {
+            if self.entries.len() >= MAX_ENTRIES {
+                sink.emit(
+                    self.problem(
+                        "E9012",
+                        "The project declares more resources than the accepted limit.",
+                        &entry.origin,
+                        entry.position,
+                    )
+                    .with_context(format!("Limit: {MAX_ENTRIES}"))
+                    .with_class(FailureClass::ResourceExhaustion),
+                );
+                return false;
+            }
+
+            if let Some(previous) = self
+                .entries
+                .iter()
+                .find(|existing| existing.order_key() == entry.order_key())
+            {
+                sink.emit(
+                    self.problem(
+                        "E9013",
+                        format!(
+                            "{} '{}' is declared twice for the {} configuration.",
+                            entry.kind, entry.name, entry.config
+                        ),
+                        &entry.origin,
+                        entry.position,
+                    )
+                    .with_context(format!(
+                        "First declared in {} at line {}",
+                        previous.origin, previous.position.line
+                    ))
+                    .with_suggestion(
+                        "Remove one. Keeping the last would make the build depend on \
+                         which file was read first.",
+                    ),
+                );
+                return false;
+            }
+
+            self.entries.push(entry);
+            true
+        }
+
+        fn problem(
+            &self,
+            code: &str,
+            message: impl Into<String>,
+            origin: &str,
+            position: Position,
+        ) -> Diagnostic {
+            Diagnostic::new(
+                code,
+                Severity::Error,
+                FailureClass::UserError,
+                "core.resources",
+                message,
+            )
+            .with_location(Location::at(origin, position.line, position.column))
+        }
+
+        /// Assigns identifiers, resolves references and verifies the result.
+        ///
+        /// This is the second half of the pipeline in directive section 22, run
+        /// as one step because none of it means anything alone: an identifier
+        /// that nothing can refer to is bookkeeping, and a resolved reference
+        /// without an identifier has nothing to resolve to.
+        pub fn compile(mut self, sink: &mut Sink) -> Option<Compiled> {
+            // Sorted, so an identifier depends on what is declared and never on
+            // the order files were read (directive section 12).
+            self.entries
+                .sort_by(|left, right| left.order_key().cmp(&right.order_key()));
+
+            let mut assignments: Vec<(Kind, String, ResourceId)> = Vec::new();
+            let mut type_index: u8 = 0;
+
+            for kind in Kind::ALL {
+                let mut names: Vec<&str> = self
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.kind == *kind)
+                    .map(|entry| entry.name.as_str())
+                    .collect();
+                names.dedup();
+                if names.is_empty() {
+                    continue;
+                }
+
+                let Some(next) = type_index.checked_add(1) else {
+                    sink.emit(Diagnostic::new(
+                        "E9020",
+                        Severity::Fatal,
+                        FailureClass::ResourceExhaustion,
+                        "core.resources",
+                        "There are more resource types than an identifier can hold.",
+                    ));
+                    return None;
+                };
+                type_index = next;
+
+                for (entry_index, name) in names.iter().enumerate() {
+                    let Ok(entry_index) = u16::try_from(entry_index) else {
+                        sink.emit(
+                            Diagnostic::new(
+                                "E9021",
+                                Severity::Fatal,
+                                FailureClass::ResourceExhaustion,
+                                "core.resources",
+                                format!(
+                                    "There are more {kind} resources than an identifier can hold."
+                                ),
+                            )
+                            .with_context("An identifier holds 65536 entries per type."),
+                        );
+                        return None;
+                    };
+                    assignments.push((
+                        *kind,
+                        (*name).to_string(),
+                        ResourceId::new(self.package_id, type_index, entry_index),
+                    ));
+                }
+            }
+
+            let mut ok = true;
+            for entry in &self.entries {
+                if let Value::Reference(reference) = &entry.value {
+                    ok &= self.check_reference(entry, reference, &assignments, sink);
+                }
+            }
+
+            ok &= self.check_for_cycles(sink);
+
+            if !ok {
+                return None;
+            }
+
+            Some(Compiled {
+                package_id: self.package_id,
+                entries: self.entries,
+                assignments,
+            })
+        }
+
+        fn check_reference(
+            &self,
+            entry: &Entry,
+            reference: &Reference,
+            assignments: &[(Kind, String, ResourceId)],
+            sink: &mut Sink,
+        ) -> bool {
+            if reference.is_platform() {
+                // The platform's resource table is not available to this build, so
+                // the reference is recorded and left unresolved rather than
+                // guessed at.
+                return true;
+            }
+
+            if reference.package.is_some() {
+                sink.emit(
+                    self.problem(
+                        "E9030",
+                        format!("'{reference}' names a package this build cannot reach."),
+                        &entry.origin,
+                        entry.position,
+                    )
+                    .with_suggestion(
+                        "Only the project's own resources and @android: are available; \
+                         nothing resolves a shared library's table yet.",
+                    ),
+                );
+                return false;
+            }
+
+            let found = assignments
+                .iter()
+                .any(|(kind, name, _)| *kind == reference.kind && name == &reference.name);
+
+            if !found {
+                let near: Vec<&str> = assignments
+                    .iter()
+                    .filter(|(kind, _, _)| *kind == reference.kind)
+                    .map(|(_, name, _)| name.as_str())
+                    .filter(|name| {
+                        name.eq_ignore_ascii_case(&reference.name)
+                            || name.starts_with(reference.name.as_str())
+                    })
+                    .take(3)
+                    .collect();
+
+                let mut diagnostic = self.problem(
+                    "E9031",
+                    format!("'{reference}' refers to a resource that is not declared."),
+                    &entry.origin,
+                    entry.position,
+                );
+                if !near.is_empty() {
+                    diagnostic =
+                        diagnostic.with_suggestion(format!("Did you mean {}?", near.join(", ")));
+                } else {
+                    diagnostic = diagnostic.with_suggestion(format!(
+                        "Declare a {} called '{}', or correct the reference.",
+                        reference.kind, reference.name
+                    ));
+                }
+                sink.emit(diagnostic);
+                return false;
+            }
+
+            true
+        }
+
+        /// Refuses a reference that eventually points back at itself.
+        ///
+        /// Following one would loop forever, so the chain is walked with a bound
+        /// and a visited list rather than recursively.
+        fn check_for_cycles(&self, sink: &mut Sink) -> bool {
+            let mut ok = true;
+
+            for entry in &self.entries {
+                let mut visited: Vec<(Kind, &str)> = vec![(entry.kind, entry.name.as_str())];
+                let mut current = entry;
+
+                while let Value::Reference(reference) = &current.value {
+                    if reference.package.is_some() {
+                        break;
+                    }
+
+                    let Some(next) = self.entries.iter().find(|candidate| {
+                        candidate.kind == reference.kind && candidate.name == reference.name
+                    }) else {
+                        break;
+                    };
+
+                    let step = (next.kind, next.name.as_str());
+                    if visited.contains(&step) {
+                        let chain = visited
+                            .iter()
+                            .map(|(kind, name)| format!("@{kind}/{name}"))
+                            .collect::<Vec<_>>()
+                            .join(" -> ");
+                        sink.emit(
+                            self.problem(
+                                "E9032",
+                                "A resource reference eventually points back at itself.",
+                                &entry.origin,
+                                entry.position,
+                            )
+                            .with_context(format!("Chain: {chain} -> {reference}"))
+                            .with_suggestion("Break the loop by giving one of them a real value."),
+                        );
+                        ok = false;
+                        break;
+                    }
+
+                    visited.push(step);
+                    if visited.len() > 64 {
+                        sink.emit(
+                            self.problem(
+                                "E9033",
+                                "A chain of resource references is longer than the accepted limit.",
+                                &entry.origin,
+                                entry.position,
+                            )
+                            .with_class(FailureClass::ResourceExhaustion),
+                        );
+                        ok = false;
+                        break;
+                    }
+                    current = next;
+                }
+            }
+
+            ok
+        }
+    }
+
+    impl Default for Table {
+        fn default() -> Self {
+            Table::new()
+        }
+    }
+
+    /// A table that has been numbered and verified.
+    #[derive(Clone, Debug)]
+    pub struct Compiled {
+        package_id: u8,
+        entries: Vec<Entry>,
+        assignments: Vec<(Kind, String, ResourceId)>,
+    }
+
+    impl Compiled {
+        /// Which package these resources belong to.
+        pub fn package_id(&self) -> u8 {
+            self.package_id
+        }
+
+        /// Every resource, in identifier order.
+        pub fn entries(&self) -> &[Entry] {
+            &self.entries
+        }
+
+        /// The identifier of a resource, if it has one.
+        pub fn id(&self, kind: Kind, name: &str) -> Option<ResourceId> {
+            self.assignments
+                .iter()
+                .find(|(entry_kind, entry_name, _)| *entry_kind == kind && entry_name == name)
+                .map(|(_, _, id)| *id)
+        }
+
+        /// Every identifier, in assignment order.
+        pub fn assignments(&self) -> &[(Kind, String, ResourceId)] {
+            &self.assignments
+        }
+
+        /// Serialises the table as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("packageId", &format!("0x{:02x}", self.package_id));
+            w.field_u64("resources", self.entries.len() as u64);
+            w.field_u64("identifiers", self.assignments.len() as u64);
+            w.field_bool("binaryTableWritten", false);
+            w.begin_array(Some("detail"));
+            for (kind, name, id) in &self.assignments {
+                w.begin_object(None);
+                w.field_str("id", &id.to_string());
+                w.field_str("kind", kind.as_str());
+                w.field_str("name", name);
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    impl Kind {
+        /// Whether a values file may declare one of these.
+        ///
+        /// A style can be referred to but not declared: declaring one needs the
+        /// attribute system, which is not built, and half a style is worse than
+        /// none.
+        pub const fn declarable(self) -> bool {
+            !matches!(self, Kind::Style)
+        }
+    }
+
+    /// Checks that a name can become a field in generated code.
+    fn validate_name(name: &str) -> Result<(), String> {
+        if name.is_empty() {
+            return Err("A resource name is empty.".to_string());
+        }
+        if name.len() > 128 {
+            return Err("A resource name is longer than 128 characters.".to_string());
+        }
+        let mut characters = name.chars();
+        let first = characters.next().unwrap_or('\0');
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return Err(format!(
+                "'{name}' does not start with a letter or underscore."
+            ));
+        }
+        for character in characters {
+            if !(character.is_ascii_alphanumeric() || character == '_' || character == '.') {
+                return Err(format!(
+                    "'{name}' contains '{character}', which is not usable."
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads the text of a resource into a value of the right shape.
+    fn parse_value(
+        kind: Kind,
+        text: &str,
+        origin: &str,
+        position: Position,
+        sink: &mut Sink,
+    ) -> Option<Value> {
+        let trimmed = text.trim();
+
+        if trimmed.starts_with('@') {
+            let Some(reference) = Reference::parse(trimmed) else {
+                sink.emit(
+                    reject(
+                        "E9040",
+                        format!("'{trimmed}' is not a resource reference."),
+                        origin,
+                        position,
+                    )
+                    .with_suggestion(
+                        "A reference is written @type/name, for example @color/omni_accent.",
+                    ),
+                );
+                return None;
+            };
+            return Some(Value::Reference(reference));
+        }
+
+        match kind {
+            Kind::String => Some(Value::Text(decode_string(text))),
+            Kind::Color => {
+                match parse_color(trimmed) {
+                    Ok(color) => Some(Value::Color(color)),
+                    Err(reason) => {
+                        sink.emit(reject("E9041", reason, origin, position).with_suggestion(
+                            "Colours are written #rgb, #argb, #rrggbb or #aarrggbb.",
+                        ));
+                        None
+                    }
+                }
+            }
+            Kind::Dimension => match parse_dimension(trimmed) {
+                Ok((milli, unit)) => Some(Value::Dimension { milli, unit }),
+                Err(reason) => {
+                    sink.emit(reject("E9042", reason, origin, position).with_suggestion(
+                        "Dimensions are a number and a unit, for example 16dp or 14sp.",
+                    ));
+                    None
+                }
+            },
+            Kind::Bool => match trimmed {
+                "true" => Some(Value::Bool(true)),
+                "false" => Some(Value::Bool(false)),
+                other => {
+                    sink.emit(
+                        reject(
+                            "E9043",
+                            format!("'{other}' is not true or false."),
+                            origin,
+                            position,
+                        )
+                        .with_suggestion("Write exactly true or false, in lower case."),
+                    );
+                    None
+                }
+            },
+            Kind::Integer => match trimmed.parse::<i32>() {
+                Ok(number) => Some(Value::Integer(number)),
+                Err(_) => {
+                    sink.emit(
+                        reject(
+                            "E9044",
+                            format!("'{trimmed}' is not a whole number."),
+                            origin,
+                            position,
+                        )
+                        .with_suggestion("Write a number that fits in 32 bits."),
+                    );
+                    None
+                }
+            },
+            Kind::Id => Some(Value::Empty),
+            Kind::Drawable | Kind::Mipmap | Kind::Style => {
+                sink.emit(
+                    reject(
+                        "E9045",
+                        format!("A {kind} cannot be given a value in a values file."),
+                        origin,
+                        position,
+                    )
+                    .with_suggestion("It is declared by the file that holds it."),
+                );
+                None
+            }
+        }
+    }
+
+    fn reject(
+        code: &str,
+        message: impl Into<String>,
+        origin: &str,
+        position: Position,
+    ) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.resources",
+            message,
+        )
+        .with_location(Location::at(origin, position.line, position.column))
+    }
+
+    /// Applies the escape and whitespace rules Android uses for strings.
+    ///
+    /// Text is trimmed and internal whitespace runs collapse to one space, which
+    /// is what makes a resource file readable across several lines. Text wrapped
+    /// in double quotes keeps its spacing exactly.
+    fn decode_string(text: &str) -> String {
+        let trimmed = text.trim();
+        if let Some(quoted) = trimmed
+            .strip_prefix('"')
+            .and_then(|rest| rest.strip_suffix('"'))
+        {
+            return unescape(quoted);
+        }
+
+        let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+        unescape(&collapsed)
+    }
+
+    fn unescape(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut characters = text.chars();
+
+        while let Some(character) = characters.next() {
+            if character != '\\' {
+                out.push(character);
+                continue;
+            }
+            match characters.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('\'') => out.push('\''),
+                Some('"') => out.push('"'),
+                Some('@') => out.push('@'),
+                Some('?') => out.push('?'),
+                Some('u') => {
+                    let digits: String = characters.by_ref().take(4).collect();
+                    match u32::from_str_radix(&digits, 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                    {
+                        Some(decoded) => out.push(decoded),
+                        None => {
+                            out.push_str("\\u");
+                            out.push_str(&digits);
+                        }
+                    }
+                }
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        }
+
+        out
+    }
+
+    /// Reads `#rgb`, `#argb`, `#rrggbb` or `#aarrggbb` into 0xAARRGGBB.
+    fn parse_color(text: &str) -> Result<u32, String> {
+        let Some(digits) = text.strip_prefix('#') else {
+            return Err(format!("'{text}' does not start with '#'."));
+        };
+        if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(format!(
+                "'{text}' contains something that is not a hex digit."
+            ));
+        }
+
+        let expand = |value: u32| (value << 4) | value;
+        let parse = |slice: &str| u32::from_str_radix(slice, 16).unwrap_or(0);
+
+        match digits.len() {
+            3 => {
+                let r = expand(parse(&digits[0..1]));
+                let g = expand(parse(&digits[1..2]));
+                let b = expand(parse(&digits[2..3]));
+                Ok(0xff00_0000 | (r << 16) | (g << 8) | b)
+            }
+            4 => {
+                let a = expand(parse(&digits[0..1]));
+                let r = expand(parse(&digits[1..2]));
+                let g = expand(parse(&digits[2..3]));
+                let b = expand(parse(&digits[3..4]));
+                Ok((a << 24) | (r << 16) | (g << 8) | b)
+            }
+            6 => Ok(0xff00_0000 | parse(digits)),
+            8 => Ok(parse(digits)),
+            other => Err(format!(
+                "'{text}' has {other} hex digits; a colour has 3, 4, 6 or 8."
+            )),
+        }
+    }
+
+    /// Reads a dimension into thousandths of its unit.
+    fn parse_dimension(text: &str) -> Result<(i64, Unit), String> {
+        let Some(unit) = Unit::ALL
+            .iter()
+            .copied()
+            .find(|unit| text.ends_with(unit.as_str()))
+        else {
+            return Err(format!("'{text}' has no unit this build understands."));
+        };
+
+        let number = &text[..text.len() - unit.as_str().len()];
+        if number.is_empty() {
+            return Err(format!("'{text}' has a unit but no number."));
+        }
+
+        let (whole, fraction) = match number.split_once('.') {
+            Some((whole, fraction)) => (whole, fraction),
+            None => (number, ""),
+        };
+
+        if fraction.len() > 3 {
+            return Err(format!(
+                "'{text}' has more than three decimal places, which this build \
+                 would have to round. Rounding silently is how two machines stop \
+                 producing the same artifact."
+            ));
+        }
+
+        let negative = whole.starts_with('-');
+        let whole_digits = whole.strip_prefix('-').unwrap_or(whole);
+        if whole_digits.is_empty() || !whole_digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!("'{text}' does not begin with a number."));
+        }
+        if !fraction.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!(
+                "'{text}' has something other than digits after the point."
+            ));
+        }
+
+        let Ok(whole_value) = whole_digits.parse::<i64>() else {
+            return Err(format!("'{text}' is larger than a dimension can hold."));
+        };
+        let scaled = format!("{fraction:0<3}");
+        let fraction_value: i64 = scaled[..3].parse().unwrap_or(0);
+
+        let Some(milli) = whole_value
+            .checked_mul(1000)
+            .and_then(|v| v.checked_add(fraction_value))
+        else {
+            return Err(format!("'{text}' is larger than a dimension can hold."));
+        };
+
+        Ok((if negative { -milli } else { milli }, unit))
+    }
+}
+
+// ===========================================================================
 // report — the single source of truth the user interface renders
 // ===========================================================================
 
@@ -6670,6 +8816,10 @@ mod tests {
     use super::json::Writer;
     use super::plugin::{Registry, Version};
     use super::project::{parse_manifest, GuardLevel, Optimization, Profile, Project};
+    use super::resources::{
+        Density, Kind as ResourceKind, Table as ResourceTable, Unit as ResourceUnit,
+        Value as ResourceValue,
+    };
     use super::scheduler::{Cancellation, Outcome as SchedulerOutcome};
     use super::toolchain::{self, Observation, Requirement, State};
     use super::vfs::{Access, Quota, VirtualFs, VirtualPath};
@@ -7797,6 +9947,658 @@ mod tests {
             // lengths either side of the Adler-32 reduction boundary.
             assert_eq!(checksum::crc32(&data), checksum::crc32(&data));
             assert_eq!(checksum::adler32(&data), checksum::adler32(&data));
+        }
+    }
+
+    // --- xml -----------------------------------------------------------------
+
+    fn parse_xml(text: &str) -> (Option<super::xml::Element>, Sink) {
+        let mut sink = Sink::new();
+        let root = super::xml::parse(text, "test.xml", &mut sink);
+        (root, sink)
+    }
+
+    #[test]
+    fn xml_reads_elements_attributes_and_text() {
+        let (root, sink) = parse_xml(
+            r#"<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- a comment -->
+    <string name="app">Omni_Builder</string>
+    <color name="accent">#6cb6ff</color>
+    <item android:id="x" empty="yes" />
+</resources>"#,
+        );
+
+        let root = root.expect("must parse");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert_eq!(root.name, "resources");
+        assert_eq!(root.children.len(), 3);
+        assert_eq!(
+            root.attribute("xmlns:android").unwrap(),
+            "http://schemas.android.com/apk/res/android"
+        );
+
+        let string = &root.children[0];
+        assert_eq!(string.name, "string");
+        assert_eq!(string.attribute("name"), Some("app"));
+        assert_eq!(string.text, "Omni_Builder");
+
+        let item = &root.children[2];
+        assert_eq!(item.attributes.len(), 2);
+        assert_eq!(item.attribute("android:id"), Some("x"));
+        assert!(item.children.is_empty());
+    }
+
+    #[test]
+    fn xml_decodes_the_five_predefined_entities_and_numeric_references() {
+        let (root, _) =
+            parse_xml(r#"<r a="&lt;&gt;&amp;&quot;&apos;"><t>&#65;&#x42;&#199;</t></r>"#);
+        let root = root.unwrap();
+        assert_eq!(root.attribute("a").unwrap(), "<>&\"'");
+        assert_eq!(root.children[0].text, "ABÇ");
+    }
+
+    #[test]
+    fn xml_refuses_a_document_type_declaration() {
+        // This is the entry point for external entity expansion and for the
+        // nested definitions that make a small file expand to gigabytes. It is
+        // not defended against; it is simply unavailable.
+        let (root, sink) = parse_xml(r#"<!DOCTYPE r [<!ENTITY x "boom">]><r>&x;</r>"#);
+        assert!(root.is_none());
+        let error = sink.entries().iter().find(|d| d.code == "E8002").unwrap();
+        assert_eq!(error.class, FailureClass::SecurityFailure);
+    }
+
+    #[test]
+    fn xml_refuses_an_entity_it_does_not_define() {
+        // With no entity table there is nothing to expand recursively, so the
+        // billion-laughs shape cannot be built in the first place.
+        let (root, sink) = parse_xml("<r>&lol;</r>");
+        assert!(root.is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E8031"));
+
+        let (root, sink) = parse_xml("<r>a & b</r>");
+        assert!(root.is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E8030"));
+    }
+
+    #[test]
+    fn xml_reads_cdata_verbatim() {
+        let (root, _) = parse_xml("<r><![CDATA[<not> & parsed]]></r>");
+        let root = root.unwrap();
+        assert!(root.children.is_empty(), "CDATA is text, not an element");
+        assert_eq!(root.text, "<not> & parsed");
+
+        // And it mixes with ordinary text in the order it appears.
+        let (root, _) = parse_xml("<r>before <![CDATA[<raw>]]> after</r>");
+        assert_eq!(root.unwrap().text, "before <raw> after");
+
+        let (root, sink) = parse_xml("<r><![CDATA[unterminated</r>");
+        assert!(root.is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E8013"));
+    }
+
+    #[test]
+    fn xml_reports_structural_problems_with_a_position() {
+        let cases = [
+            ("<a>\n<b>\n</a>\n</b>", "E8004", 3u32),
+            ("<a></a>\n</b>", "E8003", 2),
+            ("<a>\n<b>", "E8009", 2),
+            ("<a></a><b></b>", "E8005", 1),
+            ("text before<a></a>", "E8008", 1),
+            ("<a b></a>", "E8020", 1),
+            ("<a b=unquoted></a>", "E8021", 1),
+            ("<a b=\"x\" b=\"y\"></a>", "E8024", 1),
+            ("<a><!-- never closed </a>", "E8011", 1),
+            ("", "E8010", 1),
+        ];
+        for (document, code, line) in cases {
+            let (root, sink) = parse_xml(document);
+            assert!(root.is_none(), "{document:?} should not parse");
+            let error = sink
+                .entries()
+                .iter()
+                .find(|d| d.code == code)
+                .unwrap_or_else(|| panic!("{document:?} -> {:?}", sink.entries()));
+            assert_eq!(error.location.as_ref().unwrap().line, line, "{document:?}");
+        }
+    }
+
+    #[test]
+    fn xml_is_bounded_in_every_direction() {
+        // Directive section 60, on input that comes from a user's project.
+        let deep = format!(
+            "{}{}",
+            "<a>".repeat(super::xml::MAX_DEPTH + 1),
+            "</a>".repeat(super::xml::MAX_DEPTH + 1)
+        );
+        let (root, sink) = parse_xml(&deep);
+        assert!(root.is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E8007"));
+
+        let attributes: String = (0..super::xml::MAX_ATTRIBUTES + 5)
+            .map(|i| format!(" a{i}=\"v\""))
+            .collect();
+        let (root, sink) = parse_xml(&format!("<r{attributes}></r>"));
+        assert!(root.is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E8019"));
+
+        let long_name = "x".repeat(super::xml::MAX_NAME_BYTES + 1);
+        let (root, sink) = parse_xml(&format!("<{long_name}></{long_name}>"));
+        assert!(root.is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E8015"));
+
+        let (root, sink) = parse_xml(&"x".repeat(super::xml::MAX_DOCUMENT_BYTES + 1));
+        assert!(root.is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E8001"));
+    }
+
+    #[test]
+    fn xml_columns_count_characters_not_bytes() {
+        // A column number that counts bytes points at the wrong place in any file
+        // with Turkish, Greek or emoji in it.
+        let (root, sink) = parse_xml("<r>şşşş</r>\n<b>");
+        assert!(root.is_none());
+        let error = sink.entries().iter().find(|d| d.code == "E8009").unwrap();
+        assert_eq!(error.location.as_ref().unwrap().line, 2);
+    }
+
+    #[test]
+    fn xml_accepts_a_byte_order_mark() {
+        let (root, _) = parse_xml("\u{feff}<r/>");
+        assert_eq!(root.unwrap().name, "r");
+    }
+
+    #[test]
+    fn xml_survives_arbitrary_input() {
+        // Directive section 41. Resource files come from a user's project, and
+        // this reader is the first thing that touches them.
+        let mut seed = 0x5eed_0000_1111_2222u64;
+        let alphabet = b"<>/=\"'& \n\tabc&#;!-[]DOCTYPExml?";
+
+        for _ in 0..3_000 {
+            let length = (xorshift(&mut seed) % 200) as usize;
+            let document: String = (0..length)
+                .map(|_| alphabet[(xorshift(&mut seed) as usize) % alphabet.len()] as char)
+                .collect();
+            let mut sink = Sink::new();
+            // The requirement is that this returns, whatever it was given.
+            let _ = super::xml::parse(&document, "fuzz.xml", &mut sink);
+        }
+    }
+
+    // --- resources -----------------------------------------------------------
+
+    fn values(text: &str) -> (ResourceTable, Sink) {
+        let mut table = ResourceTable::new();
+        let mut sink = Sink::new();
+        table.read_values(text, "values/test.xml", &mut sink);
+        (table, sink)
+    }
+
+    #[test]
+    fn a_values_file_becomes_resources() {
+        let (table, sink) = values(
+            r#"<resources>
+    <string name="app_name">Omni_Builder</string>
+    <color name="accent">#6cb6ff</color>
+    <dimen name="gap">16dp</dimen>
+    <bool name="enabled">true</bool>
+    <integer name="retries">3</integer>
+    <id name="root" />
+</resources>"#,
+        );
+
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert_eq!(table.len(), 6);
+
+        let compiled = table.compile(&mut Sink::new()).expect("must compile");
+        let by_name = |kind, name| {
+            compiled
+                .entries()
+                .iter()
+                .find(|e| e.kind == kind && e.name == name)
+                .map(|e| e.value.clone())
+        };
+
+        assert_eq!(
+            by_name(ResourceKind::String, "app_name"),
+            Some(ResourceValue::Text("Omni_Builder".into()))
+        );
+        assert_eq!(
+            by_name(ResourceKind::Color, "accent"),
+            Some(ResourceValue::Color(0xff6c_b6ff))
+        );
+        assert_eq!(
+            by_name(ResourceKind::Dimension, "gap"),
+            Some(ResourceValue::Dimension {
+                milli: 16_000,
+                unit: ResourceUnit::Dp
+            })
+        );
+        assert_eq!(
+            by_name(ResourceKind::Bool, "enabled"),
+            Some(ResourceValue::Bool(true))
+        );
+        assert_eq!(
+            by_name(ResourceKind::Integer, "retries"),
+            Some(ResourceValue::Integer(3))
+        );
+        assert_eq!(
+            by_name(ResourceKind::Id, "root"),
+            Some(ResourceValue::Empty)
+        );
+    }
+
+    #[test]
+    fn colours_are_read_in_every_written_form() {
+        let (table, sink) = values(
+            r#"<resources>
+    <color name="a">#f00</color>
+    <color name="b">#8f00</color>
+    <color name="c">#ff0000</color>
+    <color name="d">#80ff0000</color>
+</resources>"#,
+        );
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let compiled = table.compile(&mut Sink::new()).unwrap();
+        let colour = |name: &str| {
+            compiled
+                .entries()
+                .iter()
+                .find(|e| e.name == name)
+                .and_then(|e| match e.value {
+                    ResourceValue::Color(value) => Some(value),
+                    _ => None,
+                })
+        };
+        assert_eq!(colour("a"), Some(0xffff_0000));
+        assert_eq!(colour("b"), Some(0x88ff_0000));
+        assert_eq!(colour("c"), Some(0xffff_0000));
+        assert_eq!(colour("d"), Some(0x80ff_0000));
+    }
+
+    #[test]
+    fn a_malformed_colour_is_refused_with_the_forms_that_work() {
+        for bad in ["red", "#", "#ff", "#fffff", "#gg0000", "0xff0000"] {
+            let (_, sink) = values(&format!(
+                "<resources><color name=\"c\">{bad}</color></resources>"
+            ));
+            assert!(
+                sink.entries().iter().any(|d| d.code == "E9041"),
+                "{bad} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn dimensions_keep_exactly_three_decimal_places() {
+        // Stored in thousandths, because a build that rounds differently on two
+        // machines is not reproducible (directive section 12).
+        let (table, sink) = values(
+            r#"<resources>
+    <dimen name="a">16dp</dimen>
+    <dimen name="b">14.5sp</dimen>
+    <dimen name="c">0.125in</dimen>
+    <dimen name="d">-8px</dimen>
+</resources>"#,
+        );
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let compiled = table.compile(&mut Sink::new()).unwrap();
+        let dimension = |name: &str| {
+            compiled
+                .entries()
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.value.clone())
+        };
+        assert_eq!(
+            dimension("a"),
+            Some(ResourceValue::Dimension {
+                milli: 16_000,
+                unit: ResourceUnit::Dp
+            })
+        );
+        assert_eq!(
+            dimension("b"),
+            Some(ResourceValue::Dimension {
+                milli: 14_500,
+                unit: ResourceUnit::Sp
+            })
+        );
+        assert_eq!(
+            dimension("c"),
+            Some(ResourceValue::Dimension {
+                milli: 125,
+                unit: ResourceUnit::In
+            })
+        );
+        assert_eq!(
+            dimension("d"),
+            Some(ResourceValue::Dimension {
+                milli: -8_000,
+                unit: ResourceUnit::Px
+            })
+        );
+
+        // Rendering round-trips, so a report shows what the author wrote.
+        assert_eq!(
+            ResourceValue::Dimension {
+                milli: 14_500,
+                unit: ResourceUnit::Sp
+            }
+            .to_source(),
+            "14.5sp"
+        );
+    }
+
+    #[test]
+    fn a_dimension_that_would_have_to_be_rounded_is_refused() {
+        let (_, sink) = values("<resources><dimen name=\"a\">1.2345dp</dimen></resources>");
+        let error = sink.entries().iter().find(|d| d.code == "E9042").unwrap();
+        assert!(error.message.contains("three decimal places"));
+
+        for bad in ["16", "dp", "16em", "abc dp", "1.2.3dp"] {
+            let (_, sink) = values(&format!(
+                "<resources><dimen name=\"a\">{bad}</dimen></resources>"
+            ));
+            assert!(
+                sink.entries().iter().any(|d| d.code == "E9042"),
+                "{bad} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn strings_follow_the_escape_and_whitespace_rules() {
+        let (table, sink) = values(
+            "<resources>\
+             <string name=\"collapsed\">  one   two\n   three  </string>\
+             <string name=\"quoted\">\"  kept  \"</string>\
+             <string name=\"escaped\">line\\nbreak \\@ \\' \\u00e7</string>\
+             </resources>",
+        );
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let compiled = table.compile(&mut Sink::new()).unwrap();
+        let text = |name: &str| {
+            compiled
+                .entries()
+                .iter()
+                .find(|e| e.name == name)
+                .and_then(|e| match &e.value {
+                    ResourceValue::Text(value) => Some(value.clone()),
+                    _ => None,
+                })
+        };
+        assert_eq!(text("collapsed").as_deref(), Some("one two three"));
+        assert_eq!(text("quoted").as_deref(), Some("  kept  "));
+        assert_eq!(text("escaped").as_deref(), Some("line\nbreak @ ' ç"));
+    }
+
+    #[test]
+    fn identifiers_are_assigned_from_sorted_order_not_file_order() {
+        // Directive section 12: an identifier must not depend on which file
+        // happened to be read first.
+        let forwards =
+            "<resources><string name=\"b\">B</string><string name=\"a\">A</string></resources>";
+        let backwards =
+            "<resources><string name=\"a\">A</string><string name=\"b\">B</string></resources>";
+
+        let left = values(forwards).0.compile(&mut Sink::new()).unwrap();
+        let right = values(backwards).0.compile(&mut Sink::new()).unwrap();
+
+        assert_eq!(left.assignments(), right.assignments());
+        assert_eq!(
+            left.id(ResourceKind::String, "a").unwrap().raw(),
+            right.id(ResourceKind::String, "a").unwrap().raw()
+        );
+    }
+
+    #[test]
+    fn an_identifier_has_the_shape_android_uses() {
+        let (table, _) = values(
+            r#"<resources>
+    <color name="accent">#fff</color>
+    <string name="a">A</string>
+    <string name="b">B</string>
+</resources>"#,
+        );
+        let compiled = table.compile(&mut Sink::new()).unwrap();
+
+        let colour = compiled.id(ResourceKind::Color, "accent").unwrap();
+        assert_eq!(colour.package(), 0x7f);
+        assert_eq!(colour.type_index(), 1, "color sorts before string");
+        assert_eq!(colour.entry_index(), 0);
+        assert_eq!(colour.to_string(), "0x7f010000");
+
+        let first = compiled.id(ResourceKind::String, "a").unwrap();
+        let second = compiled.id(ResourceKind::String, "b").unwrap();
+        assert_eq!(first.type_index(), 2);
+        assert_eq!(first.entry_index(), 0);
+        assert_eq!(second.entry_index(), 1);
+    }
+
+    #[test]
+    fn references_are_read_and_resolved() {
+        let (table, sink) = values(
+            r#"<resources>
+    <color name="base">#123456</color>
+    <color name="accent">@color/base</color>
+    <string name="platform">@android:string/ok</string>
+</resources>"#,
+        );
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let mut compile_sink = Sink::new();
+        let compiled = table.compile(&mut compile_sink).expect("must compile");
+        assert!(!compile_sink.has_blocking(), "{:?}", compile_sink.entries());
+        assert!(compiled.id(ResourceKind::Color, "accent").is_some());
+    }
+
+    #[test]
+    fn a_reference_to_something_undeclared_is_refused_with_a_suggestion() {
+        let (table, _) = values(
+            r#"<resources>
+    <color name="omni_accent">#123456</color>
+    <color name="other">@color/omni_accen</color>
+</resources>"#,
+        );
+        let mut sink = Sink::new();
+        assert!(table.compile(&mut sink).is_none());
+        let error = sink.entries().iter().find(|d| d.code == "E9031").unwrap();
+        assert!(error.suggestion.as_deref().unwrap().contains("omni_accent"));
+    }
+
+    #[test]
+    fn a_reference_loop_is_refused_rather_than_followed() {
+        let (table, _) = values(
+            r#"<resources>
+    <color name="a">@color/b</color>
+    <color name="b">@color/c</color>
+    <color name="c">@color/a</color>
+</resources>"#,
+        );
+        let mut sink = Sink::new();
+        assert!(table.compile(&mut sink).is_none());
+        let error = sink.entries().iter().find(|d| d.code == "E9032").unwrap();
+        assert!(error.context.iter().any(|line| line.contains("->")));
+    }
+
+    #[test]
+    fn a_resource_declared_twice_is_refused() {
+        let (_, sink) = values(
+            "<resources><string name=\"a\">1</string><string name=\"a\">2</string></resources>",
+        );
+        let error = sink.entries().iter().find(|d| d.code == "E9013").unwrap();
+        assert!(error
+            .context
+            .iter()
+            .any(|line| line.contains("First declared")));
+    }
+
+    #[test]
+    fn a_resource_name_must_be_usable_as_an_identifier() {
+        for bad in ["1abc", "has space", "has-dash", "", "has/slash"] {
+            let (_, sink) = values(&format!(
+                "<resources><string name=\"{bad}\">x</string></resources>"
+            ));
+            assert!(
+                sink.entries()
+                    .iter()
+                    .any(|d| d.code == "E9005" || d.code == "E8031"),
+                "{bad:?} was accepted"
+            );
+        }
+        let (_, sink) = values("<resources><string name=\"ok_name.2\">x</string></resources>");
+        assert!(!sink.has_blocking());
+    }
+
+    #[test]
+    fn an_unmodelled_element_is_reported_not_skipped() {
+        // Directive section 64: a resource that silently never existed is harder
+        // to find than one that was refused.
+        let (_, sink) = values("<resources><plurals name=\"p\">x</plurals></resources>");
+        assert!(sink.entries().iter().any(|d| d.code == "E9002"));
+
+        let (_, sink) = values("<resources><style name=\"Theme\">x</style></resources>");
+        let error = sink.entries().iter().find(|d| d.code == "E9003").unwrap();
+        assert!(error.message.contains("not yet modelled"));
+    }
+
+    #[test]
+    fn file_resources_carry_their_density_qualifier() {
+        let mut table = ResourceTable::new();
+        let mut sink = Sink::new();
+
+        assert!(table.read_file(
+            "drawable",
+            "omni_mark.xml",
+            "res/drawable/omni_mark.xml",
+            &mut sink
+        ));
+        assert!(table.read_file(
+            "mipmap-xxhdpi",
+            "ic_launcher.png",
+            "res/mipmap-xxhdpi/ic_launcher.png",
+            &mut sink
+        ));
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let compiled = table.compile(&mut Sink::new()).unwrap();
+        assert!(compiled.id(ResourceKind::Drawable, "omni_mark").is_some());
+
+        let launcher = compiled
+            .entries()
+            .iter()
+            .find(|e| e.name == "ic_launcher")
+            .unwrap();
+        assert_eq!(launcher.kind, ResourceKind::Mipmap);
+        assert_eq!(launcher.config.density, Density::ExtraExtraHigh);
+    }
+
+    #[test]
+    fn a_qualifier_this_build_does_not_model_is_refused() {
+        // A locale qualifier on a directory this build does understand: the type
+        // is fine, the qualifier is not modelled, and treating it as the default
+        // would put the wrong file on every device.
+        let mut table = ResourceTable::new();
+        let mut sink = Sink::new();
+        assert!(!table.read_file("drawable-tr", "a.png", "res/drawable-tr/a.png", &mut sink));
+        let error = sink.entries().iter().find(|d| d.code == "E9010").unwrap();
+        assert!(
+            error.message.contains("does not model"),
+            "{}",
+            error.message
+        );
+
+        // A directory whose type is not a resource type at all.
+        let mut sink = Sink::new();
+        assert!(!table.read_file("nonsense", "a.png", "res/nonsense/a.png", &mut sink));
+        let error = sink.entries().iter().find(|d| d.code == "E9010").unwrap();
+        assert!(
+            error.message.contains("is not a resource type"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn the_same_name_may_exist_at_several_densities() {
+        let mut table = ResourceTable::new();
+        let mut sink = Sink::new();
+        table.read_file("mipmap-hdpi", "ic.png", "res/mipmap-hdpi/ic.png", &mut sink);
+        table.read_file(
+            "mipmap-xhdpi",
+            "ic.png",
+            "res/mipmap-xhdpi/ic.png",
+            &mut sink,
+        );
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert_eq!(table.len(), 2);
+
+        let compiled = table.compile(&mut Sink::new()).unwrap();
+        // One name, one identifier, whatever the number of configurations.
+        assert_eq!(compiled.assignments().len(), 1);
+    }
+
+    #[test]
+    fn a_values_file_must_be_wrapped_in_resources() {
+        let (_, sink) = values("<strings><string name=\"a\">x</string></strings>");
+        assert!(sink.entries().iter().any(|d| d.code == "E9001"));
+    }
+
+    #[test]
+    fn a_compiled_table_serialises_into_a_valid_report() {
+        let (table, _) = values(
+            "<resources><string name=\"a\">A</string><color name=\"c\">#fff</color></resources>",
+        );
+        let compiled = table.compile(&mut Sink::new()).unwrap();
+
+        let mut w = Writer::new();
+        w.begin_object(None);
+        compiled.write_json(&mut w, "resources");
+        w.end_object();
+        let document = w.finish();
+
+        assert!(is_structurally_valid(&document), "{document}");
+        assert!(document.contains("\"packageId\":\"0x7f\""));
+        assert!(document.contains("\"binaryTableWritten\":false"));
+        assert!(document.contains("0x7f010000"));
+    }
+
+    #[test]
+    fn the_resource_engine_survives_arbitrary_input() {
+        let mut seed = 0xbeef_1234_5678_9abcu64;
+        let fragments = [
+            "<resources>",
+            "</resources>",
+            "<string name=\"a\">",
+            "</string>",
+            "<color name=",
+            "\"#\">",
+            "@color/",
+            "@+id/x",
+            "16dp",
+            "#gg",
+            "&amp;",
+            "<dimen>",
+            "\"",
+            "/>",
+            "\n",
+        ];
+        for _ in 0..2_000 {
+            let count = (xorshift(&mut seed) % 20) as usize;
+            let document: String = (0..count)
+                .map(|_| fragments[(xorshift(&mut seed) as usize) % fragments.len()])
+                .collect();
+            let mut table = ResourceTable::new();
+            let mut sink = Sink::new();
+            table.read_values(&document, "fuzz.xml", &mut sink);
+            let _ = table.compile(&mut sink);
         }
     }
 

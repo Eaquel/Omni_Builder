@@ -135,6 +135,16 @@ object OmniLog {
     @Volatile
     private var lastPublished: LogDestination? = null
 
+    /**
+     * Notified after each publish attempt, on the publisher thread.
+     *
+     * A single listener rather than a list: exactly one screen shows this, and a
+     * registry of listeners would be a way to leak an activity. It is cleared in
+     * onDestroy for the same reason.
+     */
+    @Volatile
+    private var publishListener: ((LogDestination) -> Unit)? = null
+
     @Volatile
     private var context: Context? = null
 
@@ -269,6 +279,12 @@ object OmniLog {
     /** The outcome of the most recent publish, if one has finished. */
     fun lastPublishOutcome(): LogDestination? = lastPublished
 
+    /** Replaces the publish listener. Passing null removes it. */
+    fun setPublishListener(listener: ((LogDestination) -> Unit)?) {
+        publishListener = listener
+        lastPublished?.let { outcome -> listener?.invoke(outcome) }
+    }
+
     private fun describeEnvironment(context: Context): String {
         val info = context.applicationInfo
         return buildString {
@@ -317,6 +333,7 @@ object OmniLog {
                                 "The private copy at ${outcome.location} is complete.",
                         )
                     }
+                    publishListener?.invoke(outcome)
                 }
                 LogDestination.Pending(written.path)
             }
@@ -331,7 +348,10 @@ object OmniLog {
     private fun writeBlocking(name: String, text: String, append: Boolean): LogDestination =
         when (val written = writePrivate(name, text, append)) {
             is PrivateWrite.Failed -> written.destination
-            is PrivateWrite.Ok -> publishNow(name, written.path).also { lastPublished = it }
+            is PrivateWrite.Ok -> publishNow(name, written.path).also {
+                lastPublished = it
+                publishListener?.invoke(it)
+            }
         }
 
     /**
@@ -405,48 +425,53 @@ object OmniLog {
         val resolver = context.contentResolver
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME"
+        val selection =
+            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?"
+        val arguments = arrayOf("$relativePath/", name)
 
-        var uri: Uri? = null
-        resolver.query(
+        // The entry is removed and recreated rather than reopened and truncated.
+        //
+        // Two earlier attempts failed on a Galaxy S23 running Android 16. Opening
+        // in "wt" mode wrote from offset zero without shortening the file, so each
+        // flush left the previous, longer document's tail behind. Truncating
+        // through a FileOutputStream built on the descriptor was worse: closing
+        // the stream closed the descriptor, the ParcelFileDescriptor then closed
+        // it a second time, and a double close can land on whatever file has since
+        // been given that descriptor number.
+        //
+        // Delete-then-insert has neither problem. It cannot leave old bytes
+        // behind, and because the old row is gone first, the provider never
+        // invents a "Session_Log (1).txt".
+        resolver.delete(collection, selection, arguments)
+
+        val destination = resolver.insert(
             collection,
-            arrayOf(MediaStore.MediaColumns._ID),
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?",
-            arrayOf("$relativePath/", name),
+            ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+            },
+        ) ?: throw IOException("MediaStore refused to create $name")
+
+        resolver.openOutputStream(destination, "w")?.use { stream ->
+            stream.write(bytes)
+            stream.flush()
+        } ?: throw IOException("MediaStore returned no stream for $name")
+
+        // Read the size back. A publish that reports success without checking is
+        // how the previous two bugs stayed invisible for a whole phase.
+        val published = resolver.query(
+            destination,
+            arrayOf(MediaStore.MediaColumns.SIZE),
             null,
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) {
-                uri = ContentUris.withAppendedId(collection, cursor.getLong(0))
-            }
-        }
+            null,
+            null,
+        )?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else -1L } ?: -1L
 
-        if (uri == null) {
-            uri = resolver.insert(
-                collection,
-                ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
-                },
+        if (published != bytes.size.toLong()) {
+            throw IOException(
+                "MediaStore stored $published bytes of ${bytes.size} for $name"
             )
-        }
-
-        val destination = uri ?: throw IOException("MediaStore refused to create $name")
-
-        // The file is truncated explicitly rather than by opening it in "wt"
-        // mode. On a Galaxy S23 running Android 16, "wt" wrote from offset zero
-        // without shortening the file, so every flush left the previous, shorter
-        // document's tail behind and the published log grew without bound while
-        // the private copy stayed correct. Truncating through the channel is not
-        // a hint to the provider; it is the operation.
-        val opened = resolver.openFileDescriptor(destination, "rw")
-            ?: throw IOException("MediaStore returned no descriptor for $name")
-
-        opened.use { descriptor ->
-            FileOutputStream(descriptor.fileDescriptor).use { stream ->
-                stream.channel.truncate(0)
-                stream.write(bytes)
-                stream.flush()
-            }
         }
 
         return "$relativePath/$name"
@@ -773,6 +798,9 @@ class BuilderActivity : Activity() {
         const val STORAGE_PERMISSION_REQUEST = 1
     }
 
+    /** The line that says where the session log went, updated when it gets there. */
+    private var logDestinationView: TextView? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
@@ -819,6 +847,9 @@ class BuilderActivity : Activity() {
     }
 
     override fun onDestroy() {
+        // The listener holds this activity; leaving it registered would leak it.
+        OmniLog.setPublishListener(null)
+        logDestinationView = null
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity destroyed.")
         OmniLog.flushSession()
         super.onDestroy()
@@ -1039,17 +1070,26 @@ class BuilderActivity : Activity() {
         section(root, R.string.omni_section_logs)
 
         val destination = OmniLog.flushSession()
-        root.addView(
-            keyValue(
-                OmniLog.SESSION_FILE,
-                OmniLog.describeDestination(destination),
-                when (destination) {
-                    is LogDestination.Published -> R.color.omni_ok
-                    is LogDestination.Pending -> R.color.omni_accent
-                    is LogDestination.PrivateOnly -> R.color.omni_warning
-                },
-            )
+        val row = keyValue(
+            OmniLog.SESSION_FILE,
+            OmniLog.describeDestination(destination),
+            destinationColor(destination),
         )
+        logDestinationView = row.getChildAt(1) as TextView
+        root.addView(row)
+
+        // Publishing runs on its own thread, so the line above starts out saying
+        // "publishing" and would stay that way forever if nothing came back to
+        // correct it. Directive section 43 does not allow a screen to show a
+        // state the system has already left.
+        OmniLog.setPublishListener { outcome ->
+            runOnUiThread {
+                logDestinationView?.apply {
+                    text = OmniLog.describeDestination(outcome)
+                    setTextColor(color(destinationColor(outcome)))
+                }
+            }
+        }
         root.addView(body(getString(R.string.omni_log_explanation, OmniLog.DIRECTORY_NAME)))
 
         val crash = OmniLog.lastCrash()
@@ -1153,6 +1193,12 @@ class BuilderActivity : Activity() {
     private fun divider() = View(this).apply {
         setBackgroundColor(color(R.color.omni_divider))
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(R.dimen.omni_divider_height))
+    }
+
+    private fun destinationColor(destination: LogDestination) = when (destination) {
+        is LogDestination.Published -> R.color.omni_ok
+        is LogDestination.Pending -> R.color.omni_accent
+        is LogDestination.PrivateOnly -> R.color.omni_warning
     }
 
     private fun stateColor(state: String) = when (state) {
