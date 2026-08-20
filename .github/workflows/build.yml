@@ -18,9 +18,9 @@
 #   5. A debug APK and an unsigned release APK build from source, with the Core
 #      linked into libomni_builder.so for every target ABI.
 #   6. Two clean release builds produce a byte-identical APK.
-#   7. Every APK the build produces contains every class its manifest names.
-#   8. Every APK the build produces can actually be installed: native libraries
-#      stored and 16 KB aligned, and a signature the platform accepts.
+#   7. Both APKs the build produces contain every class the manifest names.
+#   8. Both APKs can actually be installed: native libraries stored and 16 KB
+#      aligned, and, for the debug artifact, a signature the platform accepts.
 #   9. The v2 content digest the Core recomputes is the one Google's apksigner
 #      wrote, checked against a package apksigner signs during the test run.
 #  10. The Core's signing reader reads the APK this build produced -- an Android
@@ -272,6 +272,21 @@ jobs:
             exit 1
           fi
           echo "The release APK is byte-identical across clean rebuilds."
+
+      - name: Restore the debug APK the reproducibility check removed
+        # The step above runs `./gradlew clean` and then rebuilds only the
+        # release artifact, so the debug APK is gone by the time the checks
+        # below walk the output directory. They walk whatever is there and pass
+        # on one APK as readily as two, which is how the debug APK stopped being
+        # checked in CI without anything failing. The debug APK is the only one
+        # that carries a signature, so its absence also silently skipped the
+        # signature check - the very check added after "App not installed".
+        run: |
+          set -euo pipefail
+          ./gradlew :Builder:assembleDebug --console=plain
+          test -f Builder/build/outputs/apk/debug/Builder-debug.apk
+          test -f Builder/build/outputs/apk/release/Builder-release-unsigned.apk
+          echo "Both APKs are present; the checks below will see both."
 
       - name: Verify that the APKs contain the code they declare
         run: ./gradlew :Builder:verifyApkClasses --console=plain --rerun-tasks
