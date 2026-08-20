@@ -303,6 +303,43 @@
 //!   becomes a computed field and the constant-`false` tests are what force the
 //!   reports and the subsystem inventory to be updated with it.
 //! * **Status.** ACCEPTED.
+//!
+//! ### ADR-0011 — SHA-1 is implemented, for one caller, and is not a security primitive
+//!
+//! * **Context.** A DEX header carries a 20-byte `signature` field defined as
+//!   the SHA-1 of everything after it, and a 4-byte Adler-32 checksum defined
+//!   over everything after byte 12. A reader that cannot compute the first
+//!   cannot tell a truncated or edited DEX from an intact one. SHA-1 is also
+//!   broken: chosen-prefix collisions are practical and have been since 2020.
+//! * **Alternatives.** (a) Implement SHA-1 and use it wherever a hash is
+//!   wanted. (b) Do not implement it, and report the DEX signature field as
+//!   unread. (c) Implement it, scope it to this one caller, and make every
+//!   report that carries the result say what it is not.
+//! * **Decision.** (c).
+//! * **Reason.** The field is part of the format, and reading a format means
+//!   reading its fields. What makes SHA-1 dangerous is not computing it but
+//!   *believing* it: a collision attack matters when a hash stands in for an
+//!   identity. Here it stands in for nothing — the value is the file's own
+//!   description of itself, which anything that edits a DEX on purpose simply
+//!   recomputes. Option (b) would leave a real capability unbuilt over a risk
+//!   that does not apply; option (a) is how a broken primitive ends up under a
+//!   cache key.
+//! * **Tradeoffs.** A second-rate hash exists in the tree and could be
+//!   misused. That is a discipline cost, paid with the scoping below.
+//! * **Security impact.** `hash::sha1` is documented at its definition as being
+//!   for the DEX signature field alone. No cache key (section 11), artifact
+//!   digest (section 58), signing digest (section 25) or provenance record
+//!   (section 32) calls it; those use SHA-256 or SHA-512. `dex::Integrity`
+//!   reports the result together with a note, written into the JSON itself,
+//!   saying a match rules out truncation and accidental damage and is not
+//!   evidence of authorship or authenticity. The subsystem inventory says the
+//!   same in its own entry.
+//! * **Performance impact.** One SHA-1 pass over a DEX when its integrity is
+//!   checked, which is optional and not on the read path.
+//! * **Migration plan.** None. The DEX format defines this field as SHA-1 and
+//!   that will not change. If a future format version defines something else,
+//!   the new one is added and this stays for the versions that need it.
+//! * **Status.** ACCEPTED.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -360,7 +397,7 @@ pub mod plugins {
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Phase of the roadmap in directive section 52 that this tree implements.
-pub const CORE_PHASE: &str = "PHASE 6 — SIGNING";
+pub const CORE_PHASE: &str = "PHASE 7 — DEX";
 
 /// How far a roadmap phase has got.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -439,14 +476,17 @@ pub const ROADMAP: &[Phase] = &[
     Phase {
         number: 6,
         name: "PHASE 6 — SIGNING",
-        state: PhaseState::Current,
+        state: PhaseState::Delivered,
         delivers: "A DER reader, X.509 certificates, and the APK signing block                    with its content digest recomputed and matched against                    apksigner. Signatures are read, never produced or verified.",
     },
     Phase {
         number: 7,
         name: "PHASE 7 — DEX",
-        state: PhaseState::Planned,
-        delivers: "The Dalvik executable format.",
+        state: PhaseState::Current,
+        delivers: "The Dalvik executable format: header, map, string, type, \
+                   prototype, field and method pools and class definitions, \
+                   with the checksum and signature a file records over itself \
+                   recomputed. Read, not written; no bytecode is decoded.",
     },
     Phase {
         number: 8,
@@ -745,6 +785,34 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Pinned versions with provenance, verified against an observed \
                   environment.",
         missing: &["Only two components can be observed from a device."],
+    },
+    Subsystem {
+        name: "DEX reader",
+        status: Status::Partial,
+        directive_section: 21,
+        summary: "A classes.dex read down to its class definitions, with modified \
+                  UTF-8 decoded properly and the file's own checksum and \
+                  signature recomputed -- matched field for field against dexdump.",
+        missing: &[
+            "No code item is read, so nothing here can say what a method does.",
+            "Debug information, annotations and encoded arrays are located \
+             through the map but not parsed.",
+            "Nothing writes a DEX; producing one is the DEX plugin's job and it \
+             stays PLANNED.",
+            "Randomised robustness testing only; not coverage-guided fuzzing.",
+        ],
+    },
+    Subsystem {
+        name: "SHA-1",
+        status: Status::Partial,
+        directive_section: 30,
+        summary: "FIPS 180-4 SHA-1, verified against the published NIST vectors, \
+                  for one purpose: the DEX header's own signature field.",
+        missing: &[
+            "SHA-1 is broken for collision resistance and is not a security \
+             primitive here. It may not be used for provenance, authenticity or \
+             integrity against an adversary, and nothing in this tree does.",
+        ],
     },
     Subsystem {
         name: "DER reader",
@@ -2540,6 +2608,202 @@ pub mod hash {
                 *slot = slot.wrapping_add(value);
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // SHA-1 (FIPS 180-4, sections 4.1.1, 4.2.1, 5.3.1 and 6.1)
+    // -----------------------------------------------------------------------
+    //
+    // ## What this may be used for, and what it may not
+    //
+    // SHA-1 is here for exactly one reason: the DEX header carries a 20-byte
+    // `signature` field defined as the SHA-1 of everything after it, and a
+    // reader that cannot compute it cannot tell a truncated or edited DEX from
+    // an intact one. That is a *format field*, and checking it is checking
+    // that a file matches its own self-description.
+    //
+    // SHA-1 is broken for collision resistance: chosen-prefix collisions are
+    // practical. So this value must never be treated as evidence of
+    // provenance, authenticity or integrity against an adversary. Anyone able
+    // to edit a DEX can recompute its signature field, and this Core says so
+    // wherever it reports one. Nothing outside the DEX module may call it, and
+    // no cache key, artifact digest or security decision in this tree does.
+    // Directive section 30 permits an established standard with official test
+    // vectors; it does not make a broken primitive fit for a purpose it cannot
+    // serve.
+
+    /// A 20-byte SHA-1 digest. See the module note on what it may be used for.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Digest160([u8; 20]);
+
+    impl Digest160 {
+        /// The raw bytes, most significant first.
+        pub const fn as_bytes(&self) -> &[u8; 20] {
+            &self.0
+        }
+
+        /// Lowercase hexadecimal.
+        pub fn to_hex(self) -> String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut out = String::with_capacity(40);
+            for byte in self.0 {
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            out
+        }
+    }
+
+    impl core::fmt::Debug for Digest160 {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "sha1:{}", self.to_hex())
+        }
+    }
+
+    impl core::fmt::Display for Digest160 {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.to_hex())
+        }
+    }
+
+    /// Initial hash value (FIPS 180-4, section 5.3.1).
+    const H0_160: [u32; 5] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
+
+    /// Streaming SHA-1 state.
+    #[derive(Clone)]
+    pub struct Sha1 {
+        state: [u32; 5],
+        block: [u8; 64],
+        buffered: usize,
+        length_bits: u64,
+    }
+
+    impl Default for Sha1 {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Sha1 {
+        /// A fresh hasher.
+        pub const fn new() -> Self {
+            Sha1 {
+                state: H0_160,
+                block: [0u8; 64],
+                buffered: 0,
+                length_bits: 0,
+            }
+        }
+
+        /// Absorbs more of the message.
+        pub fn update(&mut self, mut data: &[u8]) {
+            self.length_bits = self.length_bits.wrapping_add((data.len() as u64) * 8);
+
+            if self.buffered > 0 {
+                let want = 64 - self.buffered;
+                let take = want.min(data.len());
+                self.block[self.buffered..self.buffered + take].copy_from_slice(&data[..take]);
+                self.buffered += take;
+                data = &data[take..];
+                if self.buffered == 64 {
+                    let block = self.block;
+                    self.compress(&block);
+                    self.buffered = 0;
+                }
+            }
+
+            while data.len() >= 64 {
+                let (block, rest) = data.split_at(64);
+                let mut fixed = [0u8; 64];
+                fixed.copy_from_slice(block);
+                self.compress(&fixed);
+                data = rest;
+            }
+
+            if !data.is_empty() {
+                self.block[..data.len()].copy_from_slice(data);
+                self.buffered = data.len();
+            }
+        }
+
+        /// Applies the padding of FIPS 180-4 section 5.1.1 and returns the digest.
+        pub fn finish(mut self) -> Digest160 {
+            let length_bits = self.length_bits;
+
+            self.append_padding_byte(0x80);
+            while self.buffered != 56 {
+                self.append_padding_byte(0x00);
+            }
+            for byte in length_bits.to_be_bytes() {
+                self.append_padding_byte(byte);
+            }
+            debug_assert_eq!(self.buffered, 0);
+
+            let mut out = [0u8; 20];
+            for (index, word) in self.state.iter().enumerate() {
+                out[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+            }
+            Digest160(out)
+        }
+
+        /// Appends one byte without touching the recorded message length.
+        fn append_padding_byte(&mut self, byte: u8) {
+            self.block[self.buffered] = byte;
+            self.buffered += 1;
+            if self.buffered == 64 {
+                let block = self.block;
+                self.compress(&block);
+                self.buffered = 0;
+            }
+        }
+
+        /// The round function of FIPS 180-4, section 6.1.2.
+        fn compress(&mut self, block: &[u8; 64]) {
+            let mut w = [0u32; 80];
+            for (index, chunk) in block.chunks_exact(4).enumerate() {
+                w[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+            for index in 16..80 {
+                w[index] =
+                    (w[index - 3] ^ w[index - 8] ^ w[index - 14] ^ w[index - 16]).rotate_left(1);
+            }
+
+            let [mut a, mut b, mut c, mut d, mut e] = self.state;
+
+            for (index, word) in w.iter().enumerate() {
+                let (f, k) = match index {
+                    0..=19 => ((b & c) | ((!b) & d), 0x5a827999u32),
+                    20..=39 => (b ^ c ^ d, 0x6ed9eba1),
+                    40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+                    _ => (b ^ c ^ d, 0xca62c1d6),
+                };
+                let temp = a
+                    .rotate_left(5)
+                    .wrapping_add(f)
+                    .wrapping_add(e)
+                    .wrapping_add(k)
+                    .wrapping_add(*word);
+                e = d;
+                d = c;
+                c = b.rotate_left(30);
+                b = a;
+                a = temp;
+            }
+
+            for (slot, value) in self.state.iter_mut().zip([a, b, c, d, e]) {
+                *slot = slot.wrapping_add(value);
+            }
+        }
+    }
+
+    /// Hashes a byte slice with SHA-1 in one call.
+    ///
+    /// Read the module note above before calling this: it is for the DEX
+    /// header's own signature field and nothing else.
+    pub fn sha1(data: &[u8]) -> Digest160 {
+        let mut hasher = Sha1::new();
+        hasher.update(data);
+        hasher.finish()
     }
 
     // -----------------------------------------------------------------------
@@ -11712,6 +11976,940 @@ pub mod signing {
 }
 
 // ===========================================================================
+// dex — the Dalvik executable format (directive section 21)
+// ===========================================================================
+
+/// Reading a `classes.dex` and checking it against its own self-description.
+///
+/// ## Contract (directive section 2)
+///
+/// | Field                | Value                                                        |
+/// |----------------------|--------------------------------------------------------------|
+/// | Module               | `omni_core::dex`                                             |
+/// | Purpose              | Read a DEX file's header, map and index pools, and recompute  |
+/// |                      | the checksum and signature it records over itself.            |
+/// | Inputs               | A DEX file's bytes. Untrusted.                                |
+/// | Outputs              | A [`Dex`] model and an [`Integrity`] result.                  |
+/// | Security             | Every offset and count is checked against the file's own      |
+/// |                      | length before it is used. A malformed file is refused, never  |
+/// |                      | partially believed.                                           |
+/// | Determinism          | Reading the same bytes yields the same model.                 |
+/// | Status               | PARTIAL — the index structures are read; bytecode is not.     |
+///
+/// ## What is read, and what is not
+///
+/// **Read.** The header, the map list, the string pool (with its modified
+/// UTF-8 decoded properly, including the surrogate pairs that encode
+/// characters outside the basic plane), the type, prototype, field and method
+/// pools, and the class definitions with their superclass, interfaces, access
+/// flags and source file. That is enough to say what a DEX declares.
+///
+/// **Not read.** Code items, so no instruction is decoded and nothing here can
+/// say what a method *does*. Debug information, annotations and encoded array
+/// values are located through the map but not parsed. Nothing writes a DEX;
+/// producing one is the DEX plugin's job and it stays `PLANNED`.
+///
+/// ## The two integrity fields
+///
+/// A DEX records an Adler-32 checksum of everything after byte 12 and a SHA-1
+/// signature of everything after byte 32. Both are recomputed here.
+///
+/// Neither is a security property. They are the file's description of itself,
+/// so they catch truncation, a bad transfer and an edit made by something that
+/// did not know to fix them up. Anyone who edits a DEX deliberately recomputes
+/// both, and SHA-1 is in any case broken for collision resistance. Every report
+/// this module writes says so rather than letting a match be read as proof.
+pub mod dex {
+    use crate::binary::checksum::adler32;
+    use crate::binary::{Endian, Reader};
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::hash::{sha1, Digest160};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    /// The first four bytes of every DEX file.
+    pub const MAGIC: &[u8; 4] = b"dex\n";
+
+    /// The size the header declares for itself, in every version so far.
+    pub const HEADER_SIZE: u32 = 0x70;
+
+    /// The value that means "this file is little-endian", which is the only
+    /// byte order Android has ever shipped.
+    pub const ENDIAN_CONSTANT: u32 = 0x1234_5678;
+
+    /// The reversed constant, which would mean a big-endian file.
+    pub const REVERSE_ENDIAN_CONSTANT: u32 = 0x7856_3412;
+
+    /// Offset at which the Adler-32 checksum's coverage begins.
+    const CHECKSUM_COVERAGE_FROM: usize = 12;
+
+    /// Offset at which the SHA-1 signature's coverage begins.
+    const SIGNATURE_COVERAGE_FROM: usize = 32;
+
+    /// Largest DEX this reader accepts (directive section 60).
+    ///
+    /// The format's own limit is 65536 methods per file, and a real
+    /// `classes.dex` is a few megabytes. This bound exists so that a declared
+    /// size cannot make the reader allocate; it is not a statement about what
+    /// is reasonable.
+    pub const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+
+    /// Largest number of entries any one pool may declare.
+    ///
+    /// Each pool entry costs at least four bytes in the file, so a count past
+    /// this could not be satisfied by any file this reader accepts. Checking
+    /// the count before trusting it is what stops a header from asking for an
+    /// allocation the file cannot back.
+    const MAX_POOL_ENTRIES: u32 = 16 * 1024 * 1024;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.dex",
+            message,
+        )
+    }
+
+    /// A DEX file's header, as it describes itself.
+    #[derive(Clone, Debug)]
+    pub struct Header {
+        /// The three-digit version from the magic, for example `035`.
+        pub version: String,
+        /// The Adler-32 checksum the file records.
+        pub checksum: u32,
+        /// The SHA-1 signature the file records.
+        pub signature: [u8; 20],
+        /// The length the file claims to be.
+        pub file_size: u32,
+        /// The length the header claims to be.
+        pub header_size: u32,
+        /// The byte-order marker.
+        pub endian_tag: u32,
+        /// Where the map list is.
+        pub map_off: u32,
+        /// Number of entries in the string pool.
+        pub string_ids_size: u32,
+        /// Number of entries in the type pool.
+        pub type_ids_size: u32,
+        /// Number of entries in the prototype pool.
+        pub proto_ids_size: u32,
+        /// Number of entries in the field pool.
+        pub field_ids_size: u32,
+        /// Number of entries in the method pool.
+        pub method_ids_size: u32,
+        /// Number of class definitions.
+        pub class_defs_size: u32,
+    }
+
+    /// One entry of the map list.
+    #[derive(Clone, Debug)]
+    pub struct MapEntry {
+        /// The type code the format assigns to this kind of item.
+        pub kind: u16,
+        /// Its name, or `"unknown"` for a code this build does not know.
+        pub name: &'static str,
+        /// How many of them there are.
+        pub size: u32,
+        /// Where they start.
+        pub offset: u32,
+    }
+
+    /// Every map item type the format defines.
+    const MAP_TYPES: &[(u16, &str)] = &[
+        (0x0000, "header_item"),
+        (0x0001, "string_id_item"),
+        (0x0002, "type_id_item"),
+        (0x0003, "proto_id_item"),
+        (0x0004, "field_id_item"),
+        (0x0005, "method_id_item"),
+        (0x0006, "class_def_item"),
+        (0x0007, "call_site_id_item"),
+        (0x0008, "method_handle_item"),
+        (0x1000, "map_list"),
+        (0x1001, "type_list"),
+        (0x1002, "annotation_set_ref_list"),
+        (0x1003, "annotation_set_item"),
+        (0x2000, "class_data_item"),
+        (0x2001, "code_item"),
+        (0x2002, "string_data_item"),
+        (0x2003, "debug_info_item"),
+        (0x2004, "annotation_item"),
+        (0x2005, "encoded_array_item"),
+        (0x2006, "annotations_directory_item"),
+        (0xf000, "hiddenapi_class_data_item"),
+    ];
+
+    fn map_type_name(kind: u16) -> &'static str {
+        MAP_TYPES
+            .iter()
+            .find(|(code, _)| *code == kind)
+            .map(|(_, name)| *name)
+            .unwrap_or("unknown")
+    }
+
+    /// A class the file defines.
+    #[derive(Clone, Debug)]
+    pub struct Class {
+        /// Its name in source form, for example `com.omni.builder.Builder`.
+        pub name: String,
+        /// Its access flags, as recorded.
+        pub access_flags: u32,
+        /// Its superclass, absent only for `java.lang.Object`.
+        pub superclass: Option<String>,
+        /// The interfaces it declares.
+        pub interfaces: Vec<String>,
+        /// The source file it was compiled from, when recorded.
+        pub source_file: Option<String>,
+    }
+
+    /// A method the file refers to, whether or not it defines it.
+    #[derive(Clone, Debug)]
+    pub struct Method {
+        /// The class that holds it, in source form.
+        pub class: String,
+        /// Its name.
+        pub name: String,
+        /// Its shorty descriptor, which is one character per parameter.
+        pub shorty: String,
+    }
+
+    /// A field the file refers to, whether or not it defines it.
+    #[derive(Clone, Debug)]
+    pub struct Field {
+        /// The class that holds it, in source form.
+        pub class: String,
+        /// Its name.
+        pub name: String,
+        /// Its type, in source form.
+        pub type_name: String,
+    }
+
+    /// A DEX file, read.
+    #[derive(Clone, Debug)]
+    pub struct Dex {
+        /// The header, as the file describes itself.
+        pub header: Header,
+        /// The map list, in file order.
+        pub map: Vec<MapEntry>,
+        /// The string pool, decoded from modified UTF-8.
+        pub strings: Vec<String>,
+        /// The type pool, in source form.
+        pub types: Vec<String>,
+        /// The classes the file defines.
+        pub classes: Vec<Class>,
+        /// The methods the file refers to.
+        pub methods: Vec<Method>,
+        /// The fields the file refers to.
+        pub fields: Vec<Field>,
+    }
+
+    impl Dex {
+        /// The names of the classes this file defines, in file order.
+        pub fn class_names(&self) -> Vec<&str> {
+            self.classes
+                .iter()
+                .map(|class| class.name.as_str())
+                .collect()
+        }
+
+        /// Whether this file defines a class with the given source-form name.
+        pub fn defines(&self, name: &str) -> bool {
+            self.classes.iter().any(|class| class.name == name)
+        }
+
+        /// Serialises the model as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("version", &self.header.version);
+            w.field_u64("fileSize", self.header.file_size as u64);
+            w.field_u64("strings", self.strings.len() as u64);
+            w.field_u64("types", self.types.len() as u64);
+            w.field_u64("classes", self.classes.len() as u64);
+            w.field_u64("methods", self.methods.len() as u64);
+            w.field_u64("fields", self.fields.len() as u64);
+            w.begin_array(Some("map"));
+            for entry in &self.map {
+                w.begin_object(None);
+                w.field_str("name", entry.name);
+                w.field_u64("size", entry.size as u64);
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// What the two self-describing fields say, and what they actually are.
+    #[derive(Clone, Debug)]
+    pub struct Integrity {
+        /// The Adler-32 the file records.
+        pub checksum_recorded: u32,
+        /// The Adler-32 this build computed over the same bytes.
+        pub checksum_computed: u32,
+        /// The SHA-1 the file records.
+        pub signature_recorded: [u8; 20],
+        /// The SHA-1 this build computed over the same bytes.
+        pub signature_computed: Digest160,
+    }
+
+    impl Integrity {
+        /// Whether the checksum matches.
+        pub fn checksum_matches(&self) -> bool {
+            self.checksum_recorded == self.checksum_computed
+        }
+
+        /// Whether the signature matches.
+        pub fn signature_matches(&self) -> bool {
+            &self.signature_recorded == self.signature_computed.as_bytes()
+        }
+
+        /// Whether the file matches its own description of itself.
+        ///
+        /// This is not "the file is genuine" and must never be reported as
+        /// though it were. Both fields are recomputed by anything that edits a
+        /// DEX on purpose, and SHA-1 is broken for collision resistance. What a
+        /// match rules out is a truncated file, a damaged transfer, and an edit
+        /// by something that did not know to fix the header up.
+        pub fn self_consistent(&self) -> bool {
+            self.checksum_matches() && self.signature_matches()
+        }
+
+        /// Serialises the result as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_bool("checksumMatches", self.checksum_matches());
+            w.field_bool("signatureMatches", self.signature_matches());
+            w.field_str("signature", &self.signature_computed.to_hex());
+            // Directive section 1: the field name has to carry the limit, or
+            // the number above will be read as something it is not.
+            w.field_str(
+                "note",
+                "These two fields are the file's description of itself. A match \
+                 rules out truncation and accidental damage. It is not evidence \
+                 of authorship or authenticity: anything that edits a DEX \
+                 recomputes both, and SHA-1 is broken for collision resistance.",
+            );
+            w.end_object();
+        }
+    }
+
+    /// Recomputes the checksum and the signature a DEX records over itself.
+    pub fn integrity(data: &[u8]) -> Result<Integrity, Diagnostic> {
+        if data.len() < HEADER_SIZE as usize {
+            return Err(fail("EX001", "The file is shorter than a DEX header.")
+                .with_context(format!("Length: {} bytes", data.len()))
+                .with_context(format!("A header is {HEADER_SIZE} bytes")));
+        }
+
+        let mut recorded_signature = [0u8; 20];
+        recorded_signature.copy_from_slice(&data[12..32]);
+
+        Ok(Integrity {
+            checksum_recorded: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
+            checksum_computed: adler32(&data[CHECKSUM_COVERAGE_FROM..]),
+            signature_recorded: recorded_signature,
+            signature_computed: sha1(&data[SIGNATURE_COVERAGE_FROM..]),
+        })
+    }
+
+    /// Turns a type descriptor into the form a person writes.
+    ///
+    /// `Ljava/lang/String;` becomes `java.lang.String`, `[I` becomes `int[]`.
+    /// A descriptor this does not recognise is returned unchanged rather than
+    /// guessed at, so nothing is ever silently renamed.
+    pub fn descriptor_to_source(descriptor: &str) -> String {
+        let mut dimensions = 0usize;
+        let mut rest = descriptor;
+        while let Some(stripped) = rest.strip_prefix('[') {
+            dimensions += 1;
+            rest = stripped;
+        }
+
+        let base = match rest {
+            "V" => "void".to_string(),
+            "Z" => "boolean".to_string(),
+            "B" => "byte".to_string(),
+            "S" => "short".to_string(),
+            "C" => "char".to_string(),
+            "I" => "int".to_string(),
+            "J" => "long".to_string(),
+            "F" => "float".to_string(),
+            "D" => "double".to_string(),
+            other => {
+                if let Some(inner) = other.strip_prefix('L').and_then(|s| s.strip_suffix(';')) {
+                    inner.replace('/', ".")
+                } else {
+                    return descriptor.to_string();
+                }
+            }
+        };
+
+        let mut out = base;
+        for _ in 0..dimensions {
+            out.push_str("[]");
+        }
+        out
+    }
+
+    /// Decodes the modified UTF-8 a DEX string pool uses.
+    ///
+    /// It differs from UTF-8 in two ways that matter, and both are the reason
+    /// this is written by hand rather than handed to `str::from_utf8`:
+    ///
+    /// * `U+0000` is encoded as `0xc0 0x80` so that a string may contain a NUL
+    ///   without terminating itself.
+    /// * A character outside the basic plane is encoded as its two UTF-16
+    ///   surrogates, each in three bytes, rather than in one four-byte
+    ///   sequence. Standard UTF-8 forbids encoding a surrogate at all.
+    ///
+    /// An unpaired surrogate is refused rather than replaced. Replacing it
+    /// would let two different files decode to the same name, and a name is
+    /// what a class is identified by.
+    pub fn decode_modified_utf8(bytes: &[u8]) -> Result<String, Diagnostic> {
+        let mut units: Vec<u16> = Vec::with_capacity(bytes.len());
+        let mut index = 0usize;
+
+        while index < bytes.len() {
+            let first = bytes[index];
+            match first {
+                0x01..=0x7f => {
+                    units.push(u16::from(first));
+                    index += 1;
+                }
+                0xc0..=0xdf => {
+                    let Some(second) = bytes.get(index + 1) else {
+                        return Err(fail("EX010", "A string ends inside a character."));
+                    };
+                    if second & 0xc0 != 0x80 {
+                        return Err(fail("EX011", "A string has a malformed character."));
+                    }
+                    units.push((u16::from(first & 0x1f) << 6) | u16::from(second & 0x3f));
+                    index += 2;
+                }
+                0xe0..=0xef => {
+                    let (Some(second), Some(third)) = (bytes.get(index + 1), bytes.get(index + 2))
+                    else {
+                        return Err(fail("EX010", "A string ends inside a character."));
+                    };
+                    if second & 0xc0 != 0x80 || third & 0xc0 != 0x80 {
+                        return Err(fail("EX011", "A string has a malformed character."));
+                    }
+                    units.push(
+                        (u16::from(first & 0x0f) << 12)
+                            | (u16::from(second & 0x3f) << 6)
+                            | u16::from(third & 0x3f),
+                    );
+                    index += 3;
+                }
+                // 0x00 would terminate the string, and 0xf0 and above is the
+                // four-byte form that modified UTF-8 does not use.
+                _ => {
+                    return Err(fail(
+                        "EX012",
+                        "A string uses a byte modified UTF-8 does not define.",
+                    )
+                    .with_context(format!("Byte: 0x{first:02x}")))
+                }
+            }
+        }
+
+        String::from_utf16(&units)
+            .map_err(|_| fail("EX013", "A string contains an unpaired surrogate."))
+    }
+
+    /// Reads a DEX file.
+    ///
+    /// Everything the header declares is checked against the length of the data
+    /// actually supplied before it is used, so no count and no offset in a
+    /// malformed file can make this read past its buffer or allocate for a
+    /// pool that is not there (directive section 60).
+    pub fn read(data: &[u8], sink: &mut Sink) -> Result<Dex, Diagnostic> {
+        if data.len() as u64 > MAX_FILE_BYTES {
+            return Err(
+                fail("EX002", "The file is larger than this reader accepts.")
+                    .with_context(format!("Length: {} bytes", data.len()))
+                    .with_context(format!("Limit: {MAX_FILE_BYTES} bytes")),
+            );
+        }
+
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.expect_magic(MAGIC)?;
+
+        let version_bytes = reader.bytes(4)?;
+        if version_bytes[3] != 0 {
+            return Err(fail("EX003", "The magic is not terminated."));
+        }
+        let version = String::from_utf8(version_bytes[..3].to_vec())
+            .map_err(|_| fail("EX003", "The version in the magic is not printable."))?;
+        if !version.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(fail("EX003", "The version in the magic is not a number.")
+                .with_context(format!("Found: {version:?}")));
+        }
+
+        let checksum = reader.u32()?;
+        let mut signature = [0u8; 20];
+        signature.copy_from_slice(reader.bytes(20)?);
+
+        let file_size = reader.u32()?;
+        let header_size = reader.u32()?;
+        let endian_tag = reader.u32()?;
+
+        if endian_tag == REVERSE_ENDIAN_CONSTANT {
+            return Err(fail(
+                "EX004",
+                "The file is big-endian, which this reader does not support.",
+            )
+            .with_suggestion(
+                "Android has only ever shipped little-endian DEX files. A \
+                 big-endian one is either a different platform's or damaged.",
+            ));
+        }
+        if endian_tag != ENDIAN_CONSTANT {
+            return Err(fail(
+                "EX004",
+                "The byte-order marker is not a value the format defines.",
+            )
+            .with_context(format!("Found: 0x{endian_tag:08x}"))
+            .with_context(format!("Expected: 0x{ENDIAN_CONSTANT:08x}")));
+        }
+
+        if header_size != HEADER_SIZE {
+            return Err(fail("EX005", "The header declares an unexpected size.")
+                .with_context(format!("Declared: {header_size}"))
+                .with_context(format!("Expected: {HEADER_SIZE}")));
+        }
+
+        // A file that lies about its own length is not one to keep reading:
+        // every offset below is relative to a size this disagrees with.
+        if file_size as usize != data.len() {
+            return Err(
+                fail("EX006", "The header's file size is not the file's size.")
+                    .with_context(format!("Declared: {file_size} bytes"))
+                    .with_context(format!("Actual: {} bytes", data.len()))
+                    .with_suggestion("The file is truncated, padded, or not the file it claims."),
+            );
+        }
+
+        let _link_size = reader.u32()?;
+        let _link_off = reader.u32()?;
+        let map_off = reader.u32()?;
+
+        let string_ids_size = reader.u32()?;
+        let string_ids_off = reader.u32()?;
+        let type_ids_size = reader.u32()?;
+        let type_ids_off = reader.u32()?;
+        let proto_ids_size = reader.u32()?;
+        let proto_ids_off = reader.u32()?;
+        let field_ids_size = reader.u32()?;
+        let field_ids_off = reader.u32()?;
+        let method_ids_size = reader.u32()?;
+        let method_ids_off = reader.u32()?;
+        let class_defs_size = reader.u32()?;
+        let class_defs_off = reader.u32()?;
+
+        for (name, count) in [
+            ("string", string_ids_size),
+            ("type", type_ids_size),
+            ("prototype", proto_ids_size),
+            ("field", field_ids_size),
+            ("method", method_ids_size),
+            ("class", class_defs_size),
+        ] {
+            if count > MAX_POOL_ENTRIES {
+                return Err(fail(
+                    "EX007",
+                    format!("The {name} pool declares too many entries."),
+                )
+                .with_context(format!("Declared: {count}"))
+                .with_context(format!("Limit: {MAX_POOL_ENTRIES}")));
+            }
+        }
+
+        let header = Header {
+            version,
+            checksum,
+            signature,
+            file_size,
+            header_size,
+            endian_tag,
+            map_off,
+            string_ids_size,
+            type_ids_size,
+            proto_ids_size,
+            field_ids_size,
+            method_ids_size,
+            class_defs_size,
+        };
+
+        let map = read_map(data, map_off)?;
+        let strings = read_strings(data, string_ids_off, string_ids_size)?;
+        let types = read_types(data, type_ids_off, type_ids_size, &strings)?;
+        let (protos, proto_shorties) =
+            read_protos(data, proto_ids_off, proto_ids_size, &strings, &types)?;
+        let fields = read_fields(data, field_ids_off, field_ids_size, &strings, &types)?;
+        let methods = read_methods(
+            data,
+            method_ids_off,
+            method_ids_size,
+            &strings,
+            &types,
+            &proto_shorties,
+        )?;
+        let classes = read_classes(data, class_defs_off, class_defs_size, &strings, &types)?;
+
+        // The prototypes are read to give the methods their shorty, and the
+        // return types are not modelled separately; saying so beats a field
+        // that exists and is always empty.
+        let _ = protos;
+
+        // The integrity fields are reported, not enforced. A DEX that fails
+        // them is still readable and the caller may want to see what is in it,
+        // so this is a diagnostic rather than a refusal.
+        match integrity(data) {
+            Ok(result) => {
+                if !result.checksum_matches() {
+                    sink.emit(
+                        Diagnostic::new(
+                            "EX020",
+                            Severity::Warning,
+                            FailureClass::Corruption,
+                            "core.dex",
+                            "The file does not match the checksum it records for itself.",
+                        )
+                        .with_context(format!("Recorded: 0x{:08x}", result.checksum_recorded))
+                        .with_context(format!("Computed: 0x{:08x}", result.checksum_computed))
+                        .with_suggestion(
+                            "The file has been changed by something that did not \
+                             update the header, or it is damaged.",
+                        ),
+                    );
+                }
+                if !result.signature_matches() {
+                    sink.emit(
+                        Diagnostic::new(
+                            "EX021",
+                            Severity::Warning,
+                            FailureClass::Corruption,
+                            "core.dex",
+                            "The file does not match the signature it records for itself.",
+                        )
+                        .with_context(format!("Computed: {}", result.signature_computed))
+                        .with_suggestion(
+                            "This is the file's own description of itself, not \
+                             evidence of who wrote it.",
+                        ),
+                    );
+                }
+            }
+            Err(error) => sink.emit(error),
+        }
+
+        Ok(Dex {
+            header,
+            map,
+            strings,
+            types,
+            classes,
+            methods,
+            fields,
+        })
+    }
+
+    fn read_map(data: &[u8], offset: u32) -> Result<Vec<MapEntry>, Diagnostic> {
+        if offset == 0 {
+            return Ok(Vec::new());
+        }
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+
+        let count = reader.u32()?;
+        if count > MAX_POOL_ENTRIES {
+            return Err(fail("EX030", "The map list declares too many entries.")
+                .with_context(format!("Declared: {count}")));
+        }
+        // Each entry is 12 bytes; refusing a count the file cannot hold is what
+        // stops the reservation below from being driven by the file.
+        if u64::from(count) * 12 > reader.remaining() as u64 {
+            return Err(fail("EX030", "The map list is longer than the file.")
+                .with_context(format!("Entries: {count}"))
+                .with_context(format!("Bytes left: {}", reader.remaining())));
+        }
+
+        let mut entries = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let kind = reader.u16()?;
+            let _unused = reader.u16()?;
+            let size = reader.u32()?;
+            let item_offset = reader.u32()?;
+            entries.push(MapEntry {
+                kind,
+                name: map_type_name(kind),
+                size,
+                offset: item_offset,
+            });
+        }
+        Ok(entries)
+    }
+
+    /// Checks that a pool of `count` fixed-size entries fits in the file.
+    ///
+    /// Called before every `Vec::with_capacity` below, so that a count taken
+    /// from the file can never drive an allocation the file cannot back.
+    fn pool_fits(
+        data: &[u8],
+        offset: u32,
+        count: u32,
+        entry_bytes: u64,
+        what: &str,
+    ) -> Result<(), Diagnostic> {
+        let end = u64::from(offset) + u64::from(count) * entry_bytes;
+        if end > data.len() as u64 {
+            return Err(
+                fail("EX008", format!("The {what} pool extends past the file."))
+                    .with_context(format!("Entries: {count}"))
+                    .with_context(format!("Ends at: {end}"))
+                    .with_context(format!("File: {} bytes", data.len())),
+            );
+        }
+        Ok(())
+    }
+
+    fn read_strings(data: &[u8], offset: u32, count: u32) -> Result<Vec<String>, Diagnostic> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        pool_fits(data, offset, count, 4, "string")?;
+
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+        let mut offsets = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            offsets.push(reader.u32()?);
+        }
+
+        let mut strings = Vec::with_capacity(count as usize);
+        for data_offset in offsets {
+            let mut item = Reader::new(data, Endian::Little, "classes.dex");
+            item.seek(u64::from(data_offset))?;
+            // The declared length is in UTF-16 units, which is not the number
+            // of bytes; the bytes run to the NUL. Reading to the NUL and then
+            // decoding is what makes the two agree without trusting either.
+            let _utf16_units = item.uleb128()?;
+            let bytes = item.cstring()?;
+            strings.push(decode_modified_utf8(bytes)?);
+        }
+        Ok(strings)
+    }
+
+    /// Looks a string up, refusing an index the pool does not have.
+    fn string_at(strings: &[String], index: u32, what: &str) -> Result<String, Diagnostic> {
+        strings.get(index as usize).cloned().ok_or_else(|| {
+            fail(
+                "EX014",
+                format!("A {what} refers to string {index}, which is not there."),
+            )
+            .with_context(format!("Strings: {}", strings.len()))
+        })
+    }
+
+    /// Looks a type up, refusing an index the pool does not have.
+    fn type_at(types: &[String], index: u32, what: &str) -> Result<String, Diagnostic> {
+        types.get(index as usize).cloned().ok_or_else(|| {
+            fail(
+                "EX015",
+                format!("A {what} refers to type {index}, which is not there."),
+            )
+            .with_context(format!("Types: {}", types.len()))
+        })
+    }
+
+    fn read_types(
+        data: &[u8],
+        offset: u32,
+        count: u32,
+        strings: &[String],
+    ) -> Result<Vec<String>, Diagnostic> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        pool_fits(data, offset, count, 4, "type")?;
+
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+        let mut types = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let descriptor_index = reader.u32()?;
+            let descriptor = string_at(strings, descriptor_index, "type")?;
+            types.push(descriptor_to_source(&descriptor));
+        }
+        Ok(types)
+    }
+
+    fn read_protos(
+        data: &[u8],
+        offset: u32,
+        count: u32,
+        strings: &[String],
+        types: &[String],
+    ) -> Result<(Vec<String>, Vec<String>), Diagnostic> {
+        if count == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        pool_fits(data, offset, count, 12, "prototype")?;
+
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+        let mut returns = Vec::with_capacity(count as usize);
+        let mut shorties = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let shorty_index = reader.u32()?;
+            let return_index = reader.u32()?;
+            let _parameters_off = reader.u32()?;
+            shorties.push(string_at(strings, shorty_index, "prototype")?);
+            returns.push(type_at(types, return_index, "prototype return")?);
+        }
+        Ok((returns, shorties))
+    }
+
+    fn read_fields(
+        data: &[u8],
+        offset: u32,
+        count: u32,
+        strings: &[String],
+        types: &[String],
+    ) -> Result<Vec<Field>, Diagnostic> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        pool_fits(data, offset, count, 8, "field")?;
+
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+        let mut fields = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let class_index = u32::from(reader.u16()?);
+            let type_index = u32::from(reader.u16()?);
+            let name_index = reader.u32()?;
+            fields.push(Field {
+                class: type_at(types, class_index, "field class")?,
+                type_name: type_at(types, type_index, "field type")?,
+                name: string_at(strings, name_index, "field name")?,
+            });
+        }
+        Ok(fields)
+    }
+
+    fn read_methods(
+        data: &[u8],
+        offset: u32,
+        count: u32,
+        strings: &[String],
+        types: &[String],
+        shorties: &[String],
+    ) -> Result<Vec<Method>, Diagnostic> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        pool_fits(data, offset, count, 8, "method")?;
+
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+        let mut methods = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let class_index = u32::from(reader.u16()?);
+            let proto_index = usize::from(reader.u16()?);
+            let name_index = reader.u32()?;
+            let shorty = shorties.get(proto_index).cloned().ok_or_else(|| {
+                fail(
+                    "EX016",
+                    format!("A method refers to prototype {proto_index}, which is not there."),
+                )
+            })?;
+            methods.push(Method {
+                class: type_at(types, class_index, "method class")?,
+                name: string_at(strings, name_index, "method name")?,
+                shorty,
+            });
+        }
+        Ok(methods)
+    }
+
+    fn read_classes(
+        data: &[u8],
+        offset: u32,
+        count: u32,
+        strings: &[String],
+        types: &[String],
+    ) -> Result<Vec<Class>, Diagnostic> {
+        if count == 0 {
+            return Ok(Vec::new());
+        }
+        pool_fits(data, offset, count, 32, "class")?;
+
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+        let mut classes = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let class_index = reader.u32()?;
+            let access_flags = reader.u32()?;
+            let superclass_index = reader.u32()?;
+            let interfaces_off = reader.u32()?;
+            let source_file_index = reader.u32()?;
+            let _annotations_off = reader.u32()?;
+            let _class_data_off = reader.u32()?;
+            let _static_values_off = reader.u32()?;
+
+            // NO_INDEX marks a field that is absent rather than zero, and the
+            // difference matters: string 0 and type 0 are real entries.
+            const NO_INDEX: u32 = 0xffff_ffff;
+
+            classes.push(Class {
+                name: type_at(types, class_index, "class")?,
+                access_flags,
+                superclass: if superclass_index == NO_INDEX {
+                    None
+                } else {
+                    Some(type_at(types, superclass_index, "superclass")?)
+                },
+                interfaces: read_type_list(data, interfaces_off, types)?,
+                source_file: if source_file_index == NO_INDEX {
+                    None
+                } else {
+                    Some(string_at(strings, source_file_index, "source file")?)
+                },
+            });
+        }
+        Ok(classes)
+    }
+
+    fn read_type_list(
+        data: &[u8],
+        offset: u32,
+        types: &[String],
+    ) -> Result<Vec<String>, Diagnostic> {
+        if offset == 0 {
+            return Ok(Vec::new());
+        }
+        let mut reader = Reader::new(data, Endian::Little, "classes.dex");
+        reader.seek(u64::from(offset))?;
+        let count = reader.u32()?;
+        // Two bytes per entry, checked before reserving anything.
+        if u64::from(count) * 2 > reader.remaining() as u64 {
+            return Err(fail("EX031", "A type list is longer than the file.")
+                .with_context(format!("Entries: {count}")));
+        }
+        let mut list = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let index = u32::from(reader.u16()?);
+            list.push(type_at(types, index, "interface")?);
+        }
+        Ok(list)
+    }
+}
+
+// ===========================================================================
 // report — the single source of truth the user interface renders
 // ===========================================================================
 
@@ -11982,6 +13180,7 @@ mod tests {
     };
     use super::cache::{Index as CacheIndex, Inputs as CacheInputs, Lookup as CacheLookup};
     use super::caps::{Capability, Decision, Policy};
+    use super::dex;
     use super::diag::{Diagnostic, Location, Severity, Sink};
     use super::graph::{Graph, Kind as NodeKind, Node, NodeId, Status as NodeStatus};
     use super::hash::Digest;
@@ -15068,6 +16267,415 @@ mod tests {
         }
     }
 
+    // --- DEX (directive section 21) ------------------------------------------
+
+    /// Builds a valid, empty DEX: a header and nothing else.
+    ///
+    /// Writing one by hand is the only way to test the refusals, because every
+    /// refusal needs a file that is correct except for the one thing under
+    /// test. It also proves the header layout is understood rather than merely
+    /// parsed by luck: the checksum and signature below are computed the way
+    /// the format defines them, and the reader accepts the result.
+    fn minimal_dex(version: &[u8; 3]) -> Vec<u8> {
+        let mut data = vec![0u8; dex::HEADER_SIZE as usize];
+        data[0..4].copy_from_slice(dex::MAGIC);
+        data[4..7].copy_from_slice(version);
+        data[7] = 0;
+        // 8..12 checksum, 12..32 signature: filled in at the end.
+        data[32..36].copy_from_slice(&(dex::HEADER_SIZE).to_le_bytes()); // file_size
+        data[36..40].copy_from_slice(&dex::HEADER_SIZE.to_le_bytes()); // header_size
+        data[40..44].copy_from_slice(&dex::ENDIAN_CONSTANT.to_le_bytes());
+        // Everything from here is a size or an offset, and all of them are zero:
+        // link, map, and the six pools. An empty DEX declares nothing.
+        seal_dex(&mut data);
+        data
+    }
+
+    /// Recomputes the two fields a DEX records over itself.
+    fn seal_dex(data: &mut [u8]) {
+        let signature = super::hash::sha1(&data[32..]);
+        data[12..32].copy_from_slice(signature.as_bytes());
+        let checksum = super::binary::checksum::adler32(&data[12..]);
+        data[8..12].copy_from_slice(&checksum.to_le_bytes());
+    }
+
+    #[test]
+    fn an_empty_dex_reads_and_holds_its_own_fields() {
+        let data = minimal_dex(b"035");
+        let mut sink = Sink::new();
+        let file = dex::read(&data, &mut sink).expect("a well-formed DEX must read");
+
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        assert_eq!(file.header.version, "035");
+        assert_eq!(file.header.file_size, dex::HEADER_SIZE);
+        assert!(file.classes.is_empty());
+        assert!(file.strings.is_empty());
+
+        let integrity = dex::integrity(&data).unwrap();
+        assert!(integrity.checksum_matches());
+        assert!(integrity.signature_matches());
+        assert!(integrity.self_consistent());
+    }
+
+    #[test]
+    fn a_dex_header_is_checked_before_it_is_believed() {
+        // Every one of these is a file that is correct except for the field
+        // under test, which is the only way to know the reader is checking that
+        // field rather than failing for some other reason.
+        /// One way of damaging an otherwise valid header.
+        type Damage = fn(&mut Vec<u8>);
+
+        let cases: &[(&str, Damage)] = &[
+            ("EX004", |d| {
+                // Big-endian, which Android has never shipped.
+                d[40..44].copy_from_slice(&dex::REVERSE_ENDIAN_CONSTANT.to_le_bytes());
+                seal_dex(d);
+            }),
+            ("EX004", |d| {
+                d[40..44].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+                seal_dex(d);
+            }),
+            ("EX005", |d| {
+                d[36..40].copy_from_slice(&0x80u32.to_le_bytes());
+                seal_dex(d);
+            }),
+            ("EX006", |d| {
+                // Claims to be longer than it is: every offset below would be
+                // measured against a length that is not the file's.
+                d[32..36].copy_from_slice(&9_999u32.to_le_bytes());
+                seal_dex(d);
+            }),
+            ("EX007", |d| {
+                // A string pool with more entries than any file could hold.
+                d[56..60].copy_from_slice(&0xffff_ffffu32.to_le_bytes());
+                seal_dex(d);
+            }),
+        ];
+
+        for (code, damage) in cases {
+            let mut data = minimal_dex(b"035");
+            damage(&mut data);
+            let error = dex::read(&data, &mut Sink::new())
+                .expect_err("a header this wrong must be refused");
+            assert_eq!(error.code, *code, "message: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_dex_that_is_not_one_is_refused_immediately() {
+        for bad in [
+            &b""[..],
+            &b"dex"[..],
+            &b"not a dex file at all"[..],
+            &b"dex\n035\0"[..], // magic only, no header
+        ] {
+            assert!(
+                dex::read(bad, &mut Sink::new()).is_err(),
+                "{:?} must be refused",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn changing_one_byte_of_a_dex_is_reported_but_not_hidden() {
+        // The two self-describing fields catch an edit made by something that
+        // did not fix them up. The file still reads: refusing to show a person
+        // what is in a damaged file would be less useful, not more.
+        let mut data = minimal_dex(b"035");
+        data[dex::HEADER_SIZE as usize - 1] ^= 0xff;
+
+        let mut sink = Sink::new();
+        let file = dex::read(&data, &mut sink);
+        assert!(file.is_ok(), "a damaged DEX still reads");
+
+        let codes: Vec<&str> = sink.entries().iter().map(|d| d.code.as_str()).collect();
+        assert!(codes.contains(&"EX020"), "checksum: {codes:?}");
+        assert!(codes.contains(&"EX021"), "signature: {codes:?}");
+
+        let integrity = dex::integrity(&data).unwrap();
+        assert!(!integrity.self_consistent());
+    }
+
+    #[test]
+    fn integrity_is_never_reported_as_more_than_it_is() {
+        // Directive section 1. A checksum and a SHA-1 the file carries about
+        // itself are not evidence of who made it, and the report has to say so
+        // in the same breath as the result.
+        let data = minimal_dex(b"035");
+        let integrity = dex::integrity(&data).unwrap();
+
+        let mut w = Writer::new();
+        w.begin_object(None);
+        integrity.write_json(&mut w, "integrity");
+        w.end_object();
+        let document = w.finish();
+
+        assert!(is_structurally_valid(&document));
+        assert!(document.contains("\"checksumMatches\":true"));
+        assert!(document.contains("not evidence of authorship or authenticity"));
+        assert!(document.contains("SHA-1 is broken for collision resistance"));
+    }
+
+    #[test]
+    fn type_descriptors_become_the_names_a_person_writes() {
+        let cases = [
+            ("Ljava/lang/String;", "java.lang.String"),
+            ("Lcom/omni/builder/Builder;", "com.omni.builder.Builder"),
+            ("V", "void"),
+            ("I", "int"),
+            ("J", "long"),
+            ("Z", "boolean"),
+            ("B", "byte"),
+            ("S", "short"),
+            ("C", "char"),
+            ("F", "float"),
+            ("D", "double"),
+            ("[I", "int[]"),
+            ("[[Ljava/lang/String;", "java.lang.String[][]"),
+        ];
+        for (descriptor, expected) in cases {
+            assert_eq!(
+                dex::descriptor_to_source(descriptor),
+                expected,
+                "{descriptor}"
+            );
+        }
+
+        // Something that is not a descriptor is returned untouched rather than
+        // guessed at: a silently renamed class is worse than an odd-looking one.
+        for odd in ["", "Ljava/lang/String", "Q", "L;x"] {
+            assert_eq!(dex::descriptor_to_source(odd), odd, "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn modified_utf8_is_decoded_the_way_the_format_defines_it() {
+        // Plain ASCII.
+        assert_eq!(dex::decode_modified_utf8(b"Builder").unwrap(), "Builder");
+
+        // U+0000 is written as two bytes so that a string can hold a NUL
+        // without ending itself. Standard UTF-8 has no such spelling.
+        assert_eq!(dex::decode_modified_utf8(&[0xc0, 0x80]).unwrap(), "\0");
+
+        // Two and three byte forms.
+        assert_eq!(dex::decode_modified_utf8("çğü".as_bytes()).unwrap(), "çğü");
+        assert_eq!(dex::decode_modified_utf8("→".as_bytes()).unwrap(), "→");
+
+        // A character outside the basic plane is written as its two UTF-16
+        // surrogates, three bytes each. Standard UTF-8 forbids that spelling,
+        // so this is the case a plain decoder gets wrong.
+        let rocket = [0xed, 0xa0, 0xbd, 0xed, 0xb2, 0x80];
+        assert_eq!(dex::decode_modified_utf8(&rocket).unwrap(), "\u{1f480}");
+
+        // And the four-byte form standard UTF-8 would use is not accepted,
+        // because a DEX never writes it.
+        assert!(dex::decode_modified_utf8(&[0xf0, 0x9f, 0x92, 0x80]).is_err());
+    }
+
+    #[test]
+    fn a_broken_string_is_refused_rather_than_repaired() {
+        // Replacing a bad byte with U+FFFD would let two different files decode
+        // to the same class name, and a name is what a class is identified by.
+        let cases: &[(&[u8], &str)] = &[
+            (&[0xed, 0xa0, 0xbd], "EX013"),       // a high surrogate alone
+            (&[0xed, 0xb2, 0x80], "EX013"),       // a low surrogate alone
+            (&[0xc2], "EX010"),                   // ends inside a character
+            (&[0xe2, 0x86], "EX010"),             // ends inside a character
+            (&[0xc2, 0x41], "EX011"),             // a bad continuation byte
+            (&[0xf0, 0x9f, 0x92, 0x80], "EX012"), // the four-byte form
+        ];
+        for (bytes, code) in cases {
+            let error =
+                dex::decode_modified_utf8(bytes).expect_err(&format!("{bytes:?} must be refused"));
+            assert_eq!(error.code, *code, "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn the_dex_reader_survives_arbitrary_input() {
+        // Directive section 21 names this explicitly: malformed DEX input must
+        // never crash the reader. What is checked is that it always terminates
+        // and never panics, whatever it is handed.
+        let mut seed = 0x1dea_7c0f_fee5_1234u64;
+        for _ in 0..3_000 {
+            let length = (xorshift(&mut seed) % 400) as usize;
+            let mut data: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+
+            // Half the cases start with a real magic, so the reader gets past
+            // the first check and into the fields that actually take work.
+            if length >= 8 && xorshift(&mut seed).is_multiple_of(2) {
+                data[0..4].copy_from_slice(dex::MAGIC);
+                data[4..8].copy_from_slice(b"035\0");
+            }
+
+            let mut sink = Sink::new();
+            let _ = dex::read(&data, &mut sink);
+            let _ = dex::integrity(&data);
+            let _ = dex::decode_modified_utf8(&data);
+        }
+    }
+
+    /// Refuses to let a conformance test skip where it was promised to run.
+    ///
+    /// A machine without an SDK or without a built package may skip; a machine
+    /// that promised both may not. Continuous integration sets this so that a
+    /// conformance test which quietly stopped running fails the build instead
+    /// of reporting success while checking nothing.
+    fn dex_conformance_may_skip(why: &str) {
+        assert!(
+            std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
+            "OMNI_REQUIRE_DEX_CONFORMANCE is set but the DEX conformance test \
+             would have skipped: {why}"
+        );
+    }
+
+    /// The `classes.dex` inside the package this build produced, if built.
+    fn dex_this_build_produced() -> Option<Vec<u8>> {
+        let Some(apk) = ["release/Builder-release.apk", "debug/Builder-debug.apk"]
+            .iter()
+            .map(|name| format!("Builder/build/outputs/apk/{name}"))
+            .find(|path| std::path::Path::new(path).exists())
+        else {
+            dex_conformance_may_skip("no APK has been built");
+            return None;
+        };
+
+        let output = std::process::Command::new("unzip")
+            .args(["-p", &apk, "classes.dex"])
+            .output()
+            .ok()?;
+        if !output.status.success() || output.stdout.is_empty() {
+            dex_conformance_may_skip("classes.dex could not be read out of the APK");
+            return None;
+        }
+        Some(output.stdout)
+    }
+
+    /// Runs `dexdump -f` and returns its header fields and class descriptors.
+    fn dexdump(bytes: &[u8]) -> Option<(std::collections::BTreeMap<String, String>, Vec<String>)> {
+        let Some(tool) = find_apksigner().and_then(|p| Some(p.parent()?.join("dexdump"))) else {
+            dex_conformance_may_skip("no Android SDK build-tools were found");
+            return None;
+        };
+        if !tool.is_file() {
+            dex_conformance_may_skip("dexdump is not in the build-tools found");
+            return None;
+        }
+
+        let directory = temp_directory("dexdump");
+        let path = directory.join("classes.dex");
+        std::fs::write(&path, bytes).ok()?;
+
+        let output = std::process::Command::new(&tool)
+            .args(["-f", path.to_str()?])
+            .output()
+            .ok()?;
+        std::fs::remove_dir_all(&directory).ok();
+        if !output.status.success() {
+            return None;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut fields = std::collections::BTreeMap::new();
+        let mut classes = Vec::new();
+        for line in text.lines() {
+            let Some((left, right)) = line.split_once(':') else {
+                continue;
+            };
+            let key = left.trim();
+            let value = right.trim();
+            if key == "Class descriptor" {
+                classes.push(value.trim_matches('\'').to_string());
+            } else if !key.contains(' ') || key.contains('_') || key == "magic" {
+                fields.insert(key.to_string(), value.to_string());
+            }
+        }
+        Some((fields, classes))
+    }
+
+    #[test]
+    fn the_dex_this_build_produced_reads_as_dexdump_reads_it() {
+        // The conformance test for this phase. Reading a DEX correctly is not
+        // something a self-consistent parser can establish about itself; what
+        // establishes it is agreeing, field for field, with the tool Google
+        // ships for the same file.
+        let Some(bytes) = dex_this_build_produced() else {
+            eprintln!(
+                "dex conformance: no built package here, so nothing was read. \
+                 Build one with `./gradlew :Builder:assembleRelease`."
+            );
+            return;
+        };
+        let Some((fields, descriptors)) = dexdump(&bytes) else {
+            eprintln!("dex conformance: dexdump is not available here");
+            return;
+        };
+
+        let mut sink = Sink::new();
+        let file = dex::read(&bytes, &mut sink).expect("a real classes.dex must read");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert_eq!(
+            sink.entries().len(),
+            0,
+            "a package this build produced must be intact: {:?}",
+            sink.entries()
+        );
+
+        let number = |key: &str| -> u32 {
+            let raw = fields
+                .get(key)
+                .unwrap_or_else(|| panic!("dexdump printed no {key}"));
+            // Values are printed as "9820 (0x00265c)" or plainly.
+            raw.split_whitespace()
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap_or_else(|_| panic!("{key} = {raw:?}"))
+        };
+
+        assert_eq!(fields.get("magic").unwrap(), "'dex\\n039\\0'");
+        assert_eq!(file.header.version, "039");
+        assert_eq!(file.header.file_size, number("file_size"));
+        assert_eq!(file.header.header_size, number("header_size"));
+        assert_eq!(file.header.string_ids_size, number("string_ids_size"));
+        assert_eq!(file.header.type_ids_size, number("type_ids_size"));
+        assert_eq!(file.header.proto_ids_size, number("proto_ids_size"));
+        assert_eq!(file.header.field_ids_size, number("field_ids_size"));
+        assert_eq!(file.header.method_ids_size, number("method_ids_size"));
+        assert_eq!(file.header.class_defs_size, number("class_defs_size"));
+
+        // The pools were not merely counted, they were read.
+        assert_eq!(file.strings.len(), file.header.string_ids_size as usize);
+        assert_eq!(file.types.len(), file.header.type_ids_size as usize);
+        assert_eq!(file.fields.len(), file.header.field_ids_size as usize);
+        assert_eq!(file.methods.len(), file.header.method_ids_size as usize);
+        assert_eq!(file.classes.len(), file.header.class_defs_size as usize);
+
+        // And every class, in the same order, with the same name.
+        let expected: Vec<String> = descriptors
+            .iter()
+            .map(|d| dex::descriptor_to_source(d))
+            .collect();
+        assert_eq!(file.class_names(), expected);
+
+        // The file's own two fields hold.
+        let integrity = dex::integrity(&bytes).unwrap();
+        assert!(integrity.checksum_matches());
+        assert!(integrity.signature_matches());
+
+        eprintln!(
+            "dex conformance: {} classes, {} methods, {} strings; header and class \
+             list agree with dexdump",
+            file.classes.len(),
+            file.methods.len(),
+            file.strings.len()
+        );
+    }
+
     // --- subsystem inventory -------------------------------------------------
 
     #[test]
@@ -16627,6 +18235,54 @@ Viewbinding   = false
 
         std::fs::remove_dir_all(&root).ok();
         std::fs::remove_dir_all(&outside).ok();
+    }
+
+    // --- SHA-1 (official NIST vectors) ---------------------------------------
+
+    #[test]
+    fn sha1_matches_the_nist_published_vectors() {
+        // FIPS 180-4 appendix A. SHA-1 is here only to check the DEX header's
+        // own signature field, and directive section 30 still requires the
+        // official vectors before it may be used for even that.
+        let cases: &[(&[u8], &str)] = &[
+            (b"", "da39a3ee5e6b4b0d3255bfef95601890afd80709"),
+            (b"abc", "a9993e364706816aba3e25717850c26c9cd0d89d"),
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "84983e441c3bd26ebaae4aa1f95129e5e54670f1",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(super::hash::sha1(input).to_hex(), *expected);
+        }
+    }
+
+    #[test]
+    fn sha1_matches_the_one_million_a_vector() {
+        let mut hasher = super::hash::Sha1::new();
+        let chunk = vec![b'a'; 1_000];
+        for _ in 0..1_000 {
+            hasher.update(&chunk);
+        }
+        assert_eq!(
+            hasher.finish().to_hex(),
+            "34aa973cd4c4daa4f61eeb2bdbad27316534016f"
+        );
+    }
+
+    #[test]
+    fn sha1_is_insensitive_to_how_the_message_is_split() {
+        let message: Vec<u8> = (0u8..=255).cycle().take(1_000).collect();
+        let one_shot = super::hash::sha1(&message);
+
+        for split in [1usize, 7, 55, 56, 57, 63, 64, 65, 128, 999] {
+            let mut hasher = super::hash::Sha1::new();
+            for piece in message.chunks(split) {
+                hasher.update(piece);
+            }
+            assert_eq!(hasher.finish(), one_shot, "split at {split}");
+        }
     }
 
     // --- SHA-512 (official NIST vectors) -------------------------------------

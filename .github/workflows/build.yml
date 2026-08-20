@@ -25,6 +25,8 @@
 #      wrote, checked against a package apksigner signs during the test run.
 #  10. The Core's signing reader reads the APK this build produced -- an Android
 #      Gradle Plugin layout, not one the Core wrote -- and its digest holds.
+#  11. The Core's DEX reader reads the classes.dex this build produced, and its
+#      header fields and class list agree with dexdump.
 #
 # WHAT IT DOES NOT PROVE
 # -----------------------------------------------------------------------------
@@ -331,6 +333,17 @@ jobs:
 
       - name: Verify that the APKs can be installed
         run: ./gradlew :Builder:verifyApkInstallability --console=plain --rerun-tasks
+
+      - name: Read the DEX this build produced with the Core's own reader
+        # Reading a format correctly is not something a self-consistent parser
+        # can establish about itself. This checks the Core's header fields and
+        # class list against dexdump on the classes.dex the build just made,
+        # and fails rather than skips if either side is missing.
+        env:
+          OMNI_REQUIRE_DEX_CONFORMANCE: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked the_dex_this_build_produced -- --nocapture
 
       - name: Read the signed APK with the Core's own signing reader
         # The Core's conformance tests sign an archive the Core itself wrote.

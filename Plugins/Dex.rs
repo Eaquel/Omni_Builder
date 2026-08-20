@@ -43,13 +43,25 @@
 //!
 //! ## Implementation status
 //!
-//! None of the pipeline above is implemented. This file declares the contract
-//! so that the registry, the capability policy and the user interface can
-//! reason about the plugin honestly; [`Plugin::execute`] refuses to run and
-//! says why.
+//! `PLANNED`. This plugin produces nothing and [`Plugin::execute`] refuses to
+//! run and says why. This file declares the contract so that the registry, the
+//! capability policy and the user interface can reason about the plugin
+//! honestly.
 //!
-//! The reader model covers the string, type, proto, field and method pools,
-//! class definitions, code items, debug information and metadata.
+//! A reader exists in the Core, and it belongs to the Core rather than to this
+//! plugin. `omni_core::dex` reads a file's header, map list, string, type,
+//! prototype, field and method pools and class definitions, decodes the
+//! modified UTF-8 the string pool uses, and recomputes the Adler-32 checksum
+//! and SHA-1 signature the file records over itself. Its header fields and its
+//! class list are checked against `dexdump` on the package this repository's
+//! own build produces.
+//!
+//! It reads no code item, so nothing in this tree can say what a method does,
+//! and it writes nothing. Every stage of the pipeline above -- from DEX IR
+//! through register allocation, instruction selection, layout, pool
+//! construction and offset resolution to the checksum and signature a writer
+//! would have to produce -- does not exist in any form. Reading a DEX is not
+//! producing one, and nothing here moves this contract off `PLANNED`.
 //!
 //! Directive section 21 requires that malformed DEX input never crashes the
 //! reader, so this plugin is a fuzzing target from its first line of code.
