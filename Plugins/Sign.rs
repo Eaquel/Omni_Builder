@@ -35,10 +35,28 @@
 //!
 //! ## Implementation status
 //!
-//! None of the pipeline above is implemented. This file declares the contract
-//! so that the registry, the capability policy and the user interface can
-//! reason about the plugin honestly; [`Plugin::execute`] refuses to run and
-//! says why.
+//! `PLANNED`. This plugin signs nothing and [`Plugin::execute`] refuses to run
+//! and says why. This file declares the contract so that the registry, the
+//! capability policy and the user interface can reason about the plugin
+//! honestly.
+//!
+//! Two stages of the pipeline above now exist in the Core, on the reading side
+//! only, and they belong to the Core rather than to this plugin:
+//!
+//! * **Certificate Parsing** — `omni_core::x509` reads a certificate's names,
+//!   validity, serial, key size and algorithms and fingerprints it. It never
+//!   checks the certificate's own signature, so it identifies a certificate
+//!   and never validates one.
+//! * **Final Verification**, partly — `omni_core::signing` finds the APK
+//!   signing block, reads its v2 signers and recomputes the chunked SHA-256
+//!   content digest, matched against `apksigner`. It never checks the
+//!   signature over the signed data, because there is no RSA or
+//!   elliptic-curve arithmetic in this tree. A digest match proves a package
+//!   is unchanged; it does not prove who signed it.
+//!
+//! Key Management, Digest-for-signing, Signature and APK Signing do not exist
+//! in any form. Reading a signature is not producing one, and nothing here
+//! moves this contract off `PLANNED`.
 //!
 //! This is the only plugin that may ever hold KEY_ACCESS, and it holds it
 //! under an explicit grant with an audit record.

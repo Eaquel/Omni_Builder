@@ -263,6 +263,46 @@
 //! * **Performance impact.** One extra call per bridge invocation.
 //! * **Migration plan.** The C ABI is versioned by [`ffi::OMNI_ABI_VERSION`].
 //! * **Status.** ACCEPTED.
+//!
+//! ### ADR-0010 — Signatures are inspected, not verified, and the report says so
+//!
+//! * **Context.** Phase 6 covers signing (directive section 25). Reading an APK
+//!   Signature Scheme v2 block needs three things: the block's own structure,
+//!   the chunked content digest it claims, and RSA or elliptic-curve arithmetic
+//!   to check the signature over the signed data. The first two are format work
+//!   and hashing. The third is public-key cryptography, which directive section
+//!   30 forbids inventing and ADR-0003 forbids importing.
+//! * **Alternatives.** (a) Implement RSA in the Core so a signature can be fully
+//!   verified. (b) Take a cryptography dependency, breaking ADR-0003. (c) Ship
+//!   nothing until (a) or (b) is possible. (d) Implement the block reader and
+//!   the content digest, and make every report state in its own fields that the
+//!   signature itself was not checked.
+//! * **Decision.** (d).
+//! * **Reason.** The content digest is the part that catches the threats
+//!   directive section 27 names — T1 an APK modified after signing, T3 a
+//!   modified DEX, T4 a modified native library — and it is checkable against
+//!   an independent implementation, which `apksigner` provides. Writing RSA to
+//!   get there would mean hand-rolling modular exponentiation and PKCS#1
+//!   padding under section 30's rules with no way to test it against anything
+//!   this tree can run; a subtly wrong verifier that returns *valid* is worse
+//!   than an honest one that returns *unchecked*. Option (c) throws away work
+//!   that is correct and useful.
+//! * **Tradeoffs.** A digest match proves the package has not changed since the
+//!   block was written. It does not prove who wrote it: anyone able to rewrite
+//!   the package can rewrite the block to match. So this detects tampering with
+//!   a package, and establishes no provenance whatsoever.
+//! * **Security impact.** The risk is entirely one of being believed to do more
+//!   than it does, so the API refuses to allow the confusion: `signing::Report`
+//!   carries `signatures_checked`, which is a constant `false` and not a
+//!   computed field, `x509::Certificate` carries `signatureChecked: false`, and
+//!   both are written into every JSON report. No function in either module
+//!   returns a bare boolean that a caller could read as *this is valid*.
+//! * **Performance impact.** One SHA-256 pass over the package, chunked at one
+//!   megabyte as the scheme defines.
+//! * **Migration plan.** When public-key arithmetic exists, `signatures_checked`
+//!   becomes a computed field and the constant-`false` tests are what force the
+//!   reports and the subsystem inventory to be updated with it.
+//! * **Status.** ACCEPTED.
 
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
@@ -320,7 +360,7 @@ pub mod plugins {
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Phase of the roadmap in directive section 52 that this tree implements.
-pub const CORE_PHASE: &str = "PHASE 5 — APK ENGINE";
+pub const CORE_PHASE: &str = "PHASE 6 — SIGNING";
 
 /// Maturity of the Core as a whole. Never raise this without the quality gates
 /// of directive section 51.
@@ -478,7 +518,8 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 58,
         summary: "CREATED to PUBLISHED as a state machine that refuses illegal steps.",
         missing: &[
-            "Nothing signs an artifact, so SIGNED is reachable and unused.",
+            "Nothing signs an artifact, so SIGNED is reachable and unused; \
+             the signing module reads a signature, it does not produce one.",
             "No artifact store; artifacts are described, not kept.",
         ],
     },
@@ -563,7 +604,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
             "No ZIP64, so four gigabytes and 65535 entries are hard limits.",
             "Nothing assembles an APK from a project yet; this is the container, \
              not the packaging step.",
-            "No signature block is written or read.",
+            "No signature block is written; the signing module reads one.",
         ],
     },
     Subsystem {
@@ -573,6 +614,47 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Pinned versions with provenance, verified against an observed \
                   environment.",
         missing: &["Only two components can be observed from a device."],
+    },
+    Subsystem {
+        name: "DER reader",
+        status: Status::Partial,
+        directive_section: 30,
+        summary: "A distinguished-encoding reader that refuses every alternative \
+                  spelling BER allows: indefinite lengths, non-minimal lengths, \
+                  padded integers and the high-tag-number form.",
+        missing: &[
+            "Reads the types certificates use; not a general ASN.1 decoder.",
+            "Randomised robustness testing only; not coverage-guided fuzzing.",
+        ],
+    },
+    Subsystem {
+        name: "X.509 certificates",
+        status: Status::Partial,
+        directive_section: 30,
+        summary: "Reads a certificate's names, validity, serial, key size and \
+                  algorithms, and fingerprints it with SHA-256.",
+        missing: &[
+            "The certificate's own signature is never checked, so this identifies \
+             a certificate but never validates one.",
+            "No chain building and no trust store.",
+            "Extensions are not read, so key usage and basic constraints are unseen.",
+        ],
+    },
+    Subsystem {
+        name: "Signature inspection",
+        status: Status::Partial,
+        directive_section: 25,
+        summary: "Finds the APK signing block, reads its v2 signers and \
+                  certificates, and recomputes the chunked SHA-256 content digest \
+                  over the package's own bytes -- matched against apksigner.",
+        missing: &[
+            "The signature over the signed data is never verified, because there \
+             is no RSA or elliptic-curve arithmetic here. A digest match proves \
+             the package is unchanged, not who signed it.",
+            "Reads v2 only; v3 and v3.1 blocks are listed but not parsed.",
+            "Nothing writes a signing block, so signing still belongs to the \
+             bootstrap toolchain.",
+        ],
     },
 ];
 
@@ -8745,6 +8827,7 @@ pub mod archive {
         entries: Vec<Entry>,
         size: u64,
         central_directory_offset: u64,
+        end_record_offset: u64,
         digest: Digest,
     }
 
@@ -8767,6 +8850,18 @@ pub mod archive {
         /// Size of the archive in bytes.
         pub fn size(&self) -> u64 {
             self.size
+        }
+
+        /// Where the central directory starts.
+        ///
+        /// The signing block, when there is one, sits immediately before it.
+        pub fn central_directory_offset(&self) -> u64 {
+            self.central_directory_offset
+        }
+
+        /// Where the end-of-central-directory record starts.
+        pub fn end_record_offset(&self) -> u64 {
+            self.end_record_offset
         }
 
         /// Digest of the whole archive.
@@ -8992,6 +9087,7 @@ pub mod archive {
             entries,
             size: data.len() as u64,
             central_directory_offset: record.central_directory_offset,
+            end_record_offset: end,
             digest: sha256(data),
         })
     }
@@ -9569,6 +9665,1485 @@ pub mod archive {
 }
 
 // ===========================================================================
+// der — ASN.1 distinguished encoding rules (directive sections 20 and 30)
+// ===========================================================================
+
+/// The encoding every X.509 certificate is written in.
+///
+/// ## Contract (directive section 2)
+///
+/// * **Purpose** — read DER, the one canonical encoding of ASN.1.
+/// * **Inputs** — bytes from a certificate. Untrusted, always: a certificate
+///   arrives from whoever signed the thing being verified.
+/// * **Non-Responsibilities** — BER, which allows several encodings of one
+///   value, and the meaning of anything it reads.
+/// * **Security** — lengths are bounded before use, nesting is explicit rather
+///   than recursive, and every encoding DER forbids is refused rather than
+///   accepted leniently.
+/// * **Status** — PARTIAL: the subset a certificate uses.
+///
+/// ## Why leniency is a security bug here
+///
+/// DER exists because BER lets one value be written several ways, and a
+/// verifier that accepts two spellings of a name can be shown a different name
+/// from the one a parser displays. Every rule below - definite lengths, shortest
+/// form, no indefinite encoding - is refused rather than tolerated for that
+/// reason.
+pub mod der {
+    use crate::binary::{Endian, Reader as BinaryReader};
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+
+    /// Deepest nesting this reader will follow.
+    pub const MAX_DEPTH: usize = 32;
+
+    /// Universal tag numbers this module names.
+    pub mod tag {
+        /// INTEGER
+        pub const INTEGER: u8 = 0x02;
+        /// BIT STRING
+        pub const BIT_STRING: u8 = 0x03;
+        /// OCTET STRING
+        pub const OCTET_STRING: u8 = 0x04;
+        /// NULL
+        pub const NULL: u8 = 0x05;
+        /// OBJECT IDENTIFIER
+        pub const OID: u8 = 0x06;
+        /// UTF8String
+        pub const UTF8_STRING: u8 = 0x0c;
+        /// PrintableString
+        pub const PRINTABLE_STRING: u8 = 0x13;
+        /// IA5String
+        pub const IA5_STRING: u8 = 0x16;
+        /// UTCTime
+        pub const UTC_TIME: u8 = 0x17;
+        /// GeneralizedTime
+        pub const GENERALIZED_TIME: u8 = 0x18;
+        /// SEQUENCE
+        pub const SEQUENCE: u8 = 0x30;
+        /// SET
+        pub const SET: u8 = 0x31;
+    }
+
+    /// One tag-length-value element.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Element<'a> {
+        /// The identifier octet.
+        pub tag: u8,
+        /// The contents, without the tag or the length.
+        pub contents: &'a [u8],
+        /// Offset of the identifier octet within the document.
+        pub offset: usize,
+        /// Total size of the element, including its tag and length.
+        pub total: usize,
+    }
+
+    impl<'a> Element<'a> {
+        /// Whether the element holds other elements.
+        pub fn is_constructed(&self) -> bool {
+            self.tag & 0x20 != 0
+        }
+
+        /// Whether the tag is context-specific, as `[0]` is.
+        pub fn is_context_specific(&self) -> bool {
+            self.tag & 0xc0 == 0x80
+        }
+
+        /// The context tag number, when the tag is context-specific.
+        pub fn context_number(&self) -> Option<u8> {
+            if self.is_context_specific() {
+                Some(self.tag & 0x1f)
+            } else {
+                None
+            }
+        }
+
+        /// Reads the contents as a sequence of further elements.
+        pub fn reader(&self) -> Reader<'a> {
+            Reader::new(self.contents, self.offset)
+        }
+    }
+
+    fn fail(code: &str, message: impl Into<String>, offset: usize) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.der",
+            message,
+        )
+        .with_context(format!("At offset: {offset}"))
+    }
+
+    /// Reads a run of DER elements.
+    #[derive(Clone, Debug)]
+    pub struct Reader<'a> {
+        data: &'a [u8],
+        position: usize,
+        base: usize,
+    }
+
+    impl<'a> Reader<'a> {
+        /// Reads `data`, reporting offsets relative to `base`.
+        pub fn new(data: &'a [u8], base: usize) -> Reader<'a> {
+            Reader {
+                data,
+                position: 0,
+                base,
+            }
+        }
+
+        /// Whether everything has been read.
+        pub fn is_empty(&self) -> bool {
+            self.position >= self.data.len()
+        }
+
+        /// Bytes left.
+        pub fn remaining(&self) -> usize {
+            self.data.len() - self.position
+        }
+
+        /// Reads the next element.
+        pub fn next_element(&mut self) -> Result<Element<'a>, Diagnostic> {
+            let offset = self.base + self.position;
+            let mut reader =
+                BinaryReader::new(&self.data[self.position..], Endian::Big, "certificate");
+
+            let tag = reader.u8()?;
+            if tag & 0x1f == 0x1f {
+                return Err(fail(
+                    "ED001",
+                    "A tag uses the high-tag-number form, which nothing here needs.",
+                    offset,
+                ));
+            }
+
+            let first = reader.u8()?;
+            let length: u64 = if first & 0x80 == 0 {
+                u64::from(first)
+            } else {
+                let count = usize::from(first & 0x7f);
+                if count == 0 {
+                    return Err(fail(
+                        "ED002",
+                        "A length is written in the indefinite form, which DER forbids.",
+                        offset,
+                    )
+                    .with_suggestion(
+                        "Indefinite lengths let one value be written two ways, and a \
+                         verifier that accepts both can be shown something a parser \
+                         does not display.",
+                    ));
+                }
+                if count > 8 {
+                    return Err(fail("ED003", "A length needs more than 64 bits.", offset));
+                }
+
+                let bytes = reader.bytes(count)?;
+                if bytes[0] == 0 {
+                    return Err(fail(
+                        "ED004",
+                        "A length has a leading zero, so it is not in its shortest form.",
+                        offset,
+                    )
+                    .with_suggestion("DER requires one encoding per value."));
+                }
+
+                let mut value: u64 = 0;
+                for byte in bytes {
+                    value = (value << 8) | u64::from(*byte);
+                }
+                if value < 0x80 {
+                    return Err(fail(
+                        "ED005",
+                        "A short length is written in the long form.",
+                        offset,
+                    ));
+                }
+                value
+            };
+
+            // A declared length is checked against what is actually there
+            // before it is used for anything, so a wrong length cannot make
+            // this read past its buffer (directive section 60). The check
+            // lives here rather than in the binary reader so the diagnostic
+            // names the element rather than the byte stream, and so the two
+            // do not race to report the same problem with different codes.
+            let contents_start = self.position + reader.position();
+            let available = (self.data.len() - contents_start) as u64;
+            if length > available {
+                return Err(fail(
+                    "ED007",
+                    "An element extends past the data it is in.",
+                    offset,
+                )
+                .with_context(format!("Wants: {length} bytes"))
+                .with_context(format!("Available: {available}")));
+            }
+            // Bounded by `available` just above, so this cannot truncate.
+            let length = length as usize;
+            let end = contents_start + length;
+
+            let element = Element {
+                tag,
+                contents: &self.data[contents_start..end],
+                offset,
+                total: end - self.position,
+            };
+            self.position = end;
+            Ok(element)
+        }
+
+        /// Reads the next element and checks its tag.
+        pub fn expect(&mut self, tag: u8) -> Result<Element<'a>, Diagnostic> {
+            let element = self.next_element()?;
+            if element.tag != tag {
+                return Err(fail(
+                    "ED010",
+                    format!("Expected tag 0x{tag:02x} but found 0x{:02x}.", element.tag),
+                    element.offset,
+                ));
+            }
+            Ok(element)
+        }
+
+        /// Reads the next element if it has this tag, without consuming anything
+        /// otherwise.
+        pub fn take_if(&mut self, tag: u8) -> Option<Element<'a>> {
+            let saved = self.position;
+            match self.next_element() {
+                Ok(element) if element.tag == tag => Some(element),
+                _ => {
+                    self.position = saved;
+                    None
+                }
+            }
+        }
+    }
+
+    /// Reads an OBJECT IDENTIFIER into its dotted form.
+    ///
+    /// The first byte holds two arcs at once, which is the one place the
+    /// encoding is not simply base-128.
+    pub fn read_oid(element: &Element<'_>) -> Result<String, Diagnostic> {
+        if element.tag != tag::OID {
+            return Err(fail(
+                "ED020",
+                "That element is not an object identifier.",
+                element.offset,
+            ));
+        }
+        if element.contents.is_empty() {
+            return Err(fail(
+                "ED021",
+                "An object identifier is empty.",
+                element.offset,
+            ));
+        }
+
+        let mut out = String::with_capacity(32);
+        let first = element.contents[0];
+        let (a, b) = if first < 40 {
+            (0, u32::from(first))
+        } else if first < 80 {
+            (1, u32::from(first) - 40)
+        } else {
+            (2, u32::from(first) - 80)
+        };
+        out.push_str(&a.to_string());
+        out.push('.');
+        out.push_str(&b.to_string());
+
+        let mut value: u64 = 0;
+        let mut in_progress = false;
+        for byte in &element.contents[1..] {
+            if !in_progress && *byte == 0x80 {
+                return Err(fail(
+                    "ED022",
+                    "An object identifier arc has a leading zero byte.",
+                    element.offset,
+                ));
+            }
+            in_progress = true;
+
+            if value > (u64::MAX >> 7) {
+                return Err(fail(
+                    "ED023",
+                    "An object identifier arc is too large.",
+                    element.offset,
+                ));
+            }
+            value = (value << 7) | u64::from(byte & 0x7f);
+
+            if byte & 0x80 == 0 {
+                out.push('.');
+                out.push_str(&value.to_string());
+                value = 0;
+                in_progress = false;
+            }
+        }
+
+        if in_progress {
+            return Err(fail(
+                "ED024",
+                "An object identifier ends in the middle of an arc.",
+                element.offset,
+            ));
+        }
+
+        Ok(out)
+    }
+
+    /// Reads an INTEGER into its unpadded big-endian bytes.
+    ///
+    /// A certificate serial number is routinely larger than any integer type, so
+    /// it is kept as bytes and rendered as hexadecimal rather than converted.
+    pub fn read_integer_bytes<'a>(element: &Element<'a>) -> Result<&'a [u8], Diagnostic> {
+        if element.tag != tag::INTEGER {
+            return Err(fail(
+                "ED030",
+                "That element is not an integer.",
+                element.offset,
+            ));
+        }
+        if element.contents.is_empty() {
+            return Err(fail("ED031", "An integer has no content.", element.offset));
+        }
+        if element.contents.len() > 1 {
+            let first = element.contents[0];
+            let second = element.contents[1];
+            if (first == 0x00 && second & 0x80 == 0) || (first == 0xff && second & 0x80 != 0) {
+                return Err(fail(
+                    "ED032",
+                    "An integer is padded, so it is not in its shortest form.",
+                    element.offset,
+                ));
+            }
+        }
+        Ok(element.contents)
+    }
+
+    /// Reads a text element, refusing anything that is not one.
+    pub fn read_string(element: &Element<'_>) -> Result<String, Diagnostic> {
+        match element.tag {
+            tag::UTF8_STRING | tag::PRINTABLE_STRING | tag::IA5_STRING => {
+                match core::str::from_utf8(element.contents) {
+                    Ok(text) => Ok(text.to_string()),
+                    Err(_) => Err(fail(
+                        "ED040",
+                        "A string is not valid UTF-8.",
+                        element.offset,
+                    )),
+                }
+            }
+            other => Err(fail(
+                "ED041",
+                format!("Tag 0x{other:02x} is not a string this reader accepts."),
+                element.offset,
+            )),
+        }
+    }
+
+    /// Renders bytes as uppercase hexadecimal, the way a serial number is shown.
+    pub fn to_hex(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789ABCDEF";
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push(HEX[(byte >> 4) as usize] as char);
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+        out
+    }
+}
+
+// ===========================================================================
+// x509 — certificates (directive sections 25 and 30)
+// ===========================================================================
+
+/// Reading the certificate that says who signed something.
+///
+/// ## Contract (directive section 2)
+///
+/// | Field                | Value                                                       |
+/// |----------------------|-------------------------------------------------------------|
+/// | Module               | `omni_core::x509`                                           |
+/// | Purpose              | Turn a certificate into facts that can be shown and compared.|
+/// | Inputs               | DER bytes. Untrusted: a certificate comes from whoever signed |
+/// |                      | the artifact being examined.                                  |
+/// | Outputs              | A [`Certificate`], or diagnostics.                            |
+/// | Non-Responsibilities | Checking a signature, building a chain, or deciding trust.    |
+/// | Status               | PARTIAL — see what it does not do, below.                     |
+///
+/// ## What this does not do, said plainly
+///
+/// It **parses**. It does not verify. Nothing here checks that a certificate's
+/// signature is valid, that it chains to anything, that it has not been revoked,
+/// or that the key in it signed anything. Those need public-key arithmetic that
+/// this tree does not have, and directive section 1 does not allow a parser to
+/// be described as a verifier.
+///
+/// What it is good for today: identifying a signer, comparing one build's signer
+/// with another's by fingerprint, and showing a person who signed something.
+pub mod x509 {
+    use crate::der::{self, tag, Element};
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::{sha256, Digest};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    /// Largest certificate this reader accepts (directive section 60).
+    pub const MAX_CERTIFICATE_BYTES: usize = 64 * 1024;
+
+    /// An algorithm identifier, kept as its number and its name.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Algorithm {
+        /// The object identifier, in dotted form.
+        pub oid: String,
+        /// The name, when this build knows it.
+        pub name: Option<&'static str>,
+    }
+
+    impl Algorithm {
+        /// The name if there is one, otherwise the identifier.
+        pub fn display(&self) -> &str {
+            self.name.unwrap_or(&self.oid)
+        }
+
+        /// Whether this build recognises the algorithm.
+        pub fn is_known(&self) -> bool {
+            self.name.is_some()
+        }
+    }
+
+    /// Algorithm identifiers a signed Android package uses.
+    ///
+    /// An unknown identifier is reported as unknown rather than guessed at: a
+    /// signature this build cannot name is one it certainly cannot check.
+    const ALGORITHMS: &[(&str, &str)] = &[
+        ("1.2.840.113549.1.1.1", "RSA"),
+        ("1.2.840.113549.1.1.5", "SHA-1 with RSA"),
+        ("1.2.840.113549.1.1.11", "SHA-256 with RSA"),
+        ("1.2.840.113549.1.1.12", "SHA-384 with RSA"),
+        ("1.2.840.113549.1.1.13", "SHA-512 with RSA"),
+        ("1.2.840.113549.1.1.10", "RSASSA-PSS"),
+        ("1.2.840.10045.2.1", "Elliptic curve"),
+        ("1.2.840.10045.4.3.2", "ECDSA with SHA-256"),
+        ("1.2.840.10045.4.3.3", "ECDSA with SHA-384"),
+        ("1.2.840.10045.4.3.4", "ECDSA with SHA-512"),
+        ("1.3.101.112", "Ed25519"),
+    ];
+
+    /// Attribute types that appear in a distinguished name.
+    const NAME_ATTRIBUTES: &[(&str, &str)] = &[
+        ("2.5.4.3", "CN"),
+        ("2.5.4.6", "C"),
+        ("2.5.4.7", "L"),
+        ("2.5.4.8", "ST"),
+        ("2.5.4.9", "STREET"),
+        ("2.5.4.10", "O"),
+        ("2.5.4.11", "OU"),
+        ("0.9.2342.19200300.100.1.25", "DC"),
+        ("1.2.840.113549.1.9.1", "emailAddress"),
+    ];
+
+    fn name_algorithm(oid: &str) -> Algorithm {
+        Algorithm {
+            oid: oid.to_string(),
+            name: ALGORITHMS
+                .iter()
+                .find(|(known, _)| *known == oid)
+                .map(|(_, name)| *name),
+        }
+    }
+
+    /// A certificate, as far as this build reads one.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Certificate {
+        /// Serial number, in uppercase hexadecimal.
+        pub serial: String,
+        /// Who issued it.
+        pub issuer: String,
+        /// Who it is about.
+        pub subject: String,
+        /// Start of validity, normalised.
+        pub not_before: String,
+        /// End of validity, normalised.
+        pub not_after: String,
+        /// Algorithm the issuer used to sign it.
+        pub signature_algorithm: Algorithm,
+        /// Algorithm of the key inside it.
+        pub public_key_algorithm: Algorithm,
+        /// Size of the key in bits, when it can be determined.
+        pub public_key_bits: Option<u32>,
+        /// SHA-256 of the whole certificate.
+        ///
+        /// This is the fingerprint every tool prints, and the only thing here
+        /// that identifies a signer without needing to verify anything.
+        pub fingerprint: Digest,
+    }
+
+    impl Certificate {
+        /// Reads a certificate.
+        pub fn parse(data: &[u8]) -> Result<Certificate, Diagnostic> {
+            if data.len() > MAX_CERTIFICATE_BYTES {
+                return Err(Diagnostic::new(
+                    "EX001",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.x509",
+                    "The certificate is larger than the accepted limit.",
+                )
+                .with_context(format!("Limit: {MAX_CERTIFICATE_BYTES} bytes")));
+            }
+
+            let mut outer = der::Reader::new(data, 0);
+            let certificate = outer.expect(tag::SEQUENCE)?;
+            if !outer.is_empty() {
+                return Err(problem(
+                    "EX002",
+                    "There is more than one certificate in these bytes.",
+                    "A certificate is one SEQUENCE and nothing else.",
+                ));
+            }
+
+            let mut body = certificate.reader();
+            let tbs = body.expect(tag::SEQUENCE)?;
+            let signature_algorithm = read_algorithm(&body.expect(tag::SEQUENCE)?)?;
+            let _signature_value = body.expect(tag::BIT_STRING)?;
+
+            let mut fields = tbs.reader();
+
+            // The version is [0] EXPLICIT and absent for a version 1
+            // certificate, so it is taken only if it is there.
+            let _version = fields.take_if(0xa0);
+
+            let serial = der::to_hex(der::read_integer_bytes(&fields.expect(tag::INTEGER)?)?);
+            let _inner_algorithm = fields.expect(tag::SEQUENCE)?;
+            let issuer = read_name(&fields.expect(tag::SEQUENCE)?)?;
+
+            let validity = fields.expect(tag::SEQUENCE)?;
+            let mut validity_fields = validity.reader();
+            let not_before = read_time(&validity_fields.next_element()?)?;
+            let not_after = read_time(&validity_fields.next_element()?)?;
+
+            let subject = read_name(&fields.expect(tag::SEQUENCE)?)?;
+            let key_info = fields.expect(tag::SEQUENCE)?;
+            let (public_key_algorithm, public_key_bits) = read_public_key(&key_info)?;
+
+            Ok(Certificate {
+                serial,
+                issuer,
+                subject,
+                not_before,
+                not_after,
+                signature_algorithm,
+                public_key_algorithm,
+                public_key_bits,
+                fingerprint: sha256(data),
+            })
+        }
+
+        /// The fingerprint in the colon-separated form tools print.
+        pub fn fingerprint_display(&self) -> String {
+            let hex = self.fingerprint.to_hex().to_uppercase();
+            hex.as_bytes()
+                .chunks(2)
+                .map(|pair| String::from_utf8_lossy(pair).into_owned())
+                .collect::<Vec<_>>()
+                .join(":")
+        }
+
+        /// Serialises the certificate as an object inside an open array.
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("serial", &self.serial);
+            w.field_str("subject", &self.subject);
+            w.field_str("issuer", &self.issuer);
+            w.field_str("notBefore", &self.not_before);
+            w.field_str("notAfter", &self.not_after);
+            w.field_str("signatureAlgorithm", self.signature_algorithm.display());
+            w.field_str("publicKeyAlgorithm", self.public_key_algorithm.display());
+            if let Some(bits) = self.public_key_bits {
+                w.field_u64("publicKeyBits", u64::from(bits));
+            }
+            w.field_str("fingerprintSha256", &self.fingerprint.to_hex());
+            w.field_bool("signatureChecked", false);
+            w.end_object();
+        }
+    }
+
+    fn problem(code: &str, message: &str, suggestion: &str) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.x509",
+            message,
+        )
+        .with_suggestion(suggestion)
+    }
+
+    fn read_algorithm(element: &Element<'_>) -> Result<Algorithm, Diagnostic> {
+        let mut fields = element.reader();
+        let oid = der::read_oid(&fields.expect(tag::OID)?)?;
+        Ok(name_algorithm(&oid))
+    }
+
+    /// Renders a distinguished name in the order it is encoded.
+    fn read_name(element: &Element<'_>) -> Result<String, Diagnostic> {
+        let mut parts: Vec<String> = Vec::new();
+        let mut sequence = element.reader();
+
+        while !sequence.is_empty() {
+            let rdn = sequence.expect(tag::SET)?;
+            let mut attributes = rdn.reader();
+            while !attributes.is_empty() {
+                let pair = attributes.expect(tag::SEQUENCE)?;
+                let mut fields = pair.reader();
+                let oid = der::read_oid(&fields.expect(tag::OID)?)?;
+                let value = fields.next_element()?;
+
+                let label = NAME_ATTRIBUTES
+                    .iter()
+                    .find(|(known, _)| *known == oid)
+                    .map(|(_, label)| (*label).to_string())
+                    .unwrap_or(oid);
+
+                // A name may hold a type this build does not model; its value is
+                // still shown, because hiding part of a name is how two signers
+                // are made to look like one.
+                let text = der::read_string(&value)
+                    .unwrap_or_else(|_| format!("#{}", der::to_hex(value.contents)));
+                parts.push(format!("{label}={text}"));
+            }
+        }
+
+        if parts.is_empty() {
+            return Err(problem(
+                "EX010",
+                "A distinguished name is empty.",
+                "A certificate names its subject and its issuer.",
+            ));
+        }
+
+        Ok(parts.join(", "))
+    }
+
+    /// Normalises a certificate time into `YYYY-MM-DD HH:MM:SS UTC`.
+    ///
+    /// UTCTime writes a two-digit year, and the rule for reading it is fixed by
+    /// RFC 5280: 50 and above means the twentieth century.
+    fn read_time(element: &Element<'_>) -> Result<String, Diagnostic> {
+        let text = core::str::from_utf8(element.contents).map_err(|_| {
+            problem(
+                "EX020",
+                "A time is not valid text.",
+                "The certificate is malformed.",
+            )
+        })?;
+
+        let digits: String = match element.tag {
+            tag::UTC_TIME => {
+                if text.len() < 13 || !text.ends_with('Z') {
+                    return Err(problem(
+                        "EX021",
+                        "A UTCTime is not in the form a certificate uses.",
+                        "RFC 5280 requires YYMMDDHHMMSSZ.",
+                    ));
+                }
+                let year: u32 = text[0..2].parse().map_err(|_| {
+                    problem(
+                        "EX022",
+                        "A time has a year that is not a number.",
+                        "The certificate is malformed.",
+                    )
+                })?;
+                let century = if year >= 50 { 1900 } else { 2000 };
+                format!("{}{}", century + year, &text[2..12])
+            }
+            tag::GENERALIZED_TIME => {
+                if text.len() < 15 || !text.ends_with('Z') {
+                    return Err(problem(
+                        "EX023",
+                        "A GeneralizedTime is not in the form a certificate uses.",
+                        "RFC 5280 requires YYYYMMDDHHMMSSZ.",
+                    ));
+                }
+                text[0..14].to_string()
+            }
+            other => {
+                return Err(problem(
+                    "EX024",
+                    &format!("Tag 0x{other:02x} is not a time."),
+                    "The certificate is malformed.",
+                ))
+            }
+        };
+
+        if !digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(problem(
+                "EX025",
+                "A time contains something that is not a digit.",
+                "The certificate is malformed.",
+            ));
+        }
+
+        Ok(format!(
+            "{}-{}-{} {}:{}:{} UTC",
+            &digits[0..4],
+            &digits[4..6],
+            &digits[6..8],
+            &digits[8..10],
+            &digits[10..12],
+            &digits[12..14],
+        ))
+    }
+
+    /// Reads the algorithm of the key, and its size when that can be told.
+    fn read_public_key(element: &Element<'_>) -> Result<(Algorithm, Option<u32>), Diagnostic> {
+        let mut fields = element.reader();
+        let algorithm = read_algorithm(&fields.expect(tag::SEQUENCE)?)?;
+        let key = fields.expect(tag::BIT_STRING)?;
+
+        // An RSA key is a SEQUENCE of two integers inside the bit string, and
+        // the first is the modulus. Its length is the key size, which is worth
+        // showing: a 1024-bit key is a fact a person should see.
+        let bits = if algorithm.oid == "1.2.840.113549.1.1.1" && !key.contents.is_empty() {
+            // The first byte of a BIT STRING counts unused trailing bits.
+            let mut inner = der::Reader::new(&key.contents[1..], key.offset);
+            inner
+                .expect(tag::SEQUENCE)
+                .ok()
+                .and_then(|sequence| {
+                    let mut numbers = sequence.reader();
+                    numbers.expect(tag::INTEGER).ok()
+                })
+                .and_then(|modulus| der::read_integer_bytes(&modulus).ok())
+                .map(|bytes| {
+                    // A DER integer is signed, so a modulus whose top bit is
+                    // set carries a leading zero byte that is padding and not
+                    // part of the number. The key size is the number's own bit
+                    // length -- 2048, not 2056 -- which is what every tool
+                    // prints and what a person comparing two reports expects.
+                    let digits = match bytes.iter().position(|byte| *byte != 0) {
+                        Some(first) => &bytes[first..],
+                        None => &[][..],
+                    };
+                    match digits.split_first() {
+                        Some((top, rest)) => (rest.len() as u32) * 8 + (8 - top.leading_zeros()),
+                        None => 0,
+                    }
+                })
+        } else {
+            None
+        };
+
+        Ok((algorithm, bits))
+    }
+}
+
+// ===========================================================================
+// signing — the APK signing block (directive sections 25, 27 and 30)
+// ===========================================================================
+
+/// Reading and checking the signature block an Android package carries.
+///
+/// ## Contract (directive section 2)
+///
+/// | Field                | Value                                                        |
+/// |----------------------|--------------------------------------------------------------|
+/// | Module               | `omni_core::signing`                                         |
+/// | Purpose              | Find the signing block, read who signed, and recompute the    |
+/// |                      | digests it claims over the package's own bytes.               |
+/// | Inputs               | A package's bytes. Untrusted.                                 |
+/// | Outputs              | A [`Report`] saying what was found and what was checked.      |
+/// | Security             | Never reports a digest as verified without having recomputed  |
+/// |                      | it, and never calls a digest match a valid signature.         |
+/// | Status               | PARTIAL — the digests are checked, the signatures are not.    |
+///
+/// ## What is checked, and what is not
+///
+/// **Checked.** The content digest. The scheme splits the package into three
+/// sections, chunks each into one-megabyte pieces, hashes every chunk and then
+/// hashes the chunk hashes. Recomputing that and comparing it with what the
+/// block claims detects any change to the package's contents, its central
+/// directory, or its end record. That covers threats T1, T3 and T4 of directive
+/// section 27: an APK modified after signing, a modified DEX, a modified native
+/// library.
+///
+/// **Not checked.** Whether the signature over the signed data is valid. That
+/// needs RSA or elliptic-curve arithmetic, which this tree does not have. So a
+/// digest match proves the package has not changed since the block was written;
+/// it does not prove who wrote it. Anyone able to rewrite the package can also
+/// rewrite the digest, and only a signature check closes that gap.
+///
+/// This distinction is why [`Report::signatures_checked`] exists and is always
+/// false. Directive section 1 does not allow the difference to be blurred, and
+/// section 28 does not allow security to be reduced to one boolean.
+pub mod signing {
+    use crate::binary::{Endian, Reader};
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::hash::{Digest, Sha256};
+    use crate::json::Writer;
+    use crate::x509::Certificate;
+    use crate::FailureClass;
+
+    /// The magic that marks the end of an APK signing block.
+    pub const MAGIC: &[u8; 16] = b"APK Sig Block 42";
+
+    /// Identifier of the APK Signature Scheme v2 block.
+    pub const V2_BLOCK_ID: u32 = 0x7109_871a;
+
+    /// Identifier of the APK Signature Scheme v3 block.
+    pub const V3_BLOCK_ID: u32 = 0xf053_68c0;
+
+    /// Identifier of the APK Signature Scheme v3.1 block.
+    pub const V31_BLOCK_ID: u32 = 0x1b93_ad61;
+
+    /// Size of the chunks the content digest is computed over.
+    pub const CHUNK_SIZE: usize = 1024 * 1024;
+
+    /// Prefix of a chunk's own digest, from the scheme's definition.
+    const CHUNK_PREFIX: u8 = 0xa5;
+
+    /// Prefix of the digest over the chunk digests.
+    const ROOT_PREFIX: u8 = 0x5a;
+
+    /// Largest signing block this reader accepts (directive section 60).
+    pub const MAX_BLOCK_BYTES: u64 = 64 * 1024 * 1024;
+
+    /// A signature algorithm the scheme defines.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct SignatureAlgorithm {
+        /// The identifier as written in the block.
+        pub id: u32,
+        /// Its name.
+        pub name: &'static str,
+        /// Whether its content digest is SHA-256, which is the one this build
+        /// can recompute.
+        pub uses_sha256: bool,
+    }
+
+    /// Every algorithm the scheme defines, with whether this build can check it.
+    const ALGORITHMS: &[SignatureAlgorithm] = &[
+        SignatureAlgorithm {
+            id: 0x0101,
+            name: "RSASSA-PSS with SHA-256",
+            uses_sha256: true,
+        },
+        SignatureAlgorithm {
+            id: 0x0102,
+            name: "RSASSA-PSS with SHA-512",
+            uses_sha256: false,
+        },
+        SignatureAlgorithm {
+            id: 0x0103,
+            name: "RSASSA-PKCS1-v1_5 with SHA-256",
+            uses_sha256: true,
+        },
+        SignatureAlgorithm {
+            id: 0x0104,
+            name: "RSASSA-PKCS1-v1_5 with SHA-512",
+            uses_sha256: false,
+        },
+        SignatureAlgorithm {
+            id: 0x0201,
+            name: "ECDSA with SHA-256",
+            uses_sha256: true,
+        },
+        SignatureAlgorithm {
+            id: 0x0202,
+            name: "ECDSA with SHA-512",
+            uses_sha256: false,
+        },
+        SignatureAlgorithm {
+            id: 0x0301,
+            name: "DSA with SHA-256",
+            uses_sha256: true,
+        },
+        SignatureAlgorithm {
+            id: 0x0421,
+            name: "RSASSA-PKCS1-v1_5 with SHA-256 over a verity tree",
+            uses_sha256: true,
+        },
+        SignatureAlgorithm {
+            id: 0x0423,
+            name: "ECDSA with SHA-256 over a verity tree",
+            uses_sha256: true,
+        },
+        SignatureAlgorithm {
+            id: 0x0425,
+            name: "DSA with SHA-256 over a verity tree",
+            uses_sha256: true,
+        },
+    ];
+
+    fn algorithm(id: u32) -> Option<SignatureAlgorithm> {
+        ALGORITHMS.iter().copied().find(|entry| entry.id == id)
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.signing",
+            message,
+        )
+    }
+
+    /// The block that sits between a package's entries and its central directory.
+    #[derive(Clone, Debug)]
+    pub struct Block {
+        offset: u64,
+        size: u64,
+        pairs: Vec<(u32, Vec<u8>)>,
+    }
+
+    impl Block {
+        /// Where the block starts.
+        pub fn offset(&self) -> u64 {
+            self.offset
+        }
+
+        /// How large it is, including its two size fields and its magic.
+        pub fn size(&self) -> u64 {
+            self.size
+        }
+
+        /// The identifiers it carries, in order.
+        pub fn ids(&self) -> Vec<u32> {
+            self.pairs.iter().map(|(id, _)| *id).collect()
+        }
+
+        /// The value stored under an identifier.
+        pub fn value(&self, id: u32) -> Option<&[u8]> {
+            self.pairs
+                .iter()
+                .find(|(candidate, _)| *candidate == id)
+                .map(|(_, value)| value.as_slice())
+        }
+    }
+
+    /// Finds and reads the signing block.
+    ///
+    /// It ends immediately before the central directory, and is found by reading
+    /// backwards from there: magic, then size, then the block itself. Returns
+    /// `Ok(None)` when the package simply has no block, which is not an error.
+    pub fn find_block(
+        data: &[u8],
+        central_directory_offset: u64,
+    ) -> Result<Option<Block>, Diagnostic> {
+        let footer = 16 + 8;
+        if central_directory_offset < footer {
+            return Ok(None);
+        }
+
+        let magic_at = central_directory_offset - 16;
+        let reader = Reader::new(data, Endian::Little, "signing block");
+        let magic = reader.slice_at(magic_at, 16)?;
+        if magic != MAGIC {
+            return Ok(None);
+        }
+
+        let mut sizes = Reader::new(data, Endian::Little, "signing block");
+        sizes.seek(central_directory_offset - footer)?;
+        let trailing_size = sizes.u64()?;
+
+        if trailing_size > MAX_BLOCK_BYTES {
+            return Err(Diagnostic::new(
+                "ES001",
+                Severity::Error,
+                FailureClass::ResourceExhaustion,
+                "core.signing",
+                "The signing block is larger than the accepted limit.",
+            )
+            .with_context(format!("Declared: {trailing_size} bytes"))
+            .with_context(format!("Limit: {MAX_BLOCK_BYTES} bytes")));
+        }
+
+        // The block's size counts everything after the leading size field, so
+        // the block begins eight bytes before that.
+        let Some(start) = central_directory_offset
+            .checked_sub(trailing_size)
+            .and_then(|value| value.checked_sub(8))
+        else {
+            return Err(fail(
+                "ES002",
+                "The signing block's size reaches before the file starts.",
+            )
+            .with_context(format!("Declared: {trailing_size} bytes")));
+        };
+
+        let mut leading = Reader::new(data, Endian::Little, "signing block");
+        leading.seek(start)?;
+        let leading_size = leading.u64()?;
+        if leading_size != trailing_size {
+            return Err(
+                fail("ES003", "The signing block's two size fields disagree.")
+                    .with_context(format!(
+                        "Leading: {leading_size}, trailing: {trailing_size}"
+                    ))
+                    .with_class(FailureClass::SecurityFailure)
+                    .with_suggestion(
+                        "A block whose size is written twice and differently is a block \
+                     a reader and a verifier can be made to see differently.",
+                    ),
+            );
+        }
+
+        // The pairs occupy everything between the leading size and the trailing
+        // size, which is the block's size less the trailing size field and magic.
+        let Some(pairs_length) = trailing_size.checked_sub(24) else {
+            return Err(fail(
+                "ES004",
+                "The signing block is too small to hold anything.",
+            ));
+        };
+
+        let mut pairs: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut cursor = Reader::new(data, Endian::Little, "signing block");
+        cursor.seek(start + 8)?;
+        let end = start + 8 + pairs_length;
+
+        while (cursor.position() as u64) < end {
+            let length = cursor.u64()?;
+            if length < 4 {
+                return Err(
+                    fail("ES005", "A signing block entry is too small to hold an id.")
+                        .with_context(format!("Length: {length}")),
+                );
+            }
+            let Some(value_length) = length.checked_sub(4) else {
+                return Err(fail(
+                    "ES005",
+                    "A signing block entry has an impossible length.",
+                ));
+            };
+
+            let id = cursor.u32()?;
+            let value_length = cursor.checked_length(value_length)?;
+            if cursor.position() as u64 + value_length as u64 > end {
+                return Err(fail(
+                    "ES006",
+                    "A signing block entry runs past the end of the block.",
+                )
+                .with_context(format!("Entry id: 0x{id:08x}")));
+            }
+            let value = cursor.bytes(value_length)?.to_vec();
+
+            if pairs.iter().any(|(existing, _)| *existing == id) {
+                return Err(
+                    fail("ES007", "The signing block carries one identifier twice.")
+                        .with_context(format!("Id: 0x{id:08x}"))
+                        .with_class(FailureClass::SecurityFailure)
+                        .with_suggestion(
+                            "Which of the two a verifier reads is not defined, so the \
+                         block is refused rather than guessed at.",
+                        ),
+                );
+            }
+
+            pairs.push((id, value));
+        }
+
+        Ok(Some(Block {
+            offset: start,
+            size: trailing_size + 8,
+            pairs,
+        }))
+    }
+
+    /// One signer's claim, as the v2 block records it.
+    #[derive(Clone, Debug)]
+    pub struct Signer {
+        /// Digests the signer claims, by algorithm.
+        pub digests: Vec<(SignatureAlgorithm, Vec<u8>)>,
+        /// Algorithms the signer produced a signature with.
+        pub signature_algorithms: Vec<SignatureAlgorithm>,
+        /// Certificates, the first of which identifies the signer.
+        pub certificates: Vec<Certificate>,
+        /// Identifiers of algorithms this build does not know.
+        pub unknown_algorithms: Vec<u32>,
+    }
+
+    /// Reads a length-prefixed sequence, one element at a time.
+    fn read_length_prefixed<'a>(
+        reader: &mut Reader<'a>,
+        what: &str,
+    ) -> Result<&'a [u8], Diagnostic> {
+        let length = reader.u32()?;
+        let length = reader
+            .checked_length(u64::from(length))
+            .map_err(|error| error.with_context(format!("Reading: {what}")))?;
+        reader.bytes(length)
+    }
+
+    /// Reads an APK Signature Scheme v2 or v3 block.
+    ///
+    /// The two share this structure; v3 adds fields this reader does not need
+    /// and skips over.
+    pub fn parse_signers(value: &[u8]) -> Result<Vec<Signer>, Diagnostic> {
+        let mut outer = Reader::new(value, Endian::Little, "signers");
+        let signers_bytes = read_length_prefixed(&mut outer, "signers")?;
+
+        let mut signers: Vec<Signer> = Vec::new();
+        let mut list = Reader::new(signers_bytes, Endian::Little, "signers");
+
+        while list.remaining() > 0 {
+            let signer_bytes = read_length_prefixed(&mut list, "signer")?;
+            let mut signer = Reader::new(signer_bytes, Endian::Little, "signer");
+
+            let signed_data = read_length_prefixed(&mut signer, "signed data")?;
+            let mut signed = Reader::new(signed_data, Endian::Little, "signed data");
+
+            // Digests.
+            let digests_bytes = read_length_prefixed(&mut signed, "digests")?;
+            let mut digests_reader = Reader::new(digests_bytes, Endian::Little, "digests");
+            let mut digests = Vec::new();
+            let mut unknown = Vec::new();
+            while digests_reader.remaining() > 0 {
+                let entry = read_length_prefixed(&mut digests_reader, "digest")?;
+                let mut fields = Reader::new(entry, Endian::Little, "digest");
+                let id = fields.u32()?;
+                let digest = read_length_prefixed(&mut fields, "digest value")?;
+                match algorithm(id) {
+                    Some(known) => digests.push((known, digest.to_vec())),
+                    None => unknown.push(id),
+                }
+            }
+
+            // Certificates.
+            let certificates_bytes = read_length_prefixed(&mut signed, "certificates")?;
+            let mut certificates_reader =
+                Reader::new(certificates_bytes, Endian::Little, "certificates");
+            let mut certificates = Vec::new();
+            while certificates_reader.remaining() > 0 {
+                let der = read_length_prefixed(&mut certificates_reader, "certificate")?;
+                certificates.push(Certificate::parse(der)?);
+            }
+
+            // The remainder of the signed data is additional attributes, which
+            // this build does not interpret.
+
+            // Signatures: their algorithms are recorded, their bytes are not
+            // checked, and nothing here pretends otherwise.
+            let signatures_bytes = read_length_prefixed(&mut signer, "signatures")?;
+            let mut signatures_reader = Reader::new(signatures_bytes, Endian::Little, "signatures");
+            let mut signature_algorithms = Vec::new();
+            while signatures_reader.remaining() > 0 {
+                let entry = read_length_prefixed(&mut signatures_reader, "signature")?;
+                let mut fields = Reader::new(entry, Endian::Little, "signature");
+                let id = fields.u32()?;
+                let _bytes = read_length_prefixed(&mut fields, "signature value")?;
+                match algorithm(id) {
+                    Some(known) => signature_algorithms.push(known),
+                    None => unknown.push(id),
+                }
+            }
+
+            if certificates.is_empty() {
+                return Err(fail("ES010", "A signer carries no certificate.")
+                    .with_suggestion("A signature nobody can be identified by is not one."));
+            }
+
+            signers.push(Signer {
+                digests,
+                signature_algorithms,
+                certificates,
+                unknown_algorithms: unknown,
+            });
+        }
+
+        if signers.is_empty() {
+            return Err(fail("ES011", "The signing block names no signer."));
+        }
+
+        Ok(signers)
+    }
+
+    /// Computes the SHA-256 content digest the scheme defines.
+    ///
+    /// The package is treated as three sections: everything before the signing
+    /// block, the central directory, and the end record with its central
+    /// directory offset replaced by the signing block's offset. Each is split
+    /// into one-megabyte chunks, every chunk is hashed with a `0xa5` prefix and
+    /// its length, and the chunk hashes are hashed together with a `0x5a`
+    /// prefix and their count.
+    ///
+    /// The substitution in the third section is what lets the digest cover the
+    /// end record without covering the offset the signing block itself moved.
+    pub fn content_digest_sha256(
+        data: &[u8],
+        block_offset: u64,
+        central_directory_offset: u64,
+        end_record_offset: u64,
+    ) -> Result<Digest, Diagnostic> {
+        let reader = Reader::new(data, Endian::Little, "package");
+
+        let contents = reader.slice_at(0, block_offset)?;
+        let directory = reader.slice_at(
+            central_directory_offset,
+            end_record_offset.saturating_sub(central_directory_offset),
+        )?;
+
+        let end_record = reader
+            .slice_at(end_record_offset, data.len() as u64 - end_record_offset)?
+            .to_vec();
+        let mut patched = end_record;
+        if patched.len() < 20 {
+            return Err(fail("ES020", "The end record is too small to patch."));
+        }
+        let substitute = u32::try_from(block_offset).map_err(|_| {
+            fail(
+                "ES021",
+                "The signing block starts past what the end record can express.",
+            )
+        })?;
+        patched[16..20].copy_from_slice(&substitute.to_le_bytes());
+
+        let mut chunk_digests: Vec<Digest> = Vec::new();
+        for section in [contents, directory, patched.as_slice()] {
+            for chunk in section.chunks(CHUNK_SIZE) {
+                let mut hasher = Sha256::new();
+                hasher.update(&[CHUNK_PREFIX]);
+                hasher.update(&(chunk.len() as u32).to_le_bytes());
+                hasher.update(chunk);
+                chunk_digests.push(hasher.finish());
+            }
+        }
+
+        let mut root = Sha256::new();
+        root.update(&[ROOT_PREFIX]);
+        root.update(&(chunk_digests.len() as u32).to_le_bytes());
+        for digest in &chunk_digests {
+            root.update(digest.as_bytes());
+        }
+        Ok(root.finish())
+    }
+
+    /// What was found in a package, and what of it was checked.
+    #[derive(Clone, Debug)]
+    pub struct Report {
+        /// Whether the package carries a signing block at all.
+        pub has_block: bool,
+        /// Which schemes are present, by name.
+        pub schemes: Vec<&'static str>,
+        /// Signers found, in block order.
+        pub signers: Vec<Signer>,
+        /// Content digests that were recomputed and matched.
+        pub digests_verified: u64,
+        /// Content digests that could not be recomputed by this build.
+        pub digests_unverifiable: u64,
+        /// Content digests that were recomputed and did not match.
+        pub digests_failed: u64,
+        /// Always false, and deliberately so: see the module documentation.
+        pub signatures_checked: bool,
+    }
+
+    impl Report {
+        /// Whether everything this build is able to check, checked out.
+        ///
+        /// This is not "the package is genuine". It is "nothing this build can
+        /// check is wrong", which is a smaller and more honest claim.
+        pub fn everything_checkable_passed(&self) -> bool {
+            self.has_block && self.digests_failed == 0 && self.digests_verified > 0
+        }
+
+        /// Serialises the report as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_bool("hasSigningBlock", self.has_block);
+            w.begin_array(Some("schemes"));
+            for scheme in &self.schemes {
+                w.element_str(scheme);
+            }
+            w.end_array();
+            w.field_u64("signers", self.signers.len() as u64);
+            w.field_u64("digestsVerified", self.digests_verified);
+            w.field_u64("digestsUnverifiable", self.digests_unverifiable);
+            w.field_u64("digestsFailed", self.digests_failed);
+            w.field_bool("signaturesChecked", self.signatures_checked);
+            w.field_str(
+                "note",
+                "A verified digest proves the package has not changed since the \
+                 block was written. It does not prove who wrote it: that needs a \
+                 signature check, which this build does not perform.",
+            );
+            w.begin_array(Some("signerDetail"));
+            for signer in &self.signers {
+                w.begin_object(None);
+                w.begin_array(Some("algorithms"));
+                for algorithm in &signer.signature_algorithms {
+                    w.element_str(algorithm.name);
+                }
+                w.end_array();
+                w.begin_array(Some("certificates"));
+                for certificate in &signer.certificates {
+                    certificate.write_json(w);
+                }
+                w.end_array();
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// Examines a package's signature block.
+    pub fn examine(
+        data: &[u8],
+        central_directory_offset: u64,
+        end_record_offset: u64,
+        sink: &mut Sink,
+    ) -> Report {
+        let mut report = Report {
+            has_block: false,
+            schemes: Vec::new(),
+            signers: Vec::new(),
+            digests_verified: 0,
+            digests_unverifiable: 0,
+            digests_failed: 0,
+            signatures_checked: false,
+        };
+
+        let block = match find_block(data, central_directory_offset) {
+            Ok(Some(block)) => block,
+            Ok(None) => {
+                sink.emit(
+                    Diagnostic::new(
+                        "ES030",
+                        Severity::Warning,
+                        FailureClass::SecurityFailure,
+                        "core.signing",
+                        "The package carries no signing block.",
+                    )
+                    .with_suggestion(
+                        "An application targeting API 30 or later is refused at \
+                         install time without one.",
+                    ),
+                );
+                return report;
+            }
+            Err(error) => {
+                sink.emit(error);
+                return report;
+            }
+        };
+
+        report.has_block = true;
+
+        for (id, name) in [
+            (V2_BLOCK_ID, "v2"),
+            (V3_BLOCK_ID, "v3"),
+            (V31_BLOCK_ID, "v3.1"),
+        ] {
+            if block.value(id).is_some() {
+                report.schemes.push(name);
+            }
+        }
+
+        let Some(value) = block
+            .value(V2_BLOCK_ID)
+            .or_else(|| block.value(V3_BLOCK_ID))
+        else {
+            sink.emit(
+                Diagnostic::new(
+                    "ES031",
+                    Severity::Warning,
+                    FailureClass::SecurityFailure,
+                    "core.signing",
+                    "The signing block carries no scheme this build reads.",
+                )
+                .with_context(format!(
+                    "Identifiers present: {}",
+                    block
+                        .ids()
+                        .iter()
+                        .map(|id| format!("0x{id:08x}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            );
+            return report;
+        };
+
+        match parse_signers(value) {
+            Ok(signers) => report.signers = signers,
+            Err(error) => {
+                sink.emit(error);
+                return report;
+            }
+        }
+
+        let computed = match content_digest_sha256(
+            data,
+            block.offset(),
+            central_directory_offset,
+            end_record_offset,
+        ) {
+            Ok(digest) => digest,
+            Err(error) => {
+                sink.emit(error);
+                return report;
+            }
+        };
+
+        for signer in &report.signers {
+            for (algorithm, claimed) in &signer.digests {
+                if !algorithm.uses_sha256 {
+                    report.digests_unverifiable += 1;
+                    sink.emit(
+                        Diagnostic::new(
+                            "ES032",
+                            Severity::Warning,
+                            FailureClass::SecurityFailure,
+                            "core.signing",
+                            format!(
+                                "A digest uses {}, which this build cannot recompute.",
+                                algorithm.name
+                            ),
+                        )
+                        .with_suggestion(
+                            "Only SHA-256 is implemented, so this claim is neither \
+                             confirmed nor disputed.",
+                        ),
+                    );
+                    continue;
+                }
+
+                if claimed.as_slice() == computed.as_bytes() {
+                    report.digests_verified += 1;
+                } else {
+                    report.digests_failed += 1;
+                    sink.emit(
+                        Diagnostic::new(
+                            "ES033",
+                            Severity::Fatal,
+                            FailureClass::Corruption,
+                            "core.signing",
+                            "The package does not match the digest recorded when it was signed.",
+                        )
+                        .with_context(format!("Algorithm: {}", algorithm.name))
+                        .with_context(format!(
+                            "Recorded: {}",
+                            crate::der::to_hex(claimed).to_lowercase()
+                        ))
+                        .with_context(format!("Computed: {computed}"))
+                        .with_suggestion(
+                            "The package has been changed since it was signed. Do not \
+                             install it.",
+                        ),
+                    );
+                }
+            }
+        }
+
+        report
+    }
+}
+
+// ===========================================================================
 // report — the single source of truth the user interface renders
 // ===========================================================================
 
@@ -9828,8 +11403,10 @@ mod tests {
         Value as ResourceValue,
     };
     use super::scheduler::{Cancellation, Outcome as SchedulerOutcome};
+    use super::signing;
     use super::toolchain::{self, Observation, Requirement, State};
     use super::vfs::{Access, Quota, VirtualFs, VirtualPath};
+    use super::x509::Certificate;
     use super::{FailureClass, Status};
 
     /// Structural check that a document is balanced and quotes are terminated.
@@ -12137,6 +13714,605 @@ mod tests {
         assert!(is_structurally_valid(&document), "{document}");
         assert!(document.contains("\"compression\":\"STORED\""));
         assert!(document.contains(&archive.digest().to_hex()));
+    }
+
+    // --- DER -----------------------------------------------------------------
+
+    /// A self-signed certificate produced by `keytool`, byte for byte.
+    ///
+    /// OpenSSL reads it as:
+    ///   subject = C = TR, O = Omni, CN = Omni Conformance
+    ///   serial  = 5D97B82E9226CBB1
+    ///   sha256  = a725...9fbe
+    /// Those are the values the tests below check against, so the parser is
+    /// measured against a tool that has nothing to do with this project.
+    const CONFORMANCE_CERTIFICATE: &[u8] = &[
+        0x30, 0x82, 0x03, 0x11, 0x30, 0x82, 0x01, 0xf9, 0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x08,
+        0x5d, 0x97, 0xb8, 0x2e, 0x92, 0x26, 0xcb, 0xb1, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
+        0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0c, 0x05, 0x00, 0x30, 0x37, 0x31, 0x0b, 0x30, 0x09, 0x06,
+        0x03, 0x55, 0x04, 0x06, 0x13, 0x02, 0x54, 0x52, 0x31, 0x0d, 0x30, 0x0b, 0x06, 0x03, 0x55,
+        0x04, 0x0a, 0x13, 0x04, 0x4f, 0x6d, 0x6e, 0x69, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55,
+        0x04, 0x03, 0x13, 0x10, 0x4f, 0x6d, 0x6e, 0x69, 0x20, 0x43, 0x6f, 0x6e, 0x66, 0x6f, 0x72,
+        0x6d, 0x61, 0x6e, 0x63, 0x65, 0x30, 0x1e, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x38, 0x32, 0x30,
+        0x30, 0x38, 0x31, 0x35, 0x35, 0x37, 0x5a, 0x17, 0x0d, 0x32, 0x36, 0x30, 0x39, 0x31, 0x39,
+        0x30, 0x38, 0x31, 0x35, 0x35, 0x37, 0x5a, 0x30, 0x37, 0x31, 0x0b, 0x30, 0x09, 0x06, 0x03,
+        0x55, 0x04, 0x06, 0x13, 0x02, 0x54, 0x52, 0x31, 0x0d, 0x30, 0x0b, 0x06, 0x03, 0x55, 0x04,
+        0x0a, 0x13, 0x04, 0x4f, 0x6d, 0x6e, 0x69, 0x31, 0x19, 0x30, 0x17, 0x06, 0x03, 0x55, 0x04,
+        0x03, 0x13, 0x10, 0x4f, 0x6d, 0x6e, 0x69, 0x20, 0x43, 0x6f, 0x6e, 0x66, 0x6f, 0x72, 0x6d,
+        0x61, 0x6e, 0x63, 0x65, 0x30, 0x82, 0x01, 0x22, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48,
+        0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00, 0x03, 0x82, 0x01, 0x0f, 0x00, 0x30, 0x82,
+        0x01, 0x0a, 0x02, 0x82, 0x01, 0x01, 0x00, 0xb0, 0x1f, 0xc3, 0xda, 0xaa, 0xec, 0x54, 0xff,
+        0xbb, 0xf5, 0xf3, 0xda, 0xfd, 0xa5, 0x2c, 0x95, 0x12, 0x1e, 0x14, 0xd1, 0xda, 0xe6, 0xf1,
+        0x81, 0x0a, 0x0a, 0x97, 0xc0, 0x9a, 0xa9, 0xd7, 0x86, 0xaf, 0x8b, 0xe2, 0x1d, 0x8d, 0x18,
+        0x16, 0x45, 0x55, 0xec, 0x5e, 0x88, 0xf5, 0xc7, 0xef, 0xe1, 0xa0, 0x1f, 0xcd, 0x70, 0xf5,
+        0x5f, 0xf9, 0xda, 0x3d, 0x4d, 0x5a, 0xbe, 0x33, 0x52, 0x08, 0x3b, 0xf6, 0x02, 0xa0, 0x2a,
+        0x17, 0x99, 0x2a, 0xa1, 0x75, 0x34, 0x12, 0x2f, 0x9c, 0x72, 0xb2, 0xe7, 0xe8, 0xa1, 0x03,
+        0x31, 0x1e, 0x0d, 0xe6, 0xeb, 0xc1, 0x0c, 0x92, 0x74, 0x0e, 0xc7, 0x78, 0xf5, 0x1b, 0xe4,
+        0x39, 0x04, 0xd4, 0xae, 0x8c, 0x55, 0x23, 0xd0, 0xd4, 0xd5, 0x5d, 0x2a, 0x8f, 0x1d, 0xbb,
+        0x8f, 0x35, 0xef, 0x64, 0xf9, 0x51, 0xd9, 0x77, 0xca, 0x8b, 0x6d, 0x4b, 0xff, 0x98, 0x13,
+        0xd4, 0x10, 0xc1, 0x31, 0xe5, 0xda, 0xad, 0xf7, 0x39, 0x3d, 0x98, 0x21, 0x9f, 0x51, 0xcc,
+        0x51, 0x72, 0xde, 0x76, 0x93, 0xbb, 0xae, 0xfb, 0x96, 0x9c, 0xe6, 0xcd, 0x8b, 0xd1, 0x22,
+        0x31, 0xec, 0x5c, 0x05, 0x7d, 0x13, 0x9e, 0xa7, 0xd0, 0xc5, 0xfc, 0x02, 0xa7, 0x04, 0x7b,
+        0x58, 0xd9, 0x10, 0x2b, 0xf4, 0x5a, 0x40, 0x8a, 0x61, 0xe2, 0xaa, 0x72, 0xaf, 0x61, 0xed,
+        0x7a, 0xc3, 0xc7, 0xa4, 0x23, 0x97, 0xc9, 0xa5, 0x71, 0x11, 0xc8, 0x76, 0x01, 0x51, 0x38,
+        0x29, 0xc7, 0xaa, 0x46, 0x38, 0x7b, 0x35, 0x22, 0x59, 0x4c, 0x78, 0x46, 0x0d, 0xb1, 0x64,
+        0xf3, 0x36, 0xb1, 0x33, 0xcc, 0x25, 0x43, 0x76, 0x86, 0x14, 0x59, 0x68, 0x09, 0x1e, 0x90,
+        0x7a, 0xd4, 0xb3, 0x6f, 0x7a, 0x8f, 0xc9, 0xbd, 0x77, 0x30, 0x5d, 0x89, 0x10, 0x69, 0x18,
+        0xd0, 0xe3, 0xbb, 0x3a, 0xe5, 0x00, 0x36, 0xab, 0x02, 0x03, 0x01, 0x00, 0x01, 0xa3, 0x21,
+        0x30, 0x1f, 0x30, 0x1d, 0x06, 0x03, 0x55, 0x1d, 0x0e, 0x04, 0x16, 0x04, 0x14, 0xee, 0x76,
+        0x4b, 0xad, 0x89, 0xb8, 0xa8, 0x59, 0xe1, 0x5b, 0xb1, 0xf8, 0x72, 0x08, 0xfb, 0x9b, 0x12,
+        0x16, 0xa8, 0x37, 0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
+        0x0c, 0x05, 0x00, 0x03, 0x82, 0x01, 0x01, 0x00, 0x74, 0x6f, 0x97, 0x28, 0xb6, 0x84, 0xfe,
+        0x21, 0x5c, 0xfb, 0x06, 0xeb, 0x14, 0x9c, 0xc5, 0xd8, 0x04, 0x81, 0x59, 0xda, 0x1f, 0x7f,
+        0x7a, 0x0f, 0xde, 0x22, 0xd9, 0xf5, 0x98, 0x5f, 0x3a, 0xde, 0xed, 0xc9, 0x3c, 0x7b, 0x86,
+        0x09, 0x6b, 0x62, 0xdb, 0x7f, 0x5d, 0x8e, 0xe5, 0x65, 0x2d, 0x48, 0xf4, 0xd2, 0xbe, 0xca,
+        0x44, 0x68, 0xb3, 0x23, 0x15, 0x41, 0x4a, 0x50, 0xcc, 0x0d, 0x3e, 0xf0, 0x9a, 0xfd, 0x7f,
+        0x7c, 0x93, 0x13, 0xd9, 0x32, 0xfe, 0x91, 0x1b, 0x77, 0x8d, 0x1a, 0x69, 0xdb, 0x00, 0xe8,
+        0x7b, 0xff, 0x8d, 0x32, 0x17, 0x95, 0xab, 0xb3, 0xb4, 0x08, 0x12, 0x38, 0x78, 0xf9, 0x84,
+        0x6f, 0x60, 0xee, 0xa2, 0x50, 0xb3, 0x46, 0x1e, 0xa2, 0x82, 0x17, 0xfc, 0x22, 0xda, 0x51,
+        0x77, 0x3c, 0x98, 0xd5, 0x9f, 0x4b, 0x02, 0x7b, 0x33, 0xb4, 0xc6, 0x59, 0x97, 0xd1, 0x79,
+        0xf0, 0x20, 0xdb, 0x0d, 0xc6, 0x16, 0xb3, 0xf4, 0x55, 0xb2, 0xe2, 0x99, 0x48, 0xa2, 0x31,
+        0xc6, 0xa1, 0x56, 0x10, 0xdc, 0x75, 0x2a, 0x59, 0x75, 0xc5, 0xe9, 0xfc, 0xf2, 0xa7, 0x69,
+        0x19, 0x26, 0xb2, 0x73, 0x37, 0x1c, 0x7a, 0xce, 0x81, 0x4b, 0x99, 0x07, 0x1d, 0xe8, 0xfa,
+        0xee, 0xf6, 0x26, 0xd6, 0x31, 0x01, 0x19, 0x0b, 0xfa, 0xb5, 0x58, 0xfd, 0xa0, 0xd9, 0x02,
+        0x63, 0x49, 0x03, 0x8a, 0x82, 0x0c, 0x16, 0x8e, 0xab, 0x86, 0x83, 0x6c, 0x25, 0x52, 0x04,
+        0x7d, 0xcf, 0x58, 0xf1, 0x96, 0x15, 0x78, 0x88, 0x83, 0x94, 0x23, 0x3e, 0xc0, 0x31, 0x13,
+        0x24, 0x46, 0x34, 0xa6, 0x60, 0x9a, 0x70, 0x97, 0xdf, 0xfd, 0xf9, 0x25, 0x76, 0x98, 0xc9,
+        0x54, 0xc4, 0x6a, 0x4b, 0x65, 0xe7, 0x8c, 0x43, 0xa3, 0xdc, 0x0f, 0x22, 0xfe, 0xea, 0x13,
+        0x7b, 0x3a, 0xfc, 0x42, 0xd1, 0x53, 0x88, 0x07, 0x6e,
+    ];
+
+    #[test]
+    fn der_refuses_every_encoding_the_rules_forbid() {
+        // DER exists because BER lets one value be written several ways, and a
+        // verifier that accepts two spellings of a name can be shown a different
+        // name from the one a parser displays.
+        let cases: &[(&[u8], &str)] = &[
+            (&[0x30, 0x80, 0x00, 0x00], "ED002"), // indefinite length
+            (&[0x30, 0x81, 0x00], "ED004"),       // long form, leading zero
+            (&[0x30, 0x81, 0x01, 0x00], "ED005"), // long form for a short length
+            (&[0x1f, 0x01, 0x00], "ED001"),       // high tag number form
+            (&[0x30, 0x05, 0x00], "ED007"),       // runs past its container
+        ];
+        for (bytes, code) in cases {
+            let mut reader = super::der::Reader::new(bytes, 0);
+            let error = reader.next_element().unwrap_err();
+            assert_eq!(error.code, *code, "{bytes:?}");
+        }
+
+        // A padded integer has a shorter encoding, so it is not DER.
+        let padded = super::der::Element {
+            tag: super::der::tag::INTEGER,
+            contents: &[0x00, 0x01],
+            offset: 0,
+            total: 4,
+        };
+        assert_eq!(
+            super::der::read_integer_bytes(&padded).unwrap_err().code,
+            "ED032"
+        );
+    }
+
+    #[test]
+    fn der_reads_object_identifiers_the_way_the_encoding_defines_them() {
+        // The first byte holds two arcs at once, which is the one place the
+        // encoding is not simply base-128.
+        let cases: &[(&[u8], &str)] = &[
+            (&[0x06, 0x03, 0x55, 0x04, 0x03], "2.5.4.3"),
+            (
+                &[
+                    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
+                ],
+                "1.2.840.113549.1.1.11",
+            ),
+            (
+                &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03],
+                "1.2.840.10045.4.3",
+            ),
+        ];
+        for (bytes, expected) in cases {
+            let mut reader = super::der::Reader::new(bytes, 0);
+            let element = reader.next_element().unwrap();
+            assert_eq!(super::der::read_oid(&element).unwrap(), *expected);
+        }
+
+        // An arc that never ends, and one with a leading zero byte.
+        for bad in [
+            &[0x06u8, 0x02, 0x55, 0x80][..],
+            &[0x06, 0x03, 0x55, 0x80, 0x01][..],
+        ] {
+            let mut reader = super::der::Reader::new(bad, 0);
+            let element = reader.next_element().unwrap();
+            assert!(super::der::read_oid(&element).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn der_survives_arbitrary_input() {
+        let mut seed = 0xaaaa_5555_cccc_3333u64;
+        for _ in 0..3_000 {
+            let length = (xorshift(&mut seed) % 120) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+            let mut reader = super::der::Reader::new(&bytes, 0);
+            // Reading until it stops must terminate, whatever it was given.
+            for _ in 0..64 {
+                match reader.next_element() {
+                    Ok(element) => {
+                        assert!(element.contents.len() <= bytes.len());
+                        let _ = super::der::read_oid(&element);
+                        let _ = super::der::read_string(&element);
+                        let _ = super::der::read_integer_bytes(&element);
+                    }
+                    Err(_) => break,
+                }
+                if reader.is_empty() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // --- X.509 ---------------------------------------------------------------
+
+    #[test]
+    fn a_certificate_reads_as_the_tools_read_it() {
+        let certificate = Certificate::parse(CONFORMANCE_CERTIFICATE).expect("must parse");
+
+        assert_eq!(certificate.subject, "C=TR, O=Omni, CN=Omni Conformance");
+        assert_eq!(certificate.issuer, certificate.subject, "it is self-signed");
+        assert_eq!(certificate.serial, "5D97B82E9226CBB1");
+        assert_eq!(certificate.public_key_algorithm.display(), "RSA");
+        assert_eq!(certificate.public_key_bits, Some(2048));
+        assert!(certificate.signature_algorithm.is_known());
+
+        // The fingerprint OpenSSL prints for this file.
+        assert_eq!(
+            certificate.fingerprint.to_hex(),
+            "a7259d236ba6819af41ef78ed77ed17804f07ec9edce8294a5ff380558289fbe"
+        );
+        assert!(certificate
+            .fingerprint_display()
+            .starts_with("A7:25:9D:23:6B:A6:81:9A"));
+
+        assert!(certificate.not_before.ends_with("UTC"));
+        assert!(certificate.not_after > certificate.not_before);
+    }
+
+    #[test]
+    fn a_certificate_never_claims_its_signature_was_checked() {
+        // Directive section 1: a parser is not a verifier, and the report must
+        // not let the two be confused.
+        let certificate = Certificate::parse(CONFORMANCE_CERTIFICATE).unwrap();
+        let mut w = Writer::new();
+        w.begin_array(None);
+        certificate.write_json(&mut w);
+        w.end_array();
+        let document = w.finish();
+
+        assert!(is_structurally_valid(&document));
+        assert!(document.contains("\"signatureChecked\":false"));
+    }
+
+    #[test]
+    fn a_damaged_certificate_is_refused_rather_than_half_read() {
+        let mut sink_count = 0;
+        for position in [0usize, 1, 4, 40, 200, 500] {
+            let mut damaged = CONFORMANCE_CERTIFICATE.to_vec();
+            damaged[position] ^= 0xff;
+            if Certificate::parse(&damaged).is_err() {
+                sink_count += 1;
+            }
+        }
+        assert!(sink_count > 0, "damaging a certificate must be noticed");
+
+        assert!(Certificate::parse(&[]).is_err());
+        assert!(Certificate::parse(&[0x30, 0x00]).is_err());
+        assert!(Certificate::parse(&CONFORMANCE_CERTIFICATE[..100]).is_err());
+    }
+
+    #[test]
+    fn certificate_parsing_survives_arbitrary_input() {
+        let mut seed = 0x9999_1111_2222_3333u64;
+        for _ in 0..2_000 {
+            let mut bytes = CONFORMANCE_CERTIFICATE.to_vec();
+            let mutations = (xorshift(&mut seed) % 8) + 1;
+            for _ in 0..mutations {
+                let position = (xorshift(&mut seed) as usize) % bytes.len();
+                bytes[position] = (xorshift(&mut seed) & 0xff) as u8;
+            }
+            let _ = Certificate::parse(&bytes);
+        }
+    }
+
+    // --- signing block -------------------------------------------------------
+
+    #[test]
+    fn a_package_without_a_signing_block_is_reported_as_such() {
+        let mut builder = ArchiveBuilder::new();
+        builder.add("a.txt", b"x".to_vec()).unwrap();
+        let bytes = builder.finish().unwrap();
+        let archive = archive::read(&bytes, &mut Sink::new()).unwrap();
+
+        let mut sink = Sink::new();
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+
+        assert!(!report.has_block);
+        assert!(!report.everything_checkable_passed());
+        assert!(sink.entries().iter().any(|d| d.code == "ES030"));
+    }
+
+    /// Signs a small package with `apksigner`, when it is available.
+    ///
+    /// Returns the bytes and the directory to clean up, or `None` when the tool
+    /// is not here.
+    /// Finds `apksigner` in whatever Android SDK this machine has.
+    ///
+    /// A conformance test that silently skips is worse than no test, because it
+    /// reports success while checking nothing. So the search covers the places
+    /// an SDK actually lives -- both environment variables and the path the
+    /// image installs it at -- and takes the newest build-tools it finds rather
+    /// than a hard-coded version that will stop existing.
+    fn find_apksigner() -> Option<std::path::PathBuf> {
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+            if let Ok(value) = std::env::var(name) {
+                if !value.is_empty() {
+                    roots.push(std::path::PathBuf::from(value));
+                }
+            }
+        }
+        roots.push(std::path::PathBuf::from("/opt/android-sdk"));
+        roots.push(std::path::PathBuf::from("/usr/local/lib/android/sdk"));
+        if let Ok(home) = std::env::var("HOME") {
+            roots.push(std::path::PathBuf::from(home).join("Android/Sdk"));
+        }
+
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(root.join("build-tools")) else {
+                continue;
+            };
+            let mut versions: Vec<std::path::PathBuf> = entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .collect();
+            versions.sort();
+            for version in versions.into_iter().rev() {
+                let candidate = version.join("apksigner");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        // A machine without an SDK may skip; a machine that promised one may
+        // not. Continuous integration sets this so that a conformance test
+        // which silently stopped running fails the build instead.
+        assert!(
+            std::env::var("OMNI_REQUIRE_APKSIGNER").is_err(),
+            "OMNI_REQUIRE_APKSIGNER is set but no apksigner was found, so the \
+             signing conformance tests would have skipped silently"
+        );
+        None
+    }
+
+    fn sign_with_apksigner(label: &str) -> Option<(Vec<u8>, std::path::PathBuf)> {
+        let apksigner = find_apksigner()?;
+
+        let directory = temp_directory(label);
+        let apk = directory.join("sample.apk");
+        let keystore = directory.join("k.jks");
+
+        let mut builder = ArchiveBuilder::for_android();
+        builder
+            .add("AndroidManifest.xml", b"<manifest/>".to_vec())
+            .unwrap();
+        builder.add("classes.dex", vec![0x2a; 3_000]).unwrap();
+        builder
+            .add("lib/arm64-v8a/libomni.so", vec![0x7f; 2_000])
+            .unwrap();
+        std::fs::write(&apk, builder.finish().unwrap()).unwrap();
+
+        let keytool = std::process::Command::new("keytool")
+            .args([
+                "-genkeypair",
+                "-keystore",
+                keystore.to_str().unwrap(),
+                "-storepass",
+                "pass123",
+                "-keypass",
+                "pass123",
+                "-alias",
+                "k",
+                "-keyalg",
+                "RSA",
+                "-keysize",
+                "2048",
+                "-validity",
+                "30",
+                "-dname",
+                "CN=Omni Test, O=Omni, C=TR",
+            ])
+            .output()
+            .ok()?;
+        if !keytool.status.success() {
+            std::fs::remove_dir_all(&directory).ok();
+            return None;
+        }
+
+        let signed = std::process::Command::new(&apksigner)
+            .args([
+                "sign",
+                "--ks",
+                keystore.to_str().unwrap(),
+                "--ks-pass",
+                "pass:pass123",
+                "--key-pass",
+                "pass:pass123",
+                "--ks-key-alias",
+                "k",
+                "--v1-signing-enabled",
+                "false",
+                "--v2-signing-enabled",
+                "true",
+                "--v3-signing-enabled",
+                "false",
+                "--min-sdk-version",
+                "28",
+                apk.to_str().unwrap(),
+            ])
+            .output()
+            .ok()?;
+        assert!(
+            signed.status.success(),
+            "apksigner failed: {}",
+            String::from_utf8_lossy(&signed.stderr)
+        );
+
+        let bytes = std::fs::read(&apk).unwrap();
+        Some((bytes, directory))
+    }
+
+    #[test]
+    fn the_digest_this_build_computes_matches_the_one_apksigner_wrote() {
+        // This is the conformance test that matters. The scheme's chunked digest
+        // is defined precisely, and recomputing it from the specification and
+        // getting the same answer as Google's signer is the only way to know the
+        // implementation is right rather than merely self-consistent.
+        let Some((bytes, directory)) = sign_with_apksigner("v2-digest") else {
+            eprintln!(
+                "signing conformance: apksigner is not available here, so the digest \
+                 was not checked against it"
+            );
+            return;
+        };
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).expect("the signed package must read");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+
+        assert!(
+            report.has_block,
+            "apksigner wrote a block and it was not found"
+        );
+        assert!(
+            report.schemes.contains(&"v2"),
+            "schemes: {:?}",
+            report.schemes
+        );
+        assert_eq!(report.signers.len(), 1);
+        assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
+        assert!(
+            report.digests_verified > 0,
+            "no digest was recomputed: {:?}",
+            sink.entries()
+        );
+        assert!(report.everything_checkable_passed());
+
+        // And the certificate inside is the one that was just made.
+        let certificate = &report.signers[0].certificates[0];
+        assert_eq!(certificate.subject, "C=TR, O=Omni, CN=Omni Test");
+        assert_eq!(certificate.public_key_bits, Some(2048));
+
+        // The report never overstates what happened.
+        assert!(!report.signatures_checked);
+
+        eprintln!(
+            "signing conformance: {} digest(s) recomputed and matched apksigner",
+            report.digests_verified
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// The package this repository's own build produced, if it has been built.
+    ///
+    /// The conformance test above signs an archive this tree wrote, which
+    /// proves the digest against apksigner but says nothing about a package
+    /// with thousands of deflated entries that the Android Gradle Plugin laid
+    /// out. This points the same reader at exactly that.
+    fn package_this_build_produced() -> Option<Vec<u8>> {
+        // Naming a package is a promise that it is there. Falling back to the
+        // default path when the named one cannot be read would turn a wrong
+        // path into a silent skip, which is the failure this whole helper
+        // exists to avoid.
+        if let Ok(named) = std::env::var("OMNI_PACKAGE_UNDER_TEST") {
+            if !named.is_empty() {
+                let bytes = std::fs::read(&named)
+                    .unwrap_or_else(|why| panic!("OMNI_PACKAGE_UNDER_TEST={named}: {why}"));
+                return Some(bytes);
+            }
+        }
+        std::fs::read("Builder/build/outputs/apk/debug/Builder-debug.apk").ok()
+    }
+
+    #[test]
+    fn the_package_this_build_produced_reads_and_its_digest_holds() {
+        let Some(bytes) = package_this_build_produced() else {
+            eprintln!(
+                "signing conformance: no built package here, so a real Android \
+                 Gradle Plugin package was not read. Build one with \
+                 `./gradlew :Builder:assembleDebug` or set \
+                 OMNI_PACKAGE_UNDER_TEST."
+            );
+            return;
+        };
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).expect("the package must read");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert!(
+            archive.entries().len() > 10,
+            "a real package has more than a handful of entries"
+        );
+
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+        assert!(report.has_block, "a debug package carries a v2 block");
+        assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
+        assert!(report.digests_verified > 0, "{:?}", sink.entries());
+        assert!(!report.signatures_checked);
+
+        eprintln!(
+            "signing conformance: {} entries, schemes {:?}, {} digest(s) matched",
+            archive.entries().len(),
+            report.schemes,
+            report.digests_verified
+        );
+    }
+
+    #[test]
+    fn changing_one_byte_of_a_signed_package_is_detected() {
+        // Threats T1, T3 and T4 of directive section 27: an APK modified after
+        // signing, a modified DEX, a modified native library. All three are the
+        // same thing to a content digest, and this is what catches them.
+        let Some((bytes, directory)) = sign_with_apksigner("v2-tamper") else {
+            eprintln!("signing conformance: apksigner is not available here");
+            return;
+        };
+
+        let archive = archive::read(&bytes, &mut Sink::new()).unwrap();
+        let entry = archive.entry("classes.dex").expect("classes.dex");
+        let position = entry.data_offset as usize + 10;
+
+        let mut tampered = bytes.clone();
+        tampered[position] ^= 0xff;
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&tampered, &mut sink).unwrap();
+        let report = signing::examine(
+            &tampered,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+
+        assert!(report.has_block);
+        assert_eq!(report.digests_verified, 0);
+        assert!(report.digests_failed > 0, "a changed byte must be noticed");
+        assert!(!report.everything_checkable_passed());
+
+        let error = sink.entries().iter().find(|d| d.code == "ES033").unwrap();
+        assert_eq!(error.severity, Severity::Fatal);
+        assert_eq!(error.class, FailureClass::Corruption);
+        assert!(error.suggestion.as_deref().unwrap().contains("Do not"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_signing_report_says_what_it_did_not_check() {
+        let Some((bytes, directory)) = sign_with_apksigner("v2-report") else {
+            return;
+        };
+
+        let archive = archive::read(&bytes, &mut Sink::new()).unwrap();
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut Sink::new(),
+        );
+
+        let mut w = Writer::new();
+        w.begin_object(None);
+        report.write_json(&mut w, "signing");
+        w.end_object();
+        let document = w.finish();
+
+        assert!(is_structurally_valid(&document), "{document}");
+        assert!(document.contains("\"signaturesChecked\":false"));
+        assert!(document.contains("does not prove who wrote it"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_signing_block_reader_survives_arbitrary_input() {
+        let Some((bytes, directory)) = sign_with_apksigner("v2-fuzz") else {
+            return;
+        };
+
+        let mut seed = 0x7777_8888_9999_aaaau64;
+        for _ in 0..1_500 {
+            let mut damaged = bytes.clone();
+            let mutations = (xorshift(&mut seed) % 6) + 1;
+            for _ in 0..mutations {
+                let position = (xorshift(&mut seed) as usize) % damaged.len();
+                damaged[position] = (xorshift(&mut seed) & 0xff) as u8;
+            }
+
+            let mut sink = Sink::new();
+            if let Some(archive) = archive::read(&damaged, &mut sink) {
+                let report = signing::examine(
+                    &damaged,
+                    archive.central_directory_offset(),
+                    archive.end_record_offset(),
+                    &mut sink,
+                );
+                // Whatever it decided, it must never claim to have checked a
+                // signature.
+                assert!(!report.signatures_checked);
+            }
+        }
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     // --- subsystem inventory -------------------------------------------------

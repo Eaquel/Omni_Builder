@@ -528,37 +528,108 @@ object OmniLog {
         val resolver = context.contentResolver
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME"
+
+        // Reuse the entry if it is already there; only create one when it is not.
+        //
+        // The previous attempt deleted by a RELATIVE_PATH and DISPLAY_NAME
+        // selection and then inserted. On a Galaxy S23 running Android 16 the
+        // delete matched nothing - the stored RELATIVE_PATH did not equal what
+        // was searched for - and the insert then failed with
+        //
+        //   SQLiteConstraintException: UNIQUE constraint failed: files._data
+        //
+        // because a row already held that path. `_data` is the absolute path
+        // column, so that error is MediaStore saying "this file is already
+        // registered". Looking the row up and writing into it removes the whole
+        // question; the fallback below covers the case where it is found only
+        // after the insert has already objected.
+        val existing = findExisting(resolver, collection, relativePath, name)
+        if (existing != null) {
+            writeTruncating(resolver, existing, bytes)
+            return
+        }
+
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+        }
+
+        val created = try {
+            resolver.insert(collection, values)
+        } catch (constraint: Exception) {
+            // The row exists after all, under a path this query did not match.
+            findExisting(resolver, collection, relativePath, name)
+                ?: throw IOException(
+                    "MediaStore has a row for this file that cannot be found: " +
+                        "${constraint.javaClass.simpleName}: ${constraint.message}"
+                )
+        } ?: throw IOException("MediaStore refused to create the entry")
+
+        writeTruncating(resolver, created, bytes)
+    }
+
+    /**
+     * Finds an existing entry, tolerating how the provider spells its path.
+     *
+     * `RELATIVE_PATH` is stored with a trailing slash on some devices and
+     * without on others, and an exact match on the wrong spelling is what let
+     * the previous attempt believe the file was not there.
+     */
+    private fun findExisting(
+        resolver: android.content.ContentResolver,
+        collection: Uri,
+        relativePath: String,
+        name: String,
+    ): Uri? {
         val selection =
-            "${MediaStore.MediaColumns.RELATIVE_PATH}=? AND ${MediaStore.MediaColumns.DISPLAY_NAME}=?"
-        val arguments = arrayOf("$relativePath/", name)
+            "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND " +
+                "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+        val arguments = arrayOf(name, "$relativePath%")
 
-        // The entry is removed and recreated rather than reopened and truncated.
-        // Opening in "wt" mode wrote from offset zero without shortening the
-        // file, so each flush left the previous document's tail behind;
-        // truncating through the descriptor closed it twice, which can land on
-        // whatever file has since been given that number.
-        runCatching { resolver.delete(collection, selection, arguments) }
+        return runCatching {
+            resolver.query(
+                collection,
+                arrayOf(MediaStore.MediaColumns._ID),
+                selection,
+                arguments,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    ContentUris.withAppendedId(collection, cursor.getLong(0))
+                } else {
+                    null
+                }
+            }
+        }.getOrNull()
+    }
 
-        val destination = resolver.insert(
-            collection,
-            ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-                put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
-            },
-        ) ?: throw IOException("MediaStore refused to create the entry")
+    /**
+     * Writes over an entry, shortening it to what is written.
+     *
+     * "rwt" is the mode that truncates; "wt" did not on the device this was
+     * measured on, and truncating through a raw descriptor closed it twice.
+     * `AutoCloseOutputStream` owns the descriptor and closes it exactly once,
+     * which is the whole reason that class exists.
+     */
+    private fun writeTruncating(
+        resolver: android.content.ContentResolver,
+        uri: Uri,
+        bytes: ByteArray,
+    ) {
+        val descriptor = resolver.openFileDescriptor(uri, "rwt")
+            ?: throw IOException("MediaStore returned no descriptor")
 
-        resolver.openOutputStream(destination, "w")?.use { stream ->
+        android.os.ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { stream ->
             stream.write(bytes)
             stream.flush()
-        } ?: throw IOException("MediaStore returned no stream")
+        }
 
-        // The size is read back, but a zero or absent size is treated as "not
-        // indexed yet" rather than as a failure. The previous attempt threw here
-        // on a freshly written file whose size the provider had not caught up
-        // with, and threw away a write that had in fact succeeded.
+        // The size is read back, but a zero or absent size means "not indexed
+        // yet" rather than "wrong": treating it as a failure once threw away a
+        // write that had in fact succeeded.
         val stored = runCatching {
-            resolver.query(destination, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)
+            resolver.query(uri, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)
                 ?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else -1L }
                 ?: -1L
         }.getOrDefault(-1L)

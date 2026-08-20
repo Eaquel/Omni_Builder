@@ -21,14 +21,21 @@
 #   7. Every APK the build produces contains every class its manifest names.
 #   8. Every APK the build produces can actually be installed: native libraries
 #      stored and 16 KB aligned, and a signature the platform accepts.
+#   9. The v2 content digest the Core recomputes is the one Google's apksigner
+#      wrote, checked against a package apksigner signs during the test run.
+#  10. The Core's signing reader reads the APK this build produced -- an Android
+#      Gradle Plugin layout, not one the Core wrote -- and its digest holds.
 #
 # WHAT IT DOES NOT PROVE
 # -----------------------------------------------------------------------------
 # Nothing here runs the application on a device. The release artifact is left
 # unsigned because no signing identity exists in this repository and none may be
 # committed (directive section 25); the debug artifact carries the standard debug
-# signature and installs. Signing as an Omni subsystem is roadmap phase 12, and
-# Plugins/Sign.rs remains PLANNED.
+# signature and installs.
+#
+# Nothing here produces a signature with Omni's own code. The Core reads and
+# checks a signing block; it does not write one, and it never verifies the
+# signature over the signed data (ADR-0010). Plugins/Sign.rs remains PLANNED.
 
 name: Build and verify
 
@@ -73,6 +80,25 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v5
 
+      - name: Install the pinned JDK
+        # keytool comes from the JDK, and the signing conformance tests use it to
+        # make the key apksigner then signs with.
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: ${{ env.OMNI_JDK_VERSION }}
+
+      - name: Install the pinned build tools
+        # The signing conformance tests check the Core's digest against the one
+        # apksigner writes. Without apksigner they would skip, so it is installed
+        # explicitly rather than assumed to be on the image.
+        run: |
+          set -euo pipefail
+          sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          "$sdkmanager" --licenses > /dev/null <<< "$(printf 'y\n%.0s' $(seq 1 100))"
+          "$sdkmanager" "build-tools;$OMNI_BUILD_TOOLS_VERSION"
+          test -x "$ANDROID_HOME/build-tools/$OMNI_BUILD_TOOLS_VERSION/apksigner"
+
       - name: Install the pinned Rust toolchain
         run: |
           set -euo pipefail
@@ -91,6 +117,11 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run the Core test suite
+        # A conformance test that skips reports success while checking nothing.
+        # This makes a missing apksigner fail the job instead (see find_apksigner
+        # in Omni.rs).
+        env:
+          OMNI_REQUIRE_APKSIGNER: "1"
         run: cargo test --locked
 
       - name: Confirm the Core carries no third-party dependency
@@ -247,6 +278,16 @@ jobs:
 
       - name: Verify that the APKs can be installed
         run: ./gradlew :Builder:verifyApkInstallability --console=plain --rerun-tasks
+
+      - name: Read the signed APK with the Core's own signing reader
+        # The Core's conformance tests sign an archive the Core itself wrote.
+        # This points the same reader at a package the Android Gradle Plugin
+        # laid out and apksigner signed, which is a different shape entirely.
+        env:
+          OMNI_PACKAGE_UNDER_TEST: Builder/build/outputs/apk/debug/Builder-debug.apk
+        run: |
+          set -euo pipefail
+          cargo test --locked the_package_this_build_produced -- --nocapture
 
       - name: Publish the APKs
         uses: actions/upload-artifact@v5
