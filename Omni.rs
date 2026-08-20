@@ -378,7 +378,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "RSA keys generated from the system random source with Miller-Rabin primality testing at 24 rounds, encoded as PKCS#8 and accepted by OpenSSL.",
         missing: &[
             "Miller-Rabin is probabilistic. At 24 rounds a composite survives with probability below 4 to the power of -24, which is small but not zero.",
-            "No key storage: a key exists for as long as the build does.",
+            "A key is only as safe as the password over it; nothing here recovers one that is lost.",
             "Not constant-time, and the primes are not checked against the distance requirements FIPS 186-5 places on them.",
         ],
     },
@@ -412,7 +412,6 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &[
             "Signing only. RSASSA-PSS is not implemented and neither is encryption.",
             "No elliptic-curve arithmetic, so an EC key cannot be used.",
-            "An encrypted keystore cannot be opened: the key must arrive as an unencrypted PKCS#8 or PKCS#1 file, which is worse custody than a keystore and is the next thing to fix.",
             "Not constant-time; see the big integer entry.",
         ],
     },
@@ -420,11 +419,55 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Package signer",
         status: Status::Partial,
         directive_section: 25,
-        summary: "Writes an APK Signature Scheme v2 block: signed data, signatures and public key, spliced ahead of the central directory with the end record repointed. apksigner verifies what this writes.",
+        summary: "Writes APK Signature Scheme v2 and v3 blocks: signed data, signatures and public key, with the platform range in the v3 block, spliced ahead of the central directory with the end record repointed. apksigner verifies the v3 block at API 28 and the v2 block at API 27.",
         missing: &[
-            "v2 only. No v1 JAR signature, no v3, no v3.1 and no rotation.",
-            "One signer per package.",
-            "No key custody: the caller supplies the key and the certificate.",
+            "No v1 JAR signature, so a package this build signs does not install below API 24.",
+            "No v3.1 and no key rotation: one signer, one certificate, for the whole platform range.",
+            "No v4 signature, so incremental installation is not available.",
+        ],
+    },
+    Subsystem {
+        name: "Symmetric cryptography",
+        status: Status::Beta,
+        directive_section: 30,
+        summary: "AES-256 in CBC with PKCS#7 padding, HMAC-SHA256 and HMAC-SHA512, and PBKDF2-HMAC-SHA256, each checked against the published vectors of FIPS-197, NIST SP 800-38A, RFC 4231 and RFC 6070.",
+        missing: &[
+            "Not constant-time: the S-box is a table lookup, so the cache timing of an encryption depends on the key.",
+            "CBC only. No GCM and no authenticated encryption, so a sealed file is checked by its padding and its contents, not by a tag.",
+            "No key derivation other than PBKDF2, and no memory-hard function such as scrypt or Argon2.",
+        ],
+    },
+    Subsystem {
+        name: "Developer keystore",
+        status: Status::Partial,
+        directive_section: 25,
+        summary: "A signing key the developer makes, named, dated and sealed under their own password as PBES2 (PBKDF2-HMAC-SHA256 at 210000 iterations, AES-256-CBC). OpenSSL opens what this writes and refuses the wrong password. Listing a key needs no password; the certificate inside is checked against the key before either is used.",
+        missing: &[
+            "The password protects the file and nothing more: the key is in ordinary memory while a package is signed, and Android's hardware-backed keystore is not used.",
+            "No import and no export: a key made elsewhere cannot be brought in, and one made here cannot be taken out.",
+            "A sealed file carries no authentication tag, so a wrong password is told apart from a damaged file only by what comes out of the decryption.",
+        ],
+    },
+    Subsystem {
+        name: "Image reader",
+        status: Status::Beta,
+        directive_section: 22,
+        summary: "Reads a PNG to its header and walks every chunk, checking each against its own CRC-32: 200 files written by other tools read here, and a flipped byte, a truncation or trailing bytes are refused.",
+        missing: &[
+            "It reads the structure, not the pixels: there is no inflate, so nothing here can resize an image or write one.",
+            "PNG only. No JPEG, no WebP and no vector drawable.",
+            "An image chosen for a project is stored with it. It does not reach the package, because android:icon is a resource reference and no resource table is written.",
+        ],
+    },
+    Subsystem {
+        name: "Project workspace",
+        status: Status::Partial,
+        directive_section: 46,
+        summary: "Lists the projects on the device, walks a project's folders within bounds, and reads and writes its text files through the same path rules the virtual filesystem uses, so an edit cannot leave the project folder.",
+        missing: &[
+            "Text files only, UTF-8 only, and up to four megabytes: anything else is refused rather than risked.",
+            "No undo, no history and no concurrent-edit detection: the last save wins.",
+            "Nothing watches the folder, so a change made by another application is seen only when the list is read again.",
         ],
     },
     Subsystem {
@@ -9792,11 +9835,60 @@ pub mod signing {
         }
     }
 
+    fn one_signer(
+        algorithm_id: u32,
+        digest: &[u8],
+        certificate: &[u8],
+        key: &crate::rsa::PrivateKey,
+        algorithm: crate::rsa::DigestAlgorithm,
+        sdk_range: Option<(u32, u32)>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let mut one_digest = Vec::new();
+        one_digest.extend_from_slice(&algorithm_id.to_le_bytes());
+        one_digest.extend_from_slice(&prefixed(digest));
+
+        let mut signed_data = Vec::new();
+        signed_data.extend_from_slice(&prefixed(&prefixed(&one_digest)));
+        signed_data.extend_from_slice(&prefixed(&prefixed(certificate)));
+        if let Some((minimum, maximum)) = sdk_range {
+            signed_data.extend_from_slice(&minimum.to_le_bytes());
+            signed_data.extend_from_slice(&maximum.to_le_bytes());
+        }
+        signed_data.extend_from_slice(&prefixed(&[]));
+
+        let signature = crate::rsa::sign(key, algorithm, &signed_data)?;
+        let mut one_signature = Vec::new();
+        one_signature.extend_from_slice(&algorithm_id.to_le_bytes());
+        one_signature.extend_from_slice(&prefixed(&signature));
+
+        let public_key = crate::x509::Certificate::public_key_info(certificate)?;
+
+        let mut signer = Vec::new();
+        signer.extend_from_slice(&prefixed(&signed_data));
+        if let Some((minimum, maximum)) = sdk_range {
+            signer.extend_from_slice(&minimum.to_le_bytes());
+            signer.extend_from_slice(&maximum.to_le_bytes());
+        }
+        signer.extend_from_slice(&prefixed(&prefixed(&one_signature)));
+        signer.extend_from_slice(&prefixed(&public_key));
+        Ok(prefixed(&prefixed(&signer)))
+    }
+
     pub fn sign_v2(
         package: &[u8],
         key: &crate::rsa::PrivateKey,
         certificate: &[u8],
         algorithm: crate::rsa::DigestAlgorithm,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        sign(package, key, certificate, algorithm, None)
+    }
+
+    pub fn sign(
+        package: &[u8],
+        key: &crate::rsa::PrivateKey,
+        certificate: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+        sdk_range: Option<(u32, u32)>,
     ) -> Result<Vec<u8>, Diagnostic> {
         let (central_directory_offset, end_record_offset) = locate(package)?;
         let block_offset = central_directory_offset;
@@ -9826,38 +9918,28 @@ pub mod signing {
             ),
         };
 
-        let mut one_digest = Vec::new();
-        one_digest.extend_from_slice(&algorithm_id.to_le_bytes());
-        one_digest.extend_from_slice(&prefixed(&digest));
-        let digests = prefixed(&prefixed(&one_digest));
-        let certificates = prefixed(&prefixed(certificate));
-        let attributes = prefixed(&[]);
-
-        let mut signed_data = Vec::new();
-        signed_data.extend_from_slice(&digests);
-        signed_data.extend_from_slice(&certificates);
-        signed_data.extend_from_slice(&attributes);
-
-        let signature = crate::rsa::sign(key, algorithm, &signed_data)?;
-        let mut one_signature = Vec::new();
-        one_signature.extend_from_slice(&algorithm_id.to_le_bytes());
-        one_signature.extend_from_slice(&prefixed(&signature));
-        let signatures = prefixed(&prefixed(&one_signature));
-
-        let public_key = prefixed(&crate::x509::Certificate::public_key_info(certificate)?);
-
-        let mut signer = Vec::new();
-        signer.extend_from_slice(&prefixed(&signed_data));
-        signer.extend_from_slice(&signatures);
-        signer.extend_from_slice(&public_key);
-
-        let signers = prefixed(&prefixed(&signer));
-
         let mut block = Vec::new();
-        let pair_length = 4u64 + signers.len() as u64;
+
+        let v2 = one_signer(algorithm_id, &digest, certificate, key, algorithm, None)?;
+        let pair_length = 4u64 + v2.len() as u64;
         block.extend_from_slice(&pair_length.to_le_bytes());
         block.extend_from_slice(&V2_BLOCK_ID.to_le_bytes());
-        block.extend_from_slice(&signers);
+        block.extend_from_slice(&v2);
+
+        if let Some(range) = sdk_range {
+            let v3 = one_signer(
+                algorithm_id,
+                &digest,
+                certificate,
+                key,
+                algorithm,
+                Some(range),
+            )?;
+            let pair_length = 4u64 + v3.len() as u64;
+            block.extend_from_slice(&pair_length.to_le_bytes());
+            block.extend_from_slice(&V3_BLOCK_ID.to_le_bytes());
+            block.extend_from_slice(&v3);
+        }
 
         let mut padding = 0usize;
         while !(24 + block.len() + padding + 8 + 4).is_multiple_of(4096) {
@@ -11260,6 +11342,367 @@ pub mod bignum {
     }
 }
 
+pub mod cipher {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::{Sha256, Sha512};
+    use crate::FailureClass;
+
+    const fn build_sbox() -> [u8; 256] {
+        let mut sbox = [0u8; 256];
+        sbox[0] = 0x63;
+        let mut p: u8 = 1;
+        let mut q: u8 = 1;
+        loop {
+            p = p ^ (p << 1) ^ (if p & 0x80 != 0 { 0x1b } else { 0 });
+            q ^= q << 1;
+            q ^= q << 2;
+            q ^= q << 4;
+            if q & 0x80 != 0 {
+                q ^= 0x09;
+            }
+            let x = q ^ q.rotate_left(1) ^ q.rotate_left(2) ^ q.rotate_left(3) ^ q.rotate_left(4);
+            sbox[p as usize] = x ^ 0x63;
+            if p == 1 {
+                break;
+            }
+        }
+        sbox
+    }
+
+    const fn build_inverse(sbox: &[u8; 256]) -> [u8; 256] {
+        let mut inverse = [0u8; 256];
+        let mut index = 0usize;
+        while index < 256 {
+            inverse[sbox[index] as usize] = index as u8;
+            index += 1;
+        }
+        inverse
+    }
+
+    static SBOX: [u8; 256] = build_sbox();
+    static INVERSE_SBOX: [u8; 256] = build_inverse(&SBOX);
+
+    fn xtime(value: u8) -> u8 {
+        (value << 1) ^ if value & 0x80 != 0 { 0x1b } else { 0 }
+    }
+
+    fn multiply(value: u8, by: u8) -> u8 {
+        let mut result = 0u8;
+        let mut a = value;
+        let mut b = by;
+        while b != 0 {
+            if b & 1 != 0 {
+                result ^= a;
+            }
+            a = xtime(a);
+            b >>= 1;
+        }
+        result
+    }
+
+    pub const KEY_BYTES: usize = 32;
+    pub const BLOCK_BYTES: usize = 16;
+    const ROUNDS: usize = 14;
+
+    fn expand(key: &[u8; KEY_BYTES]) -> [[u8; 4]; 4 * (ROUNDS + 1)] {
+        let mut words = [[0u8; 4]; 4 * (ROUNDS + 1)];
+        for (index, chunk) in key.chunks_exact(4).enumerate() {
+            words[index].copy_from_slice(chunk);
+        }
+
+        let nk = KEY_BYTES / 4;
+        let mut rcon = 1u8;
+        for index in nk..words.len() {
+            let mut temp = words[index - 1];
+            if index % nk == 0 {
+                temp = [
+                    SBOX[temp[1] as usize] ^ rcon,
+                    SBOX[temp[2] as usize],
+                    SBOX[temp[3] as usize],
+                    SBOX[temp[0] as usize],
+                ];
+                rcon = xtime(rcon);
+            } else if index % nk == 4 {
+                temp = [
+                    SBOX[temp[0] as usize],
+                    SBOX[temp[1] as usize],
+                    SBOX[temp[2] as usize],
+                    SBOX[temp[3] as usize],
+                ];
+            }
+            for byte in 0..4 {
+                words[index][byte] = words[index - nk][byte] ^ temp[byte];
+            }
+        }
+        words
+    }
+
+    fn add_round_key(state: &mut [u8; 16], words: &[[u8; 4]], round: usize) {
+        for column in 0..4 {
+            for row in 0..4 {
+                state[column * 4 + row] ^= words[round * 4 + column][row];
+            }
+        }
+    }
+
+    fn encrypt_block(block: &mut [u8; 16], words: &[[u8; 4]]) {
+        add_round_key(block, words, 0);
+        for round in 1..=ROUNDS {
+            for byte in block.iter_mut() {
+                *byte = SBOX[*byte as usize];
+            }
+            shift_rows(block);
+            if round != ROUNDS {
+                mix_columns(block);
+            }
+            add_round_key(block, words, round);
+        }
+    }
+
+    fn decrypt_block(block: &mut [u8; 16], words: &[[u8; 4]]) {
+        add_round_key(block, words, ROUNDS);
+        for round in (1..=ROUNDS).rev() {
+            inverse_shift_rows(block);
+            for byte in block.iter_mut() {
+                *byte = INVERSE_SBOX[*byte as usize];
+            }
+            add_round_key(block, words, round - 1);
+            if round != 1 {
+                inverse_mix_columns(block);
+            }
+        }
+    }
+
+    fn shift_rows(state: &mut [u8; 16]) {
+        let original = *state;
+        for row in 1..4 {
+            for column in 0..4 {
+                state[column * 4 + row] = original[((column + row) % 4) * 4 + row];
+            }
+        }
+    }
+
+    fn inverse_shift_rows(state: &mut [u8; 16]) {
+        let original = *state;
+        for row in 1..4 {
+            for column in 0..4 {
+                state[((column + row) % 4) * 4 + row] = original[column * 4 + row];
+            }
+        }
+    }
+
+    fn mix_columns(state: &mut [u8; 16]) {
+        for column in 0..4 {
+            let at = column * 4;
+            let a = [state[at], state[at + 1], state[at + 2], state[at + 3]];
+            state[at] = multiply(a[0], 2) ^ multiply(a[1], 3) ^ a[2] ^ a[3];
+            state[at + 1] = a[0] ^ multiply(a[1], 2) ^ multiply(a[2], 3) ^ a[3];
+            state[at + 2] = a[0] ^ a[1] ^ multiply(a[2], 2) ^ multiply(a[3], 3);
+            state[at + 3] = multiply(a[0], 3) ^ a[1] ^ a[2] ^ multiply(a[3], 2);
+        }
+    }
+
+    fn inverse_mix_columns(state: &mut [u8; 16]) {
+        for column in 0..4 {
+            let at = column * 4;
+            let a = [state[at], state[at + 1], state[at + 2], state[at + 3]];
+            state[at] =
+                multiply(a[0], 14) ^ multiply(a[1], 11) ^ multiply(a[2], 13) ^ multiply(a[3], 9);
+            state[at + 1] =
+                multiply(a[0], 9) ^ multiply(a[1], 14) ^ multiply(a[2], 11) ^ multiply(a[3], 13);
+            state[at + 2] =
+                multiply(a[0], 13) ^ multiply(a[1], 9) ^ multiply(a[2], 14) ^ multiply(a[3], 11);
+            state[at + 3] =
+                multiply(a[0], 11) ^ multiply(a[1], 13) ^ multiply(a[2], 9) ^ multiply(a[3], 14);
+        }
+    }
+
+    pub fn encrypt_ecb_block(key: &[u8; KEY_BYTES], block: &[u8; 16]) -> [u8; 16] {
+        let words = expand(key);
+        let mut out = *block;
+        encrypt_block(&mut out, &words);
+        out
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::SecurityFailure,
+            "core.cipher",
+            message,
+        )
+    }
+
+    pub fn encrypt_cbc(key: &[u8; KEY_BYTES], iv: &[u8; 16], plain: &[u8]) -> Vec<u8> {
+        let words = expand(key);
+        let padding = BLOCK_BYTES - (plain.len() % BLOCK_BYTES);
+        let mut padded = plain.to_vec();
+        padded.extend(std::iter::repeat_n(padding as u8, padding));
+
+        let mut previous = *iv;
+        let mut out = Vec::with_capacity(padded.len());
+        for chunk in padded.chunks_exact(BLOCK_BYTES) {
+            let mut block = [0u8; 16];
+            for index in 0..BLOCK_BYTES {
+                block[index] = chunk[index] ^ previous[index];
+            }
+            encrypt_block(&mut block, &words);
+            out.extend_from_slice(&block);
+            previous = block;
+        }
+        out
+    }
+
+    pub fn decrypt_cbc(
+        key: &[u8; KEY_BYTES],
+        iv: &[u8; 16],
+        cipher: &[u8],
+    ) -> Result<Vec<u8>, Diagnostic> {
+        if cipher.is_empty() || !cipher.len().is_multiple_of(BLOCK_BYTES) {
+            return Err(fail(
+                "EK001",
+                "The ciphertext is not a whole number of blocks.",
+            ));
+        }
+        let words = expand(key);
+        let mut previous = *iv;
+        let mut out = Vec::with_capacity(cipher.len());
+        for chunk in cipher.chunks_exact(BLOCK_BYTES) {
+            let mut block = [0u8; 16];
+            block.copy_from_slice(chunk);
+            let held = block;
+            decrypt_block(&mut block, &words);
+            for index in 0..BLOCK_BYTES {
+                out.push(block[index] ^ previous[index]);
+            }
+            previous = held;
+        }
+
+        let padding = *out.last().unwrap() as usize;
+        if padding == 0 || padding > BLOCK_BYTES || padding > out.len() {
+            return Err(fail(
+                "EK002",
+                "The password is wrong, or the data is not what it claims.",
+            )
+            .with_suggestion(
+                "Nothing is returned from a decryption whose padding does not check out.",
+            ));
+        }
+        if !out[out.len() - padding..]
+            .iter()
+            .all(|byte| *byte as usize == padding)
+        {
+            return Err(fail(
+                "EK002",
+                "The password is wrong, or the data is not what it claims.",
+            )
+            .with_suggestion(
+                "Nothing is returned from a decryption whose padding does not check out.",
+            ));
+        }
+        out.truncate(out.len() - padding);
+        Ok(out)
+    }
+
+    pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+        const BLOCK: usize = 64;
+        let mut shortened = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            let mut hasher = Sha256::new();
+            hasher.update(key);
+            shortened[..32].copy_from_slice(hasher.finish().as_bytes());
+        } else {
+            shortened[..key.len()].copy_from_slice(key);
+        }
+
+        let mut inner_pad = [0x36u8; BLOCK];
+        let mut outer_pad = [0x5cu8; BLOCK];
+        for index in 0..BLOCK {
+            inner_pad[index] ^= shortened[index];
+            outer_pad[index] ^= shortened[index];
+        }
+
+        let mut inner = Sha256::new();
+        inner.update(&inner_pad);
+        inner.update(message);
+        let digest = inner.finish();
+
+        let mut outer = Sha256::new();
+        outer.update(&outer_pad);
+        outer.update(digest.as_bytes());
+        *outer.finish().as_bytes()
+    }
+
+    pub fn hmac_sha512(key: &[u8], message: &[u8]) -> [u8; 64] {
+        const BLOCK: usize = 128;
+        let mut shortened = [0u8; BLOCK];
+        if key.len() > BLOCK {
+            let mut hasher = Sha512::new();
+            hasher.update(key);
+            shortened[..64].copy_from_slice(hasher.finish().as_bytes());
+        } else {
+            shortened[..key.len()].copy_from_slice(key);
+        }
+
+        let mut inner_pad = [0x36u8; BLOCK];
+        let mut outer_pad = [0x5cu8; BLOCK];
+        for index in 0..BLOCK {
+            inner_pad[index] ^= shortened[index];
+            outer_pad[index] ^= shortened[index];
+        }
+
+        let mut inner = Sha512::new();
+        inner.update(&inner_pad);
+        inner.update(message);
+        let digest = inner.finish();
+
+        let mut outer = Sha512::new();
+        outer.update(&outer_pad);
+        outer.update(digest.as_bytes());
+        *outer.finish().as_bytes()
+    }
+
+    pub fn pbkdf2_sha256(
+        password: &[u8],
+        salt: &[u8],
+        iterations: u32,
+        length: usize,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        if iterations == 0 {
+            return Err(fail(
+                "EK010",
+                "A key derivation needs at least one iteration.",
+            ));
+        }
+        if length == 0 || length > 1024 {
+            return Err(fail(
+                "EK011",
+                "A derived key of that length is not produced here.",
+            ));
+        }
+
+        let mut out = Vec::with_capacity(length);
+        let mut block_index = 1u32;
+        while out.len() < length {
+            let mut salted = salt.to_vec();
+            salted.extend_from_slice(&block_index.to_be_bytes());
+            let mut u = hmac_sha256(password, &salted);
+            let mut result = u;
+            for _ in 1..iterations {
+                u = hmac_sha256(password, &u);
+                for index in 0..32 {
+                    result[index] ^= u[index];
+                }
+            }
+            out.extend_from_slice(&result);
+            block_index += 1;
+        }
+        out.truncate(length);
+        Ok(out)
+    }
+}
+
 pub mod rsa {
     use crate::bignum::Natural;
     use crate::der;
@@ -11474,6 +11917,147 @@ pub mod rsa {
         outer.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &algorithm));
         outer.extend_from_slice(&der::encode_element(der::tag::OCTET_STRING, &pkcs1));
         Ok(der::encode_element(der::tag::SEQUENCE, &outer))
+    }
+
+    const PBES2: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0d];
+    const PBKDF2: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x05, 0x0c];
+    const HMAC_SHA256: &[u8] = &[0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x02, 0x09];
+    const AES256_CBC: &[u8] = &[0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2a];
+
+    pub const KEY_ITERATIONS: u32 = 210_000;
+
+    pub fn seal_pkcs8(key: &PrivateKey, password: &str) -> Result<Vec<u8>, Diagnostic> {
+        if password.chars().count() < 8 {
+            return Err(fail(
+                "ER040",
+                "A key password shorter than eight characters is refused.",
+            )
+            .with_suggestion(
+                "The password is the only thing between this key and anyone who copies the file.",
+            ));
+        }
+
+        let plain = encode_pkcs8(key)?;
+        let salt = crate::random::bytes(16)?;
+        let iv_bytes = crate::random::bytes(16)?;
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(&iv_bytes);
+
+        let derived = crate::cipher::pbkdf2_sha256(password.as_bytes(), &salt, KEY_ITERATIONS, 32)?;
+        let mut wrapping = [0u8; 32];
+        wrapping.copy_from_slice(&derived);
+        let sealed = crate::cipher::encrypt_cbc(&wrapping, &iv, &plain);
+
+        let mut kdf_params = Vec::new();
+        kdf_params.extend_from_slice(&der::encode_element(der::tag::OCTET_STRING, &salt));
+        kdf_params.extend_from_slice(&der::encode_element(
+            der::tag::INTEGER,
+            &integer_bytes(KEY_ITERATIONS),
+        ));
+        let mut prf = Vec::new();
+        prf.extend_from_slice(&der::encode_element(der::tag::OID, HMAC_SHA256));
+        prf.extend_from_slice(&der::encode_element(der::tag::NULL, &[]));
+        kdf_params.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &prf));
+
+        let mut kdf = Vec::new();
+        kdf.extend_from_slice(&der::encode_element(der::tag::OID, PBKDF2));
+        kdf.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &kdf_params));
+
+        let mut scheme = Vec::new();
+        scheme.extend_from_slice(&der::encode_element(der::tag::OID, AES256_CBC));
+        scheme.extend_from_slice(&der::encode_element(der::tag::OCTET_STRING, &iv));
+
+        let mut params = Vec::new();
+        params.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &kdf));
+        params.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &scheme));
+
+        let mut algorithm = Vec::new();
+        algorithm.extend_from_slice(&der::encode_element(der::tag::OID, PBES2));
+        algorithm.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &params));
+
+        let mut outer = Vec::new();
+        outer.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &algorithm));
+        outer.extend_from_slice(&der::encode_element(der::tag::OCTET_STRING, &sealed));
+        Ok(der::encode_element(der::tag::SEQUENCE, &outer))
+    }
+
+    fn integer_bytes(value: u32) -> Vec<u8> {
+        let raw = value.to_be_bytes();
+        let first = raw.iter().position(|byte| *byte != 0).unwrap_or(3);
+        let mut out = raw[first..].to_vec();
+        if out[0] & 0x80 != 0 {
+            out.insert(0, 0);
+        }
+        out
+    }
+
+    pub fn open_pkcs8(sealed: &[u8], password: &str) -> Result<PrivateKey, Diagnostic> {
+        let mut outer = der::Reader::new(sealed, 0);
+        let sequence = outer.expect(der::tag::SEQUENCE)?;
+        let mut fields = sequence.reader();
+
+        let algorithm = fields.expect(der::tag::SEQUENCE)?;
+        let mut algorithm_fields = algorithm.reader();
+        let scheme_oid = der::read_oid(&algorithm_fields.expect(der::tag::OID)?)?;
+        if scheme_oid != "1.2.840.113549.1.5.13" {
+            return Err(fail("ER041", "The key file does not use PBES2.")
+                .with_context(format!("Scheme: {scheme_oid}")));
+        }
+
+        let params = algorithm_fields.expect(der::tag::SEQUENCE)?;
+        let mut params_fields = params.reader();
+        let kdf = params_fields.expect(der::tag::SEQUENCE)?;
+        let mut kdf_fields = kdf.reader();
+        let kdf_oid = der::read_oid(&kdf_fields.expect(der::tag::OID)?)?;
+        if kdf_oid != "1.2.840.113549.1.5.12" {
+            return Err(fail("ER042", "The key file does not use PBKDF2."));
+        }
+        let kdf_params = kdf_fields.expect(der::tag::SEQUENCE)?;
+        let mut kdf_params_fields = kdf_params.reader();
+        let salt = kdf_params_fields
+            .expect(der::tag::OCTET_STRING)?
+            .contents
+            .to_vec();
+        let iterations_bytes =
+            der::read_integer_bytes(&kdf_params_fields.expect(der::tag::INTEGER)?)?;
+        let mut iterations = 0u32;
+        for byte in iterations_bytes {
+            iterations = iterations
+                .checked_mul(256)
+                .and_then(|v| v.checked_add(u32::from(*byte)))
+                .ok_or_else(|| {
+                    fail(
+                        "ER043",
+                        "The iteration count is larger than this build accepts.",
+                    )
+                })?;
+        }
+
+        let scheme = params_fields.expect(der::tag::SEQUENCE)?;
+        let mut scheme_fields = scheme.reader();
+        let cipher_oid = der::read_oid(&scheme_fields.expect(der::tag::OID)?)?;
+        if cipher_oid != "2.16.840.1.101.3.4.1.42" {
+            return Err(
+                fail("ER044", "The key file is not encrypted with AES-256-CBC.")
+                    .with_context(format!("Cipher: {cipher_oid}")),
+            );
+        }
+        let iv_element = scheme_fields.expect(der::tag::OCTET_STRING)?;
+        if iv_element.contents.len() != 16 {
+            return Err(fail(
+                "ER045",
+                "The initialisation vector is not sixteen bytes.",
+            ));
+        }
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(iv_element.contents);
+
+        let sealed_data = fields.expect(der::tag::OCTET_STRING)?.contents;
+        let derived = crate::cipher::pbkdf2_sha256(password.as_bytes(), &salt, iterations, 32)?;
+        let mut wrapping = [0u8; 32];
+        wrapping.copy_from_slice(&derived);
+        let plain = crate::cipher::decrypt_cbc(&wrapping, &iv, sealed_data)?;
+        parse_pkcs8(&plain)
     }
 
     pub fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey, Diagnostic> {
@@ -13175,6 +13759,11 @@ pub mod scaffold {
     pub const OLDEST_SUPPORTED: u32 = 28;
     pub const NEWEST_SUPPORTED: u32 = 36;
 
+    pub const FIRST_VERSION_NAME: &str = "1.0.0";
+    pub const FIRST_VERSION_CODE: u32 = 1;
+    pub const LONGEST_VERSION_NAME: usize = 32;
+    pub const LARGEST_VERSION_CODE: u32 = 2_100_000_000;
+
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
             code,
@@ -13193,6 +13782,8 @@ pub mod scaffold {
         pub min_sdk: u32,
         pub target_sdk: u32,
         pub languages: Vec<String>,
+        pub version_name: String,
+        pub version_code: u32,
     }
 
     impl Default for Spec {
@@ -13200,12 +13791,29 @@ pub mod scaffold {
             Spec {
                 package: "com.tr.yt".to_string(),
                 label: "My App".to_string(),
-                abis: vec![ARM64.to_string()],
+                abis: vec![ARM32.to_string(), ARM64.to_string()],
                 min_sdk: OLDEST_SUPPORTED,
                 target_sdk: NEWEST_SUPPORTED,
                 languages: vec!["kotlin".to_string()],
+                version_name: FIRST_VERSION_NAME.to_string(),
+                version_code: FIRST_VERSION_CODE,
             }
         }
+    }
+
+    pub fn escape_xml(value: &str) -> String {
+        let mut out = String::with_capacity(value.len());
+        for ch in value.chars() {
+            match ch {
+                '&' => out.push_str("&amp;"),
+                '<' => out.push_str("&lt;"),
+                '>' => out.push_str("&gt;"),
+                '"' => out.push_str("&quot;"),
+                '\'' => out.push_str("&apos;"),
+                other => out.push(other),
+            }
+        }
+        out
     }
 
     pub fn valid_package(name: &str) -> bool {
@@ -13237,6 +13845,13 @@ pub mod scaffold {
                 match key.trim() {
                     "package" => spec.package = value.to_string(),
                     "label" => spec.label = value.to_string(),
+                    "versionName" => spec.version_name = value.to_string(),
+                    "versionCode" => {
+                        spec.version_code = value.parse().map_err(|_| {
+                            fail("EP002", "The version code is not a number.")
+                                .with_context(format!("Value: {value:?}"))
+                        })?
+                    }
                     "minSdk" => {
                         spec.min_sdk = value.parse().map_err(|_| {
                             fail("EP002", "The minimum platform is not a number.")
@@ -13302,6 +13917,27 @@ pub mod scaffold {
             if self.abis.is_empty() {
                 return Err(fail("EP012", "No architecture was chosen."));
             }
+            if self.version_name.trim().is_empty()
+                || self.version_name.len() > LONGEST_VERSION_NAME
+                || !self
+                    .version_name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+            {
+                return Err(fail("EP017", "The version name is not one Android will show.")
+                    .with_context(format!("Value: {:?}", self.version_name))
+                    .with_suggestion(format!(
+                        "Letters, digits, dots, hyphens and underscores, at most                          {LONGEST_VERSION_NAME} characters, for example {FIRST_VERSION_NAME}.",
+                    )));
+            }
+            if self.version_code < 1 || self.version_code > LARGEST_VERSION_CODE {
+                return Err(fail("EP018", "The version code is outside what Android accepts.")
+                    .with_context(format!("Chosen: {}", self.version_code))
+                    .with_context(format!("Allowed: 1 to {LARGEST_VERSION_CODE}"))
+                    .with_suggestion(
+                        "Google Play refuses an upload whose version code is not larger than                          the one before it, so this number only ever goes up.",
+                    ));
+            }
             if self.languages.is_empty() {
                 return Err(fail("EP013", "No language was chosen."));
             }
@@ -13339,14 +13975,18 @@ pub mod scaffold {
                 "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
             );
             out.push_str(&format!("    package=\"{}\"\n", self.package));
-            out.push_str("    android:versionCode=\"1\" android:versionName=\"1.0\">\n");
+            out.push_str(&format!(
+                "    android:versionCode=\"{}\" android:versionName=\"{}\">\n",
+                self.version_code,
+                escape_xml(&self.version_name)
+            ));
             out.push_str(&format!(
                 "    <uses-sdk android:minSdkVersion=\"{}\" android:targetSdkVersion=\"{}\" />\n",
                 self.min_sdk, self.target_sdk
             ));
             out.push_str(&format!(
                 "    <application android:label=\"{}\" android:allowBackup=\"false\"\n",
-                self.label
+                escape_xml(&self.label)
             ));
             out.push_str("        android:extractNativeLibs=\"false\">\n");
             out.push_str(&format!(
@@ -13370,6 +14010,8 @@ pub mod scaffold {
             w.begin_object(Some(key));
             w.field_str("package", &self.package);
             w.field_str("label", &self.label);
+            w.field_str("versionName", &self.version_name);
+            w.field_u64("versionCode", self.version_code as u64);
             w.field_u64("minSdk", self.min_sdk as u64);
             w.field_u64("targetSdk", self.target_sdk as u64);
             w.begin_array(Some("abis"));
@@ -13493,6 +14135,35 @@ pub mod scaffold {
         })
     }
 
+    pub const ICON_FILE: &str = "Icon.png";
+
+    pub fn icon_path(root: &str) -> String {
+        format!("{}/{ICON_FILE}", root.trim_end_matches('/'))
+    }
+
+    pub fn set_icon(root: &str, source: &str) -> Result<crate::image::Png, Diagnostic> {
+        if !std::path::Path::new(root).is_dir() {
+            return Err(fail("EP040", "The project folder is not here.")
+                .with_context(format!("Path: {root}"))
+                .with_suggestion("Create the project before giving it an image."));
+        }
+        let png = crate::image::read_png_file(source)?;
+        let bytes = std::fs::read(source).map_err(|why| {
+            fail("EP041", "The image could not be read a second time.")
+                .with_context(format!("Reason: {why}"))
+        })?;
+        std::fs::write(icon_path(root), &bytes).map_err(|why| {
+            fail("EP042", "The image could not be stored with the project.")
+                .with_context(format!("Path: {}", icon_path(root)))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(png)
+    }
+
+    pub fn read_icon(root: &str) -> Option<crate::image::Png> {
+        crate::image::read_png_file(&icon_path(root)).ok()
+    }
+
     pub fn read_manifest(root: &str) -> Result<String, Diagnostic> {
         let path = std::path::Path::new(root).join("AndroidManifest.xml");
         std::fs::read_to_string(&path).map_err(|why| {
@@ -13502,6 +14173,1030 @@ pub mod scaffold {
                 .with_suggestion(
                     "Create the project first; a project is a manifest and its language folders.",
                 )
+        })
+    }
+}
+
+pub mod image {
+    use crate::binary::checksum::crc32;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    pub const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    pub const MAX_BYTES: usize = 32 * 1024 * 1024;
+    pub const LARGEST_EDGE: u32 = 8_192;
+    pub const LAUNCHER_EDGE: u32 = 512;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.image",
+            message,
+        )
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Colour {
+        Grey,
+        Rgb,
+        Indexed,
+        GreyAlpha,
+        Rgba,
+    }
+
+    impl Colour {
+        pub fn name(self) -> &'static str {
+            match self {
+                Colour::Grey => "greyscale",
+                Colour::Rgb => "truecolour",
+                Colour::Indexed => "indexed",
+                Colour::GreyAlpha => "greyscale with alpha",
+                Colour::Rgba => "truecolour with alpha",
+            }
+        }
+
+        pub fn has_alpha(self) -> bool {
+            matches!(self, Colour::GreyAlpha | Colour::Rgba)
+        }
+
+        fn from_byte(value: u8, depth: u8) -> Option<Colour> {
+            let allowed: (Colour, &[u8]) = match value {
+                0 => (Colour::Grey, &[1, 2, 4, 8, 16]),
+                2 => (Colour::Rgb, &[8, 16]),
+                3 => (Colour::Indexed, &[1, 2, 4, 8]),
+                4 => (Colour::GreyAlpha, &[8, 16]),
+                6 => (Colour::Rgba, &[8, 16]),
+                _ => return None,
+            };
+            allowed.1.contains(&depth).then_some(allowed.0)
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Png {
+        pub width: u32,
+        pub height: u32,
+        pub bit_depth: u8,
+        pub colour: Colour,
+        pub interlaced: bool,
+        pub bytes: usize,
+        pub chunks: usize,
+    }
+
+    impl Png {
+        pub fn is_square(&self) -> bool {
+            self.width == self.height
+        }
+
+        pub fn write_json(&self, w: &mut Writer, name: &str) {
+            w.begin_object(Some(name));
+            w.field_u64("width", u64::from(self.width));
+            w.field_u64("height", u64::from(self.height));
+            w.field_u64("bitDepth", u64::from(self.bit_depth));
+            w.field_str("colour", self.colour.name());
+            w.field_bool("hasAlpha", self.colour.has_alpha());
+            w.field_bool("interlaced", self.interlaced);
+            w.field_bool("square", self.is_square());
+            w.field_u64("bytes", self.bytes as u64);
+            w.field_u64("chunks", self.chunks as u64);
+            w.end_object();
+        }
+    }
+
+    fn be32(data: &[u8]) -> u32 {
+        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+    }
+
+    pub fn read_png(data: &[u8]) -> Result<Png, Diagnostic> {
+        if data.len() > MAX_BYTES {
+            return Err(
+                fail("EM001", "The image is larger than this build will read.")
+                    .with_context(format!("Size: {} bytes", data.len()))
+                    .with_context(format!("Largest read: {MAX_BYTES} bytes")),
+            );
+        }
+        if data.len() < 8 || data[..8] != SIGNATURE {
+            return Err(
+                fail("EM002", "The file is not a PNG image.").with_suggestion(
+                    "A PNG begins with the eight bytes the format reserves for it. \
+                 Nothing else is accepted here, because nothing else is read.",
+                ),
+            );
+        }
+
+        let mut at = 8usize;
+        let mut header: Option<Png> = None;
+        let mut chunks = 0usize;
+        let mut ended = false;
+
+        while at < data.len() {
+            if at + 8 > data.len() {
+                return Err(
+                    fail("EM003", "The image ends in the middle of a chunk header.")
+                        .with_context(format!("Offset: {at}")),
+                );
+            }
+            let length = be32(&data[at..at + 4]) as usize;
+            if length > i32::MAX as usize {
+                return Err(fail(
+                    "EM004",
+                    "A chunk claims a length the format does not allow.",
+                )
+                .with_context(format!("Claimed: {length} bytes")));
+            }
+            let kind = &data[at + 4..at + 8];
+            if at + 12 + length > data.len() {
+                return Err(
+                    fail("EM005", "A chunk claims more bytes than the file holds.")
+                        .with_context(format!("Chunk: {}", String::from_utf8_lossy(kind)))
+                        .with_context(format!("Claimed: {length} bytes"))
+                        .with_context(format!("Remaining: {} bytes", data.len() - at - 8)),
+                );
+            }
+
+            let body = &data[at + 8..at + 8 + length];
+            let stated = be32(&data[at + 8 + length..at + 12 + length]);
+            let computed = crc32(&data[at + 4..at + 8 + length]);
+            if stated != computed {
+                return Err(fail("EM006", "A chunk does not match its own checksum.")
+                    .with_context(format!("Chunk: {}", String::from_utf8_lossy(kind)))
+                    .with_context(format!("Stated: 0x{stated:08x}"))
+                    .with_context(format!("Computed: 0x{computed:08x}"))
+                    .with_suggestion("The file is damaged. It is not used."));
+            }
+
+            if chunks == 0 && kind != b"IHDR" {
+                return Err(
+                    fail("EM007", "The image does not begin with its header chunk.")
+                        .with_context(format!("First chunk: {}", String::from_utf8_lossy(kind))),
+                );
+            }
+
+            if kind == b"IHDR" {
+                if header.is_some() {
+                    return Err(fail(
+                        "EM008",
+                        "The image carries more than one header chunk.",
+                    ));
+                }
+                if length != 13 {
+                    return Err(fail("EM009", "The header chunk is not thirteen bytes.")
+                        .with_context(format!("Length: {length}")));
+                }
+                let width = be32(&body[0..4]);
+                let height = be32(&body[4..8]);
+                let bit_depth = body[8];
+                let colour = Colour::from_byte(body[9], bit_depth).ok_or_else(|| {
+                    fail(
+                        "EM010",
+                        "The colour type and bit depth are not a pair the format allows.",
+                    )
+                    .with_context(format!("Colour type: {}", body[9]))
+                    .with_context(format!("Bit depth: {bit_depth}"))
+                })?;
+                if body[10] != 0 {
+                    return Err(fail(
+                        "EM011",
+                        "The image uses a compression method the format does not define.",
+                    )
+                    .with_context(format!("Method: {}", body[10])));
+                }
+                if body[11] != 0 {
+                    return Err(fail(
+                        "EM012",
+                        "The image uses a filter method the format does not define.",
+                    )
+                    .with_context(format!("Method: {}", body[11])));
+                }
+                if body[12] > 1 {
+                    return Err(fail(
+                        "EM013",
+                        "The image uses an interlace method the format does not define.",
+                    )
+                    .with_context(format!("Method: {}", body[12])));
+                }
+                if width == 0 || height == 0 {
+                    return Err(fail("EM014", "The image has no width or no height.")
+                        .with_context(format!("Size: {width} by {height}")));
+                }
+                if width > LARGEST_EDGE || height > LARGEST_EDGE {
+                    return Err(fail(
+                        "EM015",
+                        "The image is larger than an application icon needs.",
+                    )
+                    .with_context(format!("Size: {width} by {height}"))
+                    .with_context(format!("Largest edge: {LARGEST_EDGE}"))
+                    .with_suggestion(format!(
+                        "A launcher icon is drawn at {LAUNCHER_EDGE} pixels at most.",
+                    )));
+                }
+                header = Some(Png {
+                    width,
+                    height,
+                    bit_depth,
+                    colour,
+                    interlaced: body[12] == 1,
+                    bytes: data.len(),
+                    chunks: 0,
+                });
+            }
+
+            chunks += 1;
+            at += 12 + length;
+
+            if kind == b"IEND" {
+                ended = true;
+                break;
+            }
+        }
+
+        let Some(mut png) = header else {
+            return Err(fail("EM016", "The image carries no header chunk."));
+        };
+        if !ended {
+            return Err(
+                fail("EM017", "The image has no end chunk, so it is incomplete.")
+                    .with_suggestion("A PNG ends with IEND. A file without one was cut short."),
+            );
+        }
+        if at != data.len() {
+            return Err(
+                fail("EM018", "The image carries bytes after its end chunk.")
+                    .with_context(format!("Trailing: {} bytes", data.len() - at)),
+            );
+        }
+        png.chunks = chunks;
+        Ok(png)
+    }
+
+    pub fn read_png_file(path: &str) -> Result<Png, Diagnostic> {
+        let data = std::fs::read(path).map_err(|why| {
+            fail("EM020", "The image could not be read.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        read_png(&data)
+    }
+}
+
+pub mod workspace {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::json::Writer;
+    use crate::vfs::VirtualPath;
+    use crate::FailureClass;
+
+    pub const MAX_ENTRIES: usize = 5_000;
+    pub const MAX_DEPTH: usize = 16;
+    pub const MAX_TEXT_BYTES: u64 = 4 * 1024 * 1024;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.workspace",
+            message,
+        )
+    }
+
+    fn inside(root: &str, relative: &str) -> Result<std::path::PathBuf, Diagnostic> {
+        let path = VirtualPath::parse(relative).map_err(|error| {
+            fail(
+                "EW100",
+                "That path does not name a file inside the project.",
+            )
+            .with_context(format!("Path: {relative:?}"))
+            .with_context(format!("Reported: {} {}", error.code, error.message))
+            .with_suggestion(
+                "A project path is relative, uses forward slashes, and never leaves \
+                     the project folder.",
+            )
+        })?;
+        let mut full = std::path::PathBuf::from(root);
+        for segment in path.segments() {
+            full.push(segment);
+        }
+        Ok(full)
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Entry {
+        pub path: String,
+        pub folder: bool,
+        pub bytes: u64,
+    }
+
+    impl Entry {
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("path", &self.path);
+            w.field_bool("folder", self.folder);
+            w.field_u64("bytes", self.bytes);
+            w.end_object();
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Summary {
+        pub name: String,
+        pub root: String,
+        pub package: String,
+        pub label: String,
+        pub version_name: String,
+        pub version_code: u64,
+        pub min_sdk: u64,
+        pub target_sdk: u64,
+        pub files: usize,
+        pub icon: Option<crate::image::Png>,
+    }
+
+    impl Summary {
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("name", &self.name);
+            w.field_str("root", &self.root);
+            w.field_str("package", &self.package);
+            w.field_str("label", &self.label);
+            w.field_str("versionName", &self.version_name);
+            w.field_u64("versionCode", self.version_code);
+            w.field_u64("minSdk", self.min_sdk);
+            w.field_u64("targetSdk", self.target_sdk);
+            w.field_u64("files", self.files as u64);
+            match &self.icon {
+                Some(png) => png.write_json(w, "icon"),
+                None => w.field_bool("hasIcon", false),
+            }
+            w.end_object();
+        }
+    }
+
+    fn attribute(root: &crate::xml::Element, path: &[&str], name: &str) -> String {
+        let mut here = root;
+        for step in path {
+            match here.children.iter().find(|child| child.name == *step) {
+                Some(child) => here = child,
+                None => return String::new(),
+            }
+        }
+        here.attribute(name).unwrap_or_default().to_string()
+    }
+
+    pub fn describe(root: &str) -> Option<Summary> {
+        let manifest = crate::scaffold::read_manifest(root).ok()?;
+        let mut sink = crate::diag::Sink::new();
+        let parsed = crate::xml::parse(&manifest, "AndroidManifest.xml", &mut sink)?;
+        let name = std::path::Path::new(root)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or(root)
+            .to_string();
+        let files = tree(root).map(|entries| entries.len()).unwrap_or(0);
+        Some(Summary {
+            name,
+            root: root.to_string(),
+            package: parsed.attribute("package").unwrap_or_default().to_string(),
+            label: attribute(&parsed, &["application"], "android:label"),
+            version_name: parsed
+                .attribute("android:versionName")
+                .unwrap_or_default()
+                .to_string(),
+            version_code: parsed
+                .attribute("android:versionCode")
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(0),
+            min_sdk: attribute(&parsed, &["uses-sdk"], "android:minSdkVersion")
+                .parse()
+                .unwrap_or(0),
+            target_sdk: attribute(&parsed, &["uses-sdk"], "android:targetSdkVersion")
+                .parse()
+                .unwrap_or(0),
+            files,
+            icon: crate::scaffold::read_icon(root),
+        })
+    }
+
+    pub fn list_projects(directory: &str) -> Vec<Summary> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return found;
+        };
+        let mut paths: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Some(text) = path.to_str() else { continue };
+            if let Some(summary) = describe(text) {
+                found.push(summary);
+            }
+        }
+        found
+    }
+
+    fn walk(
+        base: &std::path::Path,
+        here: &std::path::Path,
+        depth: usize,
+        into: &mut Vec<Entry>,
+    ) -> Result<(), Diagnostic> {
+        if depth > MAX_DEPTH {
+            return Err(fail(
+                "EW101",
+                "The project folder is nested deeper than this build walks.",
+            )
+            .with_context(format!("Deepest walked: {MAX_DEPTH}")));
+        }
+        let entries = std::fs::read_dir(here).map_err(|why| {
+            fail("EW102", "A folder inside the project could not be read.")
+                .with_context(format!("Path: {}", here.display()))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        let mut children: Vec<std::path::PathBuf> =
+            entries.flatten().map(|entry| entry.path()).collect();
+        children.sort();
+
+        for child in children {
+            if into.len() >= MAX_ENTRIES {
+                return Err(fail(
+                    "EW103",
+                    "The project holds more files than this build lists.",
+                )
+                .with_context(format!("Listed: {MAX_ENTRIES}")));
+            }
+            let Ok(relative) = child.strip_prefix(base) else {
+                continue;
+            };
+            let Some(path) = relative.to_str() else {
+                continue;
+            };
+            let path = path.replace('\\', "/");
+            let folder = child.is_dir();
+            let bytes = if folder {
+                0
+            } else {
+                std::fs::metadata(&child)
+                    .map(|data| data.len())
+                    .unwrap_or(0)
+            };
+            into.push(Entry {
+                path,
+                folder,
+                bytes,
+            });
+            if folder {
+                walk(base, &child, depth + 1, into)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn tree(root: &str) -> Result<Vec<Entry>, Diagnostic> {
+        let base = std::path::Path::new(root);
+        if !base.is_dir() {
+            return Err(fail("EW104", "The project folder is not here.")
+                .with_context(format!("Path: {root}")));
+        }
+        let mut entries = Vec::new();
+        walk(base, base, 0, &mut entries)?;
+        Ok(entries)
+    }
+
+    pub fn read_text(root: &str, relative: &str) -> Result<String, Diagnostic> {
+        let path = inside(root, relative)?;
+        let size = std::fs::metadata(&path)
+            .map_err(|why| {
+                fail("EW110", "That file is not in the project.")
+                    .with_context(format!("Path: {relative}"))
+                    .with_context(format!("Reason: {why}"))
+            })?
+            .len();
+        if size > MAX_TEXT_BYTES {
+            return Err(fail("EW111", "That file is larger than this editor opens.")
+                .with_context(format!("Size: {size} bytes"))
+                .with_context(format!("Largest opened: {MAX_TEXT_BYTES} bytes")));
+        }
+        let bytes = std::fs::read(&path).map_err(|why| {
+            fail("EW112", "That file could not be read.").with_context(format!("Reason: {why}"))
+        })?;
+        String::from_utf8(bytes).map_err(|_| {
+            fail(
+                "EW113",
+                "That file is not text, so it is not opened for editing.",
+            )
+            .with_context(format!("Path: {relative}"))
+            .with_suggestion(
+                "This editor writes UTF-8. Opening a file that is not text would \
+                     destroy it on the first save.",
+            )
+        })
+    }
+
+    pub fn write_text(root: &str, relative: &str, contents: &str) -> Result<u64, Diagnostic> {
+        if contents.len() as u64 > MAX_TEXT_BYTES {
+            return Err(fail("EW120", "That file is larger than this editor saves.")
+                .with_context(format!("Size: {} bytes", contents.len()))
+                .with_context(format!("Largest saved: {MAX_TEXT_BYTES} bytes")));
+        }
+        let path = inside(root, relative)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|why| {
+                fail("EW121", "The folder for that file could not be made.")
+                    .with_context(format!("Reason: {why}"))
+            })?;
+        }
+        std::fs::write(&path, contents.as_bytes()).map_err(|why| {
+            fail("EW122", "That file could not be saved.")
+                .with_context(format!("Path: {relative}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(contents.len() as u64)
+    }
+
+    pub fn create_folder(root: &str, relative: &str) -> Result<(), Diagnostic> {
+        let path = inside(root, relative)?;
+        std::fs::create_dir_all(&path).map_err(|why| {
+            fail("EW130", "That folder could not be made.")
+                .with_context(format!("Path: {relative}"))
+                .with_context(format!("Reason: {why}"))
+        })
+    }
+
+    pub fn remove(root: &str, relative: &str) -> Result<(), Diagnostic> {
+        if relative == "AndroidManifest.xml" {
+            return Err(fail("EW140", "The manifest is what makes this a project.")
+                .with_suggestion(
+                    "Edit it instead. A project folder without a manifest is not a project, \
+                     and nothing here would find it again.",
+                ));
+        }
+        let path = inside(root, relative)?;
+        let outcome = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        outcome.map_err(|why| {
+            fail("EW141", "That could not be removed.")
+                .with_context(format!("Path: {relative}"))
+                .with_context(format!("Reason: {why}"))
+        })
+    }
+}
+
+pub mod keystore {
+    use crate::certificate;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::json::Writer;
+    use crate::rsa;
+    use crate::FailureClass;
+
+    pub const MAGIC: &[u8; 8] = b"OMNIKEY1";
+    pub const CONTAINER_VERSION: u32 = 1;
+    pub const EXTENSION: &str = "omnikey";
+    pub const SHORTEST_PASSWORD: usize = 8;
+    pub const SMALLEST_KEY_BITS: u32 = 2048;
+    pub const LARGEST_KEY_BITS: u32 = 4096;
+    pub const SHORTEST_VALIDITY_DAYS: u32 = 1;
+    pub const LONGEST_VALIDITY_DAYS: u32 = 36_500;
+    pub const PLAY_STORE_VALIDITY_DAYS: u32 = 10_950;
+    pub const LONGEST_ALIAS: usize = 64;
+    pub const MAX_CONTAINER_BYTES: usize = 1 << 20;
+    const SECONDS_PER_DAY: i64 = 86_400;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.keystore",
+            message,
+        )
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Request {
+        pub alias: String,
+        pub common_name: String,
+        pub organisation: String,
+        pub country: String,
+        pub validity_days: u32,
+        pub bits: u32,
+    }
+
+    impl Default for Request {
+        fn default() -> Request {
+            Request {
+                alias: String::new(),
+                common_name: String::new(),
+                organisation: String::new(),
+                country: String::new(),
+                validity_days: PLAY_STORE_VALIDITY_DAYS,
+                bits: SMALLEST_KEY_BITS,
+            }
+        }
+    }
+
+    pub fn valid_alias(alias: &str) -> bool {
+        !alias.is_empty()
+            && alias.len() <= LONGEST_ALIAS
+            && alias
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    impl Request {
+        pub fn parse(text: &str) -> Result<Request, Diagnostic> {
+            let mut request = Request::default();
+            for entry in text.split(';').filter(|part| !part.trim().is_empty()) {
+                let Some((key, value)) = entry.split_once('=') else {
+                    return Err(fail("EY001", "A setting is not written as key=value.")
+                        .with_context(format!("Setting: {entry:?}")));
+                };
+                let value = value.trim();
+                match key.trim() {
+                    "alias" => request.alias = value.to_string(),
+                    "commonName" => request.common_name = value.to_string(),
+                    "organisation" => request.organisation = value.to_string(),
+                    "country" => request.country = value.to_ascii_uppercase(),
+                    "validityDays" => {
+                        request.validity_days = value.parse().map_err(|_| {
+                            fail("EY002", "The validity period is not a number of days.")
+                                .with_context(format!("Value: {value:?}"))
+                        })?
+                    }
+                    "bits" => {
+                        request.bits = value.parse().map_err(|_| {
+                            fail("EY002", "The key size is not a number of bits.")
+                                .with_context(format!("Value: {value:?}"))
+                        })?
+                    }
+                    other => {
+                        return Err(fail("EY003", "A setting is not one this build knows.")
+                            .with_context(format!("Setting: {other:?}"))
+                            .with_suggestion(
+                                "Known settings: alias, commonName, organisation, country, \
+                                 validityDays, bits.",
+                            ))
+                    }
+                }
+            }
+            request.validate()?;
+            Ok(request)
+        }
+
+        pub fn validate(&self) -> Result<(), Diagnostic> {
+            if !valid_alias(&self.alias) {
+                return Err(fail("EY010", "The alias is not a usable name.")
+                    .with_context(format!("Value: {:?}", self.alias))
+                    .with_suggestion(
+                        "Letters, digits, underscore and hyphen, at most 64 characters. \
+                         The alias becomes the file name, so it may not contain a path.",
+                    ));
+            }
+            for (what, text) in [
+                ("common name", &self.common_name),
+                ("organisation", &self.organisation),
+            ] {
+                if text.trim().is_empty() || text.len() > 64 {
+                    return Err(fail("EY011", format!("The {what} is empty or too long."))
+                        .with_context(format!("Value: {text:?}"))
+                        .with_suggestion("One to sixty-four characters."));
+                }
+            }
+            if self.country.len() != 2 || !self.country.chars().all(|c| c.is_ascii_uppercase()) {
+                return Err(fail("EY012", "The country is not a two-letter code.")
+                    .with_context(format!("Value: {:?}", self.country))
+                    .with_suggestion("Two upper-case letters, for example TR."));
+            }
+            if !(SHORTEST_VALIDITY_DAYS..=LONGEST_VALIDITY_DAYS).contains(&self.validity_days) {
+                return Err(fail(
+                    "EY013",
+                    "The validity period is outside what a certificate may carry.",
+                )
+                .with_context(format!("Chosen: {} days", self.validity_days))
+                .with_context(format!(
+                    "Allowed: {SHORTEST_VALIDITY_DAYS} to {LONGEST_VALIDITY_DAYS} days"
+                ))
+                .with_suggestion(format!(
+                    "Google Play requires a key valid until at least 22 October 2033; \
+                         {PLAY_STORE_VALIDITY_DAYS} days from today clears that.",
+                )));
+            }
+            if self.bits != SMALLEST_KEY_BITS && self.bits != 3072 && self.bits != LARGEST_KEY_BITS
+            {
+                return Err(
+                    fail("EY014", "The key size is not one this build will produce.")
+                        .with_context(format!("Chosen: {} bits", self.bits))
+                        .with_context(format!(
+                            "Allowed: {SMALLEST_KEY_BITS}, 3072 or {LARGEST_KEY_BITS} bits"
+                        )),
+                );
+            }
+            Ok(())
+        }
+
+        pub fn write_json(&self, w: &mut Writer, name: &str) {
+            w.begin_object(Some(name));
+            w.field_str("alias", &self.alias);
+            w.field_str("commonName", &self.common_name);
+            w.field_str("organisation", &self.organisation);
+            w.field_str("country", &self.country);
+            w.field_u64("validityDays", self.validity_days as u64);
+            w.field_u64("bits", self.bits as u64);
+            w.end_object();
+        }
+    }
+
+    pub fn check_password(password: &str) -> Result<(), Diagnostic> {
+        if password.chars().count() < SHORTEST_PASSWORD {
+            return Err(fail(
+                "EY020",
+                "The password is too short to protect a signing key.",
+            )
+            .with_context(format!("Shortest accepted: {SHORTEST_PASSWORD} characters"))
+            .with_suggestion(
+                "The password is the only thing between this file and whoever holds it. \
+                     Nothing else in this build can recover the key without it.",
+            ));
+        }
+        Ok(())
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Record {
+        pub alias: String,
+        pub path: String,
+        pub subject: String,
+        pub issued: String,
+        pub expires: String,
+        pub fingerprint: String,
+        pub bits: Option<u32>,
+    }
+
+    impl Record {
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            self.body(w);
+            w.end_object();
+        }
+
+        pub fn write_json_field(&self, w: &mut Writer, name: &str) {
+            w.begin_object(Some(name));
+            self.body(w);
+            w.end_object();
+        }
+
+        fn body(&self, w: &mut Writer) {
+            w.field_str("alias", &self.alias);
+            w.field_str("path", &self.path);
+            w.field_str("subject", &self.subject);
+            w.field_str("issued", &self.issued);
+            w.field_str("expires", &self.expires);
+            w.field_str("fingerprint", &self.fingerprint);
+            if let Some(bits) = self.bits {
+                w.field_u64("bits", u64::from(bits));
+            }
+        }
+    }
+
+    pub struct Unlocked {
+        pub key: rsa::PrivateKey,
+        pub certificate: Vec<u8>,
+        pub record: Record,
+    }
+
+    impl std::fmt::Debug for Unlocked {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "Unlocked {{ alias: {:?}, fingerprint: {:?} }}",
+                self.record.alias, self.record.fingerprint
+            )
+        }
+    }
+
+    fn put(out: &mut Vec<u8>, part: &[u8]) {
+        out.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        out.extend_from_slice(part);
+    }
+
+    fn take<'a>(data: &'a [u8], at: &mut usize) -> Result<&'a [u8], Diagnostic> {
+        if *at + 4 > data.len() {
+            return Err(fail(
+                "EY030",
+                "The key file ends in the middle of a length.",
+            ));
+        }
+        let length =
+            u32::from_le_bytes([data[*at], data[*at + 1], data[*at + 2], data[*at + 3]]) as usize;
+        *at += 4;
+        if length > data.len() || *at + length > data.len() {
+            return Err(
+                fail("EY031", "The key file claims a part longer than the file.")
+                    .with_context(format!("Claimed: {length} bytes"))
+                    .with_context(format!("Remaining: {} bytes", data.len() - *at)),
+            );
+        }
+        let part = &data[*at..*at + length];
+        *at += length;
+        Ok(part)
+    }
+
+    pub fn encode(alias: &str, certificate: &[u8], sealed: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32 + certificate.len() + sealed.len());
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&CONTAINER_VERSION.to_le_bytes());
+        put(&mut out, alias.as_bytes());
+        put(&mut out, certificate);
+        put(&mut out, sealed);
+        out
+    }
+
+    pub fn parts(data: &[u8]) -> Result<(String, &[u8], &[u8]), Diagnostic> {
+        if data.len() < 12 || &data[..8] != MAGIC {
+            return Err(fail("EY032", "The file is not an Omni signing key.")
+                .with_suggestion("A key file made by this build starts with OMNIKEY1."));
+        }
+        let version = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        if version != CONTAINER_VERSION {
+            return Err(
+                fail("EY033", "The key file was written by a different version.")
+                    .with_context(format!("File: version {version}"))
+                    .with_context(format!("This build: version {CONTAINER_VERSION}")),
+            );
+        }
+        let mut at = 12;
+        let alias = take(data, &mut at)?;
+        let certificate = take(data, &mut at)?;
+        let sealed = take(data, &mut at)?;
+        if at != data.len() {
+            return Err(
+                fail("EY034", "The key file carries bytes after its last part.")
+                    .with_context(format!("Trailing: {} bytes", data.len() - at)),
+            );
+        }
+        let alias = std::str::from_utf8(alias)
+            .map_err(|_| fail("EY035", "The alias in the key file is not text."))?
+            .to_string();
+        Ok((alias, certificate, sealed))
+    }
+
+    fn read_file(path: &str) -> Result<Vec<u8>, Diagnostic> {
+        let data = std::fs::read(path).map_err(|why| {
+            fail("EY036", "The key file could not be read.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        if data.len() > MAX_CONTAINER_BYTES {
+            return Err(fail(
+                "EY037",
+                "The key file is larger than any key this build writes.",
+            )
+            .with_context(format!("Size: {} bytes", data.len()))
+            .with_context(format!("Largest read: {MAX_CONTAINER_BYTES} bytes")));
+        }
+        Ok(data)
+    }
+
+    fn record_from(alias: &str, path: &str, certificate: &[u8]) -> Result<Record, Diagnostic> {
+        let parsed = crate::x509::Certificate::parse(certificate)?;
+        Ok(Record {
+            alias: alias.to_string(),
+            path: path.to_string(),
+            subject: parsed.subject.clone(),
+            issued: parsed.not_before.clone(),
+            expires: parsed.not_after.clone(),
+            fingerprint: parsed.fingerprint_display(),
+            bits: parsed.public_key_bits,
+        })
+    }
+
+    pub fn path_for(directory: &str, alias: &str) -> String {
+        format!("{}/{alias}.{EXTENSION}", directory.trim_end_matches('/'))
+    }
+
+    pub fn create(
+        directory: &str,
+        request: &Request,
+        password: &str,
+        now_seconds: i64,
+    ) -> Result<Record, Diagnostic> {
+        request.validate()?;
+        check_password(password)?;
+
+        let path = path_for(directory, &request.alias);
+        if std::path::Path::new(&path).exists() {
+            return Err(fail("EY040", "A key with that alias is already here.")
+                .with_context(format!("Path: {path}"))
+                .with_suggestion(
+                    "Choose another alias. This build will not overwrite a signing key, \
+                     because every application signed with the old one could no longer be updated.",
+                ));
+        }
+
+        let key = rsa::generate(request.bits as usize)?;
+        let certificate = certificate::self_signed(
+            &key,
+            &request.common_name,
+            &request.organisation,
+            &request.country,
+            certificate::moment_from_epoch(now_seconds - SECONDS_PER_DAY),
+            certificate::moment_from_epoch(
+                now_seconds + request.validity_days as i64 * SECONDS_PER_DAY,
+            ),
+        )?;
+        let sealed = rsa::seal_pkcs8(&key, password)?;
+        let container = encode(&request.alias, &certificate, &sealed);
+
+        std::fs::create_dir_all(directory).map_err(|why| {
+            fail("EY041", "The keys folder could not be made.")
+                .with_context(format!("Path: {directory}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        std::fs::write(&path, &container).map_err(|why| {
+            fail("EY042", "The key file could not be written.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+
+        record_from(&request.alias, &path, &certificate)
+    }
+
+    pub fn describe(path: &str) -> Result<Record, Diagnostic> {
+        let data = read_file(path)?;
+        let (alias, certificate, _) = parts(&data)?;
+        record_from(&alias, path, certificate)
+    }
+
+    pub fn list(directory: &str) -> Vec<Record> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return found;
+        };
+        let mut paths: Vec<String> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension == EXTENSION)
+            })
+            .filter_map(|path| path.to_str().map(|text| text.to_string()))
+            .collect();
+        paths.sort();
+        for path in paths {
+            if let Ok(record) = describe(&path) {
+                found.push(record);
+            }
+        }
+        found
+    }
+
+    pub fn unlock(path: &str, password: &str) -> Result<Unlocked, Diagnostic> {
+        let data = read_file(path)?;
+        let (alias, certificate, sealed) = parts(&data)?;
+        let key = rsa::open_pkcs8(sealed, password).map_err(|error| {
+            fail("EY021", "The password did not open this key.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reported: {} {}", error.code, error.message))
+                .with_suggestion(
+                    "Nothing in this build can recover a signing key from a lost password,                      and nothing in it records the password anywhere.",
+                )
+        })?;
+
+        let from_key = certificate::public_key_info(&key)?;
+        let from_certificate = crate::x509::Certificate::public_key_info(certificate)?;
+        if from_key != from_certificate {
+            return Err(fail(
+                "EY050",
+                "The certificate in the key file does not belong to the key in it.",
+            )
+            .with_context(format!("Path: {path}"))
+            .with_suggestion(
+                "The file has been altered. Signing with it would produce a package no device \
+                 accepts, so this build refuses to use it.",
+            ));
+        }
+
+        let record = record_from(&alias, path, certificate)?;
+        Ok(Unlocked {
+            key,
+            certificate: certificate.to_vec(),
+            record,
+        })
+    }
+
+    pub fn remove(path: &str) -> Result<(), Diagnostic> {
+        describe(path)?;
+        std::fs::remove_file(path).map_err(|why| {
+            fail("EY060", "The key file could not be removed.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
         })
     }
 }
@@ -13516,6 +15211,8 @@ pub mod builder {
     use crate::FailureClass;
 
     pub const PAGE_ALIGNMENT: u64 = 16_384;
+
+    pub const NEWEST_PLATFORM: u32 = i32::MAX as u32;
 
     #[derive(Clone, Debug)]
     pub struct Identity {
@@ -13717,6 +15414,16 @@ pub mod builder {
         now_seconds: i64,
         sink: &mut Sink,
     ) -> Result<Outcome, Diagnostic> {
+        let certificate_der = signing_identity(key, &project.identity, now_seconds)?;
+        assemble(project, key, &certificate_der, sink)
+    }
+
+    pub fn assemble(
+        project: &Project,
+        key: &rsa::PrivateKey,
+        certificate_der: &[u8],
+        sink: &mut Sink,
+    ) -> Result<Outcome, Diagnostic> {
         let root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", sink)
             .ok_or_else(|| fail("EB001", "The manifest could not be read."))?;
 
@@ -13759,15 +15466,21 @@ pub mod builder {
         let entries = archive.len();
         let unsigned = archive.finish()?;
 
-        let certificate_der = signing_identity(key, &project.identity, now_seconds)?;
-        let package = crate::signing::sign_v2(
+        let minimum_sdk = root
+            .children_named("uses-sdk")
+            .next()
+            .and_then(|element| element.attribute("android:minSdkVersion"))
+            .and_then(|text| text.parse::<u32>().ok())
+            .unwrap_or(guard::MINIMUM_SDK as u32);
+        let package = crate::signing::sign(
             &unsigned,
             key,
-            &certificate_der,
+            certificate_der,
             rsa::DigestAlgorithm::Sha256,
+            Some((minimum_sdk, NEWEST_PLATFORM)),
         )?;
 
-        let parsed = crate::x509::Certificate::parse(&certificate_der)?;
+        let parsed = crate::x509::Certificate::parse(certificate_der)?;
 
         Ok(Outcome {
             package,
@@ -14480,7 +16193,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    #[no_mangle]
     fn text_from(pointer: *const c_char) -> Option<String> {
         if pointer.is_null() {
             return None;
@@ -14489,6 +16201,13 @@ pub mod ffi {
             .to_str()
             .ok()
             .map(|value| value.to_string())
+    }
+
+    fn now_seconds() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs() as i64)
+            .unwrap_or(0)
     }
 
     fn hand_back(w: crate::json::Writer) -> *mut c_char {
@@ -14542,6 +16261,7 @@ pub mod ffi {
         root: *const c_char,
         output_path: *const c_char,
         key_path: *const c_char,
+        key_password: *const c_char,
     ) -> *mut c_char {
         let result = catch_unwind(|| {
             let (Some(root), Some(output_path), Some(key_path)) =
@@ -14549,22 +16269,28 @@ pub mod ffi {
             else {
                 return std::ptr::null_mut();
             };
+            let password = text_from(key_password).unwrap_or_default();
 
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
 
             let mut sink = crate::diag::Sink::new();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_secs() as i64)
-                .unwrap_or(0);
+            let now = now_seconds();
 
             let outcome = crate::scaffold::read_manifest(&root).and_then(|manifest| {
-                let (key, reused) = crate::builder::signing_key(&key_path)?;
-                w.field_bool("reusedKey", reused);
-                let mut project = crate::builder::from_manifest(&manifest)?;
-                project.identity.common_name = "Omni_Builder".to_string();
-                crate::builder::build(&project, &key, now, &mut sink)
+                let project = crate::builder::from_manifest(&manifest)?;
+                if password.is_empty() {
+                    let (key, reused) = crate::builder::signing_key(&key_path)?;
+                    w.field_bool("reusedKey", reused);
+                    w.field_bool("developerKey", false);
+                    crate::builder::build(&project, &key, now, &mut sink)
+                } else {
+                    let opened = crate::keystore::unlock(&key_path, &password)?;
+                    w.field_bool("reusedKey", true);
+                    w.field_bool("developerKey", true);
+                    opened.record.write_json_field(&mut w, "signedBy");
+                    crate::builder::assemble(&project, &opened.key, &opened.certificate, &mut sink)
+                }
             });
 
             match outcome {
@@ -14579,13 +16305,7 @@ pub mod ffi {
                         w.field_str("error", &format!("the package could not be written: {why}"));
                     }
                 },
-                Err(error) => {
-                    w.field_bool("built", false);
-                    w.field_str("error", &error.message);
-                    if let Some(suggestion) = &error.suggestion {
-                        w.field_str("suggestion", suggestion);
-                    }
-                }
+                Err(error) => write_failure(&mut w, "built", &error),
             }
 
             sink.write_json(&mut w, "diagnostics");
@@ -14610,6 +16330,301 @@ pub mod ffi {
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
             check.write_json(&mut w, "integrity");
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    fn write_failure(w: &mut crate::json::Writer, done: &str, error: &crate::diag::Diagnostic) {
+        w.field_bool(done, false);
+        w.field_str("code", &error.code);
+        w.field_str("error", &error.message);
+        if let Some(suggestion) = &error.suggestion {
+            w.field_str("suggestion", suggestion);
+        }
+        w.begin_array(Some("context"));
+        for line in &error.context {
+            w.element_str(line);
+        }
+        w.end_array();
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_create_key(
+        directory: *const c_char,
+        spec: *const c_char,
+        password: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(directory), Some(spec), Some(password)) =
+                (text_from(directory), text_from(spec), text_from(password))
+            else {
+                return std::ptr::null_mut();
+            };
+
+            let now = crate::ffi::now_seconds();
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::keystore::Request::parse(&spec)
+                .and_then(|request| crate::keystore::create(&directory, &request, &password, now))
+            {
+                Ok(record) => {
+                    w.field_bool("created", true);
+                    record.write_json_field(&mut w, "key");
+                }
+                Err(error) => write_failure(&mut w, "created", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_list_keys(directory: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(directory) = text_from(directory) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_str("directory", &directory);
+            w.begin_array(Some("keys"));
+            for record in crate::keystore::list(&directory) {
+                record.write_json(&mut w);
+            }
+            w.end_array();
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_delete_key(path: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(path) = text_from(path) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::keystore::remove(&path) {
+                Ok(()) => {
+                    w.field_bool("removed", true);
+                    w.field_str("path", &path);
+                }
+                Err(error) => write_failure(&mut w, "removed", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_check_key(
+        path: *const c_char,
+        password: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(path), Some(password)) = (text_from(path), text_from(password)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::keystore::unlock(&path, &password) {
+                Ok(opened) => {
+                    w.field_bool("opened", true);
+                    opened.record.write_json_field(&mut w, "key");
+                }
+                Err(error) => write_failure(&mut w, "opened", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_list_projects(directory: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(directory) = text_from(directory) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_str("directory", &directory);
+            w.begin_array(Some("projects"));
+            for summary in crate::workspace::list_projects(&directory) {
+                summary.write_json(&mut w);
+            }
+            w.end_array();
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_project_tree(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::tree(&root) {
+                Ok(entries) => {
+                    w.field_bool("read", true);
+                    w.field_str("root", &root);
+                    if let Some(summary) = crate::workspace::describe(&root) {
+                        w.begin_array(Some("project"));
+                        summary.write_json(&mut w);
+                        w.end_array();
+                    }
+                    w.begin_array(Some("entries"));
+                    for entry in &entries {
+                        entry.write_json(&mut w);
+                    }
+                    w.end_array();
+                }
+                Err(error) => write_failure(&mut w, "read", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_read_file(
+        root: *const c_char,
+        relative: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(relative)) = (text_from(root), text_from(relative)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::read_text(&root, &relative) {
+                Ok(text) => {
+                    w.field_bool("read", true);
+                    w.field_str("path", &relative);
+                    w.field_u64("bytes", text.len() as u64);
+                    w.field_str("text", &text);
+                }
+                Err(error) => write_failure(&mut w, "read", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_write_file(
+        root: *const c_char,
+        relative: *const c_char,
+        contents: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(relative), Some(contents)) =
+                (text_from(root), text_from(relative), text_from(contents))
+            else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::write_text(&root, &relative, &contents) {
+                Ok(bytes) => {
+                    w.field_bool("saved", true);
+                    w.field_str("path", &relative);
+                    w.field_u64("bytes", bytes);
+                }
+                Err(error) => write_failure(&mut w, "saved", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_new_folder(
+        root: *const c_char,
+        relative: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(relative)) = (text_from(root), text_from(relative)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::create_folder(&root, &relative) {
+                Ok(()) => {
+                    w.field_bool("made", true);
+                    w.field_str("path", &relative);
+                }
+                Err(error) => write_failure(&mut w, "made", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_remove_path(
+        root: *const c_char,
+        relative: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(relative)) = (text_from(root), text_from(relative)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::remove(&root, &relative) {
+                Ok(()) => {
+                    w.field_bool("removed", true);
+                    w.field_str("path", &relative);
+                }
+                Err(error) => write_failure(&mut w, "removed", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_set_icon(
+        root: *const c_char,
+        source: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(source)) = (text_from(root), text_from(source)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::scaffold::set_icon(&root, &source) {
+                Ok(png) => {
+                    w.field_bool("stored", true);
+                    w.field_str("path", &crate::scaffold::icon_path(&root));
+                    png.write_json(&mut w, "image");
+                    w.field_bool("appliedToPackage", false);
+                    w.field_str(
+                        "note",
+                        "The image is stored with the project. It is not in the package yet, \
+                         because android:icon is a resource reference and this build does not \
+                         write a resource table.",
+                    );
+                }
+                Err(error) => write_failure(&mut w, "stored", &error),
+            }
             w.end_object();
             hand_back(w)
         });
@@ -18701,10 +20716,48 @@ mod tests {
             "apksigner rejected it:\n{report}"
         );
         assert!(
-            report.contains("Verified using v2 scheme (APK Signature Scheme v2): true"),
+            report.contains("Verified using v3 scheme (APK Signature Scheme v3): true"),
             "{report}"
         );
         assert!(report.contains("CN=Omni_Builder"), "{report}");
+
+        let older = std::process::Command::new(&apksigner)
+            .args([
+                "verify",
+                "--verbose",
+                "--min-sdk-version",
+                "24",
+                "--max-sdk-version",
+                "27",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        let older_report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&older.stdout),
+            String::from_utf8_lossy(&older.stderr)
+        );
+        assert!(
+            older.status.success(),
+            "apksigner rejected the v2 block:\n{older_report}"
+        );
+        assert!(
+            older_report.contains("Verified using v2 scheme (APK Signature Scheme v2): true"),
+            "{older_report}"
+        );
+
+        let mut block_sink = Sink::new();
+        let (directory_offset, end_offset) =
+            super::signing::locate(&outcome.package).expect("the package must have a directory");
+        let block = super::signing::examine(
+            &outcome.package,
+            directory_offset,
+            end_offset,
+            &mut block_sink,
+        );
+        assert!(block.schemes.contains(&"v2"), "{:?}", block.schemes);
+        assert!(block.schemes.contains(&"v3"), "{:?}", block.schemes);
 
         let extracted = std::process::Command::new("unzip")
             .args(["-p", path.to_str().unwrap(), "classes.dex"])
@@ -18719,9 +20772,291 @@ mod tests {
 
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
-            "build engine: {} bytes, {} entries including a classes.dex written here, apksigner verified it",
+            "build engine: {} bytes, {} entries including a classes.dex written here, apksigner verified the v3 block at API 28 and the v2 block at API 27",
             outcome.package.len(),
             outcome.entries
+        );
+    }
+
+    #[test]
+    fn a_developer_key_is_written_read_and_unlocked_with_their_own_password() {
+        let directory = temp_directory("omni-keys");
+        let folder = directory.to_str().unwrap().to_string();
+        let request = super::keystore::Request {
+            alias: "release-2026".to_string(),
+            common_name: "Eaquel".to_string(),
+            organisation: "Omni".to_string(),
+            country: "TR".to_string(),
+            validity_days: 9_125,
+            bits: 2048,
+        };
+        let password = "correct horse battery";
+
+        let made = super::keystore::create(&folder, &request, password, 1_787_000_000)
+            .expect("a developer must be able to make their own key");
+        assert_eq!(made.alias, "release-2026");
+        assert!(made.subject.contains("CN=Eaquel"), "{}", made.subject);
+        assert!(made.subject.contains("O=Omni"), "{}", made.subject);
+        assert!(made.subject.contains("C=TR"), "{}", made.subject);
+        assert_eq!(made.bits, Some(2048));
+        assert_eq!(made.issued, "2026-08-16 20:53:20 UTC");
+        assert_eq!(made.expires, "2051-08-11 20:53:20 UTC");
+
+        let stored = std::fs::read(&made.path).expect("the key file must be on disk");
+        assert_eq!(&stored[..8], super::keystore::MAGIC);
+        assert!(
+            !stored
+                .windows(password.len())
+                .any(|window| window == password.as_bytes()),
+            "the password must never be written into the key file"
+        );
+
+        let listed = super::keystore::list(&folder);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].fingerprint, made.fingerprint);
+
+        let described =
+            super::keystore::describe(&made.path).expect("a listing must not need the password");
+        assert_eq!(described.subject, made.subject);
+
+        let opened =
+            super::keystore::unlock(&made.path, password).expect("the password must open it");
+        assert_eq!(opened.record.fingerprint, made.fingerprint);
+        assert_eq!(
+            super::certificate::public_key_info(&opened.key).unwrap(),
+            super::x509::Certificate::public_key_info(&opened.certificate).unwrap()
+        );
+
+        for wrong in ["correct horse batterz", "", "correct horse battery "] {
+            let refused = super::keystore::unlock(&made.path, wrong)
+                .expect_err("a wrong password must be refused");
+            assert_eq!(refused.code, "EY021", "{}", refused.message);
+            assert!(
+                !refused
+                    .context
+                    .iter()
+                    .any(|line| line.contains(wrong) && !wrong.is_empty()),
+                "a diagnostic must never carry the password: {:?}",
+                refused.context
+            );
+        }
+
+        let again = super::keystore::create(&folder, &request, password, 1_787_000_000)
+            .expect_err("an alias already in use must not be overwritten");
+        assert_eq!(again.code, "EY040");
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "developer key: {} sealed under a password, listed without one, {}",
+            made.alias, made.fingerprint
+        );
+    }
+
+    #[test]
+    fn a_developer_key_file_that_has_been_altered_is_refused() {
+        let directory = temp_directory("omni-keys-altered");
+        let folder = directory.to_str().unwrap().to_string();
+        let password = "a password long enough";
+        let mine = super::keystore::Request {
+            alias: "mine".to_string(),
+            common_name: "Mine".to_string(),
+            organisation: "Omni".to_string(),
+            country: "TR".to_string(),
+            validity_days: 400,
+            bits: 2048,
+        };
+        let theirs = super::keystore::Request {
+            alias: "theirs".to_string(),
+            common_name: "Theirs".to_string(),
+            ..mine.clone()
+        };
+
+        let mine_made = super::keystore::create(&folder, &mine, password, 1_787_000_000).unwrap();
+        let theirs_made =
+            super::keystore::create(&folder, &theirs, password, 1_787_000_000).unwrap();
+
+        let mine_file = std::fs::read(&mine_made.path).unwrap();
+        let theirs_file = std::fs::read(&theirs_made.path).unwrap();
+        let (_, mine_certificate, mine_sealed) = super::keystore::parts(&mine_file).unwrap();
+        let (_, theirs_certificate, _) = super::keystore::parts(&theirs_file).unwrap();
+
+        let swapped = super::keystore::encode("mine", theirs_certificate, mine_sealed);
+        std::fs::write(&mine_made.path, &swapped).unwrap();
+        let refused = super::keystore::unlock(&mine_made.path, password)
+            .expect_err("a certificate that does not match the key must be refused");
+        assert_eq!(refused.code, "EY050");
+
+        let honest = super::keystore::encode("mine", mine_certificate, mine_sealed);
+        std::fs::write(&mine_made.path, &honest).unwrap();
+        super::keystore::unlock(&mine_made.path, password).expect("the honest file must open");
+
+        std::fs::write(&mine_made.path, b"not a key at all").unwrap();
+        assert_eq!(
+            super::keystore::describe(&mine_made.path)
+                .expect_err("a file that is not a key must be refused")
+                .code,
+            "EY032"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_keystore_refuses_what_would_produce_an_unusable_key() {
+        let directory = temp_directory("omni-keys-refused");
+        let folder = directory.to_str().unwrap().to_string();
+        let sound = super::keystore::Request {
+            alias: "ok".to_string(),
+            common_name: "Name".to_string(),
+            organisation: "Omni".to_string(),
+            country: "TR".to_string(),
+            validity_days: 9_125,
+            bits: 2048,
+        };
+
+        let cases: &[(&str, super::keystore::Request, &str)] = &[
+            (
+                "an alias that is a path",
+                super::keystore::Request {
+                    alias: "../escape".to_string(),
+                    ..sound.clone()
+                },
+                "EY010",
+            ),
+            (
+                "an empty name",
+                super::keystore::Request {
+                    common_name: "   ".to_string(),
+                    ..sound.clone()
+                },
+                "EY011",
+            ),
+            (
+                "a country that is not a code",
+                super::keystore::Request {
+                    country: "Turkiye".to_string(),
+                    ..sound.clone()
+                },
+                "EY012",
+            ),
+            (
+                "a validity of no days",
+                super::keystore::Request {
+                    validity_days: 0,
+                    ..sound.clone()
+                },
+                "EY013",
+            ),
+            (
+                "a key too small to sign with",
+                super::keystore::Request {
+                    bits: 1024,
+                    ..sound.clone()
+                },
+                "EY014",
+            ),
+        ];
+
+        for (what, request, code) in cases {
+            match super::keystore::create(&folder, request, "a long enough password", 1_787_000_000)
+            {
+                Ok(made) => {
+                    panic!("{what}: {code} was expected but {} was written", made.path)
+                }
+                Err(error) => assert_eq!(&error.code, code, "{what}: {}", error.message),
+            }
+        }
+        assert!(super::keystore::list(&folder).is_empty());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_short_password_does_not_protect_a_key_so_it_is_refused() {
+        let directory = temp_directory("omni-keys-password");
+        let folder = directory.to_str().unwrap().to_string();
+        let request = super::keystore::Request {
+            alias: "short".to_string(),
+            common_name: "Name".to_string(),
+            organisation: "Omni".to_string(),
+            country: "TR".to_string(),
+            validity_days: 400,
+            bits: 2048,
+        };
+        let refused = super::keystore::create(&folder, &request, "1234567", 1_787_000_000)
+            .expect_err("seven characters must not be accepted");
+        assert_eq!(refused.code, "EY020");
+        assert!(!super::keystore::path_for(&folder, "short").is_empty());
+        assert!(super::keystore::list(&folder).is_empty());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_developers_own_key_signs_the_package_and_apksigner_reads_their_name() {
+        let Some(apksigner) = find_apksigner() else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_SELF_BUILT_APK").is_err(),
+                "OMNI_REQUIRE_SELF_BUILT_APK is set but apksigner is missing"
+            );
+            eprintln!("developer key: apksigner is not available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-developer");
+        let folder = directory.to_str().unwrap().to_string();
+        let password = "the developer's own password";
+        let request = super::keystore::Request {
+            alias: "eaquel-release".to_string(),
+            common_name: "Eaquel Release".to_string(),
+            organisation: "Omni Builder".to_string(),
+            country: "TR".to_string(),
+            validity_days: 10_950,
+            bits: 2048,
+        };
+        let made = super::keystore::create(&folder, &request, password, 1_787_000_000).unwrap();
+        let opened = super::keystore::unlock(&made.path, password).unwrap();
+
+        let mut sink = Sink::new();
+        let project = super::builder::starter("com.tr.yt", "Omni");
+        let outcome =
+            super::builder::assemble(&project, &opened.key, &opened.certificate, &mut sink)
+                .expect("the developer's key must sign the package");
+        assert_eq!(outcome.certificate_fingerprint, made.fingerprint);
+
+        let path = directory.join("developer-signed.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+        let verified = std::process::Command::new(&apksigner)
+            .args([
+                "verify",
+                "--verbose",
+                "--print-certs",
+                "--min-sdk-version",
+                "28",
+                path.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&verified.stdout),
+            String::from_utf8_lossy(&verified.stderr)
+        );
+        assert!(verified.status.success(), "{report}");
+        assert!(
+            report.contains("Verified using v3 scheme (APK Signature Scheme v3): true"),
+            "{report}"
+        );
+        assert!(report.contains("CN=Eaquel Release"), "{report}");
+        assert!(report.contains("O=Omni Builder"), "{report}");
+        assert!(
+            report
+                .to_lowercase()
+                .contains(&made.fingerprint.replace(':', "").to_lowercase()),
+            "apksigner must report the same certificate the keys list shows\n{report}"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "developer key: apksigner read CN=Eaquel Release off a package this build signed"
         );
     }
 
@@ -19014,6 +21349,368 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    fn gather_png_files(root: &std::path::Path, into: &mut Vec<std::path::PathBuf>, cap: usize) {
+        if into.len() >= cap {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        let mut children: Vec<std::path::PathBuf> =
+            entries.flatten().map(|entry| entry.path()).collect();
+        children.sort();
+        for child in children {
+            if into.len() >= cap {
+                return;
+            }
+            if child.is_dir() {
+                gather_png_files(&child, into, cap);
+            } else if child.extension().and_then(|e| e.to_str()) == Some("png") {
+                into.push(child);
+            }
+        }
+    }
+
+    #[test]
+    fn the_image_reader_accepts_every_real_png_it_is_shown() {
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            std::env::var("ANDROID_SDK_ROOT").ok(),
+            Some("/usr/share/icons".to_string()),
+            Some("/usr/share/pixmaps".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                roots.push(path);
+            }
+        }
+
+        let mut files = Vec::new();
+        for root in &roots {
+            gather_png_files(root, &mut files, 200);
+        }
+
+        if files.is_empty() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_IMAGE_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_IMAGE_CONFORMANCE is set but no PNG files were found, so the \
+                 image reader was never shown one written by another tool"
+            );
+            eprintln!("image conformance: no PNG files are available here");
+            return;
+        }
+
+        let mut read = 0usize;
+        let mut oversized = 0usize;
+        for file in &files {
+            let bytes = std::fs::read(file).unwrap();
+            match super::image::read_png(&bytes) {
+                Ok(png) => {
+                    let width = u32::from_be_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+                    let height = u32::from_be_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
+                    assert_eq!(png.width, width, "{}", file.display());
+                    assert_eq!(png.height, height, "{}", file.display());
+                    assert_eq!(png.bit_depth, bytes[24], "{}", file.display());
+                    assert_eq!(png.bytes, bytes.len(), "{}", file.display());
+                    assert!(png.chunks >= 3, "{}", file.display());
+                    read += 1;
+                }
+                Err(error) if error.code == "EM015" => oversized += 1,
+                Err(error) => panic!(
+                    "the reader refused a real PNG: {} {} {}\n{:?}",
+                    file.display(),
+                    error.code,
+                    error.message,
+                    error.context
+                ),
+            }
+        }
+
+        assert!(read > 0, "no PNG was read");
+        eprintln!(
+            "image conformance: {read} PNG files written by other tools read here, \
+             {oversized} refused only for being larger than an icon"
+        );
+    }
+
+    #[test]
+    fn the_image_reader_refuses_a_png_that_has_been_damaged() {
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 4);
+            }
+        }
+        let Some(file) = files.into_iter().find(|file| {
+            std::fs::read(file)
+                .ok()
+                .is_some_and(|bytes| super::image::read_png(&bytes).is_ok())
+        }) else {
+            eprintln!("image conformance: no PNG file is available here");
+            return;
+        };
+        let sound = std::fs::read(&file).unwrap();
+        super::image::read_png(&sound).expect("the file must read before it is damaged");
+
+        let mut wrong_signature = sound.clone();
+        wrong_signature[1] = b'Q';
+        assert_eq!(
+            super::image::read_png(&wrong_signature).unwrap_err().code,
+            "EM002"
+        );
+
+        let mut flipped = sound.clone();
+        flipped[20] ^= 0x01;
+        assert_eq!(super::image::read_png(&flipped).unwrap_err().code, "EM006");
+
+        let truncated = &sound[..sound.len() - 1];
+        let refused = super::image::read_png(truncated).unwrap_err();
+        assert!(
+            refused.code == "EM005" || refused.code == "EM003" || refused.code == "EM006",
+            "{} {}",
+            refused.code,
+            refused.message
+        );
+
+        let mut trailing = sound.clone();
+        trailing.push(0);
+        assert_eq!(super::image::read_png(&trailing).unwrap_err().code, "EM018");
+
+        assert_eq!(super::image::read_png(&[]).unwrap_err().code, "EM002");
+        assert_eq!(
+            super::image::read_png(&super::image::SIGNATURE)
+                .unwrap_err()
+                .code,
+            "EM016"
+        );
+    }
+
+    #[test]
+    fn the_editor_reads_writes_and_stays_inside_the_project() {
+        let directory = temp_directory("omni-workspace");
+        let root = directory.join("Edited");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+
+        let listed = super::workspace::list_projects(directory.to_str().unwrap());
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].package, "com.tr.yt");
+        assert_eq!(listed[0].label, "My App");
+        assert_eq!(listed[0].version_name, "1.0.0");
+        assert_eq!(listed[0].version_code, 1);
+        assert_eq!(listed[0].min_sdk, 28);
+        assert_eq!(listed[0].target_sdk, 36);
+        assert!(listed[0].icon.is_none());
+
+        let entries = super::workspace::tree(&text).unwrap();
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path == "AndroidManifest.xml"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path == "Kotlin" && entry.folder));
+
+        let manifest = super::workspace::read_text(&text, "AndroidManifest.xml").unwrap();
+        assert!(manifest.contains("com.tr.yt"));
+
+        super::workspace::create_folder(&text, "Kotlin/com/tr/yt").unwrap();
+        super::workspace::write_text(&text, "Kotlin/com/tr/yt/Screen.kt", "class Screen\n")
+            .unwrap();
+        assert_eq!(
+            super::workspace::read_text(&text, "Kotlin/com/tr/yt/Screen.kt").unwrap(),
+            "class Screen\n"
+        );
+
+        for escape in [
+            "../outside.txt",
+            "/etc/passwd",
+            "Kotlin/../../outside.txt",
+            "Kotlin/./../../outside.txt",
+            "",
+        ] {
+            let refused = super::workspace::write_text(&text, escape, "no")
+                .expect_err("a path that leaves the project must be refused");
+            assert_eq!(refused.code, "EW100", "{escape}: {}", refused.message);
+        }
+        assert!(!directory.join("outside.txt").exists());
+        assert!(!std::path::Path::new("/etc/passwd")
+            .metadata()
+            .map(|data| data.len() == 2)
+            .unwrap_or(false));
+
+        std::fs::write(root.join("Kotlin/Binary.bin"), [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        assert_eq!(
+            super::workspace::read_text(&text, "Kotlin/Binary.bin")
+                .unwrap_err()
+                .code,
+            "EW113"
+        );
+
+        assert_eq!(
+            super::workspace::remove(&text, "AndroidManifest.xml")
+                .unwrap_err()
+                .code,
+            "EW140"
+        );
+        super::workspace::remove(&text, "Kotlin/Binary.bin").unwrap();
+        assert!(!root.join("Kotlin/Binary.bin").exists());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_project_keeps_the_image_the_developer_chose() {
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 8);
+            }
+        }
+        let Some(source) = files
+            .into_iter()
+            .find(|file| super::image::read_png_file(file.to_str().unwrap_or_default()).is_ok())
+        else {
+            eprintln!("project image: no PNG file is available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-icon");
+        let root = directory.join("Pictured");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+
+        let stored = super::scaffold::set_icon(&text, source.to_str().unwrap()).unwrap();
+        assert!(stored.width > 0 && stored.height > 0);
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            std::fs::read(super::scaffold::icon_path(&text)).unwrap()
+        );
+        let read_back = super::scaffold::read_icon(&text).expect("the stored image must read");
+        assert_eq!(read_back.width, stored.width);
+        assert_eq!(read_back.height, stored.height);
+        assert!(super::workspace::describe(&text).unwrap().icon.is_some());
+
+        let not_an_image = root.join("AndroidManifest.xml");
+        assert_eq!(
+            super::scaffold::set_icon(&text, not_an_image.to_str().unwrap())
+                .unwrap_err()
+                .code,
+            "EM002"
+        );
+
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let project =
+            super::builder::from_manifest(&super::scaffold::read_manifest(&text).unwrap()).unwrap();
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
+        let archive = archive::read(&outcome.package, &mut sink).unwrap();
+        assert!(
+            !archive
+                .entries()
+                .iter()
+                .any(|entry| entry.name.contains("Icon.png")),
+            "the image is stored with the project, and this build does not claim it reached \
+             the package"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_name_with_xml_in_it_survives_the_manifest_intact() {
+        let spec = super::scaffold::Spec {
+            label: "Ali & <Veli> \"Co\"".to_string(),
+            version_name: "1.0.0".to_string(),
+            version_code: 7,
+            ..super::scaffold::Spec::default()
+        };
+        let text = spec.manifest();
+        assert!(text.contains("android:versionCode=\"7\""), "{text}");
+        assert!(text.contains("android:versionName=\"1.0.0\""), "{text}");
+
+        let mut sink = Sink::new();
+        let root = super::xml::parse(&text, "AndroidManifest.xml", &mut sink)
+            .expect("a name with markup in it must still produce a manifest that reads back");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let application = root
+            .children
+            .iter()
+            .find(|child| child.name == "application")
+            .unwrap();
+        assert_eq!(
+            application.attribute("android:label").unwrap(),
+            "Ali & <Veli> \"Co\""
+        );
+    }
+
+    #[test]
+    fn the_version_the_developer_chose_reaches_the_package() {
+        let spec = super::scaffold::Spec {
+            package: "com.tr.yt".to_string(),
+            label: "Versioned".to_string(),
+            version_name: "2.4.10".to_string(),
+            version_code: 41,
+            ..super::scaffold::Spec::default()
+        };
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let project = super::builder::from_manifest(&spec.manifest()).unwrap();
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
+            );
+            eprintln!("version: aapt2 is not available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-version");
+        let path = directory.join("versioned.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+        let dumped = std::process::Command::new(&aapt2)
+            .args([
+                "dump",
+                "xmltree",
+                path.to_str().unwrap(),
+                "--file",
+                "AndroidManifest.xml",
+            ])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&dumped.stdout).to_string();
+        assert!(dumped.status.success(), "{text}");
+        assert!(
+            text.contains("android:versionCode(0x0101021b)=41"),
+            "{text}"
+        );
+        assert!(
+            text.contains("android:versionName(0x0101021c)=\"2.4.10\""),
+            "{text}"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[test]
     fn only_the_languages_chosen_get_a_folder() {
         let directory = temp_directory("omni-scaffold-one");
@@ -19025,6 +21722,7 @@ mod tests {
             min_sdk: 28,
             target_sdk: 36,
             languages: vec!["rust".to_string()],
+            ..super::scaffold::Spec::default()
         };
         let made = super::scaffold::create(root.to_str().unwrap(), &spec).unwrap();
         assert_eq!(made.folders, vec!["Rust"]);
@@ -19096,7 +21794,12 @@ mod tests {
         let key_c = std::ffi::CString::new(key.to_str().unwrap()).unwrap();
 
         let report = call_ffi(|| unsafe {
-            super::ffi::omni_build_project(root_c.as_ptr(), out_c.as_ptr(), key_c.as_ptr())
+            super::ffi::omni_build_project(
+                root_c.as_ptr(),
+                out_c.as_ptr(),
+                key_c.as_ptr(),
+                std::ptr::null(),
+            )
         });
         assert!(is_structurally_valid(&report), "{report}");
         assert!(report.contains("\"built\":true"), "{report}");
@@ -19114,6 +21817,91 @@ mod tests {
     }
 
     #[test]
+    fn the_bridge_makes_a_developer_key_lists_it_and_signs_a_project_with_it() {
+        let directory = temp_directory("omni-ffi-keys");
+        let keys = directory.join("Keys");
+        let root = directory.join("Signed");
+        super::scaffold::create(root.to_str().unwrap(), &super::scaffold::Spec::default()).unwrap();
+
+        let keys_c = std::ffi::CString::new(keys.to_str().unwrap()).unwrap();
+        let spec_c = std::ffi::CString::new(
+            "alias=studio;commonName=Studio Name;organisation=Omni;country=TR;\
+             validityDays=10950;bits=2048",
+        )
+        .unwrap();
+        let password_c = std::ffi::CString::new("a password worth having").unwrap();
+
+        let made = call_ffi(|| unsafe {
+            super::ffi::omni_create_key(keys_c.as_ptr(), spec_c.as_ptr(), password_c.as_ptr())
+        });
+        assert!(is_structurally_valid(&made), "{made}");
+        assert!(made.contains("\"created\":true"), "{made}");
+        assert!(made.contains("CN=Studio Name"), "{made}");
+
+        let listed = call_ffi(|| unsafe { super::ffi::omni_list_keys(keys_c.as_ptr()) });
+        assert!(is_structurally_valid(&listed), "{listed}");
+        assert!(listed.contains("\"alias\":\"studio\""), "{listed}");
+
+        let path = super::keystore::path_for(keys.to_str().unwrap(), "studio");
+        let path_c = std::ffi::CString::new(path.clone()).unwrap();
+        let opened = call_ffi(|| unsafe {
+            super::ffi::omni_check_key(path_c.as_ptr(), password_c.as_ptr())
+        });
+        assert!(opened.contains("\"opened\":true"), "{opened}");
+
+        let wrong_c = std::ffi::CString::new("not the password").unwrap();
+        let refused =
+            call_ffi(|| unsafe { super::ffi::omni_check_key(path_c.as_ptr(), wrong_c.as_ptr()) });
+        assert!(refused.contains("\"opened\":false"), "{refused}");
+        assert!(refused.contains("EY021"), "{refused}");
+        assert!(
+            !refused.contains("not the password"),
+            "a bridge answer must never echo a password: {refused}"
+        );
+
+        let output = directory.join("signed.apk");
+        let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+        let out_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+        let built = call_ffi(|| unsafe {
+            super::ffi::omni_build_project(
+                root_c.as_ptr(),
+                out_c.as_ptr(),
+                path_c.as_ptr(),
+                password_c.as_ptr(),
+            )
+        });
+        assert!(is_structurally_valid(&built), "{built}");
+        assert!(built.contains("\"built\":true"), "{built}");
+        assert!(built.contains("\"developerKey\":true"), "{built}");
+        assert!(built.contains("CN=Studio Name"), "{built}");
+        assert!(
+            !built.contains("a password worth having"),
+            "a build answer must never echo a password: {built}"
+        );
+
+        let bytes = std::fs::read(&output).unwrap();
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).unwrap();
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+        assert!(report.schemes.contains(&"v2"), "{:?}", report.schemes);
+        assert!(report.schemes.contains(&"v3"), "{:?}", report.schemes);
+        assert!(report.signers[0].certificates[0]
+            .subject
+            .contains("CN=Studio Name"));
+
+        let removed = call_ffi(|| unsafe { super::ffi::omni_delete_key(path_c.as_ptr()) });
+        assert!(removed.contains("\"removed\":true"), "{removed}");
+        assert!(super::keystore::list(keys.to_str().unwrap()).is_empty());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn a_package_checks_itself_and_says_what_it_found() {
         let directory = temp_directory("omni-integrity");
         let root = directory.join("Checked");
@@ -19125,7 +21913,12 @@ mod tests {
         let out_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
         let key_c = std::ffi::CString::new(key.to_str().unwrap()).unwrap();
         call_ffi(|| unsafe {
-            super::ffi::omni_build_project(root_c.as_ptr(), out_c.as_ptr(), key_c.as_ptr())
+            super::ffi::omni_build_project(
+                root_c.as_ptr(),
+                out_c.as_ptr(),
+                key_c.as_ptr(),
+                std::ptr::null(),
+            )
         });
 
         let bytes = std::fs::read(&output).unwrap();
@@ -19169,6 +21962,249 @@ mod tests {
 
         std::fs::remove_dir_all(&directory).ok();
         eprintln!("integrity: a signed package reports TRUSTED, a re-signed or edited one reports TAMPERED");
+    }
+
+    fn bytes_of(hex: &str) -> Vec<u8> {
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect()
+    }
+
+    fn hex_string(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn aes256_matches_the_fips_197_vector() {
+        let key: [u8; 32] =
+            bytes_of("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
+                .try_into()
+                .unwrap();
+        let plain: [u8; 16] = bytes_of("00112233445566778899aabbccddeeff")
+            .try_into()
+            .unwrap();
+        let cipher = super::cipher::encrypt_ecb_block(&key, &plain);
+        assert_eq!(hex_string(&cipher), "8ea2b7ca516745bfeafc49904b496089");
+    }
+
+    #[test]
+    fn aes256_cbc_matches_the_nist_special_publication_vectors() {
+        let key: [u8; 32] =
+            bytes_of("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4")
+                .try_into()
+                .unwrap();
+        let iv: [u8; 16] = bytes_of("000102030405060708090a0b0c0d0e0f")
+            .try_into()
+            .unwrap();
+        let plain = bytes_of(concat!(
+            "6bc1bee22e409f96e93d7e117393172a",
+            "ae2d8a571e03ac9c9eb76fac45af8e51",
+            "30c81c46a35ce411e5fbc1191a0a52ef",
+            "f69f2445df4f9b17ad2b417be66c3710"
+        ));
+        let expected = concat!(
+            "f58c4c04d6e5f1ba779eabfb5f7bfbd6",
+            "9cfc4e967edb808d679f777bc6702c7d",
+            "39f23369a9d9bacfa530e26304231461",
+            "b2eb05e2c39be9fcda6c19078c6a9d1b"
+        );
+        let produced = super::cipher::encrypt_cbc(&key, &iv, &plain);
+        assert_eq!(hex_string(&produced[..64]), expected);
+
+        let back = super::cipher::decrypt_cbc(&key, &iv, &produced).unwrap();
+        assert_eq!(back, plain);
+    }
+
+    #[test]
+    fn hmac_matches_the_rfc_4231_vectors() {
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+                "4869205468657265",
+                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+                "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854",
+            ),
+            (
+                "4a656665",
+                "7768617420646f2079612077616e7420666f72206e6f7468696e673f",
+                "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+                "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737",
+            ),
+        ];
+        for (key, message, expected256, expected512) in cases {
+            let key = bytes_of(key);
+            let message = bytes_of(message);
+            assert_eq!(
+                hex_string(&super::cipher::hmac_sha256(&key, &message)),
+                *expected256
+            );
+            assert_eq!(
+                hex_string(&super::cipher::hmac_sha512(&key, &message)),
+                *expected512
+            );
+        }
+    }
+
+    #[test]
+    fn pbkdf2_matches_the_published_vectors() {
+        let cases: &[(&str, &str, u32, usize, &str)] = &[
+            (
+                "password",
+                "salt",
+                1,
+                32,
+                "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
+            ),
+            (
+                "password",
+                "salt",
+                2,
+                32,
+                "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43",
+            ),
+            (
+                "password",
+                "salt",
+                4096,
+                32,
+                "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a",
+            ),
+            (
+                "passwordPASSWORDpassword",
+                "saltSALTsaltSALTsaltSALTsaltSALTsalt",
+                4096,
+                40,
+                "348c89dbcbd32b2f32d814b8116e84cf2b17347ebc1800181c4e2a1fb8dd53e1c635518c7dac47e9",
+            ),
+        ];
+        for (password, salt, iterations, length, expected) in cases {
+            let derived = super::cipher::pbkdf2_sha256(
+                password.as_bytes(),
+                salt.as_bytes(),
+                *iterations,
+                *length,
+            )
+            .unwrap();
+            assert_eq!(
+                hex_string(&derived),
+                *expected,
+                "{password}/{salt}/{iterations}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_password_returns_nothing_rather_than_rubbish() {
+        let key = [0x11u8; 32];
+        let other = [0x22u8; 32];
+        let iv = [0x33u8; 16];
+        let secret = b"a private key would be here";
+        let sealed = super::cipher::encrypt_cbc(&key, &iv, secret);
+
+        assert_eq!(
+            super::cipher::decrypt_cbc(&key, &iv, &sealed).unwrap(),
+            secret
+        );
+        let error = super::cipher::decrypt_cbc(&other, &iv, &sealed).unwrap_err();
+        assert_eq!(error.code, "EK002");
+    }
+
+    #[test]
+    fn the_cipher_round_trips_every_length_across_the_block_boundary() {
+        let key = [0x5au8; 32];
+        let iv = [0xa5u8; 16];
+        for length in 0..80usize {
+            let plain: Vec<u8> = (0..length).map(|at| (at * 7 % 251) as u8).collect();
+            let sealed = super::cipher::encrypt_cbc(&key, &iv, &plain);
+            assert!(sealed.len() > length, "padding must always be added");
+            assert!(sealed.len().is_multiple_of(16));
+            assert_eq!(
+                super::cipher::decrypt_cbc(&key, &iv, &sealed).unwrap(),
+                plain,
+                "length {length}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_developer_key_is_sealed_with_their_password_and_openssl_opens_it() {
+        let key = super::rsa::generate(1024).expect("a key must be made");
+        let password = "correct horse battery";
+        let sealed = super::rsa::seal_pkcs8(&key, password).expect("the key must seal");
+
+        let reopened = super::rsa::open_pkcs8(&sealed, password).expect("our own key must open");
+        assert_eq!(reopened.modulus(), key.modulus());
+
+        let wrong = super::rsa::open_pkcs8(&sealed, "not the password").unwrap_err();
+        assert_eq!(wrong.code, "EK002");
+
+        let Some(tool) = openssl() else {
+            eprintln!("keystore conformance: openssl is not available here");
+            return;
+        };
+        let directory = temp_directory("omni-keystore");
+        let path = directory.join("developer.pk8");
+        std::fs::write(&path, &sealed).unwrap();
+
+        let opened = std::process::Command::new(&tool)
+            .args([
+                "pkcs8",
+                "-topk8",
+                "-inform",
+                "DER",
+                "-in",
+                path.to_str().unwrap(),
+                "-passin",
+                &format!("pass:{password}"),
+                "-nocrypt",
+                "-outform",
+                "DER",
+                "-out",
+                directory.join("plain.pk8").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            opened.status.success(),
+            "openssl could not open a key this build sealed: {}",
+            String::from_utf8_lossy(&opened.stderr)
+        );
+        let plain = std::fs::read(directory.join("plain.pk8")).unwrap();
+        let theirs = super::rsa::parse_pkcs8(&plain).unwrap();
+        assert_eq!(theirs.modulus(), key.modulus());
+
+        let refused = std::process::Command::new(&tool)
+            .args([
+                "pkcs8",
+                "-topk8",
+                "-inform",
+                "DER",
+                "-in",
+                path.to_str().unwrap(),
+                "-passin",
+                "pass:wrong",
+                "-nocrypt",
+                "-out",
+                directory.join("no.pk8").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            !refused.status.success(),
+            "a wrong password must not open it"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("keystore conformance: openssl opened a PBES2 key this build sealed, and refused the wrong password");
+    }
+
+    #[test]
+    fn a_short_password_is_refused_before_a_key_is_written() {
+        let key = super::rsa::generate(1024).unwrap();
+        let error = super::rsa::seal_pkcs8(&key, "short").unwrap_err();
+        assert_eq!(error.code, "ER040");
+        assert!(error.suggestion.unwrap().contains("only thing between"));
     }
 
     #[test]
@@ -19235,6 +22271,11 @@ mod tests {
         let encoded = axml::encode(&root).expect("the manifest must encode");
 
         let Some(aapt2) = find_build_tool("aapt2") else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing, so the \
+                 manifest this build writes was never checked against it"
+            );
             eprintln!("axml conformance: aapt2 is not available here");
             return;
         };
