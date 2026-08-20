@@ -62,6 +62,16 @@ sealed interface LogDestination {
     /** The file reached shared storage. */
     data class Published(val location: String) : LogDestination
 
+    /**
+     * The private copy is written and publishing is still running.
+     *
+     * Measured on a Galaxy S23 running Android 16, publishing through MediaStore
+     * takes 11 to 18 ms while the private write is sub-millisecond. Directive
+     * section 36 does not allow spending that on the main thread, so the two are
+     * split and this state is what the caller sees in between.
+     */
+    data class Pending(val location: String) : LogDestination
+
     /** Only the private copy exists. */
     data class PrivateOnly(val location: String, val reason: String) : LogDestination
 }
@@ -110,6 +120,20 @@ object OmniLog {
 
     private val lock = Any()
     private val session = StringBuilder(8 * 1024)
+
+    /**
+     * Carries publishing off the calling thread.
+     *
+     * One thread, so writes stay ordered and two flushes can never interleave
+     * inside the same file. A daemon thread, so it can never hold the process
+     * open (directive section 36).
+     */
+    private val publisher = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "omni-log-publisher").apply { isDaemon = true }
+    }
+
+    @Volatile
+    private var lastPublished: LogDestination? = null
 
     @Volatile
     private var context: Context? = null
@@ -169,14 +193,7 @@ object OmniLog {
      */
     fun flushSession(): LogDestination {
         val started = System.nanoTime()
-        val body = synchronized(lock) { session.toString() }
-        val header = buildString {
-            append("Omni_Builder session log\n")
-            append("Started: ").append(installedAt).append('\n')
-            append("Written: ").append(timestamp()).append('\n')
-            append("-".repeat(72)).append('\n')
-        }
-        val destination = write(SESSION_FILE, header + body, append = false)
+        val destination = write(SESSION_FILE, sessionDocument(), append = false)
 
         // Writing the log is I/O on whichever thread asked for it, and on a
         // phone that is usually the main thread. The cost is recorded rather
@@ -187,7 +204,7 @@ object OmniLog {
         event(
             LogLevel.TRACE,
             "log",
-            "Session flushed in ${elapsedMilliseconds} ms to " +
+            "Session written in ${elapsedMilliseconds} ms; " +
                 describeDestination(destination),
         )
         return destination
@@ -216,8 +233,16 @@ object OmniLog {
             append(synchronized(lock) { session.toString() })
         }
 
-        write(CRASH_FILE, record, append = true)
-        flushSession()
+        writeBlocking(CRASH_FILE, record, append = true)
+        writeBlocking(SESSION_FILE, sessionDocument(), append = false)
+    }
+
+    private fun sessionDocument(): String = buildString {
+        append("Omni_Builder session log\n")
+        append("Started: ").append(installedAt).append('\n')
+        append("Written: ").append(timestamp()).append('\n')
+        append("-".repeat(72)).append('\n')
+        append(synchronized(lock) { session.toString() })
     }
 
     /** The most recent crash record, if there is one. */
@@ -236,9 +261,13 @@ object OmniLog {
     /** Human-readable description of where the logs went. */
     fun describeDestination(destination: LogDestination): String = when (destination) {
         is LogDestination.Published -> destination.location
+        is LogDestination.Pending -> "${destination.location} (publishing to Documents)"
         is LogDestination.PrivateOnly ->
             "${destination.location} (shared storage unavailable: ${destination.reason})"
     }
+
+    /** The outcome of the most recent publish, if one has finished. */
+    fun lastPublishOutcome(): LogDestination? = lastPublished
 
     private fun describeEnvironment(context: Context): String {
         val info = context.applicationInfo
@@ -255,33 +284,91 @@ object OmniLog {
 
     private fun privateFile(name: String): File? = context?.let { File(it.filesDir, name) }
 
-    /**
-     * Writes the private copy, then tries to publish it.
-     *
-     * The private copy is written first and on its own, because it is the one
-     * that must survive. Publishing is best effort by nature: on Android 10 and
-     * later it goes through MediaStore, which needs no permission; on Android 9
-     * it needs a storage permission the user may not have granted.
-     */
-    private fun write(name: String, text: String, append: Boolean): LogDestination {
-        val target = privateFile(name)
-            ?: return LogDestination.PrivateOnly("(not started)", "no application context")
+    /** Outcome of writing the copy the application controls. */
+    private sealed interface PrivateWrite {
+        /** The private copy is on disk at this path. */
+        data class Ok(val path: String) : PrivateWrite
 
-        val privatePath = runCatching {
+        /** It is not, and this is what the caller should report. */
+        data class Failed(val destination: LogDestination) : PrivateWrite
+    }
+
+    /**
+     * Writes the private copy now and publishes in the background.
+     *
+     * The split is deliberate. The private copy is the one that must survive a
+     * process being killed, so it is written on the calling thread where its
+     * completion is guaranteed; it costs well under a millisecond. Publishing to
+     * shared storage costs an order of magnitude more and nothing depends on it
+     * having finished, so it goes to the publisher thread.
+     */
+    private fun write(name: String, text: String, append: Boolean): LogDestination =
+        when (val written = writePrivate(name, text, append)) {
+            is PrivateWrite.Failed -> written.destination
+            is PrivateWrite.Ok -> {
+                publisher.execute {
+                    val outcome = publishNow(name, written.path)
+                    lastPublished = outcome
+                    if (outcome is LogDestination.PrivateOnly) {
+                        event(
+                            LogLevel.WARN,
+                            "log",
+                            "Publishing $name to Documents failed: ${outcome.reason}. " +
+                                "The private copy at ${outcome.location} is complete.",
+                        )
+                    }
+                }
+                LogDestination.Pending(written.path)
+            }
+        }
+
+    /**
+     * Writes the private copy and publishes before returning.
+     *
+     * Used by the crash handler, where there is no later moment: the process is
+     * about to end, so a background publish would simply not happen.
+     */
+    private fun writeBlocking(name: String, text: String, append: Boolean): LogDestination =
+        when (val written = writePrivate(name, text, append)) {
+            is PrivateWrite.Failed -> written.destination
+            is PrivateWrite.Ok -> publishNow(name, written.path).also { lastPublished = it }
+        }
+
+    /**
+     * Writes the copy the application controls.
+     *
+     * Reports failure as a value rather than throwing: every caller is on a path
+     * where the right response is to record what went wrong and carry on. A
+     * logger that throws is a logger that takes the application down with it.
+     */
+    private fun writePrivate(name: String, text: String, append: Boolean): PrivateWrite {
+        val target = privateFile(name)
+            ?: return PrivateWrite.Failed(
+                LogDestination.PrivateOnly("(not started)", "no application context")
+            )
+
+        return try {
             FileOutputStream(target, append).use { it.write(text.toByteArray(Charsets.UTF_8)) }
             trim(target)
-            target.absolutePath
-        }.getOrElse { failure ->
+            PrivateWrite.Ok(target.absolutePath)
+        } catch (failure: Exception) {
             Log.e(TAG, "The private log copy could not be written.", failure)
-            return LogDestination.PrivateOnly("(unwritable)", failure.messageOrType())
+            PrivateWrite.Failed(
+                LogDestination.PrivateOnly("(unwritable)", failure.messageOrType())
+            )
         }
+    }
 
-        val bytes = runCatching { target.readBytes() }.getOrElse {
-            return LogDestination.PrivateOnly(privatePath, it.messageOrType())
+    /** Reads the private copy back and pushes it to shared storage. */
+    private fun publishNow(name: String, privatePath: String): LogDestination {
+        val target = privateFile(name)
+            ?: return LogDestination.PrivateOnly(privatePath, "no application context")
+
+        return try {
+            LogDestination.Published(publish(name, target.readBytes()))
+        } catch (failure: Exception) {
+            LogDestination.PrivateOnly(privatePath, failure.messageOrType())
         }
-
-        return runCatching { LogDestination.Published(publish(name, bytes)) }
-            .getOrElse { failure -> LogDestination.PrivateOnly(privatePath, failure.messageOrType()) }
     }
 
     private fun Throwable.messageOrType(): String = message ?: javaClass.simpleName
@@ -515,6 +602,20 @@ data class PluginRow(
     val roadmapPhase: String,
 )
 
+/** One subsystem of the Core, with what it still lacks. */
+data class SubsystemRow(
+    /** Human-facing name. */
+    val name: String,
+    /** Maturity, verbatim from the Core. */
+    val status: String,
+    /** Section of the directive that specifies it. */
+    val directiveSection: Int,
+    /** One sentence on what it does today. */
+    val summary: String,
+    /** What the specification asks for that is not built. */
+    val missing: List<String>,
+)
+
 /** A single diagnostic, as the Core emitted it. */
 data class DiagnosticRow(
     /** Stable diagnostic code. */
@@ -548,6 +649,10 @@ data class CoreState(
     val selfHostingNote: String,
     /** Tools this build still borrows (directive section 15). */
     val bootstrapDependencies: List<String>,
+    /** The Core's own subsystems and their maturity. */
+    val subsystems: List<SubsystemRow>,
+    /** How many subsystems have reached PRODUCTION. */
+    val subsystemsProduction: Int,
     /** Toolchain verification table. */
     val toolchain: List<ToolchainRow>,
     /** Number of pinned components that were verified here. */
@@ -570,6 +675,7 @@ data class CoreState(
         fun parse(document: String): CoreState {
             val root = JSONObject(document)
             val core = root.getJSONObject("core")
+            val subsystems = root.getJSONObject("subsystems")
             val toolchain = root.getJSONObject("toolchain")
             val plugins = root.getJSONObject("plugins")
 
@@ -581,6 +687,16 @@ data class CoreState(
                 selfHosted = core.getBoolean("selfHosted"),
                 selfHostingNote = core.getString("selfHostingNote"),
                 bootstrapDependencies = core.getJSONArray("bootstrapDependencies").strings(),
+                subsystems = subsystems.getJSONArray("detail").map { item ->
+                    SubsystemRow(
+                        name = item.getString("name"),
+                        status = item.getString("status"),
+                        directiveSection = item.getInt("directiveSection"),
+                        summary = item.getString("summary"),
+                        missing = item.getJSONArray("missing").strings(),
+                    )
+                },
+                subsystemsProduction = subsystems.getInt("production"),
                 toolchain = toolchain.getJSONArray("components").map { item ->
                     ToolchainRow(
                         displayName = item.getString("displayName"),
@@ -813,6 +929,28 @@ class BuilderActivity : Activity() {
         root.addView(body(state.selfHostingNote))
         state.bootstrapDependencies.forEach { root.addView(bullet(it)) }
 
+        section(root, R.string.omni_section_subsystems)
+        root.addView(
+            body(
+                getString(
+                    R.string.omni_subsystems_summary,
+                    state.subsystemsProduction,
+                    state.subsystems.size,
+                )
+            )
+        )
+        state.subsystems.forEach { row ->
+            root.addView(
+                keyValue(
+                    row.name,
+                    getString(R.string.omni_subsystem_detail, row.directiveSection, row.summary),
+                    statusColor(row.status),
+                    trailing = row.status,
+                )
+            )
+            row.missing.forEach { root.addView(bullet(it)) }
+        }
+
         section(root, R.string.omni_section_toolchain)
         root.addView(
             body(
@@ -892,6 +1030,7 @@ class BuilderActivity : Activity() {
                 OmniLog.describeDestination(destination),
                 when (destination) {
                     is LogDestination.Published -> R.color.omni_ok
+                    is LogDestination.Pending -> R.color.omni_accent
                     is LogDestination.PrivateOnly -> R.color.omni_warning
                 },
             )

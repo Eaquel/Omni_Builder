@@ -21,6 +21,15 @@
         own maturity, and none of them is implemented.</string>
 
     <string name="omni_section_self_hosting">Self-hosting</string>
+    <string name="omni_section_subsystems">Core subsystems</string>
+
+    <!-- %1$d subsystems that reached PRODUCTION, %2$d subsystems in total -->
+    <string name="omni_subsystems_summary">%1$d of %2$d Core subsystems have passed
+        every quality gate. The rest state below exactly what they still lack.</string>
+
+    <!-- %1$d directive section number, %2$s one-sentence summary -->
+    <string name="omni_subsystem_detail">Directive section %1$d · %2$s</string>
+
     <string name="omni_section_toolchain">Toolchain lock</string>
     <string name="omni_section_plugins">Plugins</string>
     <string name="omni_section_diagnostics">Diagnostics</string>

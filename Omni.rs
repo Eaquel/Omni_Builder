@@ -221,6 +221,33 @@
 //!   until then; this ADR covers bootstrap signing only.
 //! * **Status.** ACCEPTED.
 //!
+//! ### ADR-0009 — The Core stays one file, and the trigger for splitting it
+//!
+//! * **Context.** ADR-0002 put the Core in a single root-level file and said a
+//!   split would need its own decision record. Phase 2 took that file past eight
+//!   thousand lines across ten modules.
+//! * **Alternatives.** (a) Split now, one file per module. (b) Keep one file.
+//!   (c) Keep one file and write down what would make (a) the right answer.
+//! * **Decision.** (c).
+//! * **Reason.** The file is large but not tangled: every module is an inner
+//!   `mod` with its own contract, its dependencies point one way, and the tests
+//!   sit at the end where they can reach everything. Splitting has a real cost
+//!   here — directive section 46 fixes the repository layout, and each new file
+//!   is a deviation from it needing its own justification, which section 46 also
+//!   demands. Size alone is not a reason; difficulty working in it would be.
+//! * **Tradeoffs.** Navigating one long file is slower than opening the right
+//!   short one, and two people editing different subsystems touch the same file.
+//! * **Trigger for revisiting.** Any of: a module needing a dependency the rest
+//!   of the Core must not have; compile times making the edit-test loop painful;
+//!   or a second contributor working in the Core regularly. Any one of those is
+//!   enough — none of them is true today.
+//! * **Security impact.** None.
+//! * **Performance impact.** None at runtime.
+//! * **Migration plan.** A split moves each inner `mod` to its own file and
+//!   leaves `Omni.rs` as the crate root that declares them. `[lib] path` does not
+//!   change.
+//! * **Status.** ACCEPTED.
+//!
 //! ### ADR-0004 — C++ owns JNI; Rust exposes a plain C ABI
 //!
 //! * **Context.** Section 46 mandates `Builder.cpp` / `Builder.hpp` next to the
@@ -240,6 +267,12 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 #![warn(unreachable_pub)]
+// A `Diagnostic` is around 200 bytes, which Clippy flags whenever one is the
+// error half of a `Result`. It is the error half of nearly every `Result` here,
+// deliberately: the diagnostic *is* what the caller needs, and boxing it would
+// add an allocation to every failure path in the Core in exchange for nothing
+// measurable. Revisit if profiling ever says otherwise (directive section 10).
+#![allow(clippy::result_large_err)]
 
 // ---------------------------------------------------------------------------
 // Plugin modules (directive section 6).
@@ -275,7 +308,7 @@ pub mod sign;
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Phase of the roadmap in directive section 52 that this tree implements.
-pub const CORE_PHASE: &str = "PHASE 1 — MOBILE BOOTSTRAP";
+pub const CORE_PHASE: &str = "PHASE 2 — OMNI CORE";
 
 /// Maturity of the Core as a whole. Never raise this without the quality gates
 /// of directive section 51.
@@ -351,6 +384,135 @@ impl core::fmt::Display for Status {
         f.write_str(self.as_str())
     }
 }
+
+// ===========================================================================
+// Subsystem inventory (directive section 1)
+// ===========================================================================
+
+/// What one subsystem of the Core is, and honestly is not.
+///
+/// Directive section 1 forbids presenting an unfinished subsystem as finished.
+/// A comment saying so is easy to write and easy to forget; this table is
+/// rendered by the user interface, so what it says is what a person reads.
+#[derive(Clone, Copy, Debug)]
+pub struct Subsystem {
+    /// Human-facing name.
+    pub name: &'static str,
+    /// Maturity.
+    pub status: Status,
+    /// Section of the directive that specifies it.
+    pub directive_section: u16,
+    /// One sentence on what it does today.
+    pub summary: &'static str,
+    /// What the specification asks for that is not built.
+    ///
+    /// An empty list means nothing specified is missing. It does not mean the
+    /// subsystem has reached [`Status::Production`]; the gates of directive
+    /// section 51 decide that.
+    pub missing: &'static [&'static str],
+}
+
+/// Every subsystem of the Core, in the order the directive introduces them.
+pub const SUBSYSTEMS: &[Subsystem] = &[
+    Subsystem {
+        name: "Diagnostics",
+        status: Status::Partial,
+        directive_section: 33,
+        summary: "Coded, located, actionable diagnostics with severity and origin.",
+        missing: &["Related-diagnostic graphs are modelled but never populated."],
+    },
+    Subsystem {
+        name: "Capability security",
+        status: Status::Partial,
+        directive_section: 7,
+        summary: "Default-deny capability policy with an audit record per request.",
+        missing: &[
+            "Policies are built in code; nothing loads one from a project.",
+            "Plugins are not isolated at runtime, only by contract.",
+        ],
+    },
+    Subsystem {
+        name: "SHA-256",
+        status: Status::Beta,
+        directive_section: 30,
+        summary: "FIPS 180-4 SHA-256, verified against the published NIST vectors.",
+        missing: &["Not fuzzed yet, which directive section 41 asks for."],
+    },
+    Subsystem {
+        name: "Virtual filesystem",
+        status: Status::Partial,
+        directive_section: 8,
+        summary: "Named mounts, normalised paths, traversal and symlink refusal, \
+                  quotas, atomic writes.",
+        missing: &[
+            "No locking.",
+            "No snapshot or rollback.",
+            "No temporary-file lifetime management beyond a single write.",
+        ],
+    },
+    Subsystem {
+        name: "Project model",
+        status: Status::Partial,
+        directive_section: 44,
+        summary: "Omni.toml parsed, validated and reduced to a configuration digest.",
+        missing: &[
+            "No dependency declarations; nothing resolves dependencies yet.",
+            "The manifest is read from text, not from the virtual filesystem.",
+        ],
+    },
+    Subsystem {
+        name: "Artifact lifecycle",
+        status: Status::Partial,
+        directive_section: 58,
+        summary: "CREATED to PUBLISHED as a state machine that refuses illegal steps.",
+        missing: &[
+            "Nothing signs an artifact, so SIGNED is reachable and unused.",
+            "No artifact store; artifacts are described, not kept.",
+        ],
+    },
+    Subsystem {
+        name: "Incremental cache",
+        status: Status::Foundation,
+        directive_section: 11,
+        summary: "Cache keys over every input directive section 11 names, and four \
+                  distinguishable lookup outcomes.",
+        missing: &[
+            "In-memory only; nothing survives a restart.",
+            "No eviction policy.",
+            "No stored bytes, so a hit proves a key matched, not that a result exists.",
+        ],
+    },
+    Subsystem {
+        name: "Build graph",
+        status: Status::Partial,
+        directive_section: 9,
+        summary: "A real DAG with deterministic ordering and cycle detection.",
+        missing: &[
+            "Nothing constructs a graph from a project yet.",
+            "No graph is persisted between builds, so nothing can be compared.",
+        ],
+    },
+    Subsystem {
+        name: "Scheduler",
+        status: Status::Partial,
+        directive_section: 10,
+        summary: "Executes a graph in dependency order, propagates failure, honours \
+                  cancellation.",
+        missing: &[
+            "Sequential only; nothing runs in parallel.",
+            "Not memory, battery or thermal aware, which directive section 36 requires.",
+            "No checkpoint or resume inside a node.",
+        ],
+    },
+    Subsystem {
+        name: "Toolchain lock",
+        status: Status::Partial,
+        directive_section: 14,
+        summary: "Pinned versions with provenance, verified against an observed \
+                  environment.",
+        missing: &["Only two components can be observed from a device."],
+    },
+];
 
 // ===========================================================================
 // Failure model (directive section 34)
@@ -1221,12 +1383,6 @@ pub mod plugin {
 
     /// A unit of build work the Core can schedule.
     ///
-    /// `execute` returns a whole [`Diagnostic`] by value rather than a boxed one.
-    /// The type is around 200 bytes, which Clippy flags, but the failure path is
-    /// not a hot path and the diagnostic *is* the result the caller needs; boxing
-    /// would add an allocation to every failure in exchange for nothing
-    /// measurable. Revisit only if profiling says otherwise (directive section 10).
-    #[allow(clippy::result_large_err)]
     #[allow(unreachable_pub)]
     pub trait Plugin: Sync {
         /// The contract, available without executing anything.
@@ -1873,6 +2029,3585 @@ pub mod toolchain {
 }
 
 // ===========================================================================
+// hash — SHA-256 (directive section 30)
+// ===========================================================================
+
+/// SHA-256, implemented from FIPS PUB 180-4.
+///
+/// Directive section 30 forbids inventing cryptography and requires every
+/// primitive to rest on an established standard, its official specification and
+/// its official test vectors. This is an implementation of a published standard,
+/// not a new algorithm, and the tests are the vectors NIST publishes for it.
+///
+/// It exists because artifact digests (section 58), cache keys (section 11) and
+/// build provenance (section 32) all need one hash, and ADR-0003 keeps the Core
+/// free of third-party code.
+///
+/// It is **not** suitable for password hashing or for any use needing a keyed
+/// or memory-hard construction; nothing in this tree asks it to be.
+pub mod hash {
+    /// A 32-byte SHA-256 digest.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Digest([u8; 32]);
+
+    impl Digest {
+        /// The raw bytes, most significant first.
+        pub const fn as_bytes(&self) -> &[u8; 32] {
+            &self.0
+        }
+
+        /// Lowercase hexadecimal, the form every report and log uses.
+        pub fn to_hex(self) -> String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut out = String::with_capacity(64);
+            for byte in self.0 {
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            out
+        }
+
+        /// The first `bytes` bytes as hexadecimal.
+        ///
+        /// Used where a digest identifies something to a human rather than
+        /// authenticating it; never use a truncated digest for verification.
+        pub fn to_short_hex(self, bytes: usize) -> String {
+            let width = bytes.min(32) * 2;
+            self.to_hex()[..width].to_string()
+        }
+    }
+
+    impl core::fmt::Debug for Digest {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "sha256:{}", self.to_hex())
+        }
+    }
+
+    impl core::fmt::Display for Digest {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.to_hex())
+        }
+    }
+
+    /// Round constants: the first 32 bits of the fractional parts of the cube
+    /// roots of the first 64 primes (FIPS 180-4, section 4.2.2).
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    /// Initial hash value: the first 32 bits of the fractional parts of the
+    /// square roots of the first 8 primes (FIPS 180-4, section 5.3.3).
+    const H0: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    /// Streaming SHA-256 state.
+    ///
+    /// Streaming matters here: a build hashes files that must never be required
+    /// to fit in memory all at once (directive section 37).
+    #[derive(Clone)]
+    pub struct Sha256 {
+        state: [u32; 8],
+        block: [u8; 64],
+        buffered: usize,
+        /// Message length in bits, as the padding scheme requires.
+        length_bits: u64,
+    }
+
+    impl Default for Sha256 {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl Sha256 {
+        /// A fresh hasher.
+        pub const fn new() -> Self {
+            Sha256 {
+                state: H0,
+                block: [0u8; 64],
+                buffered: 0,
+                length_bits: 0,
+            }
+        }
+
+        /// Absorbs more of the message.
+        pub fn update(&mut self, mut data: &[u8]) {
+            self.length_bits = self.length_bits.wrapping_add((data.len() as u64) * 8);
+
+            if self.buffered > 0 {
+                let want = 64 - self.buffered;
+                let take = want.min(data.len());
+                self.block[self.buffered..self.buffered + take].copy_from_slice(&data[..take]);
+                self.buffered += take;
+                data = &data[take..];
+                if self.buffered == 64 {
+                    let block = self.block;
+                    self.compress(&block);
+                    self.buffered = 0;
+                }
+            }
+
+            while data.len() >= 64 {
+                let (block, rest) = data.split_at(64);
+                let mut fixed = [0u8; 64];
+                fixed.copy_from_slice(block);
+                self.compress(&fixed);
+                data = rest;
+            }
+
+            if !data.is_empty() {
+                self.block[..data.len()].copy_from_slice(data);
+                self.buffered = data.len();
+            }
+        }
+
+        /// Applies the padding of FIPS 180-4 section 5.1.1 and returns the digest.
+        pub fn finish(mut self) -> Digest {
+            let length_bits = self.length_bits;
+
+            // A single 1 bit, then zeroes, then the 64-bit length.
+            self.append_padding_byte(0x80);
+            while self.buffered != 56 {
+                self.append_padding_byte(0x00);
+            }
+            let encoded = length_bits.to_be_bytes();
+            for byte in encoded {
+                self.append_padding_byte(byte);
+            }
+            debug_assert_eq!(self.buffered, 0);
+
+            let mut out = [0u8; 32];
+            for (index, word) in self.state.iter().enumerate() {
+                out[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+            }
+            Digest(out)
+        }
+
+        /// Appends one byte without touching the recorded message length.
+        fn append_padding_byte(&mut self, byte: u8) {
+            self.block[self.buffered] = byte;
+            self.buffered += 1;
+            if self.buffered == 64 {
+                let block = self.block;
+                self.compress(&block);
+                self.buffered = 0;
+            }
+        }
+
+        /// The compression function of FIPS 180-4, section 6.2.2.
+        fn compress(&mut self, block: &[u8; 64]) {
+            let mut w = [0u32; 64];
+            for (index, chunk) in block.chunks_exact(4).enumerate() {
+                w[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            }
+            for index in 16..64 {
+                let s0 = w[index - 15].rotate_right(7)
+                    ^ w[index - 15].rotate_right(18)
+                    ^ (w[index - 15] >> 3);
+                let s1 = w[index - 2].rotate_right(17)
+                    ^ w[index - 2].rotate_right(19)
+                    ^ (w[index - 2] >> 10);
+                w[index] = w[index - 16]
+                    .wrapping_add(s0)
+                    .wrapping_add(w[index - 7])
+                    .wrapping_add(s1);
+            }
+
+            let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
+
+            for index in 0..64 {
+                let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+                let ch = (e & f) ^ ((!e) & g);
+                let temp1 = h
+                    .wrapping_add(s1)
+                    .wrapping_add(ch)
+                    .wrapping_add(K[index])
+                    .wrapping_add(w[index]);
+                let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+                let maj = (a & b) ^ (a & c) ^ (b & c);
+                let temp2 = s0.wrapping_add(maj);
+
+                h = g;
+                g = f;
+                f = e;
+                e = d.wrapping_add(temp1);
+                d = c;
+                c = b;
+                b = a;
+                a = temp1.wrapping_add(temp2);
+            }
+
+            for (slot, value) in self.state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+                *slot = slot.wrapping_add(value);
+            }
+        }
+    }
+
+    /// Hashes a byte slice in one call.
+    pub fn sha256(data: &[u8]) -> Digest {
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        hasher.finish()
+    }
+
+    /// Hashes a sequence of labelled fields unambiguously.
+    ///
+    /// Concatenating values before hashing is a classic mistake: `("ab", "c")`
+    /// and `("a", "bc")` would collide. Each field is therefore prefixed with its
+    /// name and both lengths, so no two different field sets can produce the same
+    /// input. Cache keys (directive section 11) depend on this being true.
+    pub fn sha256_fields(fields: &[(&str, &[u8])]) -> Digest {
+        let mut hasher = Sha256::new();
+        hasher.update(&(fields.len() as u64).to_be_bytes());
+        for (name, value) in fields {
+            hasher.update(&(name.len() as u64).to_be_bytes());
+            hasher.update(name.as_bytes());
+            hasher.update(&(value.len() as u64).to_be_bytes());
+            hasher.update(value);
+        }
+        hasher.finish()
+    }
+}
+
+// ===========================================================================
+// vfs — the virtual filesystem (directive section 8)
+// ===========================================================================
+
+/// The only way anything in a build reaches a file.
+///
+/// ## Contract (directive section 2)
+///
+/// | Field                | Value                                                       |
+/// |----------------------|-------------------------------------------------------------|
+/// | Module               | `omni_core::vfs`                                            |
+/// | Purpose              | Give plugins file access that is named, bounded and audited. |
+/// | Non-Responsibilities | Deciding *what* to read or write; that is the plugin's job.  |
+/// | Security             | Every operation needs a capability grant. Paths cannot escape |
+/// |                      | their mount, before or after symlink resolution.             |
+/// | Failure Modes        | Rejected path, denied capability, unknown mount, read-only    |
+/// |                      | mount, quota exhausted, underlying I/O error.                 |
+/// | Determinism          | Reading the same bytes yields the same digest; writes are     |
+/// |                      | atomic, so a build never observes a half-written file.        |
+/// | Status               | PARTIAL — snapshot and rollback are not implemented.          |
+///
+/// Directive section 8 lists what a virtual filesystem must eventually do. What
+/// is implemented here is path normalisation, traversal protection, read and
+/// write policy, quotas, temporary files and atomic writes. Locking, snapshots
+/// and rollback are **not** implemented, and no code in this tree pretends they
+/// are.
+pub mod vfs {
+    use crate::caps::Capability;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::{sha256, Digest};
+    use crate::plugin::Context;
+    use crate::FailureClass;
+    use std::fs;
+    use std::io::Write;
+    use std::path::{Component, Path, PathBuf};
+
+    /// Longest accepted path, in bytes (directive section 60).
+    pub const MAX_PATH_BYTES: usize = 4096;
+
+    /// Deepest accepted path. Guards against path explosion.
+    pub const MAX_SEGMENTS: usize = 64;
+
+    /// Longest accepted single segment, in bytes. Matches the common
+    /// filesystem limit.
+    pub const MAX_SEGMENT_BYTES: usize = 255;
+
+    /// A path that has been proven safe.
+    ///
+    /// The only way to build one is [`VirtualPath::parse`], so a value of this
+    /// type is evidence that the path is relative, free of `..`, free of control
+    /// characters and within every bound. Functions downstream can rely on that
+    /// rather than re-checking, which is the point: a check that has to be
+    /// repeated is a check that will eventually be forgotten.
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub struct VirtualPath {
+        segments: Vec<String>,
+    }
+
+    impl VirtualPath {
+        /// Normalises and validates a path expressed inside a mount.
+        ///
+        /// Accepts `/`-separated relative paths. `.` segments are dropped. Every
+        /// other rejection is deliberate and reported.
+        pub fn parse(input: &str) -> Result<VirtualPath, Diagnostic> {
+            fn reject(code: &str, message: &str, suggestion: &str) -> Diagnostic {
+                Diagnostic::new(
+                    code,
+                    Severity::Error,
+                    FailureClass::SecurityFailure,
+                    "core.vfs",
+                    message,
+                )
+                .with_suggestion(suggestion)
+            }
+
+            if input.is_empty() {
+                return Err(reject(
+                    "E2001",
+                    "The path is empty.",
+                    "Give a path relative to the mount, such as 'Source/Main/Builder.kt'.",
+                ));
+            }
+
+            if input.len() > MAX_PATH_BYTES {
+                return Err(reject(
+                    "E2002",
+                    "The path is longer than the accepted limit.",
+                    "Paths are limited to 4096 bytes.",
+                )
+                .with_context(format!("Length: {} bytes", input.len())));
+            }
+
+            if let Some(bad) = input.chars().find(|c| (*c as u32) < 0x20 || *c == '\u{7f}') {
+                return Err(reject(
+                    "E2003",
+                    "The path contains a control character.",
+                    "Remove it. A control character in a path is either a mistake \
+                     or an attempt to confuse something downstream.",
+                )
+                .with_context(format!("Character: U+{:04X}", bad as u32)));
+            }
+
+            if input.contains('\\') {
+                return Err(reject(
+                    "E2004",
+                    "The path contains a backslash.",
+                    "Use '/' as the separator. Accepting both would mean two \
+                     spellings of one path, and two spellings are two chances to \
+                     get a security check wrong.",
+                ));
+            }
+
+            if input.starts_with('/') {
+                return Err(reject(
+                    "E2005",
+                    "The path is absolute.",
+                    "Give a path relative to a mount. Absolute paths would let a \
+                     plugin name a file the build never granted it.",
+                ));
+            }
+
+            // A Windows drive specifier is absolute on the platform that
+            // understands it, so it is refused here even though this Core does
+            // not run there.
+            if input.len() >= 2 && input.as_bytes()[1] == b':' {
+                return Err(reject(
+                    "E2005",
+                    "The path names a drive.",
+                    "Give a path relative to a mount.",
+                ));
+            }
+
+            let mut segments = Vec::new();
+            for raw in input.split('/') {
+                match raw {
+                    "" => {
+                        return Err(reject(
+                            "E2006",
+                            "The path contains an empty segment.",
+                            "Remove the repeated or trailing '/'.",
+                        ));
+                    }
+                    "." => continue,
+                    ".." => {
+                        return Err(reject(
+                            "E2007",
+                            "The path tries to leave its mount.",
+                            "Remove the '..' segment. A build never needs to reach \
+                             outside the directories it was given.",
+                        ));
+                    }
+                    segment => {
+                        if segment.len() > MAX_SEGMENT_BYTES {
+                            return Err(reject(
+                                "E2008",
+                                "A path segment is longer than the accepted limit.",
+                                "Segments are limited to 255 bytes.",
+                            ));
+                        }
+                        segments.push(segment.to_string());
+                    }
+                }
+            }
+
+            if segments.is_empty() {
+                return Err(reject(
+                    "E2001",
+                    "The path names no file.",
+                    "A path of only '.' segments refers to the mount itself.",
+                ));
+            }
+
+            if segments.len() > MAX_SEGMENTS {
+                return Err(reject(
+                    "E2009",
+                    "The path is nested more deeply than the accepted limit.",
+                    "Paths are limited to 64 segments.",
+                )
+                .with_context(format!("Segments: {}", segments.len())));
+            }
+
+            Ok(VirtualPath { segments })
+        }
+
+        /// The normalised path, always using `/`.
+        pub fn as_str(&self) -> String {
+            self.segments.join("/")
+        }
+
+        /// The individual segments, in order.
+        pub fn segments(&self) -> &[String] {
+            &self.segments
+        }
+
+        /// The final segment.
+        pub fn file_name(&self) -> &str {
+            self.segments.last().map(String::as_str).unwrap_or_default()
+        }
+
+        /// The extension of the final segment, without the dot.
+        pub fn extension(&self) -> Option<&str> {
+            let name = self.file_name();
+            name.rsplit_once('.')
+                .map(|(_, ext)| ext)
+                .filter(|e| !e.is_empty())
+        }
+    }
+
+    impl core::fmt::Display for VirtualPath {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.as_str())
+        }
+    }
+
+    /// What a mount permits.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Access {
+        /// Reads only. A write is refused even with `FS_WRITE` granted.
+        ReadOnly,
+        /// Reads and writes.
+        ReadWrite,
+    }
+
+    impl Access {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Access::ReadOnly => "READ_ONLY",
+                Access::ReadWrite => "READ_WRITE",
+            }
+        }
+    }
+
+    /// A named directory a build may reach into.
+    #[derive(Clone, Debug)]
+    pub struct Mount {
+        name: String,
+        root: PathBuf,
+        access: Access,
+    }
+
+    impl Mount {
+        /// Name plugins use to address this mount.
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+
+        /// What it permits.
+        pub fn access(&self) -> Access {
+            self.access
+        }
+    }
+
+    /// Byte budgets for one build (directive section 60).
+    #[derive(Clone, Copy, Debug)]
+    pub struct Quota {
+        /// Largest single file that may be read or written.
+        pub max_file_bytes: u64,
+        /// Total that may be written across the whole build.
+        pub max_written_bytes: u64,
+    }
+
+    impl Default for Quota {
+        /// Deliberately modest. A mobile device is the target, not a build farm
+        /// (directive section 36).
+        fn default() -> Self {
+            Quota {
+                max_file_bytes: 64 * 1024 * 1024,
+                max_written_bytes: 512 * 1024 * 1024,
+            }
+        }
+    }
+
+    /// Counters worth reporting after a build.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Usage {
+        /// Files read.
+        pub reads: u64,
+        /// Files written.
+        pub writes: u64,
+        /// Bytes read.
+        pub bytes_read: u64,
+        /// Bytes written.
+        pub bytes_written: u64,
+        /// Operations refused, for any reason.
+        pub refusals: u64,
+    }
+
+    /// The filesystem a build sees.
+    #[derive(Debug)]
+    pub struct VirtualFs {
+        mounts: Vec<Mount>,
+        quota: Quota,
+        usage: Usage,
+    }
+
+    impl VirtualFs {
+        /// An empty filesystem. Nothing is reachable until something is mounted.
+        pub fn new(quota: Quota) -> Self {
+            VirtualFs {
+                mounts: Vec::new(),
+                quota,
+                usage: Usage::default(),
+            }
+        }
+
+        /// Makes a real directory reachable under a name.
+        ///
+        /// The root is canonicalised now, so every later containment check
+        /// compares against a path with no symlinks left in it.
+        pub fn mount(
+            &mut self,
+            name: impl Into<String>,
+            root: impl AsRef<Path>,
+            access: Access,
+        ) -> Result<(), Diagnostic> {
+            let name = name.into();
+            let root = root.as_ref();
+
+            if name.is_empty() || name.contains('/') {
+                return Err(Diagnostic::new(
+                    "E2010",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "core.vfs",
+                    "A mount name must be a single non-empty word.",
+                )
+                .with_context(format!("Name: {name}"))
+                .with_suggestion("Use a name such as 'project' or 'output'."));
+            }
+
+            if self.mounts.iter().any(|m| m.name == name) {
+                return Err(Diagnostic::new(
+                    "E2011",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "core.vfs",
+                    "That mount name is already in use.",
+                )
+                .with_context(format!("Name: {name}"))
+                .with_suggestion("Mount names are unique so a path means one thing."));
+            }
+
+            let canonical = fs::canonicalize(root).map_err(|error| {
+                Diagnostic::new(
+                    "E2012",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "core.vfs",
+                    "The mount root could not be resolved.",
+                )
+                .with_context(format!("Root: {}", root.display()))
+                .with_context(format!("Cause: {error}"))
+                .with_suggestion("The directory must exist before it is mounted.")
+            })?;
+
+            if !canonical.is_dir() {
+                return Err(Diagnostic::new(
+                    "E2013",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "core.vfs",
+                    "The mount root is not a directory.",
+                )
+                .with_context(format!("Root: {}", canonical.display())));
+            }
+
+            self.mounts.push(Mount {
+                name,
+                root: canonical,
+                access,
+            });
+            Ok(())
+        }
+
+        /// Every mount, in the order they were added.
+        pub fn mounts(&self) -> &[Mount] {
+            &self.mounts
+        }
+
+        /// Counters accumulated so far.
+        pub fn usage(&self) -> Usage {
+            self.usage
+        }
+
+        /// The quota in force.
+        pub fn quota(&self) -> Quota {
+            self.quota
+        }
+
+        /// Reads a file.
+        ///
+        /// Requires `FS_READ`. The digest of the bytes is returned alongside them
+        /// so that a caller never has to re-read a file to know what it hashed
+        /// to (directive sections 11 and 58).
+        pub fn read(
+            &mut self,
+            ctx: &mut Context<'_>,
+            subject: &str,
+            mount: &str,
+            path: &VirtualPath,
+        ) -> Result<(Vec<u8>, Digest), Diagnostic> {
+            self.require(ctx, subject, Capability::FsRead)?;
+            let resolved = self.resolve(mount, path, false)?;
+
+            let metadata = fs::metadata(&resolved).map_err(|error| {
+                self.usage.refusals += 1;
+                Self::io_failure("E2020", "The file could not be opened.", path, error)
+            })?;
+
+            if metadata.len() > self.quota.max_file_bytes {
+                self.usage.refusals += 1;
+                return Err(Diagnostic::new(
+                    "E2021",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.vfs",
+                    "The file is larger than this build is allowed to read.",
+                )
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Size: {} bytes", metadata.len()))
+                .with_context(format!("Limit: {} bytes", self.quota.max_file_bytes))
+                .with_suggestion(
+                    "Raise the quota deliberately if the file really is this large.",
+                ));
+            }
+
+            let bytes = fs::read(&resolved).map_err(|error| {
+                self.usage.refusals += 1;
+                Self::io_failure("E2020", "The file could not be read.", path, error)
+            })?;
+
+            self.usage.reads += 1;
+            self.usage.bytes_read += bytes.len() as u64;
+            let digest = sha256(&bytes);
+            Ok((bytes, digest))
+        }
+
+        /// Writes a file, atomically.
+        ///
+        /// Requires `FS_WRITE` and a read-write mount. The bytes go to a
+        /// temporary file in the destination directory and are renamed into
+        /// place, so a reader sees either the previous file or the complete new
+        /// one, never a partial write (directive section 59).
+        pub fn write_atomic(
+            &mut self,
+            ctx: &mut Context<'_>,
+            subject: &str,
+            mount: &str,
+            path: &VirtualPath,
+            bytes: &[u8],
+        ) -> Result<Digest, Diagnostic> {
+            self.require(ctx, subject, Capability::FsWrite)?;
+
+            let size = bytes.len() as u64;
+            if size > self.quota.max_file_bytes {
+                self.usage.refusals += 1;
+                return Err(Diagnostic::new(
+                    "E2022",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.vfs",
+                    "The file is larger than this build is allowed to write.",
+                )
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Size: {size} bytes"))
+                .with_context(format!("Limit: {} bytes", self.quota.max_file_bytes)));
+            }
+
+            if self.usage.bytes_written + size > self.quota.max_written_bytes {
+                self.usage.refusals += 1;
+                return Err(Diagnostic::new(
+                    "E2023",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.vfs",
+                    "This build has written as much as it is allowed to.",
+                )
+                .with_context(format!("Written: {} bytes", self.usage.bytes_written))
+                .with_context(format!("Limit: {} bytes", self.quota.max_written_bytes))
+                .with_suggestion(
+                    "A build that writes this much is usually looping; check before \
+                     raising the quota.",
+                ));
+            }
+
+            let resolved = self.resolve(mount, path, true)?;
+
+            if let Some(parent) = resolved.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    self.usage.refusals += 1;
+                    Self::io_failure("E2024", "The directory could not be created.", path, error)
+                })?;
+            }
+
+            // Named after the destination so a stray temporary file is always
+            // traceable to the write that left it behind.
+            let temporary = resolved.with_extension(format!(
+                "{}omni-partial",
+                resolved.extension().map(|_| ".").unwrap_or_default()
+            ));
+
+            let write_result = (|| -> std::io::Result<()> {
+                let mut file = fs::File::create(&temporary)?;
+                file.write_all(bytes)?;
+                // Flush to the device before the rename, or a crash could leave
+                // the name pointing at content that never reached storage.
+                file.sync_all()?;
+                fs::rename(&temporary, &resolved)
+            })();
+
+            if let Err(error) = write_result {
+                let _ = fs::remove_file(&temporary);
+                self.usage.refusals += 1;
+                return Err(Self::io_failure(
+                    "E2024",
+                    "The file could not be written.",
+                    path,
+                    error,
+                ));
+            }
+
+            self.usage.writes += 1;
+            self.usage.bytes_written += size;
+            Ok(sha256(bytes))
+        }
+
+        /// Whether a file exists. Requires `FS_READ`, because existence is
+        /// information.
+        pub fn exists(
+            &mut self,
+            ctx: &mut Context<'_>,
+            subject: &str,
+            mount: &str,
+            path: &VirtualPath,
+        ) -> Result<bool, Diagnostic> {
+            self.require(ctx, subject, Capability::FsRead)?;
+            Ok(self
+                .resolve(mount, path, false)
+                .map(|p| p.exists())
+                .unwrap_or(false))
+        }
+
+        fn require(
+            &mut self,
+            ctx: &mut Context<'_>,
+            subject: &str,
+            capability: Capability,
+        ) -> Result<(), Diagnostic> {
+            if ctx.require(subject, capability).is_granted() {
+                return Ok(());
+            }
+            self.usage.refusals += 1;
+            Err(Diagnostic::new(
+                "E2030",
+                Severity::Error,
+                FailureClass::SecurityFailure,
+                "core.vfs",
+                format!("{subject} does not hold {capability}."),
+            )
+            .with_context("The capability model denies by default (directive section 7).")
+            .with_suggestion(format!(
+                "Grant {capability} to this plugin explicitly if it genuinely needs it.",
+            )))
+        }
+
+        /// Maps a virtual path onto a real one, refusing anything that escapes.
+        ///
+        /// [`VirtualPath`] already guarantees the path is relative and free of
+        /// `..`, so this guards against the case that syntax cannot: a symlink
+        /// inside the mount pointing out of it.
+        fn resolve(
+            &mut self,
+            mount: &str,
+            path: &VirtualPath,
+            for_write: bool,
+        ) -> Result<PathBuf, Diagnostic> {
+            let Some(entry) = self.mounts.iter().find(|m| m.name == mount) else {
+                self.usage.refusals += 1;
+                return Err(Diagnostic::new(
+                    "E2031",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "core.vfs",
+                    format!("There is no mount named '{mount}'."),
+                )
+                .with_context(format!(
+                    "Mounted: {}",
+                    self.mounts
+                        .iter()
+                        .map(|m| m.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+                .with_suggestion("Mount the directory before reading from it."));
+            };
+
+            if for_write && entry.access == Access::ReadOnly {
+                self.usage.refusals += 1;
+                return Err(Diagnostic::new(
+                    "E2032",
+                    Severity::Error,
+                    FailureClass::SecurityFailure,
+                    "core.vfs",
+                    format!("The mount '{mount}' is read-only."),
+                )
+                .with_context(format!("Path: {path}"))
+                .with_suggestion(
+                    "Write to an output mount. A source tree is mounted read-only \
+                     on purpose.",
+                ));
+            }
+
+            let root = entry.root.clone();
+            let mut candidate = root.clone();
+            for segment in path.segments() {
+                candidate.push(segment);
+            }
+
+            // Canonicalise as much of the path as exists. For a write the file
+            // itself may not exist yet, so the deepest existing ancestor is what
+            // gets checked.
+            let mut existing = candidate.as_path();
+            let canonical = loop {
+                match fs::canonicalize(existing) {
+                    Ok(resolved) => break resolved,
+                    Err(_) => match existing.parent() {
+                        Some(parent) if parent.starts_with(&root) || parent == root => {
+                            existing = parent;
+                        }
+                        _ => break root.clone(),
+                    },
+                }
+            };
+
+            if !canonical.starts_with(&root) {
+                self.usage.refusals += 1;
+                return Err(Diagnostic::new(
+                    "E2033",
+                    Severity::Error,
+                    FailureClass::SecurityFailure,
+                    "core.vfs",
+                    "The path resolves outside its mount.",
+                )
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Mount: {mount}"))
+                .with_suggestion(
+                    "A link inside the mount points outside it. The build refuses \
+                     to follow it rather than reading a file it was never given.",
+                ));
+            }
+
+            // Rebuild from the canonical root so the returned path contains no
+            // component the check did not see.
+            let mut safe = root;
+            for segment in path.segments() {
+                safe.push(segment);
+            }
+            debug_assert!(safe
+                .components()
+                .all(|c| !matches!(c, Component::ParentDir)));
+            Ok(safe)
+        }
+
+        fn io_failure(
+            code: &str,
+            message: &str,
+            path: &VirtualPath,
+            error: std::io::Error,
+        ) -> Diagnostic {
+            Diagnostic::new(
+                code,
+                Severity::Error,
+                FailureClass::Recoverable,
+                "core.vfs",
+                message,
+            )
+            .with_context(format!("Path: {path}"))
+            .with_context(format!("Cause: {error}"))
+        }
+    }
+}
+
+// ===========================================================================
+// project — the project model and its manifest (sections 13, 44, 45, 61)
+// ===========================================================================
+
+/// What a project is, and how `Omni.toml` is read.
+///
+/// ## Contract (directive section 2)
+///
+/// * **Purpose** — turn untrusted project input into a validated model, or into
+///   diagnostics explaining exactly why it could not.
+/// * **Inputs** — the text of `Omni.toml`. Untrusted (directive section 61).
+/// * **Outputs** — a [`Project`], plus diagnostics.
+/// * **Security** — the manifest cannot request a capability, name a path
+///   outside the project, or cause anything to be executed. It is data.
+/// * **Determinism** — the same text always produces the same model and the
+///   same [`Project::digest`].
+/// * **Status** — PARTIAL. The manifest of directive section 44 is fully
+///   modelled; dependency declarations (section 62) are not, because nothing
+///   resolves dependencies yet.
+///
+/// The syntax is a deliberately small subset: sections, `Key = value`, and three
+/// value types. It is not TOML and does not claim to be. A full TOML parser is
+/// a large attack surface for a file this simple, and directive section 61
+/// requires project input to be validated before it is believed.
+pub mod project {
+    use crate::diag::{Diagnostic, Location, Severity, Sink};
+    use crate::hash::{sha256_fields, Digest};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    /// Largest accepted manifest, in bytes (directive section 60).
+    pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+
+    /// Largest accepted number of lines.
+    pub const MAX_LINES: usize = 2_000;
+
+    /// Largest accepted number of key/value entries.
+    pub const MAX_ENTRIES: usize = 256;
+
+    /// Name of the manifest file.
+    pub const MANIFEST_NAME: &str = "Omni.toml";
+
+    /// A build profile (directive section 13).
+    ///
+    /// Every profile is explicit. Directive section 13 forbids implicit
+    /// configuration, so there is no "default" variant that quietly means
+    /// something else somewhere.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Profile {
+        /// Fast to build, easy to debug, not optimised.
+        Debug,
+        /// Optimised, intended for distribution.
+        Release,
+        /// Release plus the instrumentation a profiler needs.
+        Profile,
+        /// Built for measurement, with optimisation and no instrumentation.
+        Benchmark,
+        /// Release plus every verification the build can perform.
+        Production,
+        /// What continuous integration runs: deterministic and fully checked.
+        Ci,
+        /// Smallest possible output.
+        Minimal,
+        /// Fastest possible build, correctness checks kept.
+        Fast,
+        /// Every security gate on, whatever it costs.
+        Secure,
+    }
+
+    impl Profile {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Profile::Debug => "Debug",
+                Profile::Release => "Release",
+                Profile::Profile => "Profile",
+                Profile::Benchmark => "Benchmark",
+                Profile::Production => "Production",
+                Profile::Ci => "CI",
+                Profile::Minimal => "Minimal",
+                Profile::Fast => "Fast",
+                Profile::Secure => "Secure",
+            }
+        }
+
+        /// Every profile, in declaration order.
+        pub const ALL: &'static [Profile] = &[
+            Profile::Debug,
+            Profile::Release,
+            Profile::Profile,
+            Profile::Benchmark,
+            Profile::Production,
+            Profile::Ci,
+            Profile::Minimal,
+            Profile::Fast,
+            Profile::Secure,
+        ];
+
+        fn parse(value: &str) -> Option<Profile> {
+            Profile::ALL.iter().copied().find(|p| p.as_str() == value)
+        }
+    }
+
+    impl core::fmt::Display for Profile {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
+
+    /// What the build optimises for.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Optimization {
+        /// No optimisation.
+        None,
+        /// Execution speed.
+        Speed,
+        /// Artifact size.
+        Size,
+        /// Neither at the other's expense.
+        Balanced,
+    }
+
+    impl Optimization {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Optimization::None => "None",
+                Optimization::Speed => "Speed",
+                Optimization::Size => "Size",
+                Optimization::Balanced => "Balanced",
+            }
+        }
+
+        /// Every level, in declaration order.
+        pub const ALL: &'static [Optimization] = &[
+            Optimization::None,
+            Optimization::Speed,
+            Optimization::Size,
+            Optimization::Balanced,
+        ];
+
+        fn parse(value: &str) -> Option<Optimization> {
+            Optimization::ALL
+                .iter()
+                .copied()
+                .find(|o| o.as_str() == value)
+        }
+    }
+
+    /// How much Omni_Guard is asked to do (directive section 26).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum GuardLevel {
+        /// No integrity work.
+        Off,
+        /// Artifact digests only.
+        Low,
+        /// Digests and provenance.
+        Medium,
+        /// Everything the platform offers.
+        High,
+    }
+
+    impl GuardLevel {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                GuardLevel::Off => "Off",
+                GuardLevel::Low => "Low",
+                GuardLevel::Medium => "Medium",
+                GuardLevel::High => "High",
+            }
+        }
+
+        /// Every level, in declaration order.
+        pub const ALL: &'static [GuardLevel] = &[
+            GuardLevel::Off,
+            GuardLevel::Low,
+            GuardLevel::Medium,
+            GuardLevel::High,
+        ];
+
+        fn parse(value: &str) -> Option<GuardLevel> {
+            GuardLevel::ALL
+                .iter()
+                .copied()
+                .find(|g| g.as_str() == value)
+        }
+    }
+
+    /// A validated project.
+    ///
+    /// Constructing one means every field has already been checked, so the rest
+    /// of the build can use it without re-validating.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Project {
+        /// Human-facing name.
+        pub name: String,
+        /// Android application identifier, in reverse-DNS form.
+        pub id: String,
+        /// Project version.
+        pub version: String,
+        /// Edition date, as written in the manifest.
+        pub edition: Option<String>,
+
+        /// Lowest Android release the application supports.
+        pub min_sdk: u32,
+        /// Behavioural contract the application opts into.
+        pub target_sdk: u32,
+        /// Platform the application is compiled against.
+        pub compile_sdk: u32,
+
+        /// Build profile.
+        pub profile: Profile,
+        /// What to optimise for.
+        pub optimization: Optimization,
+        /// Whether link-time optimisation is requested.
+        pub lto: bool,
+        /// Whether the build may reuse previous results.
+        pub incremental: bool,
+        /// Whether independent work may run concurrently.
+        pub parallel: bool,
+        /// Whether the build must be reproducible (directive section 12).
+        pub deterministic: bool,
+
+        /// How much integrity work Omni_Guard performs.
+        pub guard: GuardLevel,
+        /// Whether provenance is recorded (directive section 32).
+        pub provenance: bool,
+        /// Whether artifacts are verified before publication (section 58).
+        pub verification: bool,
+
+        /// Feature switches, sorted by name so the model is order-independent.
+        pub features: Vec<(String, bool)>,
+    }
+
+    impl Project {
+        /// The safe defaults of directive section 45.
+        ///
+        /// A project with no manifest still has to build, and every value below
+        /// is a decision rather than an accident: the SDK levels match the
+        /// toolchain lock, the profile is the one that cannot silently ship
+        /// unoptimised code, and every security switch starts on.
+        pub fn defaults(name: impl Into<String>, id: impl Into<String>) -> Project {
+            Project {
+                name: name.into(),
+                id: id.into(),
+                version: "0.1.0".to_string(),
+                edition: None,
+                min_sdk: 28,
+                target_sdk: 36,
+                compile_sdk: 36,
+                profile: Profile::Debug,
+                optimization: Optimization::None,
+                lto: false,
+                incremental: true,
+                parallel: true,
+                deterministic: true,
+                guard: GuardLevel::Medium,
+                provenance: true,
+                verification: true,
+                features: Vec::new(),
+            }
+        }
+
+        /// Whether a feature is switched on.
+        pub fn feature(&self, name: &str) -> bool {
+            self.features
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| *value)
+                .unwrap_or(false)
+        }
+
+        /// A digest of everything that can change what the build produces.
+        ///
+        /// This is the configuration component of a cache key (directive section
+        /// 11) and of build provenance (section 32). The name is deliberately
+        /// absent: renaming a project does not change its output.
+        pub fn digest(&self) -> Digest {
+            let numbers = format!("{}|{}|{}", self.min_sdk, self.target_sdk, self.compile_sdk);
+            let switches = format!(
+                "{}|{}|{}|{}|{}|{}|{}",
+                self.lto,
+                self.incremental,
+                self.parallel,
+                self.deterministic,
+                self.provenance,
+                self.verification,
+                self.guard.as_str(),
+            );
+            let features = self
+                .features
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",");
+
+            sha256_fields(&[
+                ("id", self.id.as_bytes()),
+                ("version", self.version.as_bytes()),
+                ("sdk", numbers.as_bytes()),
+                ("profile", self.profile.as_str().as_bytes()),
+                ("optimization", self.optimization.as_str().as_bytes()),
+                ("switches", switches.as_bytes()),
+                ("features", features.as_bytes()),
+            ])
+        }
+
+        /// Serialises the project as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("name", &self.name);
+            w.field_str("id", &self.id);
+            w.field_str("version", &self.version);
+            if let Some(edition) = &self.edition {
+                w.field_str("edition", edition);
+            }
+            w.field_u64("minSdk", self.min_sdk as u64);
+            w.field_u64("targetSdk", self.target_sdk as u64);
+            w.field_u64("compileSdk", self.compile_sdk as u64);
+            w.field_str("profile", self.profile.as_str());
+            w.field_str("optimization", self.optimization.as_str());
+            w.field_bool("lto", self.lto);
+            w.field_bool("incremental", self.incremental);
+            w.field_bool("parallel", self.parallel);
+            w.field_bool("deterministic", self.deterministic);
+            w.field_str("guard", self.guard.as_str());
+            w.field_bool("provenance", self.provenance);
+            w.field_bool("verification", self.verification);
+            w.begin_array(Some("features"));
+            for (name, enabled) in &self.features {
+                w.begin_object(None);
+                w.field_str("name", name);
+                w.field_bool("enabled", *enabled);
+                w.end_object();
+            }
+            w.end_array();
+            w.field_str("configurationDigest", &self.digest().to_hex());
+            w.end_object();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Manifest parsing
+    // -----------------------------------------------------------------------
+
+    /// One `Key = value` entry, with where it came from.
+    #[derive(Clone, Debug)]
+    struct Entry {
+        section: String,
+        key: String,
+        value: Value,
+        line: u32,
+        column: u32,
+    }
+
+    /// The three value forms the manifest grammar has.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    enum Value {
+        Text(String),
+        Integer(i64),
+        Boolean(bool),
+    }
+
+    impl Value {
+        fn type_name(&self) -> &'static str {
+            match self {
+                Value::Text(_) => "text",
+                Value::Integer(_) => "integer",
+                Value::Boolean(_) => "boolean",
+            }
+        }
+    }
+
+    /// Reads a manifest into a validated [`Project`].
+    ///
+    /// Returns `None` when the manifest cannot be trusted. Every rejection is a
+    /// diagnostic with a location, and nothing is ever silently ignored:
+    /// directive section 44 is explicit that unknown critical fields must not
+    /// pass unnoticed.
+    ///
+    /// `fallback_id` supplies the application identifier when the manifest omits
+    /// one, so that a project with a minimal manifest still builds
+    /// (directive section 45).
+    pub fn parse_manifest(text: &str, fallback_id: &str, sink: &mut Sink) -> Option<Project> {
+        let entries = read_entries(text, sink)?;
+        build_project(&entries, fallback_id, sink)
+    }
+
+    fn diagnostic(
+        code: &str,
+        severity: Severity,
+        class: FailureClass,
+        message: impl Into<String>,
+        line: u32,
+        column: u32,
+    ) -> Diagnostic {
+        Diagnostic::new(code, severity, class, "core.project", message).with_location(Location::at(
+            MANIFEST_NAME,
+            line,
+            column,
+        ))
+    }
+
+    /// Turns manifest text into entries, or explains why it could not.
+    fn read_entries(text: &str, sink: &mut Sink) -> Option<Vec<Entry>> {
+        if text.len() > MAX_MANIFEST_BYTES {
+            sink.emit(
+                diagnostic(
+                    "E3001",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "The manifest is larger than the accepted limit.",
+                    0,
+                    0,
+                )
+                .with_context(format!("Limit: {MAX_MANIFEST_BYTES} bytes"))
+                .with_context(format!("Received: {} bytes", text.len()))
+                .with_suggestion("A manifest describes a project; it is not a data file."),
+            );
+            return None;
+        }
+
+        let mut entries: Vec<Entry> = Vec::new();
+        let mut section: Option<String> = None;
+        let mut fatal = false;
+
+        for (index, raw) in text.lines().enumerate() {
+            let line = index as u32 + 1;
+
+            if index >= MAX_LINES {
+                sink.emit(
+                    diagnostic(
+                        "E3002",
+                        Severity::Error,
+                        FailureClass::ResourceExhaustion,
+                        "The manifest has more lines than the accepted limit.",
+                        line,
+                        0,
+                    )
+                    .with_context(format!("Limit: {MAX_LINES} lines")),
+                );
+                return None;
+            }
+
+            let content = raw.split('#').next().unwrap_or("").trim();
+            if content.is_empty() {
+                continue;
+            }
+
+            if let Some(rest) = content.strip_prefix('[') {
+                let Some(name) = rest.strip_suffix(']') else {
+                    sink.emit(
+                        diagnostic(
+                            "E3003",
+                            Severity::Error,
+                            FailureClass::ConfigurationError,
+                            "A section header is not closed.",
+                            line,
+                            1,
+                        )
+                        .with_context(format!("Read: {}", truncate(content, 64)))
+                        .with_suggestion("Write it as [ Project ]."),
+                    );
+                    fatal = true;
+                    continue;
+                };
+                // Directive section 44 writes headers as "[ Project ]", so the
+                // padding inside the brackets is part of the accepted form.
+                section = Some(name.trim().to_string());
+                continue;
+            }
+
+            let Some((key_part, value_part)) = content.split_once('=') else {
+                sink.emit(
+                    diagnostic(
+                        "E3004",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        "This line is neither a section header nor a Key = value entry.",
+                        line,
+                        1,
+                    )
+                    .with_context(format!("Read: {}", truncate(content, 64)))
+                    .with_suggestion("Every entry has the form Key = value."),
+                );
+                fatal = true;
+                continue;
+            };
+
+            let Some(current) = section.clone() else {
+                sink.emit(
+                    diagnostic(
+                        "E3005",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        "This entry appears before any section header.",
+                        line,
+                        1,
+                    )
+                    .with_context(format!("Key: {}", truncate(key_part.trim(), 64)))
+                    .with_suggestion("Open a section first, for example [ Project ]."),
+                );
+                fatal = true;
+                continue;
+            };
+
+            let key = key_part.trim().to_string();
+            let column = (raw.len() - raw.trim_start().len()) as u32 + 1;
+
+            if key.is_empty() {
+                sink.emit(
+                    diagnostic(
+                        "E3006",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        "This entry has no key.",
+                        line,
+                        column,
+                    )
+                    .with_suggestion("Every entry has the form Key = value."),
+                );
+                fatal = true;
+                continue;
+            }
+
+            let Some(value) = read_value(value_part.trim(), line, column, sink) else {
+                fatal = true;
+                continue;
+            };
+
+            if entries.len() >= MAX_ENTRIES {
+                sink.emit(
+                    diagnostic(
+                        "E3007",
+                        Severity::Error,
+                        FailureClass::ResourceExhaustion,
+                        "The manifest has more entries than the accepted limit.",
+                        line,
+                        column,
+                    )
+                    .with_context(format!("Limit: {MAX_ENTRIES} entries")),
+                );
+                return None;
+            }
+
+            if let Some(previous) = entries
+                .iter()
+                .find(|e| e.section == current && e.key == key)
+            {
+                sink.emit(
+                    diagnostic(
+                        "E3008",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        format!("'{key}' is set twice in [ {current} ]."),
+                        line,
+                        column,
+                    )
+                    .with_context(format!("First set on line {}", previous.line))
+                    .with_suggestion(
+                        "Remove one. Silently keeping the last value would make the \
+                         build depend on line order.",
+                    ),
+                );
+                fatal = true;
+                continue;
+            }
+
+            entries.push(Entry {
+                section: current,
+                key,
+                value,
+                line,
+                column,
+            });
+        }
+
+        if fatal {
+            None
+        } else {
+            Some(entries)
+        }
+    }
+
+    fn read_value(raw: &str, line: u32, column: u32, sink: &mut Sink) -> Option<Value> {
+        if raw.is_empty() {
+            sink.emit(
+                diagnostic(
+                    "E3009",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "This entry has no value.",
+                    line,
+                    column,
+                )
+                .with_suggestion("Write a quoted string, a whole number, true or false."),
+            );
+            return None;
+        }
+
+        if let Some(inner) = raw.strip_prefix('"') {
+            let Some(text) = inner.strip_suffix('"') else {
+                sink.emit(
+                    diagnostic(
+                        "E3010",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        "A quoted value is not closed.",
+                        line,
+                        column,
+                    )
+                    .with_context(format!("Read: {}", truncate(raw, 64)))
+                    .with_suggestion("Close the quote."),
+                );
+                return None;
+            };
+            if text.contains('"') {
+                sink.emit(
+                    diagnostic(
+                        "E3011",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        "A quoted value contains a quote.",
+                        line,
+                        column,
+                    )
+                    .with_suggestion(
+                        "Escapes are not part of this grammar. Choose a value \
+                         without a quote in it.",
+                    ),
+                );
+                return None;
+            }
+            if let Some(bad) = text.chars().find(|c| (*c as u32) < 0x20) {
+                sink.emit(
+                    diagnostic(
+                        "E3012",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        "A value contains a control character.",
+                        line,
+                        column,
+                    )
+                    .with_context(format!("Character: U+{:04X}", bad as u32)),
+                );
+                return None;
+            }
+            return Some(Value::Text(text.to_string()));
+        }
+
+        match raw {
+            "true" => return Some(Value::Boolean(true)),
+            "false" => return Some(Value::Boolean(false)),
+            _ => {}
+        }
+
+        if let Ok(number) = raw.parse::<i64>() {
+            return Some(Value::Integer(number));
+        }
+
+        sink.emit(
+            diagnostic(
+                "E3013",
+                Severity::Error,
+                FailureClass::ConfigurationError,
+                "This value has no recognised form.",
+                line,
+                column,
+            )
+            .with_context(format!("Read: {}", truncate(raw, 64)))
+            .with_suggestion(
+                "Text must be quoted. Numbers are written plainly. Booleans are \
+                 exactly true or false, in lower case.",
+            ),
+        );
+        None
+    }
+
+    fn truncate(value: &str, max: usize) -> String {
+        if value.chars().count() <= max {
+            return value.to_string();
+        }
+        let mut out: String = value.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+
+    /// Every section and key the manifest grammar defines.
+    ///
+    /// Anything outside this table is reported rather than ignored. Directive
+    /// section 44 requires it, and section 64 forbids configuration that appears
+    /// to be in force when it is not.
+    const KNOWN: &[(&str, &[&str])] = &[
+        ("Project", &["Name", "Id", "Version", "Edition"]),
+        ("Android", &["Min_sdk", "Target_sdk", "Compile_sdk"]),
+        (
+            "Build",
+            &[
+                "Profile",
+                "Optimization",
+                "Lto",
+                "Incremental",
+                "Parallel",
+                "Deterministic",
+            ],
+        ),
+        ("Security", &["Guard", "Provenance", "Verification"]),
+        ("Features", &[]),
+    ];
+
+    fn build_project(entries: &[Entry], fallback_id: &str, sink: &mut Sink) -> Option<Project> {
+        let mut project = Project::defaults("", fallback_id);
+        let mut failed = false;
+        let mut seen_name = false;
+
+        for entry in entries {
+            let Some((_, keys)) = KNOWN.iter().find(|(name, _)| *name == entry.section) else {
+                sink.emit(
+                    diagnostic(
+                        "E3020",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        format!(
+                            "[ {} ] is not a section this build understands.",
+                            entry.section
+                        ),
+                        entry.line,
+                        entry.column,
+                    )
+                    .with_context(format!(
+                        "Known sections: {}",
+                        KNOWN.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
+                    ))
+                    .with_suggestion(
+                        "An unknown section is reported rather than ignored, because \
+                         settings that look like they are in force but are not are \
+                         worse than settings that are missing.",
+                    ),
+                );
+                failed = true;
+                continue;
+            };
+
+            // [ Features ] takes any boolean, so its key list is empty by design.
+            if entry.section != "Features" && !keys.contains(&entry.key.as_str()) {
+                let suggestion = keys
+                    .iter()
+                    .find(|known| {
+                        known.eq_ignore_ascii_case(entry.key.trim_end_matches(['.', ' ']))
+                    })
+                    .map(|known| format!("Did you mean '{known}'? Keys are case-sensitive."))
+                    .unwrap_or_else(|| {
+                        format!("Keys in [ {} ]: {}", entry.section, keys.join(", "))
+                    });
+
+                sink.emit(
+                    diagnostic(
+                        "E3021",
+                        Severity::Error,
+                        FailureClass::ConfigurationError,
+                        format!("'{}' is not a key of [ {} ].", entry.key, entry.section),
+                        entry.line,
+                        entry.column,
+                    )
+                    .with_suggestion(suggestion),
+                );
+                failed = true;
+                continue;
+            }
+
+            let applied = apply(&mut project, entry, sink, &mut seen_name);
+            failed |= !applied;
+        }
+
+        if !seen_name {
+            sink.emit(
+                diagnostic(
+                    "E3030",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "The project has no name.",
+                    0,
+                    0,
+                )
+                .with_suggestion("Add a quoted Name entry to [ Project ]."),
+            );
+            failed = true;
+        }
+
+        if project.min_sdk > project.target_sdk {
+            sink.emit(
+                diagnostic(
+                    "E3031",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "Min_sdk is higher than Target_sdk.",
+                    0,
+                    0,
+                )
+                .with_context(format!(
+                    "Min_sdk: {}, Target_sdk: {}",
+                    project.min_sdk, project.target_sdk
+                ))
+                .with_suggestion("An application cannot target a release it refuses to run on."),
+            );
+            failed = true;
+        }
+
+        if project.target_sdk > project.compile_sdk {
+            sink.emit(
+                diagnostic(
+                    "E3032",
+                    Severity::Error,
+                    FailureClass::ConfigurationError,
+                    "Target_sdk is higher than Compile_sdk.",
+                    0,
+                    0,
+                )
+                .with_context(format!(
+                    "Target_sdk: {}, Compile_sdk: {}",
+                    project.target_sdk, project.compile_sdk
+                ))
+                .with_suggestion(
+                    "Targeting a release the code is not compiled against means \
+                     opting into behaviour that cannot be checked.",
+                ),
+            );
+            failed = true;
+        }
+
+        if project.deterministic && project.profile == Profile::Debug {
+            sink.emit(
+                diagnostic(
+                    "W3033",
+                    Severity::Warning,
+                    FailureClass::ConfigurationError,
+                    "A Debug build is asked to be deterministic.",
+                    0,
+                    0,
+                )
+                .with_suggestion(
+                    "Debug output carries paths and timestamps that reproducibility \
+                     cannot survive. The request is honoured as far as the build \
+                     can, and reported here because it may not be fully met.",
+                ),
+            );
+        }
+
+        project.features.sort_by(|a, b| a.0.cmp(&b.0));
+
+        if failed {
+            None
+        } else {
+            Some(project)
+        }
+    }
+
+    fn apply(project: &mut Project, entry: &Entry, sink: &mut Sink, seen_name: &mut bool) -> bool {
+        macro_rules! text {
+            () => {
+                match &entry.value {
+                    Value::Text(text) => text.clone(),
+                    other => return wrong_type(entry, "text", other, sink),
+                }
+            };
+        }
+        macro_rules! integer {
+            () => {
+                match &entry.value {
+                    Value::Integer(number) => *number,
+                    other => return wrong_type(entry, "integer", other, sink),
+                }
+            };
+        }
+        macro_rules! boolean {
+            () => {
+                match &entry.value {
+                    Value::Boolean(flag) => *flag,
+                    other => return wrong_type(entry, "boolean", other, sink),
+                }
+            };
+        }
+
+        match (entry.section.as_str(), entry.key.as_str()) {
+            ("Project", "Name") => {
+                let value = text!();
+                if value.trim().is_empty() {
+                    return reject_value(
+                        entry,
+                        "The name is empty.",
+                        "Give the project a name.",
+                        sink,
+                    );
+                }
+                project.name = value;
+                *seen_name = true;
+            }
+            ("Project", "Id") => {
+                let value = text!();
+                if let Err(reason) = validate_application_id(&value) {
+                    return reject_value(entry, &reason, APPLICATION_ID_HELP, sink);
+                }
+                project.id = value;
+            }
+            ("Project", "Version") => {
+                let value = text!();
+                if let Err(reason) = validate_version(&value) {
+                    return reject_value(
+                        entry,
+                        &reason,
+                        "Write a version as major.minor.patch, for example 1.0.0.",
+                        sink,
+                    );
+                }
+                project.version = value;
+            }
+            ("Project", "Edition") => {
+                let value = text!();
+                if let Err(reason) = validate_edition(&value) {
+                    return reject_value(
+                        entry,
+                        &reason,
+                        "Write the edition as dd/mm/yyyy, for example 01/01/2000.",
+                        sink,
+                    );
+                }
+                project.edition = Some(value);
+            }
+
+            ("Android", key) => {
+                let value = integer!();
+                let Ok(level) = u32::try_from(value) else {
+                    return reject_value(
+                        entry,
+                        "An API level cannot be negative.",
+                        "Use a level such as 28 or 36.",
+                        sink,
+                    );
+                };
+                if !(1..=100).contains(&level) {
+                    return reject_value(
+                        entry,
+                        "That is not a plausible Android API level.",
+                        "Levels currently run from 1 to about 36.",
+                        sink,
+                    );
+                }
+                match key {
+                    "Min_sdk" => project.min_sdk = level,
+                    "Target_sdk" => project.target_sdk = level,
+                    "Compile_sdk" => project.compile_sdk = level,
+                    _ => unreachable!("the key table already restricted this"),
+                }
+            }
+
+            ("Build", "Profile") => {
+                let value = text!();
+                let Some(profile) = Profile::parse(&value) else {
+                    return reject_value(
+                        entry,
+                        &format!("'{value}' is not a build profile."),
+                        &format!(
+                            "Profiles: {}",
+                            Profile::ALL
+                                .iter()
+                                .map(|p| p.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        sink,
+                    );
+                };
+                project.profile = profile;
+            }
+            ("Build", "Optimization") => {
+                let value = text!();
+                let Some(optimization) = Optimization::parse(&value) else {
+                    return reject_value(
+                        entry,
+                        &format!("'{value}' is not an optimisation level."),
+                        &format!(
+                            "Levels: {}",
+                            Optimization::ALL
+                                .iter()
+                                .map(|o| o.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        sink,
+                    );
+                };
+                project.optimization = optimization;
+            }
+            ("Build", "Lto") => project.lto = boolean!(),
+            ("Build", "Incremental") => project.incremental = boolean!(),
+            ("Build", "Parallel") => project.parallel = boolean!(),
+            ("Build", "Deterministic") => project.deterministic = boolean!(),
+
+            ("Security", "Guard") => {
+                let value = text!();
+                let Some(level) = GuardLevel::parse(&value) else {
+                    return reject_value(
+                        entry,
+                        &format!("'{value}' is not a guard level."),
+                        &format!(
+                            "Levels: {}",
+                            GuardLevel::ALL
+                                .iter()
+                                .map(|g| g.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        sink,
+                    );
+                };
+                project.guard = level;
+            }
+            ("Security", "Provenance") => project.provenance = boolean!(),
+            ("Security", "Verification") => project.verification = boolean!(),
+
+            ("Features", name) => {
+                let enabled = boolean!();
+                if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return reject_value(
+                        entry,
+                        "A feature name may contain only letters, digits and underscores.",
+                        "Rename the feature.",
+                        sink,
+                    );
+                }
+                project.features.push((name.to_string(), enabled));
+            }
+
+            _ => unreachable!("the section and key tables already restricted this"),
+        }
+
+        true
+    }
+
+    const APPLICATION_ID_HELP: &str =
+        "An application identifier is reverse-DNS, such as com.example.app: at \
+         least two parts, each starting with a letter and containing only \
+         letters, digits and underscores.";
+
+    fn wrong_type(entry: &Entry, expected: &str, found: &Value, sink: &mut Sink) -> bool {
+        sink.emit(
+            diagnostic(
+                "E3040",
+                Severity::Error,
+                FailureClass::ConfigurationError,
+                format!("'{}' expects {expected}.", entry.key),
+                entry.line,
+                entry.column,
+            )
+            .with_context(format!("Found: {}", found.type_name()))
+            .with_suggestion(match expected {
+                "text" => "Quote the value.",
+                "integer" => "Write a whole number without quotes.",
+                _ => "Write true or false, without quotes.",
+            }),
+        );
+        false
+    }
+
+    fn reject_value(entry: &Entry, message: &str, suggestion: &str, sink: &mut Sink) -> bool {
+        sink.emit(
+            diagnostic(
+                "E3041",
+                Severity::Error,
+                FailureClass::UserError,
+                message,
+                entry.line,
+                entry.column,
+            )
+            .with_context(format!("Key: {}", entry.key))
+            .with_suggestion(suggestion),
+        );
+        false
+    }
+
+    fn validate_application_id(value: &str) -> Result<(), String> {
+        if value.is_empty() {
+            return Err("The application identifier is empty.".to_string());
+        }
+        if value.len() > 255 {
+            return Err("The application identifier is too long.".to_string());
+        }
+        let parts: Vec<&str> = value.split('.').collect();
+        if parts.len() < 2 {
+            return Err(format!("'{value}' has only one part."));
+        }
+        for part in parts {
+            if part.is_empty() {
+                return Err("The application identifier has an empty part.".to_string());
+            }
+            if !part.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                return Err(format!("The part '{part}' does not start with a letter."));
+            }
+            if !part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err(format!("The part '{part}' contains an unusable character."));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_version(value: &str) -> Result<(), String> {
+        let parts: Vec<&str> = value.split('.').collect();
+        if parts.len() != 3 {
+            return Err(format!("'{value}' is not major.minor.patch."));
+        }
+        for part in parts {
+            if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
+                return Err(format!("'{value}' has a part that is not a number."));
+            }
+            if part.len() > 1 && part.starts_with('0') {
+                return Err(format!("'{value}' has a part with a leading zero."));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_edition(value: &str) -> Result<(), String> {
+        let parts: Vec<&str> = value.split('/').collect();
+        if parts.len() != 3 {
+            return Err(format!("'{value}' is not a dd/mm/yyyy date."));
+        }
+        let widths = [2usize, 2, 4];
+        let mut numbers = [0u32; 3];
+        for (index, part) in parts.iter().enumerate() {
+            if part.len() != widths[index] || !part.chars().all(|c| c.is_ascii_digit()) {
+                return Err(format!("'{value}' is not a dd/mm/yyyy date."));
+            }
+            numbers[index] = part.parse().unwrap_or(0);
+        }
+        if !(1..=31).contains(&numbers[0]) || !(1..=12).contains(&numbers[1]) {
+            return Err(format!("'{value}' is not a real date."));
+        }
+        Ok(())
+    }
+}
+
+// ===========================================================================
+// artifact — what a build produces (directive sections 58 and 59)
+// ===========================================================================
+
+/// Artifacts and the states they pass through.
+///
+/// Directive section 58 fixes the lifecycle:
+///
+/// ```text
+/// CREATED -> HASHED -> VALIDATED -> SIGNED -> VERIFIED -> PUBLISHED
+/// ```
+///
+/// and says plainly that an invalid artifact cannot be published. That sentence
+/// is the whole reason this module exists as a type rather than as a convention:
+/// the transitions are the only way to move an artifact forward, so "published
+/// without being verified" is not a bug that can be written.
+///
+/// **Status** — PARTIAL. The lifecycle is real and enforced; nothing in this tree
+/// signs anything yet, so [`State::Signed`] is reachable but unused.
+pub mod artifact {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::Digest;
+    use crate::json::Writer;
+    use crate::vfs::VirtualPath;
+    use crate::FailureClass;
+
+    /// Where an artifact is in its lifecycle.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub enum State {
+        /// It exists.
+        Created,
+        /// Its content has been hashed.
+        Hashed,
+        /// Its structure has been checked against what it claims to be.
+        Validated,
+        /// It carries a signature.
+        Signed,
+        /// Its digest, and its signature where it has one, have been checked.
+        Verified,
+        /// It has been moved to where consumers look for it.
+        Published,
+    }
+
+    impl State {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                State::Created => "CREATED",
+                State::Hashed => "HASHED",
+                State::Validated => "VALIDATED",
+                State::Signed => "SIGNED",
+                State::Verified => "VERIFIED",
+                State::Published => "PUBLISHED",
+            }
+        }
+
+        /// Whether this state may be followed by `next`.
+        ///
+        /// Signing is optional, so `VALIDATED` may go straight to `VERIFIED`;
+        /// every other step is mandatory and in order.
+        pub const fn may_advance_to(self, next: State) -> bool {
+            matches!(
+                (self, next),
+                (State::Created, State::Hashed)
+                    | (State::Hashed, State::Validated)
+                    | (State::Validated, State::Signed)
+                    | (State::Validated, State::Verified)
+                    | (State::Signed, State::Verified)
+                    | (State::Verified, State::Published)
+            )
+        }
+    }
+
+    impl core::fmt::Display for State {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
+
+    /// Stable identity of an artifact within a build.
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub struct ArtifactId(String);
+
+    impl ArtifactId {
+        /// Creates an identifier.
+        ///
+        /// Identifiers name things in reports and in cache keys, so the accepted
+        /// character set is deliberately narrow: anything that would need
+        /// escaping somewhere later is refused here instead.
+        pub fn new(value: impl Into<String>) -> Result<ArtifactId, Diagnostic> {
+            let value = value.into();
+            let usable = !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+
+            if !usable {
+                return Err(Diagnostic::new(
+                    "E5001",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.artifact",
+                    "That is not a usable artifact identifier.",
+                )
+                .with_context(format!("Given: {value}"))
+                .with_suggestion(
+                    "Use letters, digits, '.', '-' and '_', up to 128 characters, \
+                     for example 'dex.classes'.",
+                ));
+            }
+
+            Ok(ArtifactId(value))
+        }
+
+        /// The identifier as text.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl core::fmt::Display for ArtifactId {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    /// Something a build produced.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Artifact {
+        id: ArtifactId,
+        kind: String,
+        path: VirtualPath,
+        size: u64,
+        digest: Option<Digest>,
+        state: State,
+        /// Every state this artifact has been in, oldest first.
+        history: Vec<State>,
+    }
+
+    impl Artifact {
+        /// Records that an artifact now exists.
+        pub fn created(id: ArtifactId, kind: impl Into<String>, path: VirtualPath) -> Artifact {
+            Artifact {
+                id,
+                kind: kind.into(),
+                path,
+                size: 0,
+                digest: None,
+                state: State::Created,
+                history: vec![State::Created],
+            }
+        }
+
+        /// Identity.
+        pub fn id(&self) -> &ArtifactId {
+            &self.id
+        }
+
+        /// What kind of thing it is, for example `dex` or `apk`.
+        pub fn kind(&self) -> &str {
+            &self.kind
+        }
+
+        /// Where it lives.
+        pub fn path(&self) -> &VirtualPath {
+            &self.path
+        }
+
+        /// Its size in bytes, once hashed.
+        pub fn size(&self) -> u64 {
+            self.size
+        }
+
+        /// Its digest, once hashed.
+        pub fn digest(&self) -> Option<Digest> {
+            self.digest
+        }
+
+        /// Its current state.
+        pub fn state(&self) -> State {
+            self.state
+        }
+
+        /// Every state it has been in.
+        pub fn history(&self) -> &[State] {
+            &self.history
+        }
+
+        /// Records the digest of its content.
+        pub fn hashed(&mut self, digest: Digest, size: u64) -> Result<(), Diagnostic> {
+            self.advance(State::Hashed)?;
+            self.digest = Some(digest);
+            self.size = size;
+            Ok(())
+        }
+
+        /// Records that its structure has been checked.
+        pub fn validated(&mut self) -> Result<(), Diagnostic> {
+            self.advance(State::Validated)
+        }
+
+        /// Records that it has been signed.
+        pub fn signed(&mut self) -> Result<(), Diagnostic> {
+            self.advance(State::Signed)
+        }
+
+        /// Records that its digest still matches its content.
+        ///
+        /// The digest presented here is compared with the one taken at hashing
+        /// time. Directive section 6's invariant I6 requires verification before
+        /// use, and a verification that does not compare anything is decoration.
+        pub fn verified(&mut self, observed: Digest) -> Result<(), Diagnostic> {
+            let Some(expected) = self.digest else {
+                return Err(self.refuse(
+                    "E5010",
+                    "The artifact has no digest to verify against.",
+                    "Hash it before verifying it.",
+                ));
+            };
+
+            if observed != expected {
+                return Err(Diagnostic::new(
+                    "E5011",
+                    Severity::Fatal,
+                    FailureClass::Corruption,
+                    "core.artifact",
+                    "The artifact does not match the digest taken when it was built.",
+                )
+                .with_context(format!("Artifact: {}", self.id))
+                .with_context(format!("Expected: {expected}"))
+                .with_context(format!("Found: {observed}"))
+                .with_suggestion(
+                    "The file changed after the build produced it, or storage \
+                     returned different bytes. Do not use it.",
+                ));
+            }
+
+            self.advance(State::Verified)
+        }
+
+        /// Publishes the artifact.
+        ///
+        /// Refuses unless it has been verified. Directive section 58 is a single
+        /// sentence on this, and this is where that sentence is enforced.
+        pub fn published(&mut self) -> Result<(), Diagnostic> {
+            self.advance(State::Published)
+        }
+
+        fn advance(&mut self, next: State) -> Result<(), Diagnostic> {
+            if !self.state.may_advance_to(next) {
+                return Err(self.refuse(
+                    "E5012",
+                    &format!("An artifact cannot go from {} to {next}.", self.state),
+                    "The lifecycle of directive section 58 runs CREATED, HASHED, \
+                     VALIDATED, optionally SIGNED, VERIFIED, PUBLISHED.",
+                ));
+            }
+            self.state = next;
+            self.history.push(next);
+            Ok(())
+        }
+
+        fn refuse(&self, code: &str, message: &str, suggestion: &str) -> Diagnostic {
+            Diagnostic::new(
+                code,
+                Severity::Error,
+                FailureClass::InternalError,
+                "core.artifact",
+                message,
+            )
+            .with_context(format!("Artifact: {}", self.id))
+            .with_context(format!("State: {}", self.state))
+            .with_suggestion(suggestion)
+        }
+
+        /// Serialises the artifact as an object inside an open array.
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("id", self.id.as_str());
+            w.field_str("kind", &self.kind);
+            w.field_str("path", &self.path.as_str());
+            w.field_u64("size", self.size);
+            w.field_str("state", self.state.as_str());
+            match self.digest {
+                Some(digest) => w.field_str("digest", &digest.to_hex()),
+                None => w.field_bool("hashed", false),
+            }
+            w.begin_array(Some("history"));
+            for state in &self.history {
+                w.element_str(state.as_str());
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+}
+
+// ===========================================================================
+// cache — incremental build keys (directive section 11)
+// ===========================================================================
+
+/// Cache keys and the four outcomes a lookup can have.
+///
+/// Directive section 11 lists what a cache key must cover and insists the four
+/// outcomes stay distinguishable. Both are enforced here by construction: the
+/// key is built from a struct with a field per required input, so a key can
+/// never be computed from a subset by accident, and a corrupt entry is a state
+/// of its own rather than a miss.
+pub mod cache {
+    use crate::hash::{sha256_fields, Digest};
+    use crate::json::Writer;
+    use crate::project::{Optimization, Profile};
+
+    /// Everything that may change what a build step produces.
+    ///
+    /// Every field of directive section 11 is present and none is optional. If a
+    /// new input starts to affect output, adding it here is a compile error at
+    /// every construction site, which is exactly the reminder that is wanted.
+    #[derive(Clone, Copy, Debug)]
+    pub struct Inputs<'a> {
+        /// Digest of the sources this step reads.
+        pub source_digest: Digest,
+        /// Combined digest of the outputs this step depends on.
+        pub dependency_digest: Digest,
+        /// Version of the plugin performing the step.
+        pub plugin_version: &'a str,
+        /// Version of the compiler it drives.
+        pub compiler_version: &'a str,
+        /// Version of the toolchain as a whole.
+        pub toolchain_version: &'a str,
+        /// Behavioural contract the application opts into.
+        pub target_sdk: u32,
+        /// Lowest release the application supports.
+        pub min_sdk: u32,
+        /// Target architecture.
+        pub abi: &'a str,
+        /// Build profile.
+        pub profile: Profile,
+        /// Optimisation level.
+        pub optimization: Optimization,
+        /// Serialised feature switches.
+        pub feature_configuration: &'a str,
+        /// Environment variables that genuinely affect the output.
+        ///
+        /// Deliberately a list rather than "the environment": a build that
+        /// depends on the whole environment is not reproducible, and one that
+        /// silently ignores it is wrong (directive section 64).
+        pub relevant_environment: &'a [(&'a str, &'a str)],
+        /// Identifier of the security policy in force.
+        pub security_policy: &'a str,
+    }
+
+    impl Inputs<'_> {
+        /// Computes the cache key.
+        pub fn key(&self) -> Key {
+            let numbers = format!("{}|{}", self.min_sdk, self.target_sdk);
+            let environment = self
+                .relevant_environment
+                .iter()
+                .map(|(name, value)| format!("{name}={value}"))
+                .collect::<Vec<_>>()
+                .join("\u{1f}");
+
+            Key(sha256_fields(&[
+                ("source", self.source_digest.as_bytes()),
+                ("dependencies", self.dependency_digest.as_bytes()),
+                ("plugin", self.plugin_version.as_bytes()),
+                ("compiler", self.compiler_version.as_bytes()),
+                ("toolchain", self.toolchain_version.as_bytes()),
+                ("sdk", numbers.as_bytes()),
+                ("abi", self.abi.as_bytes()),
+                ("profile", self.profile.as_str().as_bytes()),
+                ("optimization", self.optimization.as_str().as_bytes()),
+                ("features", self.feature_configuration.as_bytes()),
+                ("environment", environment.as_bytes()),
+                ("security", self.security_policy.as_bytes()),
+            ]))
+        }
+    }
+
+    /// The identity of a cached result.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub struct Key(Digest);
+
+    impl Key {
+        /// The key as hexadecimal.
+        pub fn to_hex(self) -> String {
+            self.0.to_hex()
+        }
+
+        /// A short form for logs and reports.
+        pub fn to_short_hex(self) -> String {
+            self.0.to_short_hex(8)
+        }
+    }
+
+    impl core::fmt::Display for Key {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.0.to_hex())
+        }
+    }
+
+    /// What a lookup found.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Lookup {
+        /// A usable entry whose content still matches its recorded digest.
+        Hit,
+        /// Nothing stored under this key.
+        Miss,
+        /// An entry was stored but has been marked unusable.
+        Invalidated,
+        /// An entry exists and its content does not match its digest.
+        ///
+        /// Kept separate from a miss on purpose. Directive section 11 does not
+        /// permit a corrupt entry to be treated as absent: a miss is normal,
+        /// corruption is a fault that someone needs to know about.
+        Corrupted,
+    }
+
+    impl Lookup {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Lookup::Hit => "CACHE_HIT",
+                Lookup::Miss => "CACHE_MISS",
+                Lookup::Invalidated => "CACHE_INVALIDATED",
+                Lookup::Corrupted => "CACHE_CORRUPTED",
+            }
+        }
+
+        /// Whether the stored result may be reused.
+        pub const fn is_usable(self) -> bool {
+            matches!(self, Lookup::Hit)
+        }
+    }
+
+    /// One stored result.
+    #[derive(Clone, Copy, Debug)]
+    struct Entry {
+        key: Key,
+        content: Digest,
+        valid: bool,
+    }
+
+    /// Counters worth reporting after a build (directive section 56).
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Statistics {
+        /// Lookups that could be reused.
+        pub hits: u64,
+        /// Lookups that found nothing.
+        pub misses: u64,
+        /// Lookups that found an entry marked unusable.
+        pub invalidated: u64,
+        /// Lookups that found an entry whose content had changed underneath it.
+        pub corrupted: u64,
+    }
+
+    /// An in-memory cache index.
+    ///
+    /// **Status** — FOUNDATION. It records what is cached and answers lookups
+    /// correctly; it stores no bytes and survives no restart. A persistent store
+    /// needs the virtual filesystem underneath it and a decision about eviction,
+    /// neither of which is written yet.
+    #[derive(Clone, Debug, Default)]
+    pub struct Index {
+        entries: Vec<Entry>,
+        statistics: Statistics,
+    }
+
+    impl Index {
+        /// An empty index.
+        pub fn new() -> Self {
+            Index::default()
+        }
+
+        /// Records a result under a key.
+        pub fn store(&mut self, key: Key, content: Digest) {
+            match self.entries.iter_mut().find(|entry| entry.key == key) {
+                Some(entry) => {
+                    entry.content = content;
+                    entry.valid = true;
+                }
+                None => self.entries.push(Entry {
+                    key,
+                    content,
+                    valid: true,
+                }),
+            }
+        }
+
+        /// Marks an entry unusable without forgetting that it existed.
+        pub fn invalidate(&mut self, key: Key) {
+            if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
+                entry.valid = false;
+            }
+        }
+
+        /// Asks what is stored under a key, given the content found on disk.
+        ///
+        /// `observed` is the digest of what is actually there now. Passing it is
+        /// mandatory: a cache that answers without looking at the content cannot
+        /// tell a hit from corruption.
+        pub fn lookup(&mut self, key: Key, observed: Option<Digest>) -> Lookup {
+            let outcome = match self.entries.iter().find(|entry| entry.key == key) {
+                None => Lookup::Miss,
+                Some(entry) if !entry.valid => Lookup::Invalidated,
+                Some(entry) => match observed {
+                    Some(found) if found == entry.content => Lookup::Hit,
+                    Some(_) => Lookup::Corrupted,
+                    None => Lookup::Miss,
+                },
+            };
+
+            match outcome {
+                Lookup::Hit => self.statistics.hits += 1,
+                Lookup::Miss => self.statistics.misses += 1,
+                Lookup::Invalidated => self.statistics.invalidated += 1,
+                Lookup::Corrupted => self.statistics.corrupted += 1,
+            }
+            outcome
+        }
+
+        /// Counters accumulated so far.
+        pub fn statistics(&self) -> Statistics {
+            self.statistics
+        }
+
+        /// Number of entries held.
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        /// Whether nothing is held.
+        pub fn is_empty(&self) -> bool {
+            self.entries.is_empty()
+        }
+
+        /// Serialises the counters as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_u64("entries", self.entries.len() as u64);
+            w.field_u64("hits", self.statistics.hits);
+            w.field_u64("misses", self.statistics.misses);
+            w.field_u64("invalidated", self.statistics.invalidated);
+            w.field_u64("corrupted", self.statistics.corrupted);
+            w.field_bool("persistent", false);
+            w.end_object();
+        }
+    }
+}
+
+// ===========================================================================
+// graph — the build graph (directive sections 9 and 10)
+// ===========================================================================
+
+/// A real directed acyclic graph of build work.
+///
+/// Directive section 9 opens with the point of this module: a build system is
+/// not an ordered list of files. Every node names its dependencies explicitly,
+/// the order comes out of the graph rather than out of the order things were
+/// added, and a cycle is a diagnostic rather than a hang.
+///
+/// **Status** — PARTIAL. The graph, its invariants and its ordering are real.
+/// Node timing and memory figures are recorded but are only as good as what the
+/// scheduler measures, and nothing yet reads a previous build's graph back.
+pub mod graph {
+    use crate::artifact::ArtifactId;
+    use crate::cache::Key as CacheKey;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::Digest;
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    /// Diagnostic code for a graph that is not acyclic.
+    ///
+    /// Directive section 10 names this code literally, so it is spelled the way
+    /// the directive spells it rather than following the `E****` convention.
+    pub const CYCLE_CODE: &str = "BUILD_GRAPH_CYCLE";
+
+    /// Largest graph the scheduler will accept (directive section 60).
+    pub const MAX_NODES: usize = 100_000;
+
+    /// Stable identity of a node.
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub struct NodeId(String);
+
+    impl NodeId {
+        /// Creates an identifier.
+        pub fn new(value: impl Into<String>) -> Result<NodeId, Diagnostic> {
+            let value = value.into();
+            let usable = !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+
+            if !usable {
+                return Err(Diagnostic::new(
+                    "E4001",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.graph",
+                    "That is not a usable node identifier.",
+                )
+                .with_context(format!("Given: {value}"))
+                .with_suggestion(
+                    "Use letters, digits, '.', '-' and '_', for example \
+                     'compile.kotlin'.",
+                ));
+            }
+
+            Ok(NodeId(value))
+        }
+
+        /// The identifier as text.
+        pub fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl core::fmt::Display for NodeId {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.0)
+        }
+    }
+
+    /// What a node does, following the pipeline of directive section 9.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Kind {
+        /// Read and validate the project manifest.
+        Manifest,
+        /// Compile resources.
+        Resources,
+        /// Analyse sources.
+        SourceAnalysis,
+        /// Produce compiler intermediate representation.
+        CompilerIr,
+        /// Produce Dalvik executables.
+        Dex,
+        /// Produce native libraries.
+        Native,
+        /// Decide the package layout.
+        ApkLayout,
+        /// Build the package.
+        Package,
+        /// Sign the package.
+        Sign,
+        /// Verify the result.
+        Verify,
+    }
+
+    impl Kind {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Kind::Manifest => "MANIFEST",
+                Kind::Resources => "RESOURCES",
+                Kind::SourceAnalysis => "SOURCE_ANALYSIS",
+                Kind::CompilerIr => "COMPILER_IR",
+                Kind::Dex => "DEX",
+                Kind::Native => "NATIVE",
+                Kind::ApkLayout => "APK_LAYOUT",
+                Kind::Package => "PACKAGE",
+                Kind::Sign => "SIGN",
+                Kind::Verify => "VERIFY",
+            }
+        }
+    }
+
+    /// Where a node is in its execution.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Status {
+        /// Not started.
+        Pending,
+        /// Started, not finished.
+        Running,
+        /// Finished and produced what it promised.
+        Succeeded,
+        /// Its result was reused from the cache.
+        CacheHit,
+        /// It ran and failed.
+        Failed,
+        /// It did not run because something it depends on failed.
+        ///
+        /// Distinct from `Failed`: this node has no defect of its own, and
+        /// reporting it as failed would send whoever reads the build to the
+        /// wrong place.
+        Skipped,
+        /// It did not run because the build was cancelled.
+        Cancelled,
+    }
+
+    impl Status {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Status::Pending => "PENDING",
+                Status::Running => "RUNNING",
+                Status::Succeeded => "SUCCEEDED",
+                Status::CacheHit => "CACHE_HIT",
+                Status::Failed => "FAILED",
+                Status::Skipped => "SKIPPED",
+                Status::Cancelled => "CANCELLED",
+            }
+        }
+
+        /// Whether dependents of this node may run.
+        ///
+        /// Directive section 10 forbids treating a failed, skipped or cancelled
+        /// node as a success, and this is the single place that question is
+        /// answered.
+        pub const fn produced_its_outputs(self) -> bool {
+            matches!(self, Status::Succeeded | Status::CacheHit)
+        }
+
+        /// Whether the node is finished, whatever the outcome.
+        pub const fn is_finished(self) -> bool {
+            !matches!(self, Status::Pending | Status::Running)
+        }
+    }
+
+    /// What a node measured while it ran.
+    ///
+    /// Wall-clock timestamps are deliberately absent. Directive section 9 lists
+    /// start and end times, but an artifact that embeds them is not reproducible
+    /// (section 12), so the graph records how long a node took rather than when
+    /// it happened. The scheduler supplies the figures; a zero means nothing was
+    /// measured, never that nothing was used.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Measurements {
+        /// How long the node ran, in microseconds.
+        pub duration_micros: u64,
+        /// Peak memory attributable to the node, in bytes.
+        pub peak_memory_bytes: u64,
+    }
+
+    /// One unit of build work.
+    #[derive(Clone, Debug)]
+    pub struct Node {
+        id: NodeId,
+        kind: Kind,
+        plugin: String,
+        inputs: Vec<ArtifactId>,
+        outputs: Vec<ArtifactId>,
+        dependencies: Vec<NodeId>,
+
+        input_digest: Digest,
+        configuration_digest: Digest,
+        toolchain_digest: Digest,
+        plugin_digest: Digest,
+
+        status: Status,
+        measurements: Measurements,
+        cache_key: Option<CacheKey>,
+        artifact_digest: Option<Digest>,
+        diagnostics: Vec<String>,
+    }
+
+    impl Node {
+        /// Describes a unit of work.
+        pub fn new(
+            id: NodeId,
+            kind: Kind,
+            plugin: impl Into<String>,
+            digests: [Digest; 4],
+        ) -> Node {
+            Node {
+                id,
+                kind,
+                plugin: plugin.into(),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                dependencies: Vec::new(),
+                input_digest: digests[0],
+                configuration_digest: digests[1],
+                toolchain_digest: digests[2],
+                plugin_digest: digests[3],
+                status: Status::Pending,
+                measurements: Measurements::default(),
+                cache_key: None,
+                artifact_digest: None,
+                diagnostics: Vec::new(),
+            }
+        }
+
+        /// Declares an artifact this node consumes.
+        pub fn with_input(mut self, id: ArtifactId) -> Self {
+            self.inputs.push(id);
+            self
+        }
+
+        /// Declares an artifact this node produces.
+        pub fn with_output(mut self, id: ArtifactId) -> Self {
+            self.outputs.push(id);
+            self
+        }
+
+        /// Declares a node that must finish first.
+        pub fn after(mut self, id: NodeId) -> Self {
+            self.dependencies.push(id);
+            self
+        }
+
+        /// Identity.
+        pub fn id(&self) -> &NodeId {
+            &self.id
+        }
+
+        /// What it does.
+        pub fn kind(&self) -> Kind {
+            self.kind
+        }
+
+        /// Which plugin performs it.
+        pub fn plugin(&self) -> &str {
+            &self.plugin
+        }
+
+        /// Artifacts it consumes.
+        pub fn inputs(&self) -> &[ArtifactId] {
+            &self.inputs
+        }
+
+        /// Artifacts it produces.
+        pub fn outputs(&self) -> &[ArtifactId] {
+            &self.outputs
+        }
+
+        /// Nodes that must finish first.
+        pub fn dependencies(&self) -> &[NodeId] {
+            &self.dependencies
+        }
+
+        /// Where it is in its execution.
+        pub fn status(&self) -> Status {
+            self.status
+        }
+
+        /// What it measured.
+        pub fn measurements(&self) -> Measurements {
+            self.measurements
+        }
+
+        /// Its cache key, once computed.
+        pub fn cache_key(&self) -> Option<CacheKey> {
+            self.cache_key
+        }
+
+        /// Digest of what it produced, once it has produced it.
+        pub fn artifact_digest(&self) -> Option<Digest> {
+            self.artifact_digest
+        }
+
+        /// Codes of diagnostics raised while it ran.
+        pub fn diagnostics(&self) -> &[String] {
+            &self.diagnostics
+        }
+
+        /// Serialises the node as an object inside an open array.
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("id", self.id.as_str());
+            w.field_str("kind", self.kind.as_str());
+            w.field_str("plugin", &self.plugin);
+            w.field_str("status", self.status.as_str());
+
+            w.begin_array(Some("inputs"));
+            for input in &self.inputs {
+                w.element_str(input.as_str());
+            }
+            w.end_array();
+            w.begin_array(Some("outputs"));
+            for output in &self.outputs {
+                w.element_str(output.as_str());
+            }
+            w.end_array();
+            w.begin_array(Some("dependencies"));
+            for dependency in &self.dependencies {
+                w.element_str(dependency.as_str());
+            }
+            w.end_array();
+
+            w.field_str("inputDigest", &self.input_digest.to_short_hex(8));
+            w.field_str(
+                "configurationDigest",
+                &self.configuration_digest.to_short_hex(8),
+            );
+            w.field_str("toolchainDigest", &self.toolchain_digest.to_short_hex(8));
+            w.field_str("pluginDigest", &self.plugin_digest.to_short_hex(8));
+            w.field_u64("durationMicros", self.measurements.duration_micros);
+            w.field_u64("peakMemoryBytes", self.measurements.peak_memory_bytes);
+            if let Some(key) = self.cache_key {
+                w.field_str("cacheKey", &key.to_short_hex());
+            }
+            if let Some(digest) = self.artifact_digest {
+                w.field_str("artifactDigest", &digest.to_hex());
+            }
+            w.begin_array(Some("diagnostics"));
+            for code in &self.diagnostics {
+                w.element_str(code);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// The graph itself.
+    #[derive(Clone, Debug, Default)]
+    pub struct Graph {
+        nodes: Vec<Node>,
+    }
+
+    impl Graph {
+        /// An empty graph.
+        pub fn new() -> Self {
+            Graph::default()
+        }
+
+        /// Adds a node.
+        ///
+        /// Refuses a duplicate identifier: two nodes answering to one name would
+        /// make every dependency edge ambiguous.
+        pub fn add(&mut self, node: Node) -> Result<(), Diagnostic> {
+            if self.nodes.len() >= MAX_NODES {
+                return Err(Diagnostic::new(
+                    "E4002",
+                    Severity::Fatal,
+                    FailureClass::ResourceExhaustion,
+                    "core.graph",
+                    "The build graph has more nodes than the scheduler accepts.",
+                )
+                .with_context(format!("Limit: {MAX_NODES} nodes")));
+            }
+
+            if self.nodes.iter().any(|existing| existing.id == node.id) {
+                return Err(Diagnostic::new(
+                    "E4003",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.graph",
+                    format!("There is already a node called '{}'.", node.id),
+                )
+                .with_suggestion("Node identifiers are unique within a graph."));
+            }
+
+            self.nodes.push(node);
+            Ok(())
+        }
+
+        /// Every node, in the order they were added.
+        pub fn nodes(&self) -> &[Node] {
+            &self.nodes
+        }
+
+        /// Number of nodes.
+        pub fn len(&self) -> usize {
+            self.nodes.len()
+        }
+
+        /// Whether the graph is empty.
+        pub fn is_empty(&self) -> bool {
+            self.nodes.is_empty()
+        }
+
+        /// Looks a node up.
+        pub fn node(&self, id: &NodeId) -> Option<&Node> {
+            self.nodes.iter().find(|node| &node.id == id)
+        }
+
+        /// Looks a node up for modification.
+        pub fn node_mut(&mut self, id: &NodeId) -> Option<&mut Node> {
+            self.nodes.iter_mut().find(|node| &node.id == id)
+        }
+
+        /// Records how a node finished.
+        pub(crate) fn finish(
+            &mut self,
+            id: &NodeId,
+            status: Status,
+            measurements: Measurements,
+            artifact_digest: Option<Digest>,
+            diagnostics: Vec<String>,
+        ) {
+            if let Some(node) = self.node_mut(id) {
+                node.status = status;
+                node.measurements = measurements;
+                node.artifact_digest = artifact_digest;
+                node.diagnostics = diagnostics;
+            }
+        }
+
+        /// Records the cache key computed for a node.
+        pub fn set_cache_key(&mut self, id: &NodeId, key: CacheKey) {
+            if let Some(node) = self.node_mut(id) {
+                node.cache_key = Some(key);
+            }
+        }
+
+        /// Nodes that depend on this one, directly.
+        pub fn dependents(&self, id: &NodeId) -> Vec<&NodeId> {
+            self.nodes
+                .iter()
+                .filter(|node| node.dependencies.contains(id))
+                .map(|node| &node.id)
+                .collect()
+        }
+
+        /// Checks the graph and returns the order work may run in.
+        ///
+        /// The order is produced by Kahn's algorithm over nodes taken in
+        /// insertion order, so a given graph always yields the same plan
+        /// (directive section 12). Every failure mode of directive section 10 is
+        /// answered here: an edge to a node that does not exist, and a cycle.
+        pub fn plan(&self) -> Result<Vec<NodeId>, Diagnostic> {
+            for node in &self.nodes {
+                for dependency in &node.dependencies {
+                    if self.node(dependency).is_none() {
+                        return Err(Diagnostic::new(
+                            "E4004",
+                            Severity::Fatal,
+                            FailureClass::InternalError,
+                            "core.graph",
+                            format!(
+                                "'{}' depends on '{dependency}', which is not in the graph.",
+                                node.id
+                            ),
+                        )
+                        .with_suggestion(
+                            "Add the node, or remove the edge. A build cannot wait \
+                             for work nobody is going to do.",
+                        ));
+                    }
+                }
+
+                if node.dependencies.contains(&node.id) {
+                    return Err(Self::cycle_diagnostic(std::slice::from_ref(&node.id)));
+                }
+            }
+
+            let mut remaining: Vec<usize> = (0..self.nodes.len()).collect();
+            let mut order: Vec<NodeId> = Vec::with_capacity(self.nodes.len());
+            let mut done: Vec<NodeId> = Vec::with_capacity(self.nodes.len());
+
+            while !remaining.is_empty() {
+                let ready: Vec<usize> = remaining
+                    .iter()
+                    .copied()
+                    .filter(|index| {
+                        self.nodes[*index]
+                            .dependencies
+                            .iter()
+                            .all(|dependency| done.contains(dependency))
+                    })
+                    .collect();
+
+                if ready.is_empty() {
+                    let involved: Vec<NodeId> = remaining
+                        .iter()
+                        .map(|index| self.nodes[*index].id.clone())
+                        .collect();
+                    return Err(Self::cycle_diagnostic(&involved));
+                }
+
+                for index in ready {
+                    order.push(self.nodes[index].id.clone());
+                    done.push(self.nodes[index].id.clone());
+                    remaining.retain(|candidate| *candidate != index);
+                }
+            }
+
+            Ok(order)
+        }
+
+        fn cycle_diagnostic(involved: &[NodeId]) -> Diagnostic {
+            let mut names: Vec<String> =
+                involved.iter().map(|id| id.as_str().to_string()).collect();
+            names.sort();
+
+            Diagnostic::new(
+                CYCLE_CODE,
+                Severity::Fatal,
+                FailureClass::ConfigurationError,
+                "core.graph",
+                "The build graph contains a cycle.",
+            )
+            .with_context(format!("Nodes involved: {}", names.join(", ")))
+            .with_suggestion(
+                "Every dependency edge points at work that must finish first, so a \
+                 cycle asks for something to happen before itself. Break it by \
+                 removing an edge or by splitting a node.",
+            )
+        }
+
+        /// Serialises the graph as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_u64("nodes", self.nodes.len() as u64);
+            w.field_u64(
+                "edges",
+                self.nodes
+                    .iter()
+                    .map(|node| node.dependencies.len() as u64)
+                    .sum(),
+            );
+            match self.plan() {
+                Ok(order) => {
+                    w.field_bool("acyclic", true);
+                    w.begin_array(Some("order"));
+                    for id in order {
+                        w.element_str(id.as_str());
+                    }
+                    w.end_array();
+                }
+                Err(error) => {
+                    w.field_bool("acyclic", false);
+                    w.field_str("problem", &error.code);
+                }
+            }
+            w.begin_array(Some("nodeDetail"));
+            for node in &self.nodes {
+                node.write_json(w);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+}
+
+// ===========================================================================
+// scheduler — running the graph (directive sections 10, 35 and 36)
+// ===========================================================================
+
+/// Executes a build graph without violating any of its invariants.
+///
+/// Directive section 10 states what a scheduler may not do: cross a dependency
+/// edge, accept a cycle, ignore a failed dependency, call a cancelled node
+/// successful, or treat a stale artifact as fresh. Each of those is a test in
+/// this file rather than a promise in a comment.
+///
+/// **Status** — PARTIAL. Ordering, failure propagation and cancellation are
+/// real. Execution is sequential: directive section 36 asks for a scheduler that
+/// is aware of memory, battery and thermal state, and none of that is
+/// implemented, so nothing here claims to run work in parallel.
+pub mod scheduler {
+    use crate::caps::Policy;
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::graph::{Graph, Measurements, Node, NodeId, Status};
+    use crate::hash::Digest;
+    use crate::json::Writer;
+    use crate::plugin::{Context, Registry};
+    use crate::FailureClass;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    /// A build's cancellation flag (directive section 35).
+    ///
+    /// Cheap to clone and safe to share, so a user interface can hold one while
+    /// the build holds another. Cancelling is one-way: a build that has been
+    /// asked to stop is not restarted by clearing a flag, it is started again.
+    #[derive(Clone, Debug, Default)]
+    pub struct Cancellation {
+        flag: Arc<AtomicBool>,
+    }
+
+    impl Cancellation {
+        /// A token that has not been cancelled.
+        pub fn new() -> Self {
+            Cancellation::default()
+        }
+
+        /// Asks the build to stop at its next checkpoint.
+        pub fn cancel(&self) {
+            self.flag.store(true, Ordering::SeqCst);
+        }
+
+        /// Whether cancellation has been requested.
+        pub fn is_cancelled(&self) -> bool {
+            self.flag.load(Ordering::SeqCst)
+        }
+    }
+
+    /// What a node produced.
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct NodeResult {
+        /// Digest of the artifact it produced, when it produced one.
+        pub artifact_digest: Option<Digest>,
+        /// Whether the result was reused rather than computed.
+        pub from_cache: bool,
+        /// Peak memory attributable to the node.
+        ///
+        /// Zero means "not measured", never "none used". Directive section 1
+        /// does not allow an unmeasured figure to be presented as a measurement.
+        pub peak_memory_bytes: u64,
+    }
+
+    /// Whatever actually performs a node's work.
+    ///
+    /// The scheduler owns ordering and invariants; what a node *does* is
+    /// somebody else's problem. That separation is what lets these invariants be
+    /// tested without a compiler existing (directive section 66).
+    pub trait NodeExecutor {
+        /// Performs the node's work.
+        fn execute(&mut self, node: &Node, ctx: &mut Context<'_>)
+            -> Result<NodeResult, Diagnostic>;
+    }
+
+    /// Runs each node through the plugin registry.
+    ///
+    /// Every plugin in this tree is `PLANNED`, so every node this executor runs
+    /// fails with `E0001`. That is the honest behaviour: the scheduler works, and
+    /// there is nothing yet for it to schedule.
+    pub struct PluginRegistryExecutor {
+        registry: Registry,
+    }
+
+    impl PluginRegistryExecutor {
+        /// Uses the plugins compiled into this build.
+        pub fn new() -> Self {
+            PluginRegistryExecutor {
+                registry: Registry::builtin(),
+            }
+        }
+    }
+
+    impl Default for PluginRegistryExecutor {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl NodeExecutor for PluginRegistryExecutor {
+        fn execute(
+            &mut self,
+            node: &Node,
+            ctx: &mut Context<'_>,
+        ) -> Result<NodeResult, Diagnostic> {
+            let Some(plugin) = self.registry.find(node.plugin()) else {
+                return Err(Diagnostic::new(
+                    "E6001",
+                    Severity::Fatal,
+                    FailureClass::ConfigurationError,
+                    "core.scheduler",
+                    format!("No plugin called '{}' is registered.", node.plugin()),
+                )
+                .with_context(format!("Node: {}", node.id()))
+                .with_suggestion(
+                    "The graph names a plugin this build does not contain. Either \
+                     the graph or the plugin set is out of date.",
+                ));
+            };
+
+            plugin.execute(ctx).map(|_| NodeResult::default())
+        }
+    }
+
+    /// How a build ended.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Outcome {
+        /// Every node produced its outputs.
+        Completed,
+        /// At least one node failed.
+        Failed,
+        /// The build was cancelled before it finished.
+        Cancelled,
+        /// The graph was rejected before any node ran.
+        Rejected,
+    }
+
+    impl Outcome {
+        /// Stable machine-readable name.
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Outcome::Completed => "COMPLETED",
+                Outcome::Failed => "FAILED",
+                Outcome::Cancelled => "CANCELLED",
+                Outcome::Rejected => "REJECTED",
+            }
+        }
+    }
+
+    /// What happened during a build.
+    #[derive(Clone, Debug)]
+    pub struct Report {
+        /// How it ended.
+        pub outcome: Outcome,
+        /// Nodes that produced their outputs.
+        pub succeeded: u64,
+        /// Nodes whose results were reused.
+        pub cache_hits: u64,
+        /// Nodes that ran and failed.
+        pub failed: u64,
+        /// Nodes that did not run because a dependency failed.
+        pub skipped: u64,
+        /// Nodes that did not run because the build was cancelled.
+        pub cancelled: u64,
+        /// The order the scheduler chose, whether or not it got through it.
+        pub order: Vec<NodeId>,
+        /// Total time spent inside node execution, in microseconds.
+        pub duration_micros: u64,
+    }
+
+    impl Report {
+        /// Serialises the report as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("outcome", self.outcome.as_str());
+            w.field_u64("succeeded", self.succeeded);
+            w.field_u64("cacheHits", self.cache_hits);
+            w.field_u64("failed", self.failed);
+            w.field_u64("skipped", self.skipped);
+            w.field_u64("cancelled", self.cancelled);
+            w.field_u64("durationMicros", self.duration_micros);
+            w.field_bool("parallel", false);
+            w.begin_array(Some("order"));
+            for id in &self.order {
+                w.element_str(id.as_str());
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// Runs the graph.
+    ///
+    /// The plan is computed first, so a graph that cannot be executed is
+    /// rejected before anything runs rather than part-way through. Cancellation
+    /// is checked between nodes, which is the checkpoint directive section 35
+    /// asks for; a node already running is left to finish, because stopping it
+    /// mid-write is what atomic output exists to prevent.
+    pub fn run(
+        graph: &mut Graph,
+        executor: &mut dyn NodeExecutor,
+        policy: &mut Policy,
+        sink: &mut Sink,
+        cancellation: &Cancellation,
+    ) -> Report {
+        let order = match graph.plan() {
+            Ok(order) => order,
+            Err(error) => {
+                sink.emit(error);
+                return Report {
+                    outcome: Outcome::Rejected,
+                    succeeded: 0,
+                    cache_hits: 0,
+                    failed: 0,
+                    skipped: 0,
+                    cancelled: 0,
+                    order: Vec::new(),
+                    duration_micros: 0,
+                };
+            }
+        };
+
+        let mut report = Report {
+            outcome: Outcome::Completed,
+            succeeded: 0,
+            cache_hits: 0,
+            failed: 0,
+            skipped: 0,
+            cancelled: 0,
+            order: order.clone(),
+            duration_micros: 0,
+        };
+
+        for id in &order {
+            if cancellation.is_cancelled() {
+                graph.finish(
+                    id,
+                    Status::Cancelled,
+                    Measurements::default(),
+                    None,
+                    Vec::new(),
+                );
+                report.cancelled += 1;
+                report.outcome = Outcome::Cancelled;
+                continue;
+            }
+
+            // The node is cloned so the graph can be written to while its work
+            // runs. Nodes are small; the alternative is threading a borrow of the
+            // graph through every executor, which would make an executor able to
+            // rewrite the graph it is running inside.
+            let Some(node) = graph.node(id).cloned() else {
+                continue;
+            };
+
+            let blocked: Vec<String> = node
+                .dependencies()
+                .iter()
+                .filter(|dependency| {
+                    graph
+                        .node(dependency)
+                        .map(|d| !d.status().produced_its_outputs())
+                        .unwrap_or(true)
+                })
+                .map(|dependency| dependency.as_str().to_string())
+                .collect();
+
+            if !blocked.is_empty() {
+                // Directive section 10: a failed dependency is never ignored, and
+                // a node that never ran is never called failed.
+                sink.emit(
+                    Diagnostic::new(
+                        "W6002",
+                        Severity::Warning,
+                        FailureClass::Recoverable,
+                        "core.scheduler",
+                        format!("'{}' was skipped.", node.id()),
+                    )
+                    .with_context(format!("Waiting on: {}", blocked.join(", ")))
+                    .with_suggestion(
+                        "Fix what those nodes reported. This node has no problem of \
+                         its own.",
+                    ),
+                );
+                graph.finish(
+                    id,
+                    Status::Skipped,
+                    Measurements::default(),
+                    None,
+                    Vec::new(),
+                );
+                report.skipped += 1;
+                if report.outcome == Outcome::Completed {
+                    report.outcome = Outcome::Failed;
+                }
+                continue;
+            }
+
+            graph.finish(
+                id,
+                Status::Running,
+                Measurements::default(),
+                None,
+                Vec::new(),
+            );
+
+            let before = sink.len();
+            let started = Instant::now();
+            let result = {
+                let mut ctx = Context {
+                    policy,
+                    diagnostics: sink,
+                };
+                executor.execute(&node, &mut ctx)
+            };
+            let elapsed = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            report.duration_micros += elapsed;
+
+            let codes: Vec<String> = sink.entries()[before..]
+                .iter()
+                .map(|d| d.code.clone())
+                .collect();
+
+            match result {
+                Ok(node_result) => {
+                    let status = if node_result.from_cache {
+                        report.cache_hits += 1;
+                        Status::CacheHit
+                    } else {
+                        report.succeeded += 1;
+                        Status::Succeeded
+                    };
+                    graph.finish(
+                        id,
+                        status,
+                        Measurements {
+                            duration_micros: elapsed,
+                            peak_memory_bytes: node_result.peak_memory_bytes,
+                        },
+                        node_result.artifact_digest,
+                        codes,
+                    );
+                }
+                Err(error) => {
+                    let mut codes = codes;
+                    codes.push(error.code.clone());
+                    sink.emit(error);
+                    graph.finish(
+                        id,
+                        Status::Failed,
+                        Measurements {
+                            duration_micros: elapsed,
+                            peak_memory_bytes: 0,
+                        },
+                        None,
+                        codes,
+                    );
+                    report.failed += 1;
+                    if report.outcome == Outcome::Completed {
+                        report.outcome = Outcome::Failed;
+                    }
+                }
+            }
+        }
+
+        report
+    }
+}
+
+// ===========================================================================
 // report — the single source of truth the user interface renders
 // ===========================================================================
 
@@ -1919,6 +5654,32 @@ pub fn state_report(observed_environment: &str) -> String {
     w.begin_array(Some("bootstrapDependencies"));
     for dependency in BOOTSTRAP_DEPENDENCIES {
         w.element_str(dependency);
+    }
+    w.end_array();
+    w.end_object();
+
+    w.begin_object(Some("subsystems"));
+    w.field_u64("count", SUBSYSTEMS.len() as u64);
+    w.field_u64(
+        "production",
+        SUBSYSTEMS
+            .iter()
+            .filter(|s| s.status == Status::Production)
+            .count() as u64,
+    );
+    w.begin_array(Some("detail"));
+    for subsystem in SUBSYSTEMS {
+        w.begin_object(None);
+        w.field_str("name", subsystem.name);
+        w.field_str("status", subsystem.status.as_str());
+        w.field_u64("directiveSection", subsystem.directive_section as u64);
+        w.field_str("summary", subsystem.summary);
+        w.begin_array(Some("missing"));
+        for gap in subsystem.missing {
+            w.element_str(gap);
+        }
+        w.end_array();
+        w.end_object();
     }
     w.end_array();
     w.end_object();
@@ -2087,11 +5848,18 @@ pub mod ffi {
 
 #[cfg(test)]
 mod tests {
+    use super::artifact::{Artifact, ArtifactId, State as ArtifactState};
+    use super::cache::{Index as CacheIndex, Inputs as CacheInputs, Lookup as CacheLookup};
     use super::caps::{Capability, Decision, Policy};
     use super::diag::{Diagnostic, Location, Severity, Sink};
+    use super::graph::{Graph, Kind as NodeKind, Node, NodeId, Status as NodeStatus};
+    use super::hash::Digest;
     use super::json::Writer;
     use super::plugin::{Registry, Version};
+    use super::project::{parse_manifest, GuardLevel, Optimization, Profile, Project};
+    use super::scheduler::{Cancellation, Outcome as SchedulerOutcome};
     use super::toolchain::{self, Observation, Requirement, State};
+    use super::vfs::{Access, Quota, VirtualFs, VirtualPath};
     use super::{FailureClass, Status};
 
     /// Structural check that a document is balanced and quotes are terminated.
@@ -2705,6 +6473,1687 @@ mod tests {
         for pin in toolchain::LOCK {
             assert!(report.contains(pin.id), "missing pin in report: {}", pin.id);
         }
+    }
+
+    // --- subsystem inventory -------------------------------------------------
+
+    #[test]
+    fn no_subsystem_claims_to_be_finished() {
+        // Directive section 1. The gates of section 51 decide when this may
+        // change, and this test is what makes that a decision rather than an
+        // oversight.
+        for subsystem in super::SUBSYSTEMS {
+            assert_ne!(
+                subsystem.status,
+                Status::Production,
+                "{} claims PRODUCTION",
+                subsystem.name
+            );
+        }
+    }
+
+    #[test]
+    fn every_subsystem_states_what_is_missing() {
+        for subsystem in super::SUBSYSTEMS {
+            assert!(!subsystem.name.is_empty());
+            assert!(!subsystem.summary.is_empty(), "{}", subsystem.name);
+            assert!(subsystem.directive_section > 0, "{}", subsystem.name);
+
+            // Anything short of BETA has unfinished work by definition, and
+            // saying so is the whole point of the table.
+            if subsystem.status < Status::Beta {
+                assert!(
+                    !subsystem.missing.is_empty(),
+                    "{} is {} but lists nothing missing",
+                    subsystem.name,
+                    subsystem.status
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_report_carries_the_subsystem_inventory() {
+        let report = super::state_report("");
+        assert!(is_structurally_valid(&report));
+        assert!(report.contains("\"production\":0"));
+        for subsystem in super::SUBSYSTEMS {
+            assert!(
+                report.contains(subsystem.name),
+                "missing: {}",
+                subsystem.name
+            );
+        }
+    }
+
+    // --- artifact lifecycle --------------------------------------------------
+
+    fn artifact_named(name: &str) -> Artifact {
+        Artifact::created(
+            ArtifactId::new(name).unwrap(),
+            "dex",
+            VirtualPath::parse("build/classes.dex").unwrap(),
+        )
+    }
+
+    #[test]
+    fn artifact_identifiers_are_restricted_to_what_reports_can_carry() {
+        assert!(ArtifactId::new("dex.classes").is_ok());
+        assert!(ArtifactId::new("apk-unsigned_1").is_ok());
+        for bad in ["", "has space", "has/slash", "has\"quote", &"x".repeat(129)] {
+            assert_eq!(ArtifactId::new(bad).unwrap_err().code, "E5001", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn an_artifact_walks_the_lifecycle_the_directive_defines() {
+        let mut artifact = artifact_named("dex.classes");
+        assert_eq!(artifact.state(), ArtifactState::Created);
+
+        let digest = super::hash::sha256(b"dex bytes");
+        artifact.hashed(digest, 9).unwrap();
+        assert_eq!(artifact.state(), ArtifactState::Hashed);
+        assert_eq!(artifact.digest(), Some(digest));
+        assert_eq!(artifact.size(), 9);
+
+        artifact.validated().unwrap();
+        artifact.signed().unwrap();
+        artifact.verified(digest).unwrap();
+        artifact.published().unwrap();
+
+        assert_eq!(artifact.state(), ArtifactState::Published);
+        assert_eq!(
+            artifact.history(),
+            [
+                ArtifactState::Created,
+                ArtifactState::Hashed,
+                ArtifactState::Validated,
+                ArtifactState::Signed,
+                ArtifactState::Verified,
+                ArtifactState::Published,
+            ]
+        );
+    }
+
+    #[test]
+    fn signing_is_optional_but_every_other_step_is_not() {
+        let mut artifact = artifact_named("apk.unsigned");
+        let digest = super::hash::sha256(b"apk");
+        artifact.hashed(digest, 3).unwrap();
+        artifact.validated().unwrap();
+        artifact.verified(digest).unwrap();
+        artifact.published().unwrap();
+        assert_eq!(artifact.state(), ArtifactState::Published);
+    }
+
+    #[test]
+    fn an_unverified_artifact_cannot_be_published() {
+        // Directive section 58, in one sentence: an invalid artifact cannot be
+        // published. This is where that sentence is enforced.
+        let mut artifact = artifact_named("apk.release");
+        assert_eq!(artifact.published().unwrap_err().code, "E5012");
+
+        let digest = super::hash::sha256(b"apk");
+        artifact.hashed(digest, 3).unwrap();
+        assert_eq!(artifact.published().unwrap_err().code, "E5012");
+
+        artifact.validated().unwrap();
+        assert_eq!(artifact.published().unwrap_err().code, "E5012");
+        assert_eq!(artifact.state(), ArtifactState::Validated);
+    }
+
+    #[test]
+    fn steps_cannot_be_skipped_or_repeated() {
+        let mut artifact = artifact_named("a.b");
+        assert_eq!(artifact.validated().unwrap_err().code, "E5012");
+
+        let digest = super::hash::sha256(b"x");
+        artifact.hashed(digest, 1).unwrap();
+        assert_eq!(artifact.hashed(digest, 1).unwrap_err().code, "E5012");
+    }
+
+    #[test]
+    fn verification_actually_compares_the_digest() {
+        // Invariant I6: an artifact is verified before use. A verification that
+        // compares nothing would satisfy the letter of that and none of its
+        // point.
+        let mut artifact = artifact_named("a.b");
+        let original = super::hash::sha256(b"original");
+        artifact.hashed(original, 8).unwrap();
+        artifact.validated().unwrap();
+
+        let tampered = super::hash::sha256(b"tampered");
+        let error = artifact.verified(tampered).unwrap_err();
+        assert_eq!(error.code, "E5011");
+        assert_eq!(error.class, FailureClass::Corruption);
+        assert_eq!(error.severity, Severity::Fatal);
+        assert_eq!(artifact.state(), ArtifactState::Validated);
+
+        artifact.verified(original).unwrap();
+        assert_eq!(artifact.state(), ArtifactState::Verified);
+    }
+
+    #[test]
+    fn an_artifact_without_a_digest_cannot_be_verified() {
+        // Reaching VALIDATED without a digest is impossible by construction, so
+        // the guard is checked on a fresh artifact. Both the missing digest and
+        // the illegal transition apply here; the diagnostic reports the missing
+        // digest, because "hash it first" is the actionable half.
+        let mut artifact = artifact_named("a.b");
+        let error = artifact.verified(super::hash::sha256(b"x")).unwrap_err();
+        assert_eq!(error.code, "E5010");
+        assert!(error.suggestion.as_deref().unwrap().contains("Hash it"));
+        assert_eq!(artifact.state(), ArtifactState::Created);
+    }
+
+    // --- cache ---------------------------------------------------------------
+
+    fn cache_inputs<'a>(source: &'a Digest, dependencies: &'a Digest) -> CacheInputs<'a> {
+        CacheInputs {
+            source_digest: *source,
+            dependency_digest: *dependencies,
+            plugin_version: "0.1.0",
+            compiler_version: "2.4.10",
+            toolchain_version: "9.7.0",
+            target_sdk: 36,
+            min_sdk: 28,
+            abi: "arm64-v8a",
+            profile: Profile::Release,
+            optimization: Optimization::Size,
+            feature_configuration: "Compose=true",
+            relevant_environment: &[],
+            security_policy: "default",
+        }
+    }
+
+    #[test]
+    fn a_cache_key_changes_when_any_declared_input_changes() {
+        // Directive section 11 lists what a key must cover. Each of these is one
+        // of those inputs, and each must move the key.
+        let source = super::hash::sha256(b"source");
+        let dependencies = super::hash::sha256(b"deps");
+        let base = cache_inputs(&source, &dependencies).key();
+
+        let other = super::hash::sha256(b"other");
+        let mutations: Vec<CacheInputs> = vec![
+            CacheInputs {
+                source_digest: other,
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                dependency_digest: other,
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                plugin_version: "0.2.0",
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                compiler_version: "2.4.11",
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                toolchain_version: "9.7.1",
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                target_sdk: 35,
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                min_sdk: 29,
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                abi: "x86_64",
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                profile: Profile::Debug,
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                optimization: Optimization::Speed,
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                feature_configuration: "Compose=false",
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                relevant_environment: &[("OMNI_X", "1")],
+                ..cache_inputs(&source, &dependencies)
+            },
+            CacheInputs {
+                security_policy: "strict",
+                ..cache_inputs(&source, &dependencies)
+            },
+        ];
+
+        for (index, mutated) in mutations.iter().enumerate() {
+            assert_ne!(base, mutated.key(), "input {index} did not affect the key");
+        }
+    }
+
+    #[test]
+    fn a_cache_key_is_stable_for_the_same_inputs() {
+        let source = super::hash::sha256(b"source");
+        let dependencies = super::hash::sha256(b"deps");
+        assert_eq!(
+            cache_inputs(&source, &dependencies).key(),
+            cache_inputs(&source, &dependencies).key()
+        );
+        assert_eq!(
+            cache_inputs(&source, &dependencies).key().to_hex().len(),
+            64
+        );
+    }
+
+    #[test]
+    fn the_four_cache_outcomes_stay_distinguishable() {
+        // Directive section 11 requires them to be told apart, and section 11's
+        // last line forbids treating a corrupt entry as usable.
+        let source = super::hash::sha256(b"source");
+        let dependencies = super::hash::sha256(b"deps");
+        let key = cache_inputs(&source, &dependencies).key();
+        let stored = super::hash::sha256(b"result");
+
+        let mut index = CacheIndex::new();
+        assert_eq!(index.lookup(key, Some(stored)), CacheLookup::Miss);
+
+        index.store(key, stored);
+        assert_eq!(index.lookup(key, Some(stored)), CacheLookup::Hit);
+        assert_eq!(
+            index.lookup(key, Some(super::hash::sha256(b"changed"))),
+            CacheLookup::Corrupted
+        );
+
+        index.invalidate(key);
+        assert_eq!(index.lookup(key, Some(stored)), CacheLookup::Invalidated);
+
+        let statistics = index.statistics();
+        assert_eq!(statistics.misses, 1);
+        assert_eq!(statistics.hits, 1);
+        assert_eq!(statistics.corrupted, 1);
+        assert_eq!(statistics.invalidated, 1);
+
+        assert!(CacheLookup::Hit.is_usable());
+        for unusable in [
+            CacheLookup::Miss,
+            CacheLookup::Invalidated,
+            CacheLookup::Corrupted,
+        ] {
+            assert!(!unusable.is_usable(), "{unusable:?}");
+        }
+    }
+
+    // --- build graph ---------------------------------------------------------
+
+    fn digests() -> [Digest; 4] {
+        [
+            super::hash::sha256(b"input"),
+            super::hash::sha256(b"configuration"),
+            super::hash::sha256(b"toolchain"),
+            super::hash::sha256(b"plugin"),
+        ]
+    }
+
+    fn node(id: &str, kind: NodeKind) -> Node {
+        Node::new(NodeId::new(id).unwrap(), kind, "omni.plugin.dex", digests())
+    }
+
+    #[test]
+    fn a_graph_orders_work_by_its_edges_not_by_insertion() {
+        // Directive section 9: a build system is not a file ordering.
+        let mut graph = Graph::new();
+        graph
+            .add(node("package", NodeKind::Package).after(NodeId::new("dex").unwrap()))
+            .unwrap();
+        graph
+            .add(node("dex", NodeKind::Dex).after(NodeId::new("compile").unwrap()))
+            .unwrap();
+        graph.add(node("compile", NodeKind::CompilerIr)).unwrap();
+
+        let order: Vec<String> = graph
+            .plan()
+            .unwrap()
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        assert_eq!(order, ["compile", "dex", "package"]);
+    }
+
+    #[test]
+    fn the_plan_is_the_same_every_time() {
+        // Directive section 12: identical input, identical order, so a build's
+        // shape never depends on iteration luck.
+        let mut graph = Graph::new();
+        graph.add(node("a", NodeKind::Manifest)).unwrap();
+        graph.add(node("b", NodeKind::Resources)).unwrap();
+        graph
+            .add(node("c", NodeKind::Dex).after(NodeId::new("a").unwrap()))
+            .unwrap();
+        graph
+            .add(node("d", NodeKind::Package).after(NodeId::new("b").unwrap()))
+            .unwrap();
+
+        let first = graph.plan().unwrap();
+        for _ in 0..16 {
+            assert_eq!(graph.plan().unwrap(), first);
+        }
+    }
+
+    #[test]
+    fn a_cycle_is_reported_with_the_code_the_directive_names() {
+        let mut graph = Graph::new();
+        graph
+            .add(node("a", NodeKind::Dex).after(NodeId::new("b").unwrap()))
+            .unwrap();
+        graph
+            .add(node("b", NodeKind::Dex).after(NodeId::new("a").unwrap()))
+            .unwrap();
+
+        let error = graph.plan().unwrap_err();
+        assert_eq!(error.code, super::graph::CYCLE_CODE);
+        assert_eq!(error.code, "BUILD_GRAPH_CYCLE");
+        assert_eq!(error.severity, Severity::Fatal);
+        assert!(error.context.iter().any(|line| line.contains("a, b")));
+    }
+
+    #[test]
+    fn a_node_that_depends_on_itself_is_a_cycle() {
+        let mut graph = Graph::new();
+        graph
+            .add(node("a", NodeKind::Dex).after(NodeId::new("a").unwrap()))
+            .unwrap();
+        assert_eq!(graph.plan().unwrap_err().code, super::graph::CYCLE_CODE);
+    }
+
+    #[test]
+    fn an_edge_to_a_node_that_does_not_exist_is_refused() {
+        let mut graph = Graph::new();
+        graph
+            .add(node("a", NodeKind::Dex).after(NodeId::new("ghost").unwrap()))
+            .unwrap();
+        let error = graph.plan().unwrap_err();
+        assert_eq!(error.code, "E4004");
+        assert!(error.message.contains("ghost"));
+    }
+
+    #[test]
+    fn node_identifiers_are_unique_and_restricted() {
+        let mut graph = Graph::new();
+        graph.add(node("a", NodeKind::Dex)).unwrap();
+        assert_eq!(
+            graph.add(node("a", NodeKind::Dex)).unwrap_err().code,
+            "E4003"
+        );
+        assert_eq!(NodeId::new("has space").unwrap_err().code, "E4001");
+        assert_eq!(NodeId::new("").unwrap_err().code, "E4001");
+    }
+
+    #[test]
+    fn a_status_only_unblocks_dependents_when_it_produced_something() {
+        // Directive section 10, stated once and used everywhere.
+        assert!(NodeStatus::Succeeded.produced_its_outputs());
+        assert!(NodeStatus::CacheHit.produced_its_outputs());
+        for blocked in [
+            NodeStatus::Pending,
+            NodeStatus::Running,
+            NodeStatus::Failed,
+            NodeStatus::Skipped,
+            NodeStatus::Cancelled,
+        ] {
+            assert!(!blocked.produced_its_outputs(), "{blocked:?}");
+        }
+    }
+
+    // --- scheduler -----------------------------------------------------------
+
+    /// An executor whose behaviour each test decides node by node.
+    struct ScriptedExecutor {
+        failing: Vec<String>,
+        cached: Vec<String>,
+        ran: Vec<String>,
+    }
+
+    impl ScriptedExecutor {
+        fn new() -> Self {
+            ScriptedExecutor {
+                failing: Vec::new(),
+                cached: Vec::new(),
+                ran: Vec::new(),
+            }
+        }
+
+        fn failing(mut self, id: &str) -> Self {
+            self.failing.push(id.to_string());
+            self
+        }
+
+        fn cached(mut self, id: &str) -> Self {
+            self.cached.push(id.to_string());
+            self
+        }
+    }
+
+    impl super::scheduler::NodeExecutor for ScriptedExecutor {
+        fn execute(
+            &mut self,
+            node: &Node,
+            _ctx: &mut super::plugin::Context<'_>,
+        ) -> Result<super::scheduler::NodeResult, Diagnostic> {
+            let id = node.id().as_str().to_string();
+            self.ran.push(id.clone());
+
+            if self.failing.contains(&id) {
+                return Err(Diagnostic::new(
+                    "E9999",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "test",
+                    "scripted failure",
+                ));
+            }
+
+            Ok(super::scheduler::NodeResult {
+                artifact_digest: Some(super::hash::sha256(id.as_bytes())),
+                from_cache: self.cached.contains(&id),
+                peak_memory_bytes: 0,
+            })
+        }
+    }
+
+    fn linear_graph() -> Graph {
+        let mut graph = Graph::new();
+        graph.add(node("compile", NodeKind::CompilerIr)).unwrap();
+        graph
+            .add(node("dex", NodeKind::Dex).after(NodeId::new("compile").unwrap()))
+            .unwrap();
+        graph
+            .add(node("package", NodeKind::Package).after(NodeId::new("dex").unwrap()))
+            .unwrap();
+        graph
+    }
+
+    #[test]
+    fn a_healthy_graph_runs_to_completion_in_dependency_order() {
+        let mut graph = linear_graph();
+        let mut executor = ScriptedExecutor::new();
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        let report = super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+        );
+
+        assert_eq!(report.outcome, SchedulerOutcome::Completed);
+        assert_eq!(report.succeeded, 3);
+        assert_eq!(report.failed, 0);
+        assert_eq!(executor.ran, ["compile", "dex", "package"]);
+        for id in ["compile", "dex", "package"] {
+            let found = graph.node(&NodeId::new(id).unwrap()).unwrap();
+            assert_eq!(found.status(), NodeStatus::Succeeded);
+            assert!(found.artifact_digest().is_some());
+        }
+    }
+
+    #[test]
+    fn a_failure_stops_its_dependents_and_says_why() {
+        // Directive section 10: a failed dependency is never ignored, and the
+        // nodes behind it are skipped rather than called failed.
+        let mut graph = linear_graph();
+        let mut executor = ScriptedExecutor::new().failing("dex");
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        let report = super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+        );
+
+        assert_eq!(report.outcome, SchedulerOutcome::Failed);
+        assert_eq!(report.succeeded, 1);
+        assert_eq!(report.failed, 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(
+            executor.ran,
+            ["compile", "dex"],
+            "package must not have run"
+        );
+
+        assert_eq!(
+            graph.node(&NodeId::new("dex").unwrap()).unwrap().status(),
+            NodeStatus::Failed
+        );
+        assert_eq!(
+            graph
+                .node(&NodeId::new("package").unwrap())
+                .unwrap()
+                .status(),
+            NodeStatus::Skipped
+        );
+
+        let skip = sink.entries().iter().find(|d| d.code == "W6002").unwrap();
+        assert!(skip.context.iter().any(|line| line.contains("dex")));
+        assert!(sink.entries().iter().any(|d| d.code == "E9999"));
+    }
+
+    #[test]
+    fn a_cancelled_build_marks_nothing_as_successful() {
+        // Directive section 10 forbids calling a cancelled node successful, and
+        // section 35 asks for a safe stop rather than a torn one.
+        let mut graph = linear_graph();
+        let mut executor = ScriptedExecutor::new();
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        let cancellation = Cancellation::new();
+        cancellation.cancel();
+
+        let report = super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &cancellation,
+        );
+
+        assert_eq!(report.outcome, SchedulerOutcome::Cancelled);
+        assert_eq!(report.cancelled, 3);
+        assert_eq!(report.succeeded, 0);
+        assert!(executor.ran.is_empty());
+        for id in ["compile", "dex", "package"] {
+            let status = graph.node(&NodeId::new(id).unwrap()).unwrap().status();
+            assert_eq!(status, NodeStatus::Cancelled);
+            assert!(!status.produced_its_outputs());
+        }
+    }
+
+    #[test]
+    fn a_cache_hit_is_recorded_as_such_and_still_unblocks_dependents() {
+        let mut graph = linear_graph();
+        let mut executor = ScriptedExecutor::new().cached("compile");
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        let report = super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+        );
+
+        assert_eq!(report.outcome, SchedulerOutcome::Completed);
+        assert_eq!(report.cache_hits, 1);
+        assert_eq!(report.succeeded, 2);
+        assert_eq!(
+            graph
+                .node(&NodeId::new("compile").unwrap())
+                .unwrap()
+                .status(),
+            NodeStatus::CacheHit
+        );
+    }
+
+    #[test]
+    fn a_graph_that_cannot_be_planned_runs_nothing_at_all() {
+        let mut graph = Graph::new();
+        graph
+            .add(node("a", NodeKind::Dex).after(NodeId::new("b").unwrap()))
+            .unwrap();
+        graph
+            .add(node("b", NodeKind::Dex).after(NodeId::new("a").unwrap()))
+            .unwrap();
+
+        let mut executor = ScriptedExecutor::new();
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        let report = super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+        );
+
+        assert_eq!(report.outcome, SchedulerOutcome::Rejected);
+        assert!(executor.ran.is_empty());
+        assert!(report.order.is_empty());
+        assert!(sink
+            .entries()
+            .iter()
+            .any(|d| d.code == super::graph::CYCLE_CODE));
+        for id in ["a", "b"] {
+            assert_eq!(
+                graph.node(&NodeId::new(id).unwrap()).unwrap().status(),
+                NodeStatus::Pending
+            );
+        }
+    }
+
+    #[test]
+    fn the_real_executor_refuses_to_invent_a_result_for_a_planned_plugin() {
+        // Every plugin in this tree is PLANNED, so a real build fails - loudly,
+        // with E0001, and with nothing marked as produced (directive section 1).
+        let mut graph = Graph::new();
+        graph
+            .add(Node::new(
+                NodeId::new("dex").unwrap(),
+                NodeKind::Dex,
+                "omni.plugin.dex",
+                digests(),
+            ))
+            .unwrap();
+
+        let mut executor = super::scheduler::PluginRegistryExecutor::new();
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        let report = super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+        );
+
+        assert_eq!(report.outcome, SchedulerOutcome::Failed);
+        assert_eq!(report.succeeded, 0);
+        assert!(sink.entries().iter().any(|d| d.code == "E0001"));
+        assert_eq!(
+            graph.node(&NodeId::new("dex").unwrap()).unwrap().status(),
+            NodeStatus::Failed
+        );
+    }
+
+    #[test]
+    fn a_node_naming_an_unknown_plugin_fails_rather_than_being_skipped() {
+        let mut graph = Graph::new();
+        graph
+            .add(Node::new(
+                NodeId::new("mystery").unwrap(),
+                NodeKind::Dex,
+                "omni.plugin.nonexistent",
+                digests(),
+            ))
+            .unwrap();
+
+        let mut executor = super::scheduler::PluginRegistryExecutor::new();
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+
+        super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+        );
+
+        assert!(sink.entries().iter().any(|d| d.code == "E6001"));
+    }
+
+    #[test]
+    fn cancellation_is_shared_between_the_holder_and_the_build() {
+        let token = Cancellation::new();
+        let observer = token.clone();
+        assert!(!observer.is_cancelled());
+        token.cancel();
+        assert!(observer.is_cancelled());
+    }
+
+    #[test]
+    fn the_graph_and_the_scheduler_serialise_into_a_valid_report() {
+        let mut graph = linear_graph();
+        let mut executor = ScriptedExecutor::new().failing("dex");
+        let mut policy = Policy::new("build");
+        let mut sink = Sink::new();
+        let report = super::scheduler::run(
+            &mut graph,
+            &mut executor,
+            &mut policy,
+            &mut sink,
+            &Cancellation::new(),
+        );
+
+        let mut w = Writer::new();
+        w.begin_object(None);
+        graph.write_json(&mut w, "graph");
+        report.write_json(&mut w, "build");
+        w.end_object();
+        let document = w.finish();
+
+        assert!(is_structurally_valid(&document), "{document}");
+        assert!(document.contains("\"acyclic\":true"));
+        assert!(document.contains("\"outcome\":\"FAILED\""));
+        assert!(document.contains("\"status\":\"SKIPPED\""));
+    }
+
+    // --- project manifest ----------------------------------------------------
+
+    /// The manifest exactly as directive section 44 writes it, with the one
+    /// typographical slip corrected: the directive prints `Deterministic.`
+    /// with a trailing dot, and a separate test covers what happens if that is
+    /// typed literally.
+    const DIRECTIVE_MANIFEST: &str = r#"
+[ Project ]
+Name    = "Demo App"
+Id        = "com.demo"
+Version   = "1.0.0"
+Edition    = "01/01/2000"
+
+[ Android ]
+Min_sdk      = 28
+Target_sdk   = 36
+Compile_sdk = 36
+
+[ Build ]
+Profile = "Release"
+Optimization = "Size"
+Lto             = true
+Incremental     = true
+Parallel         = true
+Deterministic   = true
+
+[ Security ]
+Guard = "High"
+Provenance    = true
+Verification    = true
+
+[ Features ]
+Compose      = true
+Viewbinding   = false
+"#;
+
+    #[test]
+    fn the_manifest_from_the_directive_parses_exactly() {
+        let mut sink = Sink::new();
+        let project = parse_manifest(DIRECTIVE_MANIFEST, "com.fallback", &mut sink)
+            .expect("the directive's own manifest must parse");
+
+        assert!(!sink.has_blocking(), "diagnostics: {:?}", sink.entries());
+        assert_eq!(project.name, "Demo App");
+        assert_eq!(project.id, "com.demo");
+        assert_eq!(project.version, "1.0.0");
+        assert_eq!(project.edition.as_deref(), Some("01/01/2000"));
+        assert_eq!(project.min_sdk, 28);
+        assert_eq!(project.target_sdk, 36);
+        assert_eq!(project.compile_sdk, 36);
+        assert_eq!(project.profile, Profile::Release);
+        assert_eq!(project.optimization, Optimization::Size);
+        assert!(project.lto);
+        assert!(project.incremental);
+        assert!(project.parallel);
+        assert!(project.deterministic);
+        assert_eq!(project.guard, GuardLevel::High);
+        assert!(project.provenance);
+        assert!(project.verification);
+        assert!(project.feature("Compose"));
+        assert!(!project.feature("Viewbinding"));
+        assert!(!project.feature("SomethingElse"));
+    }
+
+    #[test]
+    fn a_mistyped_key_is_named_and_corrected() {
+        // Directive section 44 prints "Deterministic." with a trailing dot. A
+        // build that quietly accepted it would leave the author believing a
+        // setting was in force when it was not (section 64), so it is refused -
+        // with the correction spelled out.
+        let manifest = "[ Project ]\nName = \"A\"\nId = \"com.a\"\n\
+                        [ Build ]\nDeterministic.   = true\n";
+        let mut sink = Sink::new();
+        assert!(parse_manifest(manifest, "com.fallback", &mut sink).is_none());
+
+        let error = sink
+            .entries()
+            .iter()
+            .find(|d| d.code == "E3021")
+            .expect("the unknown key must be reported");
+        assert!(error
+            .suggestion
+            .as_deref()
+            .unwrap()
+            .contains("Deterministic"));
+        assert_eq!(error.location.as_ref().unwrap().line, 5);
+    }
+
+    #[test]
+    fn keys_and_sections_are_case_sensitive() {
+        // Directive section 44 says so explicitly.
+        let manifest = "[ project ]\nname = \"A\"\n";
+        let mut sink = Sink::new();
+        assert!(parse_manifest(manifest, "com.fallback", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3020"));
+
+        let manifest = "[ Project ]\nname = \"A\"\n";
+        let mut sink = Sink::new();
+        assert!(parse_manifest(manifest, "com.fallback", &mut sink).is_none());
+        let error = sink.entries().iter().find(|d| d.code == "E3021").unwrap();
+        assert!(error
+            .suggestion
+            .as_deref()
+            .unwrap()
+            .contains("case-sensitive"));
+    }
+
+    #[test]
+    fn a_minimal_manifest_gets_safe_defaults() {
+        // Directive section 45: the smallest useful project still builds, and
+        // every default is a decision rather than an accident.
+        let mut sink = Sink::new();
+        let project =
+            parse_manifest("[ Project ]\nName = \"Tiny\"\n", "com.omni.tiny", &mut sink).unwrap();
+
+        assert_eq!(project.name, "Tiny");
+        assert_eq!(project.id, "com.omni.tiny");
+        assert_eq!(project.min_sdk, 28);
+        assert_eq!(project.target_sdk, 36);
+        assert_eq!(project.compile_sdk, 36);
+        assert!(project.deterministic);
+        assert!(project.provenance);
+        assert!(project.verification);
+        assert_eq!(project.guard, GuardLevel::Medium);
+    }
+
+    #[test]
+    fn a_project_without_a_name_is_refused() {
+        let mut sink = Sink::new();
+        assert!(parse_manifest("[ Project ]\nId = \"com.a\"\n", "com.f", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3030"));
+    }
+
+    #[test]
+    fn values_must_have_the_type_the_key_expects() {
+        let cases = [
+            ("[ Project ]\nName = 5\n", "E3040"),
+            (
+                "[ Project ]\nName = \"A\"\n[ Android ]\nMin_sdk = \"28\"\n",
+                "E3040",
+            ),
+            (
+                "[ Project ]\nName = \"A\"\n[ Build ]\nLto = \"true\"\n",
+                "E3040",
+            ),
+            (
+                "[ Project ]\nName = \"A\"\n[ Features ]\nCompose = 1\n",
+                "E3040",
+            ),
+        ];
+        for (manifest, code) in cases {
+            let mut sink = Sink::new();
+            assert!(
+                parse_manifest(manifest, "com.f", &mut sink).is_none(),
+                "{manifest}"
+            );
+            assert!(
+                sink.entries().iter().any(|d| d.code == code),
+                "{manifest} -> {:?}",
+                sink.entries()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_syntax_is_reported_with_a_position() {
+        let cases = [
+            ("[ Project\nName = \"A\"\n", "E3003", 1u32),
+            ("[ Project ]\nName\n", "E3004", 2),
+            ("Name = \"A\"\n", "E3005", 1),
+            ("[ Project ]\n = \"A\"\n", "E3006", 2),
+            ("[ Project ]\nName =\n", "E3009", 2),
+            ("[ Project ]\nName = \"unterminated\n", "E3010", 2),
+            ("[ Project ]\nName = maybe\n", "E3013", 2),
+        ];
+        for (manifest, code, line) in cases {
+            let mut sink = Sink::new();
+            assert!(
+                parse_manifest(manifest, "com.f", &mut sink).is_none(),
+                "{manifest:?}"
+            );
+            let error = sink
+                .entries()
+                .iter()
+                .find(|d| d.code == code)
+                .unwrap_or_else(|| panic!("{manifest:?} -> {:?}", sink.entries()));
+            assert_eq!(error.location.as_ref().unwrap().line, line, "{manifest:?}");
+            assert_eq!(error.location.as_ref().unwrap().file, "Omni.toml");
+        }
+    }
+
+    #[test]
+    fn a_key_set_twice_is_refused_rather_than_resolved() {
+        let manifest = "[ Project ]\nName = \"A\"\nName = \"B\"\n";
+        let mut sink = Sink::new();
+        assert!(parse_manifest(manifest, "com.f", &mut sink).is_none());
+        let error = sink.entries().iter().find(|d| d.code == "E3008").unwrap();
+        assert!(error.context.iter().any(|line| line.contains("line 2")));
+    }
+
+    #[test]
+    fn comments_and_blank_lines_are_ignored() {
+        let manifest = "# a project\n\n[ Project ]  # the section\nName = \"A\" # the name\n";
+        let mut sink = Sink::new();
+        let project = parse_manifest(manifest, "com.f", &mut sink).unwrap();
+        assert_eq!(project.name, "A");
+    }
+
+    #[test]
+    fn application_identifiers_are_validated() {
+        for (id, ok) in [
+            ("com.demo", true),
+            ("com.demo.app_two", true),
+            ("a.b", true),
+            ("demo", false),
+            ("com..demo", false),
+            ("com.1demo", false),
+            ("com.de-mo", false),
+            ("", false),
+        ] {
+            let manifest = format!("[ Project ]\nName = \"A\"\nId = \"{id}\"\n");
+            let mut sink = Sink::new();
+            let parsed = parse_manifest(&manifest, "com.f", &mut sink);
+            assert_eq!(parsed.is_some(), ok, "id: {id:?} -> {:?}", sink.entries());
+            if !ok {
+                assert!(sink.entries().iter().any(|d| d.code == "E3041"));
+            }
+        }
+    }
+
+    #[test]
+    fn versions_and_editions_are_validated() {
+        for (version, ok) in [
+            ("1.0.0", true),
+            ("10.20.30", true),
+            ("1.0", false),
+            ("1.0.x", false),
+            ("01.0.0", false),
+        ] {
+            let manifest = format!("[ Project ]\nName = \"A\"\nVersion = \"{version}\"\n");
+            let mut sink = Sink::new();
+            assert_eq!(
+                parse_manifest(&manifest, "com.f", &mut sink).is_some(),
+                ok,
+                "version: {version}"
+            );
+        }
+
+        for (edition, ok) in [
+            ("01/01/2000", true),
+            ("31/12/2026", true),
+            ("2000-01-01", false),
+            ("1/1/2000", false),
+            ("32/01/2000", false),
+        ] {
+            let manifest = format!("[ Project ]\nName = \"A\"\nEdition = \"{edition}\"\n");
+            let mut sink = Sink::new();
+            assert_eq!(
+                parse_manifest(&manifest, "com.f", &mut sink).is_some(),
+                ok,
+                "edition: {edition}"
+            );
+        }
+    }
+
+    #[test]
+    fn sdk_levels_must_be_consistent_with_each_other() {
+        let manifest = "[ Project ]\nName = \"A\"\n[ Android ]\nMin_sdk = 36\nTarget_sdk = 28\n";
+        let mut sink = Sink::new();
+        assert!(parse_manifest(manifest, "com.f", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3031"));
+
+        let manifest =
+            "[ Project ]\nName = \"A\"\n[ Android ]\nTarget_sdk = 36\nCompile_sdk = 30\n";
+        let mut sink = Sink::new();
+        assert!(parse_manifest(manifest, "com.f", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3032"));
+
+        let manifest = "[ Project ]\nName = \"A\"\n[ Android ]\nMin_sdk = -1\n";
+        let mut sink = Sink::new();
+        assert!(parse_manifest(manifest, "com.f", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3041"));
+    }
+
+    #[test]
+    fn a_deterministic_debug_build_is_flagged_but_allowed() {
+        let manifest =
+            "[ Project ]\nName = \"A\"\n[ Build ]\nProfile = \"Debug\"\nDeterministic = true\n";
+        let mut sink = Sink::new();
+        let project = parse_manifest(manifest, "com.f", &mut sink).unwrap();
+        assert!(project.deterministic);
+        assert!(sink.entries().iter().any(|d| d.code == "W3033"));
+        assert!(!sink.has_blocking());
+    }
+
+    #[test]
+    fn every_profile_and_level_named_by_the_directive_is_accepted() {
+        for profile in Profile::ALL {
+            let manifest = format!(
+                "[ Project ]\nName = \"A\"\n[ Build ]\nProfile = \"{}\"\n",
+                profile.as_str()
+            );
+            let mut sink = Sink::new();
+            let parsed = parse_manifest(&manifest, "com.f", &mut sink).unwrap();
+            assert_eq!(parsed.profile, *profile);
+        }
+        // Directive section 13 requires at least these nine.
+        assert_eq!(Profile::ALL.len(), 9);
+
+        for level in GuardLevel::ALL {
+            let manifest = format!(
+                "[ Project ]\nName = \"A\"\n[ Security ]\nGuard = \"{}\"\n",
+                level.as_str()
+            );
+            let mut sink = Sink::new();
+            assert_eq!(
+                parse_manifest(&manifest, "com.f", &mut sink).unwrap().guard,
+                *level
+            );
+        }
+    }
+
+    #[test]
+    fn the_configuration_digest_reflects_behaviour_not_naming() {
+        let base = parse_manifest(DIRECTIVE_MANIFEST, "com.f", &mut Sink::new()).unwrap();
+
+        // Deterministic (directive section 12).
+        assert_eq!(base.digest(), base.digest());
+        let again = parse_manifest(DIRECTIVE_MANIFEST, "com.f", &mut Sink::new()).unwrap();
+        assert_eq!(base.digest(), again.digest());
+
+        // Renaming a project does not change what it produces.
+        let mut renamed = base.clone();
+        renamed.name = "Something Else".to_string();
+        assert_eq!(base.digest(), renamed.digest());
+
+        // Anything that does change the output changes the digest.
+        for mutate in [
+            (|p: &mut Project| p.optimization = Optimization::Speed) as fn(&mut Project),
+            |p: &mut Project| p.lto = false,
+            |p: &mut Project| p.min_sdk = 29,
+            |p: &mut Project| p.profile = Profile::Debug,
+            |p: &mut Project| p.guard = GuardLevel::Off,
+            |p: &mut Project| p.features.push(("Extra".to_string(), true)),
+        ] {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(base.digest(), changed.digest());
+        }
+    }
+
+    #[test]
+    fn feature_order_does_not_change_the_project() {
+        let forwards = "[ Project ]\nName = \"A\"\n[ Features ]\nA = true\nB = false\n";
+        let backwards = "[ Project ]\nName = \"A\"\n[ Features ]\nB = false\nA = true\n";
+        let left = parse_manifest(forwards, "com.f", &mut Sink::new()).unwrap();
+        let right = parse_manifest(backwards, "com.f", &mut Sink::new()).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left.digest(), right.digest());
+    }
+
+    #[test]
+    fn the_manifest_is_bounded() {
+        // Directive section 60, on input that is not trusted.
+        let mut sink = Sink::new();
+        let huge = "x".repeat(super::project::MAX_MANIFEST_BYTES + 1);
+        assert!(parse_manifest(&huge, "com.f", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3001"));
+
+        let mut sink = Sink::new();
+        let many_lines = "\n".repeat(super::project::MAX_LINES + 10);
+        assert!(parse_manifest(&many_lines, "com.f", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3002"));
+
+        let mut sink = Sink::new();
+        let many_entries: String = std::iter::once("[ Features ]\n".to_string())
+            .chain((0..super::project::MAX_ENTRIES + 10).map(|i| format!("F{i} = true\n")))
+            .collect();
+        assert!(parse_manifest(&many_entries, "com.f", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "E3007"));
+    }
+
+    #[test]
+    fn hostile_manifests_are_rejected_without_crashing() {
+        // Directive section 41: malformed input must not crash, hang or allocate
+        // without bound. Project files come from outside (section 61).
+        let cases = [
+            "",
+            "[",
+            "[]",
+            "[ ]",
+            "=",
+            "==",
+            "[ Project ]\n=\n",
+            "[ Project ]\nName = \"\u{0}\"\n",
+            "[ Project ]\nName = \"a\"b\"\n",
+            "\u{feff}[ Project ]\nName = \"A\"\n",
+            "[ Project ]\r\nName = \"A\"\r\n",
+            "[ Features ]\n= true\n",
+            "[ Project ]\nName = 99999999999999999999999\n",
+            "[ Android ]\nMin_sdk = 9999999999999999999\n",
+        ];
+        for manifest in cases {
+            let mut sink = Sink::new();
+            // The only requirement is that this returns rather than misbehaving.
+            let _ = parse_manifest(manifest, "com.f", &mut sink);
+        }
+    }
+
+    #[test]
+    fn a_project_serialises_into_a_valid_report() {
+        let project = parse_manifest(DIRECTIVE_MANIFEST, "com.f", &mut Sink::new()).unwrap();
+        let mut w = Writer::new();
+        w.begin_object(None);
+        project.write_json(&mut w, "project");
+        w.end_object();
+        let document = w.finish();
+
+        assert!(is_structurally_valid(&document), "{document}");
+        assert!(document.contains("\"id\":\"com.demo\""));
+        assert!(document.contains("\"profile\":\"Release\""));
+        assert!(document.contains(&project.digest().to_hex()));
+    }
+
+    // --- virtual filesystem --------------------------------------------------
+
+    /// A fresh directory under the system temporary directory.
+    ///
+    /// No dependency is used for this: a counter plus the process id is enough
+    /// to keep concurrent tests apart, and ADR-0003 keeps the Core dependency
+    /// free right down to its tests.
+    fn temp_directory(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("omni-vfs-{label}-{}-{unique}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temporary directory");
+        path
+    }
+
+    /// A policy that grants exactly what the test asks for.
+    fn policy_with(capabilities: &[Capability]) -> Policy {
+        let mut policy = Policy::new("test");
+        for capability in capabilities {
+            policy.grant(*capability);
+        }
+        policy
+    }
+
+    #[test]
+    fn virtual_paths_normalise_what_they_accept() {
+        let path = VirtualPath::parse("Source/./Main/Builder.kt").unwrap();
+        assert_eq!(path.as_str(), "Source/Main/Builder.kt");
+        assert_eq!(path.segments(), ["Source", "Main", "Builder.kt"]);
+        assert_eq!(path.file_name(), "Builder.kt");
+        assert_eq!(path.extension(), Some("kt"));
+
+        assert_eq!(VirtualPath::parse("a").unwrap().as_str(), "a");
+        assert_eq!(VirtualPath::parse("./a").unwrap().as_str(), "a");
+        assert_eq!(VirtualPath::parse("a/b/c").unwrap().extension(), None);
+        assert_eq!(VirtualPath::parse("a.b.c").unwrap().extension(), Some("c"));
+        assert_eq!(VirtualPath::parse("noext.").unwrap().extension(), None);
+    }
+
+    #[test]
+    fn virtual_paths_refuse_to_leave_their_mount() {
+        // Directive section 8: traversal is refused, in every spelling.
+        for attempt in [
+            "..",
+            "../secret",
+            "a/../../secret",
+            "a/b/../../../secret",
+            "./../secret",
+        ] {
+            let error =
+                VirtualPath::parse(attempt).expect_err("traversal must be refused: {attempt}");
+            assert_eq!(error.code, "E2007", "input: {attempt}");
+            assert_eq!(error.class, FailureClass::SecurityFailure);
+        }
+    }
+
+    #[test]
+    fn virtual_paths_refuse_absolute_forms() {
+        assert_eq!(VirtualPath::parse("/etc/passwd").unwrap_err().code, "E2005");
+        assert_eq!(VirtualPath::parse("/").unwrap_err().code, "E2005");
+        assert_eq!(VirtualPath::parse("C:/Windows").unwrap_err().code, "E2005");
+    }
+
+    #[test]
+    fn virtual_paths_refuse_ambiguous_or_hostile_spellings() {
+        assert_eq!(VirtualPath::parse("").unwrap_err().code, "E2001");
+        assert_eq!(VirtualPath::parse(".").unwrap_err().code, "E2001");
+        assert_eq!(VirtualPath::parse("./.").unwrap_err().code, "E2001");
+        assert_eq!(VirtualPath::parse("a//b").unwrap_err().code, "E2006");
+        assert_eq!(VirtualPath::parse("a/").unwrap_err().code, "E2006");
+        assert_eq!(VirtualPath::parse("a\\b").unwrap_err().code, "E2004");
+        assert_eq!(VirtualPath::parse("a\u{0}b").unwrap_err().code, "E2003");
+        assert_eq!(VirtualPath::parse("a\nb").unwrap_err().code, "E2003");
+        assert_eq!(VirtualPath::parse("a\u{7f}b").unwrap_err().code, "E2003");
+    }
+
+    #[test]
+    fn virtual_paths_are_bounded() {
+        // Directive section 60: path explosion and deep nesting are refused
+        // rather than merely being slow.
+        let long_path = "a".repeat(super::vfs::MAX_PATH_BYTES + 1);
+        assert_eq!(VirtualPath::parse(&long_path).unwrap_err().code, "E2002");
+
+        let long_segment = format!("dir/{}", "b".repeat(super::vfs::MAX_SEGMENT_BYTES + 1));
+        assert_eq!(VirtualPath::parse(&long_segment).unwrap_err().code, "E2008");
+
+        let deep = vec!["d"; super::vfs::MAX_SEGMENTS + 1].join("/");
+        assert_eq!(VirtualPath::parse(&deep).unwrap_err().code, "E2009");
+
+        // Exactly at the limits is accepted; the bound is not off by one.
+        let at_limit = vec!["d"; super::vfs::MAX_SEGMENTS].join("/");
+        assert!(VirtualPath::parse(&at_limit).is_ok());
+    }
+
+    #[test]
+    fn virtual_paths_keep_unicode_intact() {
+        let path = VirtualPath::parse("Kaynak/Ana/Örnek türkçe.kt").unwrap();
+        assert_eq!(path.file_name(), "Örnek türkçe.kt");
+        assert_eq!(path.extension(), Some("kt"));
+    }
+
+    #[test]
+    fn mounting_requires_a_real_directory_and_a_usable_name() {
+        let root = temp_directory("mount");
+        let mut vfs = VirtualFs::new(Quota::default());
+
+        assert_eq!(
+            vfs.mount("", &root, Access::ReadOnly).unwrap_err().code,
+            "E2010"
+        );
+        assert_eq!(
+            vfs.mount("a/b", &root, Access::ReadOnly).unwrap_err().code,
+            "E2010"
+        );
+        assert_eq!(
+            vfs.mount("missing", root.join("nowhere"), Access::ReadOnly)
+                .unwrap_err()
+                .code,
+            "E2012"
+        );
+
+        vfs.mount("project", &root, Access::ReadOnly).unwrap();
+        assert_eq!(
+            vfs.mount("project", &root, Access::ReadOnly)
+                .unwrap_err()
+                .code,
+            "E2011"
+        );
+        assert_eq!(vfs.mounts().len(), 1);
+        assert_eq!(vfs.mounts()[0].name(), "project");
+        assert_eq!(vfs.mounts()[0].access(), Access::ReadOnly);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn reading_and_writing_round_trip_with_a_digest() {
+        let root = temp_directory("roundtrip");
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("output", &root, Access::ReadWrite).unwrap();
+
+        let mut policy = policy_with(&[Capability::FsRead, Capability::FsWrite]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        let path = VirtualPath::parse("nested/deep/file.txt").unwrap();
+        let written = vfs
+            .write_atomic(&mut ctx, "plugin.test", "output", &path, b"omni")
+            .unwrap();
+        assert_eq!(written, super::hash::sha256(b"omni"));
+
+        let (bytes, digest) = vfs.read(&mut ctx, "plugin.test", "output", &path).unwrap();
+        assert_eq!(bytes, b"omni");
+        assert_eq!(digest, written);
+
+        assert!(vfs
+            .exists(&mut ctx, "plugin.test", "output", &path)
+            .unwrap());
+        let absent = VirtualPath::parse("nested/deep/absent.txt").unwrap();
+        assert!(!vfs
+            .exists(&mut ctx, "plugin.test", "output", &absent)
+            .unwrap());
+
+        let usage = vfs.usage();
+        assert_eq!(usage.reads, 1);
+        assert_eq!(usage.writes, 1);
+        assert_eq!(usage.bytes_written, 4);
+        assert_eq!(usage.bytes_read, 4);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_write_leaves_no_partial_file_behind() {
+        // Directive section 59: a build must never publish something half
+        // written, and must not litter the output with the evidence either.
+        let root = temp_directory("atomic");
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("output", &root, Access::ReadWrite).unwrap();
+
+        let mut policy = policy_with(&[Capability::FsWrite]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        let path = VirtualPath::parse("artifact.bin").unwrap();
+        vfs.write_atomic(&mut ctx, "plugin.test", "output", &path, b"first")
+            .unwrap();
+        vfs.write_atomic(&mut ctx, "plugin.test", "output", &path, b"second")
+            .unwrap();
+
+        let leftovers: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("omni-partial"))
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+        assert_eq!(std::fs::read(root.join("artifact.bin")).unwrap(), b"second");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn the_filesystem_is_unreachable_without_a_capability() {
+        // Directive section 7: default deny, and the refusal is a diagnostic
+        // rather than a silent empty result.
+        let root = temp_directory("caps");
+        std::fs::write(root.join("file.txt"), b"data").unwrap();
+
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("project", &root, Access::ReadWrite).unwrap();
+
+        let mut policy = Policy::new("empty");
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+        let path = VirtualPath::parse("file.txt").unwrap();
+
+        let read = vfs
+            .read(&mut ctx, "plugin.test", "project", &path)
+            .unwrap_err();
+        assert_eq!(read.code, "E2030");
+        assert_eq!(read.class, FailureClass::SecurityFailure);
+
+        let write = vfs
+            .write_atomic(&mut ctx, "plugin.test", "project", &path, b"x")
+            .unwrap_err();
+        assert_eq!(write.code, "E2030");
+
+        // And the refusal was audited.
+        assert!(policy.audit().iter().any(|record| {
+            record.subject == "plugin.test" && record.decision == Decision::Deny
+        }));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_read_only_mount_refuses_writes_even_with_the_capability() {
+        let root = temp_directory("readonly");
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("source", &root, Access::ReadOnly).unwrap();
+
+        let mut policy = policy_with(&[Capability::FsWrite]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        let path = VirtualPath::parse("file.txt").unwrap();
+        let error = vfs
+            .write_atomic(&mut ctx, "plugin.test", "source", &path, b"x")
+            .unwrap_err();
+        assert_eq!(error.code, "E2032");
+        assert!(!root.join("file.txt").exists());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_unknown_mount_is_named_in_the_diagnostic() {
+        let root = temp_directory("unknown");
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("project", &root, Access::ReadOnly).unwrap();
+
+        let mut policy = policy_with(&[Capability::FsRead]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        let path = VirtualPath::parse("file.txt").unwrap();
+        let error = vfs
+            .read(&mut ctx, "plugin.test", "elsewhere", &path)
+            .unwrap_err();
+        assert_eq!(error.code, "E2031");
+        assert!(error.context.iter().any(|line| line.contains("project")));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn quotas_are_enforced_on_the_file_and_on_the_build() {
+        let root = temp_directory("quota");
+        let mut vfs = VirtualFs::new(Quota {
+            max_file_bytes: 8,
+            max_written_bytes: 12,
+        });
+        vfs.mount("output", &root, Access::ReadWrite).unwrap();
+
+        let mut policy = policy_with(&[Capability::FsRead, Capability::FsWrite]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        let big = VirtualPath::parse("big.bin").unwrap();
+        assert_eq!(
+            vfs.write_atomic(&mut ctx, "p", "output", &big, &[0u8; 9])
+                .unwrap_err()
+                .code,
+            "E2022"
+        );
+
+        let a = VirtualPath::parse("a.bin").unwrap();
+        let b = VirtualPath::parse("b.bin").unwrap();
+        vfs.write_atomic(&mut ctx, "p", "output", &a, &[0u8; 8])
+            .unwrap();
+        assert_eq!(
+            vfs.write_atomic(&mut ctx, "p", "output", &b, &[0u8; 8])
+                .unwrap_err()
+                .code,
+            "E2023"
+        );
+        assert_eq!(vfs.usage().bytes_written, 8);
+
+        // Reading is bounded too.
+        std::fs::write(root.join("large.bin"), [0u8; 9]).unwrap();
+        let large = VirtualPath::parse("large.bin").unwrap();
+        assert_eq!(
+            vfs.read(&mut ctx, "p", "output", &large).unwrap_err().code,
+            "E2021"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_cannot_smuggle_a_path_out_of_its_mount() {
+        // Syntax alone cannot catch this: the path has no '..' in it. Only
+        // resolving the link does.
+        let root = temp_directory("symlink");
+        let outside = temp_directory("symlink-outside");
+        std::fs::write(outside.join("secret.txt"), b"not yours").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let mut vfs = VirtualFs::new(Quota::default());
+        vfs.mount("project", &root, Access::ReadWrite).unwrap();
+
+        let mut policy = policy_with(&[Capability::FsRead]);
+        let mut sink = Sink::new();
+        let mut ctx = super::plugin::Context {
+            policy: &mut policy,
+            diagnostics: &mut sink,
+        };
+
+        let path = VirtualPath::parse("escape/secret.txt").unwrap();
+        let error = vfs
+            .read(&mut ctx, "plugin.test", "project", &path)
+            .unwrap_err();
+        assert_eq!(error.code, "E2033");
+        assert_eq!(error.class, FailureClass::SecurityFailure);
+        assert!(vfs.usage().refusals > 0);
+
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    // --- SHA-256 (official NIST vectors) -------------------------------------
+
+    #[test]
+    fn sha256_matches_the_nist_published_vectors() {
+        // FIPS 180-4 and the NIST Cryptographic Algorithm Validation Program
+        // publish these. Directive section 30 makes passing them the condition
+        // for using the primitive at all.
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            (
+                b"abc",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
+            ),
+            (
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmno\
+                  ijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu",
+                "cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1",
+            ),
+        ];
+
+        for (input, expected) in cases {
+            // The fourth case uses a line continuation, so strip the indentation
+            // the source layout introduced.
+            let cleaned: Vec<u8> = input.iter().copied().filter(|b| *b != b' ').collect();
+            assert_eq!(
+                super::hash::sha256(&cleaned).to_hex(),
+                *expected,
+                "input: {:?}",
+                String::from_utf8_lossy(&cleaned)
+            );
+        }
+    }
+
+    #[test]
+    fn sha256_matches_the_one_million_a_vector() {
+        // The long-message vector from FIPS 180-4 appendix B.3. It is the one
+        // that catches a broken length counter or a broken padding boundary.
+        let mut hasher = super::hash::Sha256::new();
+        let chunk = vec![b'a'; 1_000];
+        for _ in 0..1_000 {
+            hasher.update(&chunk);
+        }
+        assert_eq!(
+            hasher.finish().to_hex(),
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
+    }
+
+    #[test]
+    fn sha256_is_insensitive_to_how_the_message_is_split() {
+        // Streaming has to agree with the one-shot form, or a digest would
+        // depend on the caller's buffer size rather than on the data.
+        let message: Vec<u8> = (0u8..=255).cycle().take(1_000).collect();
+        let one_shot = super::hash::sha256(&message);
+
+        for split in [1usize, 7, 55, 56, 57, 63, 64, 65, 128, 999] {
+            let mut hasher = super::hash::Sha256::new();
+            for piece in message.chunks(split) {
+                hasher.update(piece);
+            }
+            assert_eq!(hasher.finish(), one_shot, "split at {split}");
+        }
+    }
+
+    #[test]
+    fn sha256_handles_every_padding_boundary() {
+        // Lengths either side of the block and length-field boundaries are where
+        // a padding bug hides.
+        for length in [0usize, 1, 54, 55, 56, 57, 63, 64, 65, 119, 120, 127, 128] {
+            let message = vec![b'x'; length];
+            let streamed = {
+                let mut hasher = super::hash::Sha256::new();
+                hasher.update(&message);
+                hasher.finish()
+            };
+            assert_eq!(streamed, super::hash::sha256(&message), "length {length}");
+        }
+    }
+
+    #[test]
+    fn digest_renders_as_lowercase_hex() {
+        let digest = super::hash::sha256(b"abc");
+        let hex = digest.to_hex();
+        assert_eq!(hex.len(), 64);
+        assert!(hex
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+        assert_eq!(digest.to_short_hex(4), "ba7816bf");
+        assert_eq!(digest.to_short_hex(64).len(), 64);
+        assert_eq!(format!("{digest:?}"), format!("sha256:{hex}"));
+    }
+
+    #[test]
+    fn field_hashing_cannot_be_confused_by_moving_a_boundary() {
+        // Without length prefixes these two would hash identically, and two
+        // different cache keys would collide (directive section 11).
+        let left = super::hash::sha256_fields(&[("a", b"ab"), ("b", b"c")]);
+        let right = super::hash::sha256_fields(&[("a", b"a"), ("b", b"bc")]);
+        assert_ne!(left, right);
+
+        // Renaming a field changes the digest too.
+        assert_ne!(
+            super::hash::sha256_fields(&[("a", b"x")]),
+            super::hash::sha256_fields(&[("b", b"x")])
+        );
+
+        // And the same fields always give the same answer (section 12).
+        assert_eq!(
+            super::hash::sha256_fields(&[("a", b"x"), ("b", b"y")]),
+            super::hash::sha256_fields(&[("a", b"x"), ("b", b"y")])
+        );
     }
 
     // --- C ABI --------------------------------------------------------------
