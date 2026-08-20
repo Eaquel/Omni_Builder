@@ -1,84 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Omni_Builder — user-facing strings.
-
-  Every string here describes what the system actually is. Directive section 1
-  forbids wording that implies a capability the build does not have, so there is
-  no "Build", "Compile" or "Export" string: nothing in this tree can do those
-  things yet.
--->
 <resources>
     <string name="omni_app_name">Omni_Builder</string>
+    <string name="omni_bullet">\u2022 %1$s</string>
 
-    <!-- %1$s core version, %2$s core status, %3$d C ABI version -->
-    <string name="omni_core_line">Core %1$s · %2$s · ABI %3$d</string>
+    <string name="omni_form_identity">Identity</string>
+    <string name="omni_form_package">Package name</string>
+    <string name="omni_form_label">Application name</string>
+    <string name="omni_form_architecture">Architecture</string>
+    <string name="omni_form_platform">Oldest Android</string>
+    <string name="omni_form_languages">Languages</string>
+    <string name="omni_form_no_compiler">Folders are created for what you pick. No compiler
+        exists yet, so the code in them is not compiled.</string>
 
-    <string name="omni_core_unavailable">Omni Core is not available</string>
+    <string name="omni_action_create">CREATE PROJECT</string>
+    <string name="omni_action_build">BUILD APK</string>
 
-    <string name="omni_not_a_builder_yet">No compiler yet. Everything else below is real and
-        checked against the tools Google and OpenSSL ship.</string>
+    <string name="omni_created">PROJECT CREATED</string>
+    <string name="omni_refused">NO PACKAGE PRODUCED</string>
+    <string name="omni_result_contents">Contents</string>
+    <string name="omni_result_signature">Signature</string>
+    <string name="omni_result_policy">Security policy</string>
+    <string name="omni_integrity_unknown">Integrity could not be checked.</string>
 
-    <string name="omni_section_build">Build a package</string>
-    <string name="omni_build_explain">Manifest, dex, package and signature, all made here.</string>
-    <string name="omni_build_action">BUILD APK</string>
-    <string name="omni_build_running">Building…</string>
-    <string name="omni_build_no_code">The activity is empty: there is no compiler yet, so nothing
-        writes method bodies.</string>
-
-    <string name="omni_section_roadmap">Roadmap</string>
-
-    <!-- %1$d phases whose work has landed, %2$d phases in total -->
-    <string name="omni_roadmap_summary">%1$d of %2$d delivered.</string>
-
-    <string name="omni_section_self_hosting">Self-hosting</string>
-    <string name="omni_section_subsystems">Core subsystems</string>
-
-    <!-- %1$d subsystems that reached PRODUCTION, %2$d subsystems in total -->
-    <string name="omni_subsystems_summary">%1$d of %2$d at PRODUCTION.</string>
-
-    <!-- %1$d directive section number, %2$s one-sentence summary -->
-    <string name="omni_subsystem_detail">Directive section %1$d · %2$s</string>
-
-    <string name="omni_section_toolchain">Toolchain lock</string>
-    <string name="omni_section_plugins">Plugins</string>
-    <string name="omni_section_diagnostics">Diagnostics</string>
-
-    <string name="omni_self_hosted">Self-hosted</string>
-    <string name="omni_yes">YES</string>
-    <string name="omni_no">NO</string>
-
-    <!-- %1$d components verified here, %2$d components pinned in total -->
-    <string name="omni_toolchain_summary">%1$d of %2$d pinned components could be
-        verified on this device. The rest run on a build host and are reported as
-        unverifiable rather than assumed.</string>
-
-    <!-- %1$d plugins implemented, %2$d plugins declared -->
-    <string name="omni_plugins_summary">%1$d of %2$d declared plugins are
-        implemented. The others exist as contracts only.</string>
-
-    <string name="omni_no_diagnostics">The Core reported no diagnostics.</string>
-
-    <string name="omni_section_logs">Logs</string>
-
-    <!-- %1$s the directory name created under the shared Documents folder -->
-    <string name="omni_log_explanation">Every run rewrites these files. The copy in
-        the application\'s own storage always succeeds and is what the crash
-        handler relies on. The copy under Android/data/com.omni.builder/files/%1$s
-        needs no permission and any file manager reaches it. The copy under
-        Documents/%1$s is the easiest to find when the device allows it. Whichever
-        of them failed says so above, with the reason.</string>
-
-    <string name="omni_log_written">WRITTEN</string>
-    <string name="omni_log_failed">FAILED</string>
-    <string name="omni_log_not_written_yet">The log has not been written yet.</string>
-
-    <!-- %1$s where the copy would have gone, %2$s what went wrong -->
-    <string name="omni_log_copy_failed">%1$s — %2$s</string>
-
-    <string name="omni_no_crash">No crash has been recorded.</string>
-    <string name="omni_crash_recorded">A crash was recorded. The most recent
-        record starts below; the full trace is in the file.</string>
-
-    <!-- %1$s the text of the bullet point -->
-    <string name="omni_bullet">•  %1$s</string>
+    <string name="omni_storage_rationale">Android 9 needs the storage permission to write logs
+        into Documents. Nothing else uses it.</string>
 </resources>

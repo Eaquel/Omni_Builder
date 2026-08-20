@@ -157,6 +157,9 @@ val omniSigningStoreFile = omniSetting("omni.signing.storeFile", "OMNI_SIGNING_S
 val omniSigningStorePassword =
     omniSetting("omni.signing.storePassword", "OMNI_SIGNING_STORE_PASSWORD")
 val omniSigningKeyAlias = omniSetting("omni.signing.keyAlias", "OMNI_SIGNING_KEY_ALIAS")
+val omniExpectedCertificate: String =
+    omniSetting("omni.signing.certificateSha256", "OMNI_SIGNING_CERT_SHA256") ?: ""
+
 val omniSigningKeyPassword =
     omniSetting("omni.signing.keyPassword", "OMNI_SIGNING_KEY_PASSWORD")
 
@@ -322,6 +325,10 @@ android {
         }
     }
 
+    defaultConfig {
+        resValue("string", "omni_expected_certificate", omniExpectedCertificate)
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -364,6 +371,7 @@ android {
     }
 
     buildFeatures {
+        resValues = true
         buildConfig = false
         viewBinding = false
     }

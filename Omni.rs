@@ -328,6 +328,28 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &["Only two components can be observed from a device."],
     },
     Subsystem {
+        name: "Self integrity",
+        status: Status::Partial,
+        directive_section: 29,
+        summary: "A package reads its own bytes, recomputes the digest its signature records, and compares the signing certificate against the one the build expects. Repacking or re-signing turns the standing to TAMPERED.",
+        missing: &[
+            "It cannot detect an attacker who patched the check out along with everything else. Self-verification raises the cost of repacking; it does not prevent it.",
+            "It says nothing about the running process, only about the file on disk.",
+            "No attestation and no remote check: there is nothing to compare against but a value compiled into the build.",
+        ],
+    },
+    Subsystem {
+        name: "Project scaffold",
+        status: Status::Partial,
+        directive_section: 46,
+        summary: "A project is a manifest at the root and one folder per chosen language, with a starter file in each. Package name, application name, architectures, platform range and languages are validated before anything is written.",
+        missing: &[
+            "The architecture choice is recorded and shown but nothing acts on it, because no native compiler exists to produce a library for it.",
+            "A starter file is written once and never regenerated; the project belongs to whoever edits it.",
+            "No resources, no assets and no dependency declarations.",
+        ],
+    },
+    Subsystem {
         name: "Omni_Guard policy",
         status: Status::Partial,
         directive_section: 29,
@@ -12949,6 +12971,541 @@ pub mod dexwrite {
     }
 }
 
+pub mod integrity {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Standing {
+        Trusted,
+        Unverified,
+        Tampered,
+    }
+
+    impl Standing {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Standing::Trusted => "TRUSTED",
+                Standing::Unverified => "UNVERIFIED",
+                Standing::Tampered => "TAMPERED",
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct SelfCheck {
+        pub has_block: bool,
+        pub digest_verified: bool,
+        pub digest_failed: bool,
+        pub certificate: Option<String>,
+        pub expected: Option<String>,
+        pub standing: Standing,
+        pub reason: String,
+    }
+
+    impl SelfCheck {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("standing", self.standing.as_str());
+            w.field_str("reason", &self.reason);
+            w.field_bool("signed", self.has_block);
+            w.field_bool(
+                "contentsUnchanged",
+                self.digest_verified && !self.digest_failed,
+            );
+            if let Some(certificate) = &self.certificate {
+                w.field_str("certificate", certificate);
+            }
+            if let Some(expected) = &self.expected {
+                w.field_str("expected", expected);
+            }
+            w.field_str(
+                "note",
+                "This is the package checking itself. It detects a package that was repacked or re-signed by anything that did not also change this check. It cannot detect an attacker who patched the check out, and it is not a claim that the running process is untampered.",
+            );
+            w.end_object();
+        }
+    }
+
+    fn normalise(fingerprint: &str) -> String {
+        fingerprint
+            .chars()
+            .filter(|c| c.is_ascii_hexdigit())
+            .map(|c| c.to_ascii_lowercase())
+            .collect()
+    }
+
+    pub fn examine_self(path: &str, expected: Option<&str>) -> SelfCheck {
+        let expected_clean = expected.map(normalise).filter(|text| text.len() == 64);
+
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                return SelfCheck {
+                    has_block: false,
+                    digest_verified: false,
+                    digest_failed: false,
+                    certificate: None,
+                    expected: expected_clean,
+                    standing: Standing::Unverified,
+                    reason: format!("The package could not be read: {why}"),
+                }
+            }
+        };
+
+        let mut sink = Sink::new();
+        let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+            return SelfCheck {
+                has_block: false,
+                digest_verified: false,
+                digest_failed: false,
+                certificate: None,
+                expected: expected_clean,
+                standing: Standing::Tampered,
+                reason: "The package is not a readable archive.".to_string(),
+            };
+        };
+
+        let report = crate::signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+
+        let certificate = report
+            .signers
+            .first()
+            .and_then(|signer| signer.certificates.first())
+            .map(|certificate| certificate.fingerprint.to_hex());
+
+        let digest_failed = report.digests_failed > 0;
+        let digest_verified = report.digests_verified > 0;
+
+        let (standing, reason) = if !report.has_block {
+            (
+                Standing::Tampered,
+                "The package carries no signature at all.".to_string(),
+            )
+        } else if digest_failed {
+            (
+                Standing::Tampered,
+                "The package does not match the digest recorded when it was signed.".to_string(),
+            )
+        } else if !digest_verified {
+            (
+                Standing::Unverified,
+                "The signature uses a digest this build cannot recompute.".to_string(),
+            )
+        } else {
+            match (&certificate, &expected_clean) {
+                (Some(found), Some(wanted)) if found == wanted => (
+                    Standing::Trusted,
+                    "The contents are unchanged and the certificate is the expected one."
+                        .to_string(),
+                ),
+                (Some(_), Some(_)) => (
+                    Standing::Tampered,
+                    "The contents are unchanged but the package was signed by a different key than the one this build expects.".to_string(),
+                ),
+                (Some(_), None) => (
+                    Standing::Unverified,
+                    "The contents are unchanged, but this build carries no expected certificate to compare against.".to_string(),
+                ),
+                (None, _) => (
+                    Standing::Unverified,
+                    "No certificate could be read from the signature.".to_string(),
+                ),
+            }
+        };
+
+        SelfCheck {
+            has_block: report.has_block,
+            digest_verified,
+            digest_failed,
+            certificate,
+            expected: expected_clean,
+            standing,
+            reason,
+        }
+    }
+
+    pub fn emit(check: &SelfCheck, sink: &mut Sink) {
+        if check.standing == Standing::Trusted {
+            return;
+        }
+        let severity = match check.standing {
+            Standing::Tampered => Severity::Fatal,
+            _ => Severity::Warning,
+        };
+        sink.emit(
+            Diagnostic::new(
+                match check.standing {
+                    Standing::Tampered => "EI001",
+                    _ => "EI002",
+                },
+                severity,
+                FailureClass::SecurityFailure,
+                "core.integrity",
+                check.reason.clone(),
+            )
+            .with_suggestion(
+                "A package that fails this check is not the one this build was made as. Install the original, or build it again from source.",
+            ),
+        );
+    }
+}
+
+pub mod scaffold {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    pub const ARM32: &str = "armeabi-v7a";
+    pub const ARM64: &str = "arm64-v8a";
+
+    pub const LANGUAGES: &[(&str, &str)] = &[
+        ("kotlin", "Kotlin"),
+        ("java", "Java"),
+        ("cpp", "Native"),
+        ("rust", "Rust"),
+    ];
+
+    pub const OLDEST_SUPPORTED: u32 = 28;
+    pub const NEWEST_SUPPORTED: u32 = 36;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.scaffold",
+            message,
+        )
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Spec {
+        pub package: String,
+        pub label: String,
+        pub abis: Vec<String>,
+        pub min_sdk: u32,
+        pub target_sdk: u32,
+        pub languages: Vec<String>,
+    }
+
+    impl Default for Spec {
+        fn default() -> Spec {
+            Spec {
+                package: "com.tr.yt".to_string(),
+                label: "My App".to_string(),
+                abis: vec![ARM64.to_string()],
+                min_sdk: OLDEST_SUPPORTED,
+                target_sdk: NEWEST_SUPPORTED,
+                languages: vec!["kotlin".to_string()],
+            }
+        }
+    }
+
+    pub fn valid_package(name: &str) -> bool {
+        let parts: Vec<&str> = name.split('.').collect();
+        if parts.len() < 2 || name.len() > 255 {
+            return false;
+        }
+        parts.iter().all(|part| {
+            !part.is_empty()
+                && part.starts_with(|c: char| c.is_ascii_lowercase())
+                && part
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+    }
+
+    impl Spec {
+        pub fn parse(text: &str) -> Result<Spec, Diagnostic> {
+            let mut spec = Spec::default();
+            spec.languages.clear();
+            spec.abis.clear();
+
+            for entry in text.split(';').filter(|part| !part.trim().is_empty()) {
+                let Some((key, value)) = entry.split_once('=') else {
+                    return Err(fail("EP001", "A setting is not written as key=value.")
+                        .with_context(format!("Setting: {entry:?}")));
+                };
+                let value = value.trim();
+                match key.trim() {
+                    "package" => spec.package = value.to_string(),
+                    "label" => spec.label = value.to_string(),
+                    "minSdk" => {
+                        spec.min_sdk = value.parse().map_err(|_| {
+                            fail("EP002", "The minimum platform is not a number.")
+                                .with_context(format!("Value: {value:?}"))
+                        })?
+                    }
+                    "targetSdk" => {
+                        spec.target_sdk = value.parse().map_err(|_| {
+                            fail("EP002", "The target platform is not a number.")
+                                .with_context(format!("Value: {value:?}"))
+                        })?
+                    }
+                    "abis" => {
+                        for abi in value.split(',').filter(|a| !a.trim().is_empty()) {
+                            let abi = abi.trim();
+                            if abi != ARM32 && abi != ARM64 {
+                                return Err(fail(
+                                    "EP003",
+                                    "An architecture is not one this build knows.",
+                                )
+                                .with_context(format!("Value: {abi:?}"))
+                                .with_context(format!("Known: {ARM32}, {ARM64}")));
+                            }
+                            spec.abis.push(abi.to_string());
+                        }
+                    }
+                    "languages" => {
+                        for language in value.split(',').filter(|l| !l.trim().is_empty()) {
+                            let language = language.trim().to_ascii_lowercase();
+                            if !LANGUAGES.iter().any(|(known, _)| *known == language) {
+                                return Err(fail(
+                                    "EP004",
+                                    "A language is not one this build knows.",
+                                )
+                                .with_context(format!("Value: {language:?}")));
+                            }
+                            spec.languages.push(language);
+                        }
+                    }
+                    other => {
+                        return Err(fail("EP005", "A setting is not one this build knows.")
+                            .with_context(format!("Setting: {other:?}")))
+                    }
+                }
+            }
+
+            spec.validate()?;
+            Ok(spec)
+        }
+
+        pub fn validate(&self) -> Result<(), Diagnostic> {
+            if !valid_package(&self.package) {
+                return Err(fail("EP010", "The package name is not a usable Android package name.")
+                    .with_context(format!("Value: {:?}", self.package))
+                    .with_suggestion(
+                        "Two or more parts separated by dots, each starting with a lower-case letter, for example com.tr.yt.",
+                    ));
+            }
+            if self.label.trim().is_empty() || self.label.len() > 64 {
+                return Err(fail("EP011", "The application name is empty or too long.")
+                    .with_context(format!("Value: {:?}", self.label)));
+            }
+            if self.abis.is_empty() {
+                return Err(fail("EP012", "No architecture was chosen."));
+            }
+            if self.languages.is_empty() {
+                return Err(fail("EP013", "No language was chosen."));
+            }
+            if self.min_sdk < OLDEST_SUPPORTED {
+                return Err(fail(
+                    "EP014",
+                    "The minimum platform is below what the security policy allows.",
+                )
+                .with_context(format!("Chosen: API {}", self.min_sdk))
+                .with_context(format!("Allowed: API {OLDEST_SUPPORTED} and above")));
+            }
+            if self.target_sdk > NEWEST_SUPPORTED {
+                return Err(fail("EP015", "The target platform is newer than any this toolchain has.")
+                    .with_context(format!("Chosen: API {}", self.target_sdk))
+                    .with_context(format!("Newest available: API {NEWEST_SUPPORTED}"))
+                    .with_suggestion(
+                        "A platform that has not shipped cannot be targeted. Nothing here will pretend otherwise.",
+                    ));
+            }
+            if self.min_sdk > self.target_sdk {
+                return Err(
+                    fail("EP016", "The minimum platform is newer than the target.")
+                        .with_context(format!("Minimum: API {}", self.min_sdk))
+                        .with_context(format!("Target: API {}", self.target_sdk)),
+                );
+            }
+            Ok(())
+        }
+
+        pub fn manifest(&self) -> String {
+            let activity = format!("{}.MainActivity", self.package);
+            let mut out = String::new();
+            out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+            out.push_str(
+                "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
+            );
+            out.push_str(&format!("    package=\"{}\"\n", self.package));
+            out.push_str("    android:versionCode=\"1\" android:versionName=\"1.0\">\n");
+            out.push_str(&format!(
+                "    <uses-sdk android:minSdkVersion=\"{}\" android:targetSdkVersion=\"{}\" />\n",
+                self.min_sdk, self.target_sdk
+            ));
+            out.push_str(&format!(
+                "    <application android:label=\"{}\" android:allowBackup=\"false\"\n",
+                self.label
+            ));
+            out.push_str("        android:extractNativeLibs=\"false\">\n");
+            out.push_str(&format!(
+                "        <activity android:name=\"{activity}\" android:exported=\"true\">\n"
+            ));
+            out.push_str("            <intent-filter>\n");
+            out.push_str(
+                "                <action android:name=\"android.intent.action.MAIN\" />\n",
+            );
+            out.push_str(
+                "                <category android:name=\"android.intent.category.LAUNCHER\" />\n",
+            );
+            out.push_str("            </intent-filter>\n");
+            out.push_str("        </activity>\n");
+            out.push_str("    </application>\n");
+            out.push_str("</manifest>\n");
+            out
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("package", &self.package);
+            w.field_str("label", &self.label);
+            w.field_u64("minSdk", self.min_sdk as u64);
+            w.field_u64("targetSdk", self.target_sdk as u64);
+            w.begin_array(Some("abis"));
+            for abi in &self.abis {
+                w.element_str(abi);
+            }
+            w.end_array();
+            w.begin_array(Some("languages"));
+            for language in &self.languages {
+                w.element_str(language);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    fn starter_source(language: &str, spec: &Spec) -> (String, String) {
+        let class = format!("{}.MainActivity", spec.package);
+        match language {
+            "kotlin" => (
+                "MainActivity.kt".to_string(),
+                format!(
+                    "package {}\n\nimport android.app.Activity\nimport android.os.Bundle\n\nclass MainActivity : Activity() {{\n    override fun onCreate(state: Bundle?) {{\n        super.onCreate(state)\n    }}\n}}\n",
+                    spec.package
+                ),
+            ),
+            "java" => (
+                "MainActivity.java".to_string(),
+                format!(
+                    "package {};\n\nimport android.app.Activity;\nimport android.os.Bundle;\n\npublic final class MainActivity extends Activity {{\n    @Override\n    protected void onCreate(Bundle state) {{\n        super.onCreate(state);\n    }}\n}}\n",
+                    spec.package
+                ),
+            ),
+            "cpp" => (
+                "Main.cpp".to_string(),
+                format!(
+                    "#include <jni.h>\n\nextern \"C\" JNIEXPORT jint JNICALL\nJNI_OnLoad(JavaVM *, void *) {{\n    return JNI_VERSION_1_6;\n}}\n\n// {class}\n"
+                ),
+            ),
+            "rust" => (
+                "Lib.rs".to_string(),
+                format!(
+                    "#![no_std]\n\n#[panic_handler]\nfn panic(_: &core::panic::PanicInfo) -> ! {{\n    loop {{}}\n}}\n\n#[no_mangle]\npub extern \"C\" fn omni_entry() -> i32 {{\n    0\n}}\n\n// {class}\n"
+                ),
+            ),
+            _ => (String::new(), String::new()),
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Created {
+        pub root: String,
+        pub folders: Vec<String>,
+        pub files: Vec<String>,
+    }
+
+    impl Created {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("root", &self.root);
+            w.begin_array(Some("folders"));
+            for folder in &self.folders {
+                w.element_str(folder);
+            }
+            w.end_array();
+            w.begin_array(Some("files"));
+            for file in &self.files {
+                w.element_str(file);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    pub fn create(root: &str, spec: &Spec) -> Result<Created, Diagnostic> {
+        spec.validate()?;
+        let base = std::path::Path::new(root);
+        std::fs::create_dir_all(base).map_err(|why| {
+            fail("EP020", "The project folder could not be made.")
+                .with_context(format!("Path: {root}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+
+        let manifest = base.join("AndroidManifest.xml");
+        std::fs::write(&manifest, spec.manifest()).map_err(|why| {
+            fail("EP021", "The manifest could not be written.")
+                .with_context(format!("Reason: {why}"))
+        })?;
+
+        let mut folders = Vec::new();
+        let mut files = vec!["AndroidManifest.xml".to_string()];
+
+        for (language, folder) in LANGUAGES {
+            if !spec.languages.iter().any(|chosen| chosen == language) {
+                continue;
+            }
+            let directory = base.join(folder);
+            std::fs::create_dir_all(&directory).map_err(|why| {
+                fail("EP022", "A language folder could not be made.")
+                    .with_context(format!("Folder: {folder}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            folders.push((*folder).to_string());
+
+            let (name, body) = starter_source(language, spec);
+            let path = directory.join(&name);
+            if !path.exists() {
+                std::fs::write(&path, body).map_err(|why| {
+                    fail("EP023", "A starter file could not be written.")
+                        .with_context(format!("File: {folder}/{name}"))
+                        .with_context(format!("Reason: {why}"))
+                })?;
+            }
+            files.push(format!("{folder}/{name}"));
+        }
+
+        Ok(Created {
+            root: root.to_string(),
+            folders,
+            files,
+        })
+    }
+
+    pub fn read_manifest(root: &str) -> Result<String, Diagnostic> {
+        let path = std::path::Path::new(root).join("AndroidManifest.xml");
+        std::fs::read_to_string(&path).map_err(|why| {
+            fail("EP030", "The project has no manifest at its root.")
+                .with_context(format!("Path: {}", path.display()))
+                .with_context(format!("Reason: {why}"))
+                .with_suggestion(
+                    "Create the project first; a project is a manifest and its language folders.",
+                )
+        })
+    }
+}
+
 pub mod builder {
     use crate::archive::Builder as ArchiveBuilder;
     use crate::certificate;
@@ -13080,6 +13637,54 @@ pub mod builder {
             not_before,
             not_after,
         )
+    }
+
+    pub fn from_manifest(manifest: &str) -> Result<Project, Diagnostic> {
+        let mut sink = crate::diag::Sink::new();
+        let root = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink)
+            .ok_or_else(|| fail("EB030", "The project's manifest could not be read."))?;
+
+        let activity = root
+            .children
+            .iter()
+            .find(|child| child.name == "application")
+            .and_then(|application| {
+                application
+                    .children
+                    .iter()
+                    .find(|child| child.name == "activity")
+            })
+            .and_then(|activity| activity.attribute("android:name"))
+            .ok_or_else(|| {
+                fail(
+                    "EB031",
+                    "The manifest declares no activity to build a class for.",
+                )
+                .with_suggestion(
+                    "A project needs one activity so the package has something to launch.",
+                )
+            })?
+            .to_string();
+
+        let descriptor = format!("L{};", activity.replace('.', "/"));
+        Ok(Project {
+            manifest: manifest.to_string(),
+            files: Vec::new(),
+            code: vec![crate::dexwrite::Class {
+                descriptor: descriptor.clone(),
+                superclass: "Landroid/app/Activity;".to_string(),
+                access_flags: crate::dexwrite::ACC_PUBLIC,
+                source_file: Some("MainActivity.java".to_string()),
+                direct_methods: vec![crate::dexwrite::default_constructor(&descriptor)],
+            }],
+            references: vec![crate::dexwrite::MethodRef {
+                class: "Landroid/app/Activity;".to_string(),
+                name: "<init>".to_string(),
+                return_type: "V".to_string(),
+                parameters: Vec::new(),
+            }],
+            identity: Identity::default(),
+        })
     }
 
     pub fn signing_key(path: &str) -> Result<(rsa::PrivateKey, bool), Diagnostic> {
@@ -13876,26 +14481,73 @@ pub mod ffi {
     }
 
     #[no_mangle]
-    pub unsafe extern "C" fn omni_build_package(
-        package_name: *const c_char,
+    fn text_from(pointer: *const c_char) -> Option<String> {
+        if pointer.is_null() {
+            return None;
+        }
+        unsafe { CStr::from_ptr(pointer) }
+            .to_str()
+            .ok()
+            .map(|value| value.to_string())
+    }
+
+    fn hand_back(w: crate::json::Writer) -> *mut c_char {
+        match CString::new(w.finish()) {
+            Ok(report) => report.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        }
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_create_project(
+        root: *const c_char,
+        spec: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(spec)) = (text_from(root), text_from(spec)) else {
+                return std::ptr::null_mut();
+            };
+
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::scaffold::Spec::parse(&spec)
+                .and_then(|spec| crate::scaffold::create(&root, &spec).map(|made| (spec, made)))
+            {
+                Ok((spec, made)) => {
+                    w.field_bool("created", true);
+                    spec.write_json(&mut w, "project");
+                    made.write_json(&mut w, "layout");
+                }
+                Err(error) => {
+                    w.field_bool("created", false);
+                    w.field_str("error", &error.message);
+                    if let Some(suggestion) = &error.suggestion {
+                        w.field_str("suggestion", suggestion);
+                    }
+                    w.begin_array(Some("context"));
+                    for line in &error.context {
+                        w.element_str(line);
+                    }
+                    w.end_array();
+                }
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_build_project(
+        root: *const c_char,
         output_path: *const c_char,
         key_path: *const c_char,
     ) -> *mut c_char {
         let result = catch_unwind(|| {
-            if package_name.is_null() || output_path.is_null() || key_path.is_null() {
+            let (Some(root), Some(output_path), Some(key_path)) =
+                (text_from(root), text_from(output_path), text_from(key_path))
+            else {
                 return std::ptr::null_mut();
-            }
-            let package_name = match unsafe { CStr::from_ptr(package_name) }.to_str() {
-                Ok(text) => text.to_string(),
-                Err(_) => return std::ptr::null_mut(),
-            };
-            let output_path = match unsafe { CStr::from_ptr(output_path) }.to_str() {
-                Ok(text) => text.to_string(),
-                Err(_) => return std::ptr::null_mut(),
-            };
-            let key_path = match unsafe { CStr::from_ptr(key_path) }.to_str() {
-                Ok(text) => text.to_string(),
-                Err(_) => return std::ptr::null_mut(),
             };
 
             let mut w = crate::json::Writer::new();
@@ -13907,9 +14559,11 @@ pub mod ffi {
                 .map(|elapsed| elapsed.as_secs() as i64)
                 .unwrap_or(0);
 
-            let outcome = crate::builder::signing_key(&key_path).and_then(|(key, reused)| {
+            let outcome = crate::scaffold::read_manifest(&root).and_then(|manifest| {
+                let (key, reused) = crate::builder::signing_key(&key_path)?;
                 w.field_bool("reusedKey", reused);
-                let project = crate::builder::starter(&package_name, "Made By Omni");
+                let mut project = crate::builder::from_manifest(&manifest)?;
+                project.identity.common_name = "Omni_Builder".to_string();
                 crate::builder::build(&project, &key, now, &mut sink)
             });
 
@@ -13922,7 +14576,6 @@ pub mod ffi {
                     }
                     Err(why) => {
                         w.field_bool("built", false);
-                        w.field_str("path", &output_path);
                         w.field_str("error", &format!("the package could not be written: {why}"));
                     }
                 },
@@ -13937,11 +14590,28 @@ pub mod ffi {
 
             sink.write_json(&mut w, "diagnostics");
             w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
 
-            match CString::new(w.finish()) {
-                Ok(report) => report.into_raw(),
-                Err(_) => std::ptr::null_mut(),
-            }
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_verify_self(
+        package_path: *const c_char,
+        expected_certificate: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(package_path) = text_from(package_path) else {
+                return std::ptr::null_mut();
+            };
+            let expected = text_from(expected_certificate);
+
+            let check = crate::integrity::examine_self(&package_path, expected.as_deref());
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            check.write_json(&mut w, "integrity");
+            w.end_object();
+            hand_back(w)
         });
         result.unwrap_or(std::ptr::null_mut())
     }
@@ -18189,93 +18859,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_path_the_application_takes_produces_a_package_on_disk() {
-        let directory = temp_directory("omni-ffi-build");
-        let output = directory.join("made-by-omni.apk");
-        let key_file = directory.join("signing.pk8");
-        let manifest = std::ffi::CString::new("com.omni.made").unwrap();
-        let path = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
-        let key = std::ffi::CString::new(key_file.to_str().unwrap()).unwrap();
-
-        let report = unsafe {
-            let raw =
-                super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr(), key.as_ptr());
-            assert!(!raw.is_null(), "the bridge must always report");
-            let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
-            super::ffi::omni_string_free(raw);
-            text
-        };
-
-        assert!(is_structurally_valid(&report), "{report}");
-        assert!(report.contains("\"built\":true"), "{report}");
-        assert!(report.contains("\"verdict\":\"PASSED\""), "{report}");
-        assert!(report.contains("\"carriesCode\":true"), "{report}");
-        assert!(report.contains("\"reusedKey\":false"), "{report}");
-        assert!(output.is_file(), "the package must be on disk");
-        assert!(
-            key_file.is_file(),
-            "the key must be kept for the next build"
-        );
-
-        let again = unsafe {
-            let raw =
-                super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr(), key.as_ptr());
-            let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
-            super::ffi::omni_string_free(raw);
-            text
-        };
-        assert!(
-            again.contains("\"reusedKey\":true"),
-            "a second build must keep the same identity: {again}"
-        );
-
-        let bytes = std::fs::read(&output).unwrap();
-        let mut sink = Sink::new();
-        let archive = archive::read(&bytes, &mut sink).expect("what it wrote must read back");
-        let signing_report = signing::examine(
-            &bytes,
-            archive.central_directory_offset(),
-            archive.end_record_offset(),
-            &mut sink,
-        );
-        assert!(signing_report.has_block);
-        assert_eq!(signing_report.digests_failed, 0, "{:?}", sink.entries());
-        assert!(signing_report.digests_verified > 0);
-
-        std::fs::remove_dir_all(&directory).ok();
-        eprintln!(
-            "application path: {} bytes written and read back through the bridge",
-            bytes.len()
-        );
-    }
-
-    #[test]
-    fn the_bridge_reports_a_path_it_cannot_write_to() {
-        let directory = temp_directory("omni-ffi-refuse");
-        let output = directory.join("should-not-exist.apk");
-        let key_file = directory.join("signing.pk8");
-        let manifest = std::ffi::CString::new("com.omni.made").unwrap();
-        let path = std::ffi::CString::new("/does/not/exist/nowhere.apk").unwrap();
-        let key = std::ffi::CString::new(key_file.to_str().unwrap()).unwrap();
-        let _ = &output;
-
-        let report = unsafe {
-            let raw =
-                super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr(), key.as_ptr());
-            let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
-            super::ffi::omni_string_free(raw);
-            text
-        };
-
-        assert!(report.contains("\"built\":false"), "{report}");
-        assert!(
-            report.contains("could not be written"),
-            "the failure must say what went wrong: {report}"
-        );
-        std::fs::remove_dir_all(&directory).ok();
-    }
-
     fn sample_activity_class() -> super::dexwrite::Class {
         super::dexwrite::Class {
             descriptor: "Lcom/omni/made/MainActivity;".to_string(),
@@ -18364,6 +18947,228 @@ mod tests {
     fn a_dex_with_no_classes_is_refused() {
         let error = super::dexwrite::write(&[], &[]).unwrap_err();
         assert_eq!(error.code, "EW010");
+    }
+
+    fn call_ffi(f: impl FnOnce() -> *mut std::os::raw::c_char) -> String {
+        unsafe {
+            let raw = f();
+            assert!(!raw.is_null(), "the bridge must always report");
+            let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
+            super::ffi::omni_string_free(raw);
+            text
+        }
+    }
+
+    #[test]
+    fn a_project_is_a_manifest_and_language_folders_and_nothing_else() {
+        let directory = temp_directory("omni-scaffold");
+        let root = directory.join("MyApp");
+        let spec = "package=com.tr.yt;label=My App;abis=arm64-v8a,armeabi-v7a;minSdk=28;targetSdk=36;languages=kotlin,rust,cpp,java";
+
+        let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+        let spec_c = std::ffi::CString::new(spec).unwrap();
+        let report = call_ffi(|| unsafe {
+            super::ffi::omni_create_project(root_c.as_ptr(), spec_c.as_ptr())
+        });
+        assert!(is_structurally_valid(&report), "{report}");
+        assert!(report.contains("\"created\":true"), "{report}");
+
+        let mut names: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["AndroidManifest.xml", "Java", "Kotlin", "Native", "Rust"],
+            "the root holds the manifest and the language folders, nothing else"
+        );
+
+        for (folder, file) in [
+            ("Kotlin", "MainActivity.kt"),
+            ("Java", "MainActivity.java"),
+            ("Native", "Main.cpp"),
+            ("Rust", "Lib.rs"),
+        ] {
+            let inside: Vec<String> = std::fs::read_dir(root.join(folder))
+                .unwrap()
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().to_string())
+                .collect();
+            assert_eq!(
+                inside,
+                vec![file],
+                "{folder} holds one starter file and no subfolder"
+            );
+        }
+
+        let manifest = std::fs::read_to_string(root.join("AndroidManifest.xml")).unwrap();
+        assert!(manifest.contains("package=\"com.tr.yt\""), "{manifest}");
+        assert!(manifest.contains("android:label=\"My App\""), "{manifest}");
+        assert!(
+            manifest.contains("android:minSdkVersion=\"28\""),
+            "{manifest}"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn only_the_languages_chosen_get_a_folder() {
+        let directory = temp_directory("omni-scaffold-one");
+        let root = directory.join("OnlyRust");
+        let spec = super::scaffold::Spec {
+            package: "com.tr.yt".to_string(),
+            label: "Only Rust".to_string(),
+            abis: vec![super::scaffold::ARM64.to_string()],
+            min_sdk: 28,
+            target_sdk: 36,
+            languages: vec!["rust".to_string()],
+        };
+        let made = super::scaffold::create(root.to_str().unwrap(), &spec).unwrap();
+        assert_eq!(made.folders, vec!["Rust"]);
+        assert!(!root.join("Kotlin").exists());
+        assert!(!root.join("Native").exists());
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_project_specification_is_checked_before_anything_is_written() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "package=nodots;label=X;abis=arm64-v8a;languages=kotlin",
+                "EP010",
+            ),
+            (
+                "package=com.tr.yt;label=;abis=arm64-v8a;languages=kotlin",
+                "EP011",
+            ),
+            ("package=com.tr.yt;label=X;abis=;languages=kotlin", "EP012"),
+            (
+                "package=com.tr.yt;label=X;abis=arm64-v8a;languages=",
+                "EP013",
+            ),
+            (
+                "package=com.tr.yt;label=X;abis=arm64-v8a;languages=kotlin;minSdk=21",
+                "EP014",
+            ),
+            (
+                "package=com.tr.yt;label=X;abis=arm64-v8a;languages=kotlin;targetSdk=99",
+                "EP015",
+            ),
+            (
+                "package=com.tr.yt;label=X;abis=x86;languages=kotlin",
+                "EP003",
+            ),
+            (
+                "package=com.tr.yt;label=X;abis=arm64-v8a;languages=go",
+                "EP004",
+            ),
+        ];
+        for (spec, code) in cases {
+            let error = super::scaffold::Spec::parse(spec).unwrap_err();
+            assert_eq!(error.code, *code, "{spec}");
+        }
+    }
+
+    #[test]
+    fn a_platform_that_has_not_shipped_cannot_be_targeted() {
+        let error = super::scaffold::Spec::parse(
+            "package=com.tr.yt;label=X;abis=arm64-v8a;languages=kotlin;targetSdk=37",
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "EP015");
+        assert!(error.suggestion.unwrap().contains("pretend"));
+    }
+
+    #[test]
+    fn a_project_created_here_builds_into_a_package() {
+        let directory = temp_directory("omni-scaffold-build");
+        let root = directory.join("Buildable");
+        let spec = super::scaffold::Spec::default();
+        super::scaffold::create(root.to_str().unwrap(), &spec).unwrap();
+
+        let output = directory.join("out.apk");
+        let key = directory.join("signing.pk8");
+        let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+        let out_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+        let key_c = std::ffi::CString::new(key.to_str().unwrap()).unwrap();
+
+        let report = call_ffi(|| unsafe {
+            super::ffi::omni_build_project(root_c.as_ptr(), out_c.as_ptr(), key_c.as_ptr())
+        });
+        assert!(is_structurally_valid(&report), "{report}");
+        assert!(report.contains("\"built\":true"), "{report}");
+        assert!(report.contains("\"carriesCode\":true"), "{report}");
+        assert!(output.is_file());
+
+        let bytes = std::fs::read(&output).unwrap();
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).unwrap();
+        assert!(archive
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "classes.dex"));
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_package_checks_itself_and_says_what_it_found() {
+        let directory = temp_directory("omni-integrity");
+        let root = directory.join("Checked");
+        super::scaffold::create(root.to_str().unwrap(), &super::scaffold::Spec::default()).unwrap();
+
+        let output = directory.join("checked.apk");
+        let key = directory.join("signing.pk8");
+        let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+        let out_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+        let key_c = std::ffi::CString::new(key.to_str().unwrap()).unwrap();
+        call_ffi(|| unsafe {
+            super::ffi::omni_build_project(root_c.as_ptr(), out_c.as_ptr(), key_c.as_ptr())
+        });
+
+        let bytes = std::fs::read(&output).unwrap();
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).unwrap();
+        let signing_report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+        let fingerprint = signing_report.signers[0].certificates[0]
+            .fingerprint
+            .to_hex();
+
+        let path_c = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+        let good = std::ffi::CString::new(fingerprint.clone()).unwrap();
+        let report =
+            call_ffi(|| unsafe { super::ffi::omni_verify_self(path_c.as_ptr(), good.as_ptr()) });
+        assert!(report.contains("\"standing\":\"TRUSTED\""), "{report}");
+        assert!(
+            report.contains("cannot detect an attacker who patched the check out"),
+            "{report}"
+        );
+
+        let other = std::ffi::CString::new("0".repeat(64)).unwrap();
+        let report =
+            call_ffi(|| unsafe { super::ffi::omni_verify_self(path_c.as_ptr(), other.as_ptr()) });
+        assert!(report.contains("\"standing\":\"TAMPERED\""), "{report}");
+        assert!(report.contains("signed by a different key"), "{report}");
+
+        let mut damaged = bytes.clone();
+        let at = damaged.len() / 3;
+        damaged[at] ^= 0xff;
+        let damaged_path = directory.join("damaged.apk");
+        std::fs::write(&damaged_path, &damaged).unwrap();
+        let damaged_c = std::ffi::CString::new(damaged_path.to_str().unwrap()).unwrap();
+        let report =
+            call_ffi(|| unsafe { super::ffi::omni_verify_self(damaged_c.as_ptr(), good.as_ptr()) });
+        assert!(report.contains("\"standing\":\"TAMPERED\""), "{report}");
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("integrity: a signed package reports TRUSTED, a re-signed or edited one reports TAMPERED");
     }
 
     #[test]

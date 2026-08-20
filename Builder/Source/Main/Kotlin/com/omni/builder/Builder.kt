@@ -19,6 +19,10 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.text.Editable
+import android.text.TextWatcher
+import android.widget.EditText
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -576,11 +580,11 @@ object Builder {
 
     external fun nativeStateReport(observedEnvironment: String?): String
 
-    external fun nativeBuildPackage(
-        packageName: String,
-        outputPath: String,
-        keyPath: String,
-    ): String
+    external fun nativeCreateProject(root: String, spec: String): String
+
+    external fun nativeBuildProject(root: String, outputPath: String, keyPath: String): String
+
+    external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
     fun observedEnvironment(context: Context): String {
         val info = context.applicationInfo
@@ -606,6 +610,52 @@ data class PluginRow(
     val roadmapPhase: String,
 )
 
+data class ProjectSpec(
+    val packageName: String,
+    val label: String,
+    val abis: List<String>,
+    val minSdk: Int,
+    val targetSdk: Int,
+    val languages: List<String>,
+) {
+    fun encode(): String = buildString {
+        append("package=").append(packageName).append(';')
+        append("label=").append(label).append(';')
+        append("abis=").append(abis.joinToString(",")).append(';')
+        append("minSdk=").append(minSdk).append(';')
+        append("targetSdk=").append(targetSdk).append(';')
+        append("languages=").append(languages.joinToString(","))
+    }
+}
+
+data class CreateOutcome(
+    val created: Boolean,
+    val root: String?,
+    val folders: List<String>,
+    val files: List<String>,
+    val error: String?,
+    val suggestion: String?,
+) {
+    companion object {
+        fun parse(document: String): CreateOutcome {
+            val root = JSONObject(document)
+            val layout = root.optJSONObject("layout")
+            fun strings(name: String): List<String> {
+                val array = layout?.optJSONArray(name) ?: return emptyList()
+                return (0 until array.length()).map { array.getString(it) }
+            }
+            return CreateOutcome(
+                created = root.optBoolean("created", false),
+                root = layout?.optString("root")?.ifEmpty { null },
+                folders = strings("folders"),
+                files = strings("files"),
+                error = root.optString("error").ifEmpty { null },
+                suggestion = root.optString("suggestion").ifEmpty { null },
+            )
+        }
+    }
+}
+
 data class BuildOutcome(
     val built: Boolean,
     val path: String?,
@@ -613,7 +663,6 @@ data class BuildOutcome(
     val entries: Long,
     val signed: Boolean,
     val carriesCode: Boolean,
-    val certificate: String?,
     val guardVerdict: String?,
     val rulesApplied: Long,
     val findings: List<String>,
@@ -622,13 +671,13 @@ data class BuildOutcome(
     companion object {
         fun parse(document: String): BuildOutcome {
             val root = JSONObject(document)
-            val package_ = root.optJSONObject("package")
-            val guard = package_?.optJSONObject("guard")
+            val packaged = root.optJSONObject("package")
+            val guard = packaged?.optJSONObject("guard")
             val findings = mutableListOf<String>()
             guard?.optJSONArray("findings")?.let { array ->
                 for (index in 0 until array.length()) {
                     val item = array.getJSONObject(index)
-                    findings.add("${item.getString("what")} — ${item.getString("remedy")}")
+                    findings.add("${item.getString("what")} ${item.getString("remedy")}")
                 }
             }
             root.optJSONArray("diagnostics")?.let { array ->
@@ -641,15 +690,31 @@ data class BuildOutcome(
             return BuildOutcome(
                 built = root.optBoolean("built", false),
                 path = root.optString("path").ifEmpty { null },
-                bytes = package_?.optLong("bytes") ?: 0L,
-                entries = package_?.optLong("entries") ?: 0L,
-                signed = package_?.optBoolean("signed", false) ?: false,
-                carriesCode = package_?.optBoolean("carriesCode", false) ?: false,
-                certificate = package_?.optString("certificate")?.ifEmpty { null },
+                bytes = packaged?.optLong("bytes") ?: 0L,
+                entries = packaged?.optLong("entries") ?: 0L,
+                signed = packaged?.optBoolean("signed", false) ?: false,
+                carriesCode = packaged?.optBoolean("carriesCode", false) ?: false,
                 guardVerdict = guard?.optString("verdict")?.ifEmpty { null },
                 rulesApplied = guard?.optLong("rulesApplied") ?: 0L,
                 findings = findings,
                 error = root.optString("error").ifEmpty { null },
+            )
+        }
+    }
+}
+
+data class SelfCheck(
+    val standing: String,
+    val reason: String,
+    val certificate: String?,
+) {
+    companion object {
+        fun parse(document: String): SelfCheck {
+            val integrity = JSONObject(document).getJSONObject("integrity")
+            return SelfCheck(
+                standing = integrity.getString("standing"),
+                reason = integrity.getString("reason"),
+                certificate = integrity.optString("certificate").ifEmpty { null },
             )
         }
     }
@@ -772,16 +837,42 @@ class BuilderActivity : Activity() {
 
     private companion object {
         const val STORAGE_PERMISSION_REQUEST = 1
+        val ABI_CHOICES = listOf(
+            "32 bit" to listOf("armeabi-v7a"),
+            "64 bit" to listOf("arm64-v8a"),
+            "32 + 64 bit" to listOf("armeabi-v7a", "arm64-v8a"),
+        )
+        val ANDROID_RELEASES = listOf(
+            28 to "Android 9",
+            29 to "Android 10",
+            30 to "Android 11",
+            31 to "Android 12",
+            32 to "Android 12L",
+            33 to "Android 13",
+            34 to "Android 14",
+            35 to "Android 15",
+            36 to "Android 16",
+        )
+        val LANGUAGE_CHOICES = listOf(
+            "rust" to "Rust",
+            "cpp" to "C++",
+            "kotlin" to "Kotlin",
+            "java" to "Java",
+        )
     }
 
-    private var logDestinationView: TextView? = null
+    private var packageName_ = "com.tr.yt"
+    private var appLabel = "My App"
+    private var abiChoice = 1
+    private var minSdk = 28
+    private var targetSdk = 36
+    private val languages = linkedSetOf("kotlin")
 
-    private var logCopiesView: LinearLayout? = null
+    private lateinit var results: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
-
         requestLegacyStoragePermissionIfNeeded()
 
         val root = LinearLayout(this).apply {
@@ -791,39 +882,239 @@ class BuilderActivity : Activity() {
         }
 
         when (val load = Builder.load()) {
-            is Builder.LoadState.Failed -> renderLoadFailure(root, load.reason)
-            is Builder.LoadState.Loaded -> renderCoreState(root)
+            is Builder.LoadState.Failed -> {
+                root.addView(banner(load.reason, R.color.omni_error))
+                setContentView(scroll(root))
+                return
+            }
+            is Builder.LoadState.Loaded -> Unit
         }
 
-        renderLogSection(root)
+        root.addView(renderIntegrity())
+        root.addView(title(getString(R.string.omni_app_name)))
 
-        setContentView(
-            ScrollView(this).apply {
-                setBackgroundColor(color(R.color.omni_background))
-                isFillViewport = true
-                addView(root, MATCH_PARENT, WRAP_CONTENT)
+        section(root, R.string.omni_form_identity)
+        root.addView(field(getString(R.string.omni_form_package), packageName_) { packageName_ = it })
+        root.addView(field(getString(R.string.omni_form_label), appLabel) { appLabel = it })
+
+        section(root, R.string.omni_form_architecture)
+        root.addView(chips(ABI_CHOICES.map { it.first }, { it == abiChoice }) { abiChoice = it })
+
+        section(root, R.string.omni_form_platform)
+        root.addView(
+            chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == minSdk }) {
+                minSdk = ANDROID_RELEASES[it].first
+                if (targetSdk < minSdk) targetSdk = minSdk
             }
         )
+
+        section(root, R.string.omni_form_languages)
+        root.addView(
+            chips(
+                LANGUAGE_CHOICES.map { it.second },
+                { languages.contains(LANGUAGE_CHOICES[it].first) },
+            ) { index ->
+                val key = LANGUAGE_CHOICES[index].first
+                if (!languages.remove(key)) languages.add(key)
+            }
+        )
+        root.addView(body(getString(R.string.omni_form_no_compiler)))
+
+        results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(action(getString(R.string.omni_action_create)) { createProject() })
+        root.addView(action(getString(R.string.omni_action_build)) { buildProject() })
+        root.addView(results)
+
+        setContentView(scroll(root))
     }
 
-    override fun onResume() {
-        super.onResume()
-        OmniLog.event(LogLevel.INFO, "lifecycle", "Activity resumed.")
+    private fun scroll(inner: LinearLayout) = ScrollView(this).apply {
+        setBackgroundColor(color(R.color.omni_background))
+        isFillViewport = true
+        addView(inner, MATCH_PARENT, WRAP_CONTENT)
     }
 
-    override fun onPause() {
-        super.onPause()
-        OmniLog.event(LogLevel.INFO, "lifecycle", "Activity paused.")
-        OmniLog.flushSession()
+    private fun projectRoot() = File(getExternalFilesDir(null) ?: filesDir, "Projects/$appLabel")
+
+    private fun spec() = ProjectSpec(
+        packageName = packageName_.trim(),
+        label = appLabel.trim(),
+        abis = ABI_CHOICES[abiChoice].second,
+        minSdk = minSdk,
+        targetSdk = targetSdk,
+        languages = languages.toList(),
+    )
+
+    private fun createProject() {
+        results.removeAllViews()
+        val outcome = runCatching {
+            CreateOutcome.parse(Builder.nativeCreateProject(projectRoot().absolutePath, spec().encode()))
+        }.getOrElse {
+            OmniLog.recordCrash(Thread.currentThread(), it)
+            results.addView(banner(it.message ?: it.javaClass.simpleName, R.color.omni_error))
+            return
+        }
+
+        if (!outcome.created) {
+            results.addView(banner(outcome.error ?: "refused", R.color.omni_error))
+            outcome.suggestion?.let { results.addView(body(it)) }
+            return
+        }
+        OmniLog.event(LogLevel.INFO, "project", "Created ${outcome.root}")
+        results.addView(banner(getString(R.string.omni_created), R.color.omni_ok))
+        outcome.root?.let { results.addView(body(it)) }
+        outcome.files.forEach { results.addView(bullet(it)) }
     }
 
-    override fun onDestroy() {
-        OmniLog.setPublishListener(null)
-        logDestinationView = null
-        logCopiesView = null
-        OmniLog.event(LogLevel.INFO, "lifecycle", "Activity destroyed.")
-        OmniLog.flushSession()
-        super.onDestroy()
+    private fun buildProject() {
+        results.removeAllViews()
+        val destination = File(getExternalFilesDir(null) ?: filesDir, "${appLabel.trim()}.apk")
+        val key = File(filesDir, "signing.pk8")
+        val started = System.nanoTime()
+        val outcome = runCatching {
+            BuildOutcome.parse(
+                Builder.nativeBuildProject(
+                    projectRoot().absolutePath,
+                    destination.absolutePath,
+                    key.absolutePath,
+                )
+            )
+        }.getOrElse {
+            OmniLog.recordCrash(Thread.currentThread(), it)
+            results.addView(banner(it.message ?: it.javaClass.simpleName, R.color.omni_error))
+            return
+        }
+        val elapsed = (System.nanoTime() - started) / 1_000_000
+
+        if (!outcome.built) {
+            OmniLog.event(LogLevel.ERROR, "build", "Refused: ${outcome.error}")
+            results.addView(banner(getString(R.string.omni_refused), R.color.omni_error))
+            outcome.error?.let { results.addView(body(it)) }
+            outcome.findings.forEach { results.addView(bullet(it)) }
+            return
+        }
+
+        OmniLog.event(LogLevel.INFO, "build", "Built ${outcome.bytes} bytes in $elapsed ms")
+        results.addView(banner("${outcome.bytes} bytes · $elapsed ms", R.color.omni_ok))
+        results.addView(
+            keyValue(
+                getString(R.string.omni_result_contents),
+                if (outcome.carriesCode) "manifest + classes.dex" else "manifest",
+                R.color.omni_muted,
+                trailing = "${outcome.entries}",
+            )
+        )
+        results.addView(
+            keyValue(
+                getString(R.string.omni_result_signature),
+                "v2 · RSA-2048",
+                if (outcome.signed) R.color.omni_ok else R.color.omni_error,
+                trailing = if (outcome.signed) "SIGNED" else "NONE",
+            )
+        )
+        results.addView(
+            keyValue(
+                getString(R.string.omni_result_policy),
+                "${outcome.rulesApplied} rules",
+                if (outcome.guardVerdict == "PASSED") R.color.omni_ok else R.color.omni_error,
+                trailing = outcome.guardVerdict ?: "?",
+            )
+        )
+        outcome.path?.let { results.addView(bullet(it)) }
+    }
+
+    private fun renderIntegrity(): TextView {
+        val expected = getString(R.string.omni_expected_certificate).ifEmpty { null }
+        val check = runCatching {
+            SelfCheck.parse(Builder.nativeVerifySelf(applicationInfo.sourceDir, expected))
+        }.getOrNull()
+
+        if (check == null) {
+            return banner(getString(R.string.omni_integrity_unknown), R.color.omni_warning)
+        }
+        OmniLog.event(LogLevel.INFO, "integrity", "${check.standing}: ${check.reason}")
+        val colour = when (check.standing) {
+            "TRUSTED" -> R.color.omni_ok
+            "TAMPERED" -> R.color.omni_error
+            else -> R.color.omni_warning
+        }
+        return banner("${check.standing} · ${check.reason}", colour)
+    }
+
+    private fun action(label: String, onPress: () -> Unit) = TextView(this).apply {
+        text = label
+        setTextColor(color(R.color.omni_ok))
+        setTypeface(typeface, Typeface.BOLD)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+        gravity = Gravity.CENTER
+        setPadding(dp(R.dimen.omni_gap))
+        isClickable = true
+        setOnClickListener { onPress() }
+    }
+
+    private fun field(label: String, initial: String, onChange: (String) -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
+        }
+        row.addView(TextView(this).apply {
+            text = label
+            setTextColor(color(R.color.omni_muted))
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.omni_text_small))
+        })
+        row.addView(EditText(this).apply {
+            setText(initial)
+            setTextColor(color(R.color.omni_foreground))
+            setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.omni_text_body))
+            isSingleLine = true
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                override fun afterTextChanged(s: Editable?) {
+                    onChange(s?.toString().orEmpty())
+                }
+            })
+        })
+        return row
+    }
+
+    private fun chips(
+        labels: List<String>,
+        selected: (Int) -> Boolean,
+        onPick: (Int) -> Unit,
+    ): View {
+        val holder = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
+        }
+        val scroller = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val views = mutableListOf<TextView>()
+
+        fun repaint() {
+            views.forEachIndexed { index, view ->
+                view.setTextColor(
+                    color(if (selected(index)) R.color.omni_ok else R.color.omni_muted)
+                )
+            }
+        }
+
+        labels.forEachIndexed { index, label ->
+            val chip = TextView(this).apply {
+                text = label
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.omni_text_body))
+                setPadding(dp(R.dimen.omni_gap), dp(R.dimen.omni_gap_small), dp(R.dimen.omni_gap), dp(R.dimen.omni_gap_small))
+                isClickable = true
+                setOnClickListener {
+                    onPick(index)
+                    repaint()
+                }
+            }
+            views.add(chip)
+            holder.addView(chip)
+        }
+        repaint()
+        scroller.addView(holder)
+        return scroller
     }
 
     private fun requestLegacyStoragePermissionIfNeeded() {
@@ -831,370 +1122,24 @@ class BuilderActivity : Activity() {
             return
         }
         if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            == PackageManager.PERMISSION_GRANTED
+            != PackageManager.PERMISSION_GRANTED
         ) {
-            return
+            requestPermissions(
+                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                STORAGE_PERMISSION_REQUEST,
+            )
         }
-        OmniLog.event(
-            LogLevel.INFO,
-            "log",
-            "Requesting the storage permission; on Android 9 it is the only way " +
-                "to write into shared Documents.",
-        )
-        requestPermissions(
-            arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-            STORAGE_PERMISSION_REQUEST,
-        )
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray,
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode != STORAGE_PERMISSION_REQUEST) {
-            return
-        }
-        val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
-        OmniLog.event(
-            if (granted) LogLevel.INFO else LogLevel.WARN,
-            "log",
-            if (granted) {
-                "Storage permission granted; logs will be published to Documents."
-            } else {
-                "Storage permission denied; logs stay in the application's own " +
-                    "storage and are not published to Documents."
-            },
-        )
+    override fun onPause() {
+        super.onPause()
         OmniLog.flushSession()
     }
 
-    private fun renderLoadFailure(root: LinearLayout, reason: String) {
-        root.addView(title(getString(R.string.omni_app_name)))
-        root.addView(banner(getString(R.string.omni_core_unavailable), R.color.omni_error))
-        root.addView(body(reason))
-    }
-
-    private fun renderCoreState(root: LinearLayout) {
-        val started = System.nanoTime()
-        val state = try {
-            CoreState.parse(Builder.nativeStateReport(Builder.observedEnvironment(this)))
-        } catch (error: RuntimeException) {
-            val reason = "The Core produced a report this build cannot read: " +
-                "${error.message}. The interface and the Core are out of step."
-            OmniLog.event(LogLevel.ERROR, "core", reason)
-            renderLoadFailure(root, reason)
-            return
-        }
-
-        val elapsedMicroseconds = (System.nanoTime() - started) / 1_000
-        OmniLog.event(
-            LogLevel.INFO,
-            "core",
-            "State report read in ${elapsedMicroseconds} us: core ${state.version} " +
-                "(${state.status}), ABI ${state.abiVersion}, " +
-                "${state.toolchainVerified}/${state.toolchain.size} pins verified, " +
-                "${state.pluginsImplemented}/${state.plugins.size} plugins implemented, " +
-                "${state.diagnostics.size} diagnostics.",
-        )
-
-        root.addView(title(getString(R.string.omni_app_name)))
-        root.addView(
-            body(
-                getString(
-                    R.string.omni_core_line,
-                    state.version,
-                    state.status,
-                    state.abiVersion,
-                )
-            )
-        )
-        root.addView(body(state.phase))
-
-        root.addView(
-            banner(
-                getString(R.string.omni_not_a_builder_yet),
-                R.color.omni_warning,
-            )
-        )
-
-        renderBuildSection(root)
-
-        section(root, R.string.omni_section_roadmap)
-        root.addView(
-            body(
-                getString(
-                    R.string.omni_roadmap_summary,
-                    state.roadmapDelivered,
-                    state.roadmap.size,
-                )
-            )
-        )
-        state.roadmap.forEach { phase ->
-            root.addView(
-                keyValue(
-                    phase.name,
-                    "",
-                    phaseColor(phase.state),
-                    trailing = phase.state,
-                )
-            )
-        }
-
-        section(root, R.string.omni_section_self_hosting)
-        root.addView(
-            keyValue(
-                getString(R.string.omni_self_hosted),
-                if (state.selfHosted) getString(R.string.omni_yes) else getString(R.string.omni_no),
-                if (state.selfHosted) R.color.omni_ok else R.color.omni_warning,
-            )
-        )
-        state.bootstrapDependencies.forEach { root.addView(bullet(it)) }
-
-        section(root, R.string.omni_section_subsystems)
-        root.addView(
-            body(
-                getString(
-                    R.string.omni_subsystems_summary,
-                    state.subsystemsProduction,
-                    state.subsystems.size,
-                )
-            )
-        )
-        state.subsystems.forEach { row ->
-            root.addView(
-                keyValue(
-                    row.name,
-                    "\u00a7${row.directiveSection}",
-                    statusColor(row.status),
-                    trailing = row.status,
-                )
-            )
-        }
-
-        section(root, R.string.omni_section_toolchain)
-        root.addView(
-            body(
-                getString(
-                    R.string.omni_toolchain_summary,
-                    state.toolchainVerified,
-                    state.toolchain.size,
-                )
-            )
-        )
-        state.toolchain.forEach { row ->
-            root.addView(
-                keyValue(
-                    row.displayName,
-                    buildString {
-                        append(row.pinned)
-                        row.observed?.let { append(" · seen ").append(it) }
-                        if (row.checksumPinned) append(" · checksum pinned")
-                    },
-                    stateColor(row.state),
-                    trailing = row.state,
-                )
-            )
-        }
-
-        section(root, R.string.omni_section_plugins)
-        root.addView(
-            body(
-                getString(
-                    R.string.omni_plugins_summary,
-                    state.pluginsImplemented,
-                    state.plugins.size,
-                )
-            )
-        )
-        state.plugins.forEach { row ->
-            root.addView(
-                keyValue(
-                    row.displayName,
-                    row.roadmapPhase,
-                    statusColor(row.status),
-                    trailing = row.status,
-                )
-            )
-        }
-
-        section(root, R.string.omni_section_diagnostics)
-        if (state.diagnostics.isEmpty()) {
-            root.addView(body(getString(R.string.omni_no_diagnostics)))
-        } else {
-            state.diagnostics.forEach { diagnostic ->
-                root.addView(
-                    keyValue(
-                        "${diagnostic.code}  ${diagnostic.severity}",
-                        diagnostic.message,
-                        severityColor(diagnostic.severity),
-                    )
-                )
-                diagnostic.suggestion?.let { root.addView(bullet(it)) }
-            }
-        }
-    }
-
-    private fun renderLogSection(root: LinearLayout) {
-        section(root, R.string.omni_section_logs)
-
-        val destination = OmniLog.flushSession()
-        val row = keyValue(
-            OmniLog.SESSION_FILE,
-            OmniLog.describeDestination(destination),
-            destinationColor(destination),
-        )
-        logDestinationView = row.getChildAt(1) as TextView
-        root.addView(row)
-
-        val copiesHolder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        logCopiesView = copiesHolder
-        root.addView(copiesHolder)
-        renderCopies(copiesHolder, OmniLog.lastCopies())
-
-        root.addView(body(getString(R.string.omni_log_explanation, OmniLog.DIRECTORY_NAME)))
-
-        OmniLog.setPublishListener { outcome ->
-            runOnUiThread {
-                logDestinationView?.apply {
-                    text = OmniLog.describeDestination(outcome)
-                    setTextColor(color(destinationColor(outcome)))
-                }
-                logCopiesView?.let { holder ->
-                    holder.removeAllViews()
-                    renderCopies(holder, OmniLog.lastCopies())
-                }
-            }
-        }
-
-        val crash = OmniLog.lastCrash()
-        if (crash == null) {
-            root.addView(body(getString(R.string.omni_no_crash)))
-        } else {
-            root.addView(
-                keyValue(
-                    OmniLog.CRASH_FILE,
-                    getString(R.string.omni_crash_recorded),
-                    R.color.omni_error,
-                )
-            )
-            root.addView(mono(crash))
-        }
-    }
-
-    private fun renderCopies(holder: LinearLayout, copies: List<LogCopy>) {
-        if (copies.isEmpty()) {
-            holder.addView(body(getString(R.string.omni_log_not_written_yet)))
-            return
-        }
-        copies.forEach { copy ->
-            holder.addView(
-                keyValue(
-                    copy.label,
-                    copy.error?.let { getString(R.string.omni_log_copy_failed, copy.location, it) }
-                        ?: copy.location,
-                    if (copy.succeeded) R.color.omni_ok else R.color.omni_error,
-                    trailing = if (copy.succeeded) {
-                        getString(R.string.omni_log_written)
-                    } else {
-                        getString(R.string.omni_log_failed)
-                    },
-                )
-            )
-        }
-    }
-
-    private fun renderBuildSection(root: LinearLayout) {
-        section(root, R.string.omni_section_build)
-        root.addView(body(getString(R.string.omni_build_explain)))
-
-        val results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        val action = TextView(this).apply {
-            text = getString(R.string.omni_build_action)
-            setTextColor(color(R.color.omni_ok))
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            gravity = Gravity.CENTER
-            setPadding(dp(R.dimen.omni_gap))
-            isClickable = true
-        }
-        action.setOnClickListener {
-            action.isClickable = false
-            action.text = getString(R.string.omni_build_running)
-            results.removeAllViews()
-            OmniLog.event(LogLevel.INFO, "build", "Build requested.")
-
-            val destination = File(getExternalFilesDir(null) ?: filesDir, "made-by-omni.apk")
-            val keyFile = File(filesDir, "signing.pk8")
-            val started = System.nanoTime()
-            val outcome = try {
-                BuildOutcome.parse(
-                    Builder.nativeBuildPackage(
-                        "com.omni.made",
-                        destination.absolutePath,
-                        keyFile.absolutePath,
-                    )
-                )
-            } catch (error: Throwable) {
-                OmniLog.recordCrash(Thread.currentThread(), error)
-                null
-            }
-            val elapsed = (System.nanoTime() - started) / 1_000_000
-
-            action.text = getString(R.string.omni_build_action)
-            action.isClickable = true
-            renderBuildOutcome(results, outcome, elapsed)
-        }
-        root.addView(action)
-        root.addView(results)
-    }
-
-    private fun renderBuildOutcome(into: LinearLayout, outcome: BuildOutcome?, elapsedMs: Long) {
-        if (outcome == null) {
-            into.addView(banner("The build threw. See Crash_Log.txt.", R.color.omni_error))
-            return
-        }
-
-        if (outcome.built) {
-            OmniLog.event(
-                LogLevel.INFO,
-                "build",
-                "Built ${outcome.bytes} bytes in ${elapsedMs} ms at ${outcome.path}",
-            )
-            into.addView(banner("APK BUILT · ${outcome.bytes} bytes · ${elapsedMs} ms", R.color.omni_ok))
-            into.addView(
-                keyValue(
-                    "Contents",
-                    if (outcome.carriesCode) "manifest + classes.dex" else "manifest only",
-                    R.color.omni_muted,
-                    trailing = "${outcome.entries}",
-                )
-            )
-            into.addView(
-                keyValue(
-                    "Signature",
-                    "v2 · RSA-2048",
-                    if (outcome.signed) R.color.omni_ok else R.color.omni_error,
-                    trailing = if (outcome.signed) "SIGNED" else "NONE",
-                )
-            )
-            into.addView(
-                keyValue(
-                    "Security policy",
-                    "${outcome.rulesApplied} rules",
-                    if (outcome.guardVerdict == "PASSED") R.color.omni_ok else R.color.omni_error,
-                    trailing = outcome.guardVerdict ?: "?",
-                )
-            )
-            outcome.path?.let { into.addView(bullet(it)) }
-            into.addView(body(getString(R.string.omni_build_no_code)))
-        } else {
-            OmniLog.event(LogLevel.ERROR, "build", "Build refused: ${outcome.error}")
-            into.addView(banner("NO PACKAGE PRODUCED", R.color.omni_error))
-            outcome.error?.let { into.addView(body(it)) }
-            outcome.findings.forEach { into.addView(bullet(it)) }
-        }
+    override fun onDestroy() {
+        OmniLog.setPublishListener(null)
+        OmniLog.flushSession()
+        super.onDestroy()
     }
 
     private fun section(root: LinearLayout, titleRes: Int) {

@@ -220,6 +220,8 @@ jobs:
           test "$reported" = "cmake version $OMNI_CMAKE_VERSION"
 
       - name: Point the build at the provisioned toolchains
+        env:
+          OMNI_SIGNING_CERT_SHA256: ${{ secrets.OMNI_SIGNING_CERT_SHA256 }}
         run: |
           set -euo pipefail
           # local.properties is host-specific and deliberately not committed
@@ -341,12 +343,12 @@ jobs:
             so="$work/lib/$abi/libomni_builder.so"
             test -f "$so" || { echo "missing native library for $abi"; exit 1; }
 
-            # The four JNI entry points and JNI_OnLoad, and nothing else. If the
+            # The six JNI entry points and JNI_OnLoad, and nothing else. If the
             # Core's C ABI ever appears here, --exclude-libs has stopped working
             # and the shared object is exposing more than it should.
             exported=$("$nm" -D --defined-only "$so" | wc -l)
             echo "$abi: $exported exported symbols"
-            test "$exported" -eq 5
+            test "$exported" -eq 7
 
             "$nm" -D --defined-only "$so" | grep -q Java_com_omni_builder_Builder_nativeStateReport
             ! "$nm" -D --defined-only "$so" | grep -q omni_state_report
@@ -411,6 +413,8 @@ jobs:
           cargo test --locked the_path_the_application_takes -- --nocapture
           cargo test --locked the_security_policy_refuses -- --nocapture
           cargo test --locked the_dex_this_build_writes -- --nocapture
+          cargo test --locked a_project_is_a_manifest -- --nocapture
+          cargo test --locked a_package_checks_itself -- --nocapture
 
       - name: Read the classes this build produced with the Core's own reader
         # Every class file the Kotlin compiler just produced, compared field for

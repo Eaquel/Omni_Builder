@@ -152,41 +152,65 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCoreVersion(
   return result;
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildPackage(
-    JNIEnv *env, jobject , jstring package_name, jstring output_path,
-    jstring key_path) {
-  if (package_name == nullptr || output_path == nullptr || key_path == nullptr) {
-    ThrowJava(env, kIllegalState,
-              "A build needs a package name, an output path and a key path.");
-    return nullptr;
-  }
-
-  std::string package_text;
-  std::string path_text;
-  std::string key_text;
-  if (!JavaStringToUtf8(env, package_name, &package_text) ||
-      !JavaStringToUtf8(env, output_path, &path_text) ||
-      !JavaStringToUtf8(env, key_path, &key_text)) {
-    return nullptr;
-  }
-
-  char *report = omni_build_package(package_text.c_str(), path_text.c_str(),
-                                    key_text.c_str());
+jstring HandBack(JNIEnv *env, char *report) {
   if (report == nullptr) {
     ThrowJava(env, kIllegalState,
-              "Omni Core could not report on the build. This is a defect in the "
-              "Core, not in the project being built.");
+              "Omni Core could not report. This is a defect in the Core, not "
+              "in the project being built.");
     return nullptr;
   }
-
   jstring result = env->NewStringUTF(report);
   omni_string_free(report);
   if (result == nullptr) {
     ThrowJava(env, kOutOfMemory,
-              "The build report could not be converted to a Java string.");
-    return nullptr;
+              "A Core report could not be converted to a Java string.");
   }
   return result;
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCreateProject(
+    JNIEnv *env, jobject , jstring root, jstring spec) {
+  std::string root_text;
+  std::string spec_text;
+  if (root == nullptr || spec == nullptr ||
+      !JavaStringToUtf8(env, root, &root_text) ||
+      !JavaStringToUtf8(env, spec, &spec_text)) {
+    ThrowJava(env, kIllegalState, "A project needs a folder and a specification.");
+    return nullptr;
+  }
+  return HandBack(env, omni_create_project(root_text.c_str(), spec_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildProject(
+    JNIEnv *env, jobject , jstring root, jstring output_path, jstring key_path) {
+  std::string root_text;
+  std::string path_text;
+  std::string key_text;
+  if (root == nullptr || output_path == nullptr || key_path == nullptr ||
+      !JavaStringToUtf8(env, root, &root_text) ||
+      !JavaStringToUtf8(env, output_path, &path_text) ||
+      !JavaStringToUtf8(env, key_path, &key_text)) {
+    ThrowJava(env, kIllegalState, "A build needs a project, an output and a key.");
+    return nullptr;
+  }
+  return HandBack(env, omni_build_project(root_text.c_str(), path_text.c_str(),
+                                          key_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeVerifySelf(
+    JNIEnv *env, jobject , jstring package_path, jstring expected) {
+  std::string path_text;
+  std::string expected_text;
+  if (package_path == nullptr || !JavaStringToUtf8(env, package_path, &path_text)) {
+    ThrowJava(env, kIllegalState, "A verification needs a package path.");
+    return nullptr;
+  }
+  if (expected != nullptr && !JavaStringToUtf8(env, expected, &expected_text)) {
+    return nullptr;
+  }
+  return HandBack(env, omni_verify_self(path_text.c_str(),
+                                        expected == nullptr ? nullptr
+                                                            : expected_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(
