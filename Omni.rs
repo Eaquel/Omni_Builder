@@ -344,9 +344,9 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 23,
         summary: "A project becomes a signed package with nothing borrowed: the security policy runs first, then the manifest is encoded, the archive written, a key generated, a certificate written, and the package signed. apksigner verifies the result.",
         missing: &[
-            "No compiler and no DEX writer, so a package carries a manifest and files handed to it, never compiled code.",
+            "No compiler. The dex a package carries holds a class and a constructor the engine emits itself; nothing compiles a method body, so an activity built here does nothing.",
             "No resource table, so a manifest may not name a resource.",
-            "The signing key is generated per build rather than kept, so two builds are not the same application to Android.",
+            "No resource table, so an icon, a theme or a translated label cannot be carried.",
         ],
     },
     Subsystem {
@@ -434,6 +434,17 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
              the upstream compiler's output is not evidence that anything here \
              could produce it (directive section 16).",
             "Randomised robustness testing only; not coverage-guided fuzzing.",
+        ],
+    },
+    Subsystem {
+        name: "DEX writer",
+        status: Status::Partial,
+        directive_section: 21,
+        summary: "Writes a classes.dex: sorted string, type, prototype and method pools, class definitions, class data and code items, with the checksum and signature the format defines. dexdump reads what this writes and the Core reads it back.",
+        missing: &[
+            "It emits the instructions a default constructor needs and nothing else. There is no assembler and no compiler, so a method body cannot be given to it.",
+            "No fields, no virtual methods, no interfaces, no annotations, no debug information.",
+            "One dex per package; there is no multidex.",
         ],
     },
     Subsystem {
@@ -12498,6 +12509,446 @@ pub mod axml {
     }
 }
 
+pub mod dexwrite {
+    use crate::binary::checksum::adler32;
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::sha1;
+    use crate::FailureClass;
+
+    pub const ACC_PUBLIC: u32 = 0x1;
+    pub const ACC_CONSTRUCTOR: u32 = 0x1_0000;
+
+    const OP_RETURN_VOID: u16 = 0x000e;
+    const OP_INVOKE_DIRECT: u16 = 0x0070;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.dexwrite",
+            message,
+        )
+    }
+
+    pub fn encode_modified_utf8(text: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(text.len() + 1);
+        for unit in text.encode_utf16() {
+            match unit {
+                0x0001..=0x007f => out.push(unit as u8),
+                0 | 0x0080..=0x07ff => {
+                    out.push(0xc0 | (unit >> 6) as u8);
+                    out.push(0x80 | (unit & 0x3f) as u8);
+                }
+                _ => {
+                    out.push(0xe0 | (unit >> 12) as u8);
+                    out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
+                    out.push(0x80 | (unit & 0x3f) as u8);
+                }
+            }
+        }
+        out.push(0);
+        out
+    }
+
+    fn uleb128(out: &mut Vec<u8>, mut value: u32) {
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct MethodRef {
+        pub class: String,
+        pub name: String,
+        pub return_type: String,
+        pub parameters: Vec<String>,
+    }
+
+    impl MethodRef {
+        pub fn shorty(&self) -> String {
+            let letter = |descriptor: &str| -> char {
+                match descriptor.chars().next() {
+                    Some('[') => 'L',
+                    Some('L') => 'L',
+                    Some(other) => other,
+                    None => 'V',
+                }
+            };
+            let mut out = String::new();
+            out.push(letter(&self.return_type));
+            for parameter in &self.parameters {
+                out.push(letter(parameter));
+            }
+            out
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Method {
+        pub reference: MethodRef,
+        pub access_flags: u32,
+        pub registers: u16,
+        pub inputs: u16,
+        pub outputs: u16,
+        pub instructions: Vec<u16>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Class {
+        pub descriptor: String,
+        pub superclass: String,
+        pub access_flags: u32,
+        pub source_file: Option<String>,
+        pub direct_methods: Vec<Method>,
+    }
+
+    pub fn default_constructor(class: &str) -> Method {
+        Method {
+            reference: MethodRef {
+                class: class.to_string(),
+                name: "<init>".to_string(),
+                return_type: "V".to_string(),
+                parameters: Vec::new(),
+            },
+            access_flags: ACC_PUBLIC | ACC_CONSTRUCTOR,
+            registers: 1,
+            inputs: 1,
+            outputs: 1,
+            instructions: Vec::new(),
+        }
+    }
+
+    #[derive(Default)]
+    struct Pools {
+        strings: Vec<String>,
+        types: Vec<String>,
+        protos: Vec<(String, String, Vec<String>)>,
+        methods: Vec<(String, String, usize)>,
+    }
+
+    impl Pools {
+        fn string(&mut self, text: &str) {
+            if !self.strings.iter().any(|held| held == text) {
+                self.strings.push(text.to_string());
+            }
+        }
+
+        fn kind(&mut self, descriptor: &str) {
+            self.string(descriptor);
+            if !self.types.iter().any(|held| held == descriptor) {
+                self.types.push(descriptor.to_string());
+            }
+        }
+
+        fn index_of_string(&self, text: &str) -> Result<u32, Diagnostic> {
+            self.strings
+                .iter()
+                .position(|held| held == text)
+                .map(|at| at as u32)
+                .ok_or_else(|| fail("EW001", format!("string {text:?} was not interned")))
+        }
+
+        fn index_of_type(&self, descriptor: &str) -> Result<u32, Diagnostic> {
+            self.types
+                .iter()
+                .position(|held| held == descriptor)
+                .map(|at| at as u32)
+                .ok_or_else(|| fail("EW002", format!("type {descriptor:?} was not interned")))
+        }
+
+        fn index_of_proto(&self, reference: &MethodRef) -> Result<u32, Diagnostic> {
+            self.protos
+                .iter()
+                .position(|(_, ret, params)| {
+                    *ret == reference.return_type && *params == reference.parameters
+                })
+                .map(|at| at as u32)
+                .ok_or_else(|| fail("EW003", "a prototype was not interned"))
+        }
+
+        fn index_of_method(&self, reference: &MethodRef) -> Result<u32, Diagnostic> {
+            let proto = self.index_of_proto(reference)? as usize;
+            self.methods
+                .iter()
+                .position(|(class, name, held)| {
+                    *class == reference.class && *name == reference.name && *held == proto
+                })
+                .map(|at| at as u32)
+                .ok_or_else(|| fail("EW004", "a method was not interned"))
+        }
+    }
+
+    fn utf16_order(left: &str, right: &str) -> core::cmp::Ordering {
+        left.encode_utf16().cmp(right.encode_utf16())
+    }
+
+    pub fn write(classes: &[Class], extra: &[MethodRef]) -> Result<Vec<u8>, Diagnostic> {
+        if classes.is_empty() {
+            return Err(fail("EW010", "A dex file must define at least one class."));
+        }
+
+        let mut pools = Pools::default();
+        let mut references: Vec<MethodRef> = extra.to_vec();
+
+        for class in classes {
+            pools.kind(&class.descriptor);
+            pools.kind(&class.superclass);
+            if let Some(source) = &class.source_file {
+                pools.string(source);
+            }
+            for method in &class.direct_methods {
+                references.push(method.reference.clone());
+            }
+        }
+        for reference in &references {
+            pools.kind(&reference.class);
+            pools.kind(&reference.return_type);
+            for parameter in &reference.parameters {
+                pools.kind(parameter);
+            }
+            pools.string(&reference.name);
+            pools.string(&reference.shorty());
+        }
+
+        pools.strings.sort_by(|a, b| utf16_order(a, b));
+        pools.types.sort_by(|a, b| utf16_order(a, b));
+
+        for reference in &references {
+            let proto = (
+                reference.shorty(),
+                reference.return_type.clone(),
+                reference.parameters.clone(),
+            );
+            if !pools
+                .protos
+                .iter()
+                .any(|(_, ret, params)| *ret == proto.1 && *params == proto.2)
+            {
+                pools.protos.push(proto);
+            }
+        }
+        let types_snapshot = pools.types.clone();
+        let position_of_type = |descriptor: &str| -> u32 {
+            types_snapshot
+                .iter()
+                .position(|held| held == descriptor)
+                .unwrap_or(0) as u32
+        };
+        pools.protos.sort_by(|a, b| {
+            position_of_type(&a.1)
+                .cmp(&position_of_type(&b.1))
+                .then_with(|| a.2.len().cmp(&b.2.len()))
+        });
+
+        for reference in &references {
+            let proto = pools.index_of_proto(reference)? as usize;
+            let entry = (reference.class.clone(), reference.name.clone(), proto);
+            if !pools.methods.contains(&entry) {
+                pools.methods.push(entry);
+            }
+        }
+        let strings_snapshot = pools.strings.clone();
+        let position_of_string = |text: &str| -> u32 {
+            strings_snapshot
+                .iter()
+                .position(|held| held == text)
+                .unwrap_or(0) as u32
+        };
+        pools.methods.sort_by(|a, b| {
+            position_of_type(&a.0)
+                .cmp(&position_of_type(&b.0))
+                .then_with(|| position_of_string(&a.1).cmp(&position_of_string(&b.1)))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+
+        let header_size = 0x70usize;
+        let string_ids_off = header_size;
+        let type_ids_off = string_ids_off + pools.strings.len() * 4;
+        let proto_ids_off = type_ids_off + pools.types.len() * 4;
+        let field_ids_off = proto_ids_off + pools.protos.len() * 12;
+        let method_ids_off = field_ids_off;
+        let class_defs_off = method_ids_off + pools.methods.len() * 8;
+        let data_off = class_defs_off + classes.len() * 32;
+
+        let mut data = Vec::new();
+        let mut string_data_offsets = Vec::with_capacity(pools.strings.len());
+        for text in &pools.strings {
+            string_data_offsets.push((data_off + data.len()) as u32);
+            let encoded = encode_modified_utf8(text);
+            uleb128(&mut data, text.encode_utf16().count() as u32);
+            data.extend_from_slice(&encoded);
+        }
+
+        let mut code_offsets: Vec<Vec<u32>> = Vec::new();
+        for class in classes {
+            let mut here = Vec::new();
+            for method in &class.direct_methods {
+                while !(data_off + data.len()).is_multiple_of(4) {
+                    data.push(0);
+                }
+                here.push((data_off + data.len()) as u32);
+
+                let mut instructions = method.instructions.clone();
+                if instructions.is_empty() {
+                    let super_init = MethodRef {
+                        class: class.superclass.clone(),
+                        name: "<init>".to_string(),
+                        return_type: "V".to_string(),
+                        parameters: Vec::new(),
+                    };
+                    let target = pools.index_of_method(&super_init)?;
+                    instructions.push((1 << 12) | OP_INVOKE_DIRECT);
+                    instructions.push(target as u16);
+                    instructions.push(0);
+                    instructions.push(OP_RETURN_VOID);
+                }
+
+                data.extend_from_slice(&method.registers.to_le_bytes());
+                data.extend_from_slice(&method.inputs.to_le_bytes());
+                data.extend_from_slice(&method.outputs.to_le_bytes());
+                data.extend_from_slice(&0u16.to_le_bytes());
+                data.extend_from_slice(&0u32.to_le_bytes());
+                data.extend_from_slice(&(instructions.len() as u32).to_le_bytes());
+                for unit in &instructions {
+                    data.extend_from_slice(&unit.to_le_bytes());
+                }
+            }
+            code_offsets.push(here);
+        }
+
+        let mut class_data_offsets = Vec::with_capacity(classes.len());
+        for (index, class) in classes.iter().enumerate() {
+            class_data_offsets.push((data_off + data.len()) as u32);
+            let mut body = Vec::new();
+            uleb128(&mut body, 0);
+            uleb128(&mut body, 0);
+            uleb128(&mut body, class.direct_methods.len() as u32);
+            uleb128(&mut body, 0);
+
+            let mut previous = 0u32;
+            for (slot, method) in class.direct_methods.iter().enumerate() {
+                let absolute = pools.index_of_method(&method.reference)?;
+                uleb128(&mut body, absolute - previous);
+                previous = absolute;
+                uleb128(&mut body, method.access_flags);
+                uleb128(&mut body, code_offsets[index][slot]);
+            }
+            data.extend_from_slice(&body);
+        }
+
+        while !(data_off + data.len()).is_multiple_of(4) {
+            data.push(0);
+        }
+        let map_off = data_off + data.len();
+
+        let mut map: Vec<(u16, u32, u32)> = vec![
+            (0x0000, 1, 0),
+            (0x0001, pools.strings.len() as u32, string_ids_off as u32),
+            (0x0002, pools.types.len() as u32, type_ids_off as u32),
+            (0x0003, pools.protos.len() as u32, proto_ids_off as u32),
+            (0x0005, pools.methods.len() as u32, method_ids_off as u32),
+            (0x0006, classes.len() as u32, class_defs_off as u32),
+            (0x2002, pools.strings.len() as u32, string_data_offsets[0]),
+            (
+                0x2001,
+                code_offsets.iter().map(|list| list.len() as u32).sum(),
+                code_offsets[0][0],
+            ),
+            (0x2000, classes.len() as u32, class_data_offsets[0]),
+            (0x1000, 1, map_off as u32),
+        ];
+        map.sort_by_key(|(_, _, offset)| *offset);
+
+        let mut map_bytes = Vec::new();
+        map_bytes.extend_from_slice(&(map.len() as u32).to_le_bytes());
+        for (kind, size, offset) in &map {
+            map_bytes.extend_from_slice(&kind.to_le_bytes());
+            map_bytes.extend_from_slice(&0u16.to_le_bytes());
+            map_bytes.extend_from_slice(&size.to_le_bytes());
+            map_bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        data.extend_from_slice(&map_bytes);
+
+        let data_size = data.len();
+        let file_size = data_off + data_size;
+
+        let mut out = vec![0u8; header_size];
+        out[0..4].copy_from_slice(b"dex\n");
+        out[4..8].copy_from_slice(b"035\0");
+        out[32..36].copy_from_slice(&(file_size as u32).to_le_bytes());
+        out[36..40].copy_from_slice(&(header_size as u32).to_le_bytes());
+        out[40..44].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+        out[44..48].copy_from_slice(&0u32.to_le_bytes());
+        out[48..52].copy_from_slice(&0u32.to_le_bytes());
+        out[52..56].copy_from_slice(&(map_off as u32).to_le_bytes());
+        out[56..60].copy_from_slice(&(pools.strings.len() as u32).to_le_bytes());
+        out[60..64].copy_from_slice(&(string_ids_off as u32).to_le_bytes());
+        out[64..68].copy_from_slice(&(pools.types.len() as u32).to_le_bytes());
+        out[68..72].copy_from_slice(&(type_ids_off as u32).to_le_bytes());
+        out[72..76].copy_from_slice(&(pools.protos.len() as u32).to_le_bytes());
+        out[76..80].copy_from_slice(&(proto_ids_off as u32).to_le_bytes());
+        out[80..84].copy_from_slice(&0u32.to_le_bytes());
+        out[84..88].copy_from_slice(&0u32.to_le_bytes());
+        out[88..92].copy_from_slice(&(pools.methods.len() as u32).to_le_bytes());
+        out[92..96].copy_from_slice(&(method_ids_off as u32).to_le_bytes());
+        out[96..100].copy_from_slice(&(classes.len() as u32).to_le_bytes());
+        out[100..104].copy_from_slice(&(class_defs_off as u32).to_le_bytes());
+        out[104..108].copy_from_slice(&(data_size as u32).to_le_bytes());
+        out[108..112].copy_from_slice(&(data_off as u32).to_le_bytes());
+
+        for offset in &string_data_offsets {
+            out.extend_from_slice(&offset.to_le_bytes());
+        }
+        for descriptor in &pools.types {
+            out.extend_from_slice(&pools.index_of_string(descriptor)?.to_le_bytes());
+        }
+        for (shorty, return_type, _) in &pools.protos {
+            out.extend_from_slice(&pools.index_of_string(shorty)?.to_le_bytes());
+            out.extend_from_slice(&pools.index_of_type(return_type)?.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+        }
+        for (class, name, proto) in &pools.methods {
+            out.extend_from_slice(&(pools.index_of_type(class)? as u16).to_le_bytes());
+            out.extend_from_slice(&(*proto as u16).to_le_bytes());
+            out.extend_from_slice(&pools.index_of_string(name)?.to_le_bytes());
+        }
+        for (index, class) in classes.iter().enumerate() {
+            out.extend_from_slice(&pools.index_of_type(&class.descriptor)?.to_le_bytes());
+            out.extend_from_slice(&class.access_flags.to_le_bytes());
+            out.extend_from_slice(&pools.index_of_type(&class.superclass)?.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            match &class.source_file {
+                Some(source) => {
+                    out.extend_from_slice(&pools.index_of_string(source)?.to_le_bytes())
+                }
+                None => out.extend_from_slice(&0xffff_ffffu32.to_le_bytes()),
+            }
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&class_data_offsets[index].to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+        }
+
+        debug_assert_eq!(out.len(), data_off);
+        out.extend_from_slice(&data);
+        debug_assert_eq!(out.len(), file_size);
+
+        let signature = sha1(&out[32..]);
+        out[12..32].copy_from_slice(signature.as_bytes());
+        let checksum = adler32(&out[12..]);
+        out[8..12].copy_from_slice(&checksum.to_le_bytes());
+        Ok(out)
+    }
+}
+
 pub mod builder {
     use crate::archive::Builder as ArchiveBuilder;
     use crate::certificate;
@@ -12530,7 +12981,55 @@ pub mod builder {
     pub struct Project {
         pub manifest: String,
         pub files: Vec<(String, Vec<u8>)>,
+        pub code: Vec<crate::dexwrite::Class>,
+        pub references: Vec<crate::dexwrite::MethodRef>,
         pub identity: Identity,
+    }
+
+    pub fn starter(package: &str, label: &str) -> Project {
+        let activity = format!("{package}.MainActivity");
+        let descriptor = format!("L{};", activity.replace('.', "/"));
+        let manifest = format!(
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n",
+                "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
+                "    package=\"{package}\"\n",
+                "    android:versionCode=\"1\" android:versionName=\"1.0\">\n",
+                "    <uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />\n",
+                "    <application android:label=\"{label}\" android:allowBackup=\"false\"\n",
+                "        android:extractNativeLibs=\"false\">\n",
+                "        <activity android:name=\"{activity}\" android:exported=\"true\">\n",
+                "            <intent-filter>\n",
+                "                <action android:name=\"android.intent.action.MAIN\" />\n",
+                "                <category android:name=\"android.intent.category.LAUNCHER\" />\n",
+                "            </intent-filter>\n",
+                "        </activity>\n",
+                "    </application>\n",
+                "</manifest>\n"
+            ),
+            package = package,
+            label = label,
+            activity = activity
+        );
+
+        Project {
+            manifest,
+            files: Vec::new(),
+            code: vec![crate::dexwrite::Class {
+                descriptor: descriptor.clone(),
+                superclass: "Landroid/app/Activity;".to_string(),
+                access_flags: crate::dexwrite::ACC_PUBLIC,
+                source_file: Some("MainActivity.java".to_string()),
+                direct_methods: vec![crate::dexwrite::default_constructor(&descriptor)],
+            }],
+            references: vec![crate::dexwrite::MethodRef {
+                class: "Landroid/app/Activity;".to_string(),
+                name: "<init>".to_string(),
+                return_type: "V".to_string(),
+                parameters: Vec::new(),
+            }],
+            identity: Identity::default(),
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -12539,6 +13038,7 @@ pub mod builder {
         pub guard: guard::Report,
         pub entries: usize,
         pub signed: bool,
+        pub carries_code: bool,
         pub certificate_fingerprint: String,
     }
 
@@ -12548,6 +13048,7 @@ pub mod builder {
             w.field_u64("bytes", self.package.len() as u64);
             w.field_u64("entries", self.entries as u64);
             w.field_bool("signed", self.signed);
+            w.field_bool("carriesCode", self.carries_code);
             w.field_str("certificate", &self.certificate_fingerprint);
             self.guard.write_json(w, "guard");
             w.end_object();
@@ -12581,6 +13082,30 @@ pub mod builder {
         )
     }
 
+    pub fn signing_key(path: &str) -> Result<(rsa::PrivateKey, bool), Diagnostic> {
+        if let Ok(stored) = std::fs::read(path) {
+            if let Ok(key) = rsa::parse_pkcs8(&stored) {
+                return Ok((key, true));
+            }
+        }
+
+        let key = rsa::generate(2048)?;
+        let encoded = rsa::encode_pkcs8(&key)?;
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(path, &encoded).map_err(|why| {
+            fail("EB020", "The signing key could not be stored.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
+                .with_suggestion(
+                    "Without a stored key every build is a different application to Android, \
+                     so an update would not install over the previous one.",
+                )
+        })?;
+        Ok((key, false))
+    }
+
     pub fn build(
         project: &Project,
         key: &rsa::PrivateKey,
@@ -12608,6 +13133,10 @@ pub mod builder {
 
         let mut archive = ArchiveBuilder::for_android();
         archive.add("AndroidManifest.xml", manifest)?;
+        if !project.code.is_empty() {
+            let classes = crate::dexwrite::write(&project.code, &project.references)?;
+            archive.add("classes.dex", classes)?;
+        }
         for (name, bytes) in &project.files {
             if name == "AndroidManifest.xml" {
                 return Err(fail(
@@ -12640,6 +13169,7 @@ pub mod builder {
             guard: report,
             entries,
             signed: true,
+            carries_code: !project.code.is_empty(),
             certificate_fingerprint: parsed.fingerprint_display(),
         })
     }
@@ -13347,18 +13877,23 @@ pub mod ffi {
 
     #[no_mangle]
     pub unsafe extern "C" fn omni_build_package(
-        manifest: *const c_char,
+        package_name: *const c_char,
         output_path: *const c_char,
+        key_path: *const c_char,
     ) -> *mut c_char {
         let result = catch_unwind(|| {
-            if manifest.is_null() || output_path.is_null() {
+            if package_name.is_null() || output_path.is_null() || key_path.is_null() {
                 return std::ptr::null_mut();
             }
-            let manifest = match unsafe { CStr::from_ptr(manifest) }.to_str() {
+            let package_name = match unsafe { CStr::from_ptr(package_name) }.to_str() {
                 Ok(text) => text.to_string(),
                 Err(_) => return std::ptr::null_mut(),
             };
             let output_path = match unsafe { CStr::from_ptr(output_path) }.to_str() {
+                Ok(text) => text.to_string(),
+                Err(_) => return std::ptr::null_mut(),
+            };
+            let key_path = match unsafe { CStr::from_ptr(key_path) }.to_str() {
                 Ok(text) => text.to_string(),
                 Err(_) => return std::ptr::null_mut(),
             };
@@ -13372,12 +13907,9 @@ pub mod ffi {
                 .map(|elapsed| elapsed.as_secs() as i64)
                 .unwrap_or(0);
 
-            let outcome = crate::rsa::generate(2048).and_then(|key| {
-                let project = crate::builder::Project {
-                    manifest,
-                    files: Vec::new(),
-                    identity: crate::builder::Identity::default(),
-                };
+            let outcome = crate::builder::signing_key(&key_path).and_then(|(key, reused)| {
+                w.field_bool("reusedKey", reused);
+                let project = crate::builder::starter(&package_name, "Made By Omni");
                 crate::builder::build(&project, &key, now, &mut sink)
             });
 
@@ -17436,6 +17968,8 @@ mod tests {
                 ("lib/arm64-v8a/libomni.so".to_string(), vec![0x7f; 2_048]),
                 ("assets/notes.txt".to_string(), b"made by omni".to_vec()),
             ],
+            code: Vec::new(),
+            references: Vec::new(),
             identity: super::builder::Identity::default(),
         }
     }
@@ -17453,14 +17987,24 @@ mod tests {
 
         let key = super::rsa::generate(2048).expect("the engine must be able to make a key");
         let mut sink = Sink::new();
-        let outcome = super::builder::build(&sample_project(), &key, 1_787_000_000, &mut sink)
+        let mut project = super::builder::starter("com.omni.made", "Made By Omni");
+        project.files = sample_project().files;
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
             .expect("a compliant project must build");
 
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
         assert_eq!(outcome.guard.verdict(), super::guard::Verdict::Passed);
         assert!(outcome.guard.rules_applied >= 7);
         assert!(outcome.signed);
-        assert_eq!(outcome.entries, 3);
+        assert!(outcome.carries_code);
+        assert_eq!(outcome.entries, 4);
+
+        let mut own = Sink::new();
+        let archive = archive::read(&outcome.package, &mut own).expect("it must read back");
+        assert!(archive
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "classes.dex"));
 
         let directory = temp_directory("omni-engine");
         let path = directory.join("made-by-omni.apk");
@@ -17492,9 +18036,20 @@ mod tests {
         );
         assert!(report.contains("CN=Omni_Builder"), "{report}");
 
+        let extracted = std::process::Command::new("unzip")
+            .args(["-p", path.to_str().unwrap(), "classes.dex"])
+            .output()
+            .unwrap();
+        assert!(extracted.status.success());
+        let classes = dex::read(&extracted.stdout, &mut Sink::new()).expect("our dex must read");
+        assert_eq!(classes.class_names(), vec!["com.omni.made.MainActivity"]);
+        if let Some((_, descriptors)) = dexdump(&extracted.stdout) {
+            assert_eq!(descriptors, vec!["Lcom/omni/made/MainActivity;"]);
+        }
+
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
-            "build engine: {} bytes, {} entries, key and certificate both made here, apksigner verified it",
+            "build engine: {} bytes, {} entries including a classes.dex written here, apksigner verified it",
             outcome.package.len(),
             outcome.entries
         );
@@ -17538,6 +18093,8 @@ mod tests {
             let project = super::builder::Project {
                 manifest,
                 files: Vec::new(),
+                code: Vec::new(),
+                references: Vec::new(),
                 identity: super::builder::Identity::default(),
             };
             let mut sink = Sink::new();
@@ -17636,11 +18193,14 @@ mod tests {
     fn the_path_the_application_takes_produces_a_package_on_disk() {
         let directory = temp_directory("omni-ffi-build");
         let output = directory.join("made-by-omni.apk");
-        let manifest = std::ffi::CString::new(SAFE_PROJECT_MANIFEST).unwrap();
+        let key_file = directory.join("signing.pk8");
+        let manifest = std::ffi::CString::new("com.omni.made").unwrap();
         let path = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+        let key = std::ffi::CString::new(key_file.to_str().unwrap()).unwrap();
 
         let report = unsafe {
-            let raw = super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr());
+            let raw =
+                super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr(), key.as_ptr());
             assert!(!raw.is_null(), "the bridge must always report");
             let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
             super::ffi::omni_string_free(raw);
@@ -17650,7 +18210,25 @@ mod tests {
         assert!(is_structurally_valid(&report), "{report}");
         assert!(report.contains("\"built\":true"), "{report}");
         assert!(report.contains("\"verdict\":\"PASSED\""), "{report}");
+        assert!(report.contains("\"carriesCode\":true"), "{report}");
+        assert!(report.contains("\"reusedKey\":false"), "{report}");
         assert!(output.is_file(), "the package must be on disk");
+        assert!(
+            key_file.is_file(),
+            "the key must be kept for the next build"
+        );
+
+        let again = unsafe {
+            let raw =
+                super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr(), key.as_ptr());
+            let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
+            super::ffi::omni_string_free(raw);
+            text
+        };
+        assert!(
+            again.contains("\"reusedKey\":true"),
+            "a second build must keep the same identity: {again}"
+        );
 
         let bytes = std::fs::read(&output).unwrap();
         let mut sink = Sink::new();
@@ -17673,30 +18251,119 @@ mod tests {
     }
 
     #[test]
-    fn the_bridge_refuses_a_weak_project_without_writing_anything() {
+    fn the_bridge_reports_a_path_it_cannot_write_to() {
         let directory = temp_directory("omni-ffi-refuse");
         let output = directory.join("should-not-exist.apk");
-        let weak = SAFE_PROJECT_MANIFEST.replace(
-            "android:allowBackup=\"false\"",
-            "android:allowBackup=\"true\" android:debuggable=\"true\"",
-        );
-        let manifest = std::ffi::CString::new(weak).unwrap();
-        let path = std::ffi::CString::new(output.to_str().unwrap()).unwrap();
+        let key_file = directory.join("signing.pk8");
+        let manifest = std::ffi::CString::new("com.omni.made").unwrap();
+        let path = std::ffi::CString::new("/does/not/exist/nowhere.apk").unwrap();
+        let key = std::ffi::CString::new(key_file.to_str().unwrap()).unwrap();
+        let _ = &output;
 
         let report = unsafe {
-            let raw = super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr());
+            let raw =
+                super::ffi::omni_build_package(manifest.as_ptr(), path.as_ptr(), key.as_ptr());
             let text = std::ffi::CStr::from_ptr(raw).to_str().unwrap().to_string();
             super::ffi::omni_string_free(raw);
             text
         };
 
         assert!(report.contains("\"built\":false"), "{report}");
-        assert!(report.contains("EG001"), "{report}");
         assert!(
-            !output.exists(),
-            "a refused project must leave nothing behind"
+            report.contains("could not be written"),
+            "the failure must say what went wrong: {report}"
         );
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    fn sample_activity_class() -> super::dexwrite::Class {
+        super::dexwrite::Class {
+            descriptor: "Lcom/omni/made/MainActivity;".to_string(),
+            superclass: "Landroid/app/Activity;".to_string(),
+            access_flags: super::dexwrite::ACC_PUBLIC,
+            source_file: Some("MainActivity.java".to_string()),
+            direct_methods: vec![super::dexwrite::default_constructor(
+                "Lcom/omni/made/MainActivity;",
+            )],
+        }
+    }
+
+    fn super_constructor() -> super::dexwrite::MethodRef {
+        super::dexwrite::MethodRef {
+            class: "Landroid/app/Activity;".to_string(),
+            name: "<init>".to_string(),
+            return_type: "V".to_string(),
+            parameters: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_dex_this_build_writes_is_read_by_dexdump() {
+        let bytes = super::dexwrite::write(&[sample_activity_class()], &[super_constructor()])
+            .expect("the dex must be written");
+
+        let mut sink = Sink::new();
+        let file = dex::read(&bytes, &mut sink).expect("our own reader must read it");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        assert_eq!(file.class_names(), vec!["com.omni.made.MainActivity"]);
+        assert_eq!(
+            file.classes[0].superclass.as_deref(),
+            Some("android.app.Activity")
+        );
+        let integrity = dex::integrity(&bytes).unwrap();
+        assert!(integrity.self_consistent());
+
+        let Some((fields, descriptors)) = dexdump(&bytes) else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_DEX_CONFORMANCE is set but dexdump is missing"
+            );
+            eprintln!("dexwrite conformance: dexdump is not available here");
+            return;
+        };
+        assert_eq!(descriptors, vec!["Lcom/omni/made/MainActivity;"]);
+        assert_eq!(
+            fields.get("class_defs_size").map(|v| v.as_str()),
+            Some("1"),
+            "{fields:?}"
+        );
+        eprintln!(
+            "dexwrite conformance: {} bytes written here and read by dexdump",
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn modified_utf8_survives_a_round_trip_through_both_halves() {
+        for text in [
+            "",
+            "MainActivity",
+            "Lcom/omni/made/MainActivity;",
+            "\u{0}",
+            "\u{00e7}\u{011f}\u{00fc}",
+            "\u{1f480}",
+            "a\u{0}b\u{1f480}c",
+        ] {
+            let encoded = super::dexwrite::encode_modified_utf8(text);
+            assert_eq!(*encoded.last().unwrap(), 0, "{text:?} must be terminated");
+            let back = modified_utf8::decode(&encoded[..encoded.len() - 1]).unwrap();
+            assert_eq!(back, text, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn writing_the_same_classes_twice_gives_the_same_bytes() {
+        let first =
+            super::dexwrite::write(&[sample_activity_class()], &[super_constructor()]).unwrap();
+        let second =
+            super::dexwrite::write(&[sample_activity_class()], &[super_constructor()]).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_dex_with_no_classes_is_refused() {
+        let error = super::dexwrite::write(&[], &[]).unwrap_err();
+        assert_eq!(error.code, "EW010");
     }
 
     #[test]

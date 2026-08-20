@@ -13,7 +13,8 @@ const char *omni_core_version(void);
 
 char *omni_state_report(const char *observed_environment);
 
-char *omni_build_package(const char *manifest, const char *output_path);
+char *omni_build_package(const char *package_name, const char *output_path,
+                         const char *key_path);
 
 void omni_string_free(char *value);
 

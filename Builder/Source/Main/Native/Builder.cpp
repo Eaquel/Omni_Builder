@@ -153,20 +153,25 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCoreVersion(
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildPackage(
-    JNIEnv *env, jobject , jstring manifest, jstring output_path) {
-  if (manifest == nullptr || output_path == nullptr) {
-    ThrowJava(env, kIllegalState, "A build needs a manifest and an output path.");
+    JNIEnv *env, jobject , jstring package_name, jstring output_path,
+    jstring key_path) {
+  if (package_name == nullptr || output_path == nullptr || key_path == nullptr) {
+    ThrowJava(env, kIllegalState,
+              "A build needs a package name, an output path and a key path.");
     return nullptr;
   }
 
-  std::string manifest_text;
+  std::string package_text;
   std::string path_text;
-  if (!JavaStringToUtf8(env, manifest, &manifest_text) ||
-      !JavaStringToUtf8(env, output_path, &path_text)) {
+  std::string key_text;
+  if (!JavaStringToUtf8(env, package_name, &package_text) ||
+      !JavaStringToUtf8(env, output_path, &path_text) ||
+      !JavaStringToUtf8(env, key_path, &key_text)) {
     return nullptr;
   }
 
-  char *report = omni_build_package(manifest_text.c_str(), path_text.c_str());
+  char *report = omni_build_package(package_text.c_str(), path_text.c_str(),
+                                    key_text.c_str());
   if (report == nullptr) {
     ThrowJava(env, kIllegalState,
               "Omni Core could not report on the build. This is a defect in the "

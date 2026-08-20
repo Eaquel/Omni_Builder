@@ -410,6 +410,7 @@ jobs:
           cargo test --locked the_build_engine_produces -- --nocapture
           cargo test --locked the_path_the_application_takes -- --nocapture
           cargo test --locked the_security_policy_refuses -- --nocapture
+          cargo test --locked the_dex_this_build_writes -- --nocapture
 
       - name: Read the classes this build produced with the Core's own reader
         # Every class file the Kotlin compiler just produced, compared field for

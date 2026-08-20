@@ -576,7 +576,11 @@ object Builder {
 
     external fun nativeStateReport(observedEnvironment: String?): String
 
-    external fun nativeBuildPackage(manifest: String, outputPath: String): String
+    external fun nativeBuildPackage(
+        packageName: String,
+        outputPath: String,
+        keyPath: String,
+    ): String
 
     fun observedEnvironment(context: Context): String {
         val info = context.applicationInfo
@@ -602,22 +606,13 @@ data class PluginRow(
     val roadmapPhase: String,
 )
 
-const val STARTER_MANIFEST: String =
-    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n" +
-        "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n" +
-        "    package=\"com.omni.made\"\n" +
-        "    android:versionCode=\"1\" android:versionName=\"1.0\">\n" +
-        "    <uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />\n" +
-        "    <application android:label=\"Made By Omni\" android:hasCode=\"false\"\n" +
-        "        android:allowBackup=\"false\" android:extractNativeLibs=\"false\" />\n" +
-        "</manifest>\n"
-
 data class BuildOutcome(
     val built: Boolean,
     val path: String?,
     val bytes: Long,
     val entries: Long,
     val signed: Boolean,
+    val carriesCode: Boolean,
     val certificate: String?,
     val guardVerdict: String?,
     val rulesApplied: Long,
@@ -649,6 +644,7 @@ data class BuildOutcome(
                 bytes = package_?.optLong("bytes") ?: 0L,
                 entries = package_?.optLong("entries") ?: 0L,
                 signed = package_?.optBoolean("signed", false) ?: false,
+                carriesCode = package_?.optBoolean("carriesCode", false) ?: false,
                 certificate = package_?.optString("certificate")?.ifEmpty { null },
                 guardVerdict = guard?.optString("verdict")?.ifEmpty { null },
                 rulesApplied = guard?.optLong("rulesApplied") ?: 0L,
@@ -939,7 +935,7 @@ class BuilderActivity : Activity() {
             root.addView(
                 keyValue(
                     phase.name,
-                    phase.delivers,
+                    "",
                     phaseColor(phase.state),
                     trailing = phase.state,
                 )
@@ -954,7 +950,6 @@ class BuilderActivity : Activity() {
                 if (state.selfHosted) R.color.omni_ok else R.color.omni_warning,
             )
         )
-        root.addView(body(state.selfHostingNote))
         state.bootstrapDependencies.forEach { root.addView(bullet(it)) }
 
         section(root, R.string.omni_section_subsystems)
@@ -971,12 +966,11 @@ class BuilderActivity : Activity() {
             root.addView(
                 keyValue(
                     row.name,
-                    getString(R.string.omni_subsystem_detail, row.directiveSection, row.summary),
+                    "\u00a7${row.directiveSection}",
                     statusColor(row.status),
                     trailing = row.status,
                 )
             )
-            row.missing.forEach { root.addView(bullet(it)) }
         }
 
         section(root, R.string.omni_section_toolchain)
@@ -1132,10 +1126,15 @@ class BuilderActivity : Activity() {
             OmniLog.event(LogLevel.INFO, "build", "Build requested.")
 
             val destination = File(getExternalFilesDir(null) ?: filesDir, "made-by-omni.apk")
+            val keyFile = File(filesDir, "signing.pk8")
             val started = System.nanoTime()
             val outcome = try {
                 BuildOutcome.parse(
-                    Builder.nativeBuildPackage(STARTER_MANIFEST, destination.absolutePath)
+                    Builder.nativeBuildPackage(
+                        "com.omni.made",
+                        destination.absolutePath,
+                        keyFile.absolutePath,
+                    )
                 )
             } catch (error: Throwable) {
                 OmniLog.recordCrash(Thread.currentThread(), error)
@@ -1163,22 +1162,29 @@ class BuilderActivity : Activity() {
                 "build",
                 "Built ${outcome.bytes} bytes in ${elapsedMs} ms at ${outcome.path}",
             )
-            into.addView(banner("PACKAGE BUILT", R.color.omni_ok))
-            into.addView(keyValue("Size", "${outcome.bytes} bytes", R.color.omni_ok))
-            into.addView(keyValue("Entries", "${outcome.entries}", R.color.omni_muted))
+            into.addView(banner("APK BUILT · ${outcome.bytes} bytes · ${elapsedMs} ms", R.color.omni_ok))
+            into.addView(
+                keyValue(
+                    "Contents",
+                    if (outcome.carriesCode) "manifest + classes.dex" else "manifest only",
+                    R.color.omni_muted,
+                    trailing = "${outcome.entries}",
+                )
+            )
             into.addView(
                 keyValue(
                     "Signature",
-                    if (outcome.signed) "v2, RSA-2048, key made here" else "none",
+                    "v2 · RSA-2048",
                     if (outcome.signed) R.color.omni_ok else R.color.omni_error,
+                    trailing = if (outcome.signed) "SIGNED" else "NONE",
                 )
             )
-            outcome.certificate?.let { into.addView(keyValue("Certificate", it, R.color.omni_muted)) }
             into.addView(
                 keyValue(
                     "Security policy",
-                    "${outcome.guardVerdict} · ${outcome.rulesApplied} rules",
+                    "${outcome.rulesApplied} rules",
                     if (outcome.guardVerdict == "PASSED") R.color.omni_ok else R.color.omni_error,
+                    trailing = outcome.guardVerdict ?: "?",
                 )
             )
             outcome.path?.let { into.addView(bullet(it)) }
