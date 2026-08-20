@@ -242,8 +242,39 @@ jobs:
           fi
 
           store="$RUNNER_TEMP/omni-release.jks"
-          printf '%s' "$OMNI_KEYSTORE_BASE64" | base64 --decode > "$store"
+
+          # Strip every whitespace character before decoding. A secret pasted
+          # from a phone or a wrapped terminal picks up spaces, and GNU base64
+          # rejects the whole input over one of them - "base64: invalid input"
+          # and nothing else to go on. Newlines it tolerates; spaces it does
+          # not, which is a distinction nobody should have to know.
+          printf '%s' "$OMNI_KEYSTORE_BASE64" | tr -d '[:space:]' | base64 --decode > "$store"
           test -s "$store"
+
+          # And prove it is actually the keystore before the build depends on
+          # it. This is not belt-and-braces: a truncated paste *decodes without
+          # complaint* into bytes that are not a keystore, so without this the
+          # first sign of trouble would be an AGP error during signing, several
+          # minutes later and far from the cause. keytool prints the certificate
+          # to nowhere; nothing secret reaches the log.
+          if ! keytool -list -keystore "$store" \
+                -storepass "$OMNI_KEYSTORE_PASSWORD" \
+                -alias "$OMNI_KEY_ALIAS" > /dev/null 2>&1; then
+            echo "OMNI_KEYSTORE_BASE64 did not decode into a usable keystore."
+            echo
+            echo "Decoded $(wc -c < "$store") bytes. Check, in this order:"
+            echo "  1. The secret holds the whole base64 value. It is one long"
+            echo "     line and a partial copy still decodes - into nothing."
+            echo "  2. It holds only the base64, with no surrounding text."
+            echo "  3. OMNI_KEYSTORE_PASSWORD and OMNI_KEY_ALIAS match the key."
+            exit 1
+          fi
+
+          # The certificate fingerprint is public and worth having in the log:
+          # it is how you tell which key signed a given build.
+          keytool -list -keystore "$store" \
+            -storepass "$OMNI_KEYSTORE_PASSWORD" \
+            -alias "$OMNI_KEY_ALIAS" 2>/dev/null | grep -i "fingerprint" || true
 
           {
             echo "OMNI_SIGNING_STORE_FILE=$store"
