@@ -65,15 +65,36 @@ sealed interface LogDestination {
     /**
      * The private copy is written and publishing is still running.
      *
-     * Measured on a Galaxy S23 running Android 16, publishing through MediaStore
-     * takes 11 to 18 ms while the private write is sub-millisecond. Directive
-     * section 36 does not allow spending that on the main thread, so the two are
-     * split and this state is what the caller sees in between.
+     * Measured on a Galaxy S23 running Android 16, publishing takes 11 to 18 ms
+     * while the private write is sub-millisecond. Directive section 36 does not
+     * allow spending that on the main thread, so the two are split and this
+     * state is what the caller sees in between.
      */
     data class Pending(val location: String) : LogDestination
 
     /** Only the private copy exists. */
     data class PrivateOnly(val location: String, val reason: String) : LogDestination
+}
+
+/**
+ * One place a copy of a log was written, and how that went.
+ *
+ * Two attempts to publish the log went wrong in a row, and both stayed invisible
+ * for a whole phase because a failure was recorded only in the log that had just
+ * failed to be published. Every attempt is now reported individually, with the
+ * exception's type as well as its message: an IOException's message is often
+ * null, and "publishing failed: null" says nothing at all.
+ */
+data class LogCopy(
+    /** Short name of the place, for the screen. */
+    val label: String,
+    /** Where it went, or where it would have gone. */
+    val location: String,
+    /** Null when it worked; otherwise what went wrong. */
+    val error: String?,
+) {
+    /** Whether the copy is there. */
+    val succeeded: Boolean get() = error == null
 }
 
 /**
@@ -134,6 +155,9 @@ object OmniLog {
 
     @Volatile
     private var lastPublished: LogDestination? = null
+
+    @Volatile
+    private var copies: List<LogCopy> = emptyList()
 
     /**
      * Notified after each publish attempt, on the publisher thread.
@@ -279,6 +303,9 @@ object OmniLog {
     /** The outcome of the most recent publish, if one has finished. */
     fun lastPublishOutcome(): LogDestination? = lastPublished
 
+    /** Every place the log was written on the most recent flush, and how it went. */
+    fun lastCopies(): List<LogCopy> = copies
+
     /** Replaces the publish listener. Passing null removes it. */
     fun setPublishListener(listener: ((LogDestination) -> Unit)?) {
         publishListener = listener
@@ -374,26 +401,18 @@ object OmniLog {
         } catch (failure: Exception) {
             Log.e(TAG, "The private log copy could not be written.", failure)
             PrivateWrite.Failed(
-                LogDestination.PrivateOnly("(unwritable)", failure.messageOrType())
+                LogDestination.PrivateOnly("(unwritable)", failure.describe())
             )
         }
     }
 
-    /** Reads the private copy back and pushes it to shared storage. */
-    private fun publishNow(name: String, privatePath: String): LogDestination {
-        val target = privateFile(name)
-            ?: return LogDestination.PrivateOnly(privatePath, "no application context")
-
-        return try {
-            LogDestination.Published(publish(name, target.readBytes()))
-        } catch (failure: Exception) {
-            LogDestination.PrivateOnly(privatePath, failure.messageOrType())
-        }
-    }
-
-    private fun Throwable.messageOrType(): String = message ?: javaClass.simpleName
-
-    /** Drops the oldest half once the cap is reached. */
+    /**
+     * Drops the oldest half once the cap is reached.
+     *
+     * A log that grows without bound is a resource-exhaustion bug wearing a
+     * useful disguise (directive section 60). The newest half is kept: the
+     * entries near a failure are the ones worth having.
+     */
     private fun trim(file: File) {
         if (file.length() <= MAX_BYTES) {
             return
@@ -405,23 +424,107 @@ object OmniLog {
         }
     }
 
-    private fun publish(name: String, bytes: ByteArray): String {
-        val active = context ?: throw IOException("no application context")
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            publishThroughMediaStore(active, name, bytes)
-        } else {
-            publishThroughLegacyStorage(active, name, bytes)
+    /** Reads the private copy back and pushes it to shared storage. */
+    private fun publishNow(name: String, privatePath: String): LogDestination {
+        val target = privateFile(name)
+            ?: return LogDestination.PrivateOnly(privatePath, "no application context")
+
+        val bytes = try {
+            target.readBytes()
+        } catch (failure: Exception) {
+            return LogDestination.PrivateOnly(privatePath, failure.describe())
+        }
+
+        val attempts = mutableListOf(
+            LogCopy("Application storage", privatePath, null),
+            publishToApplicationExternal(name, bytes),
+            publishToSharedDocuments(name, bytes),
+        )
+        copies = attempts
+
+        // Report the best place the file actually reached. The order is by how
+        // easily a person can get at it, not by how clever the mechanism is.
+        val shared = attempts.last()
+        if (shared.succeeded) {
+            return LogDestination.Published(shared.location)
+        }
+        val external = attempts[1]
+        if (external.succeeded) {
+            return LogDestination.Published(external.location)
+        }
+        return LogDestination.PrivateOnly(
+            privatePath,
+            shared.error ?: external.error ?: "unknown",
+        )
+    }
+
+    /**
+     * Writes into the application's own directory on shared storage.
+     *
+     * This is the copy that cannot fail for a permission reason: every app may
+     * write under `Android/data/<package>/files` without holding anything, on
+     * every version this application runs on. A file manager reaches it, which
+     * is what matters when the point of the file is to be sent to someone.
+     */
+    private fun publishToApplicationExternal(name: String, bytes: ByteArray): LogCopy {
+        val label = "Shared storage"
+        val context = context ?: return LogCopy(label, "(not started)", "no application context")
+
+        return try {
+            val root = context.getExternalFilesDir(null)
+                ?: return LogCopy(label, "(unavailable)", "external storage is not mounted")
+            val directory = File(root, DIRECTORY_NAME)
+            if (!directory.isDirectory && !directory.mkdirs()) {
+                return LogCopy(label, directory.absolutePath, "the directory could not be created")
+            }
+            val file = File(directory, name)
+            FileOutputStream(file, false).use { stream ->
+                stream.write(bytes)
+                stream.flush()
+            }
+            if (file.length() != bytes.size.toLong()) {
+                return LogCopy(
+                    label,
+                    file.absolutePath,
+                    "wrote ${bytes.size} bytes but the file holds ${file.length()}",
+                )
+            }
+            LogCopy(label, file.absolutePath, null)
+        } catch (failure: Exception) {
+            LogCopy(label, "(failed)", failure.describe())
+        }
+    }
+
+    /** Writes into the shared Documents folder, where it is easiest to find. */
+    private fun publishToSharedDocuments(name: String, bytes: ByteArray): LogCopy {
+        val label = "Documents"
+        val context = context ?: return LogCopy(label, "(not started)", "no application context")
+        val location = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME/$name"
+
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                publishThroughMediaStore(context, name, bytes)
+            } else {
+                publishThroughLegacyStorage(context, name, bytes)
+            }
+            LogCopy(label, location, null)
+        } catch (failure: Exception) {
+            LogCopy(label, location, failure.describe())
         }
     }
 
     /**
-     * Publishes through MediaStore, which is how an application writes into a
-     * shared collection on Android 10 and later without holding any permission.
+     * Describes a failure in a way that is worth reading.
      *
-     * The whole file is rewritten rather than appended: append semantics differ
-     * between providers, and rewriting is idempotent.
+     * An IOException's message is frequently null, and a report that says
+     * "failed: null" is how the last two publishing bugs stayed invisible.
      */
-    private fun publishThroughMediaStore(context: Context, name: String, bytes: ByteArray): String {
+    private fun Exception.describe(): String {
+        val detail = message?.takeIf { it.isNotBlank() }
+        return if (detail == null) javaClass.simpleName else "${javaClass.simpleName}: $detail"
+    }
+
+    private fun publishThroughMediaStore(context: Context, name: String, bytes: ByteArray) {
         val resolver = context.contentResolver
         val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME"
@@ -430,19 +533,11 @@ object OmniLog {
         val arguments = arrayOf("$relativePath/", name)
 
         // The entry is removed and recreated rather than reopened and truncated.
-        //
-        // Two earlier attempts failed on a Galaxy S23 running Android 16. Opening
-        // in "wt" mode wrote from offset zero without shortening the file, so each
-        // flush left the previous, longer document's tail behind. Truncating
-        // through a FileOutputStream built on the descriptor was worse: closing
-        // the stream closed the descriptor, the ParcelFileDescriptor then closed
-        // it a second time, and a double close can land on whatever file has since
-        // been given that descriptor number.
-        //
-        // Delete-then-insert has neither problem. It cannot leave old bytes
-        // behind, and because the old row is gone first, the provider never
-        // invents a "Session_Log (1).txt".
-        resolver.delete(collection, selection, arguments)
+        // Opening in "wt" mode wrote from offset zero without shortening the
+        // file, so each flush left the previous document's tail behind;
+        // truncating through the descriptor closed it twice, which can land on
+        // whatever file has since been given that number.
+        runCatching { resolver.delete(collection, selection, arguments) }
 
         val destination = resolver.insert(
             collection,
@@ -451,30 +546,26 @@ object OmniLog {
                 put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
                 put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
             },
-        ) ?: throw IOException("MediaStore refused to create $name")
+        ) ?: throw IOException("MediaStore refused to create the entry")
 
         resolver.openOutputStream(destination, "w")?.use { stream ->
             stream.write(bytes)
             stream.flush()
-        } ?: throw IOException("MediaStore returned no stream for $name")
+        } ?: throw IOException("MediaStore returned no stream")
 
-        // Read the size back. A publish that reports success without checking is
-        // how the previous two bugs stayed invisible for a whole phase.
-        val published = resolver.query(
-            destination,
-            arrayOf(MediaStore.MediaColumns.SIZE),
-            null,
-            null,
-            null,
-        )?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else -1L } ?: -1L
+        // The size is read back, but a zero or absent size is treated as "not
+        // indexed yet" rather than as a failure. The previous attempt threw here
+        // on a freshly written file whose size the provider had not caught up
+        // with, and threw away a write that had in fact succeeded.
+        val stored = runCatching {
+            resolver.query(destination, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)
+                ?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else -1L }
+                ?: -1L
+        }.getOrDefault(-1L)
 
-        if (published != bytes.size.toLong()) {
-            throw IOException(
-                "MediaStore stored $published bytes of ${bytes.size} for $name"
-            )
+        if (stored > 0 && stored != bytes.size.toLong()) {
+            throw IOException("stored $stored bytes of ${bytes.size}")
         }
-
-        return "$relativePath/$name"
     }
 
     /**
@@ -482,11 +573,7 @@ object OmniLog {
      * and writing to it requires a permission the user grants at runtime.
      */
     @Suppress("DEPRECATION")
-    private fun publishThroughLegacyStorage(
-        context: Context,
-        name: String,
-        bytes: ByteArray,
-    ): String {
+    private fun publishThroughLegacyStorage(context: Context, name: String, bytes: ByteArray) {
         if (context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             != PackageManager.PERMISSION_GRANTED
         ) {
@@ -499,9 +586,10 @@ object OmniLog {
             throw IOException("could not create ${directory.absolutePath}")
         }
 
-        val file = File(directory, name)
-        FileOutputStream(file, false).use { it.write(bytes) }
-        return file.absolutePath
+        FileOutputStream(File(directory, name), false).use { stream ->
+            stream.write(bytes)
+            stream.flush()
+        }
     }
 }
 
@@ -801,6 +889,9 @@ class BuilderActivity : Activity() {
     /** The line that says where the session log went, updated when it gets there. */
     private var logDestinationView: TextView? = null
 
+    /** The list of copies, refreshed when publishing finishes. */
+    private var logCopiesView: LinearLayout? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
@@ -850,6 +941,7 @@ class BuilderActivity : Activity() {
         // The listener holds this activity; leaving it registered would leak it.
         OmniLog.setPublishListener(null)
         logDestinationView = null
+        logCopiesView = null
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity destroyed.")
         OmniLog.flushSession()
         super.onDestroy()
@@ -1078,19 +1170,30 @@ class BuilderActivity : Activity() {
         logDestinationView = row.getChildAt(1) as TextView
         root.addView(row)
 
-        // Publishing runs on its own thread, so the line above starts out saying
+        val copiesHolder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        logCopiesView = copiesHolder
+        root.addView(copiesHolder)
+        renderCopies(copiesHolder, OmniLog.lastCopies())
+
+        root.addView(body(getString(R.string.omni_log_explanation, OmniLog.DIRECTORY_NAME)))
+
+        // Publishing runs on its own thread, so the lines above start out saying
         // "publishing" and would stay that way forever if nothing came back to
-        // correct it. Directive section 43 does not allow a screen to show a
-        // state the system has already left.
+        // correct them. Directive section 43 does not allow a screen to show a
+        // state the system has already left - and two publishing bugs stayed
+        // hidden for a phase each because the screen never said what happened.
         OmniLog.setPublishListener { outcome ->
             runOnUiThread {
                 logDestinationView?.apply {
                     text = OmniLog.describeDestination(outcome)
                     setTextColor(color(destinationColor(outcome)))
                 }
+                logCopiesView?.let { holder ->
+                    holder.removeAllViews()
+                    renderCopies(holder, OmniLog.lastCopies())
+                }
             }
         }
-        root.addView(body(getString(R.string.omni_log_explanation, OmniLog.DIRECTORY_NAME)))
 
         val crash = OmniLog.lastCrash()
         if (crash == null) {
@@ -1104,6 +1207,29 @@ class BuilderActivity : Activity() {
                 )
             )
             root.addView(mono(crash))
+        }
+    }
+
+    /** Lists every place a copy was written, and says why any of them failed. */
+    private fun renderCopies(holder: LinearLayout, copies: List<LogCopy>) {
+        if (copies.isEmpty()) {
+            holder.addView(body(getString(R.string.omni_log_not_written_yet)))
+            return
+        }
+        copies.forEach { copy ->
+            holder.addView(
+                keyValue(
+                    copy.label,
+                    copy.error?.let { getString(R.string.omni_log_copy_failed, copy.location, it) }
+                        ?: copy.location,
+                    if (copy.succeeded) R.color.omni_ok else R.color.omni_error,
+                    trailing = if (copy.succeeded) {
+                        getString(R.string.omni_log_written)
+                    } else {
+                        getString(R.string.omni_log_failed)
+                    },
+                )
+            )
         }
     }
 

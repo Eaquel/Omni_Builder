@@ -320,7 +320,7 @@ pub mod plugins {
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Phase of the roadmap in directive section 52 that this tree implements.
-pub const CORE_PHASE: &str = "PHASE 4 — RESOURCE ENGINE";
+pub const CORE_PHASE: &str = "PHASE 5 — APK ENGINE";
 
 /// Maturity of the Core as a whole. Never raise this without the quality gates
 /// of directive section 51.
@@ -550,6 +550,20 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
             "Only density qualifiers are modelled; a locale directory is refused.",
             "Styles can be referred to but not declared.",
             "Nothing reads resource files through the virtual filesystem yet.",
+        ],
+    },
+    Subsystem {
+        name: "Archive engine",
+        status: Status::Partial,
+        directive_section: 23,
+        summary: "The ZIP container an APK is: read, validated, and written \
+                  deterministically with page-aligned native libraries.",
+        missing: &[
+            "Writes stored entries only; nothing compresses.",
+            "No ZIP64, so four gigabytes and 65535 entries are hard limits.",
+            "Nothing assembles an APK from a project yet; this is the container, \
+             not the packaging step.",
+            "No signature block is written or read.",
         ],
     },
     Subsystem {
@@ -8563,6 +8577,998 @@ pub mod resources {
 }
 
 // ===========================================================================
+// archive — the ZIP container an APK is (directive sections 23 and 24)
+// ===========================================================================
+
+/// ZIP archives: read, modelled, validated and written.
+///
+/// ## Contract (directive section 2)
+///
+/// | Field                | Value                                                       |
+/// |----------------------|-------------------------------------------------------------|
+/// | Module               | `omni_core::archive`                                        |
+/// | Purpose              | The container format an Android package is.                  |
+/// | Inputs               | Archive bytes, or entries to write. Untrusted, always.       |
+/// | Outputs              | An [`Archive`] model, or archive bytes; plus diagnostics.    |
+/// | Non-Responsibilities | Compression, signing, and knowing what an APK's entries mean. |
+/// | Security             | Every offset is checked against the file. Entry names cannot  |
+/// |                      | escape, absolutely or by traversal. Central directory and     |
+/// |                      | local headers must agree.                                     |
+/// | Determinism          | Fixed timestamps, sorted entries, no host-dependent metadata. |
+/// | Status               | PARTIAL — reads any archive's structure, writes stored        |
+/// |                      | entries only.                                                 |
+///
+/// ## The approach directive section 24 requires
+///
+/// > Specification → Parser → Internal Model → Validator → Writer →
+/// > Conformance Tests
+///
+/// The format is not reinvented. This implements the subset of PKWARE's
+/// APPNOTE that an APK uses: local file headers, the central directory, and the
+/// end-of-central-directory record.
+///
+/// ## What it does not do
+///
+/// **It does not compress.** Entries are written stored, byte for byte. Deflate
+/// is a compressor, which is a subsystem of its own with its own tests, and an
+/// APK built with stored entries is correct and larger rather than smaller and
+/// wrong. An archive being *read* may hold deflated entries; their structure is
+/// modelled and their bytes are not decompressed, and the model says which is
+/// which rather than pretending.
+pub mod archive {
+    use crate::binary::{checksum, Endian, Reader, Writer as BinaryWriter};
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::hash::{sha256, Digest};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    /// Signature of a local file header.
+    pub const LOCAL_HEADER_SIGNATURE: u32 = 0x0403_4b50;
+
+    /// Signature of a central directory record.
+    pub const CENTRAL_HEADER_SIGNATURE: u32 = 0x0201_4b50;
+
+    /// Signature of the end-of-central-directory record.
+    pub const END_OF_CENTRAL_DIRECTORY_SIGNATURE: u32 = 0x0605_4b50;
+
+    /// Fixed size of a local file header before the name and extra field.
+    pub const LOCAL_HEADER_SIZE: u64 = 30;
+
+    /// Fixed size of a central directory record before the name, extra and comment.
+    pub const CENTRAL_HEADER_SIZE: u64 = 46;
+
+    /// Fixed size of the end-of-central-directory record before the comment.
+    pub const END_OF_CENTRAL_DIRECTORY_SIZE: u64 = 22;
+
+    /// Most entries an archive may hold.
+    ///
+    /// The end-of-central-directory record counts entries in sixteen bits, and
+    /// this implementation does not write the ZIP64 records that lift that.
+    pub const MAX_ENTRIES: usize = 65_535;
+
+    /// Longest accepted entry name, in bytes.
+    pub const MAX_NAME_BYTES: usize = 4_096;
+
+    /// Largest archive this implementation will read or write.
+    ///
+    /// Four gigabytes is where the format's 32-bit offsets stop working, and
+    /// ZIP64 is not implemented (directive section 60).
+    pub const MAX_ARCHIVE_BYTES: u64 = u32::MAX as u64;
+
+    /// Fixed modification date: 1 January 1980, the start of the DOS epoch.
+    ///
+    /// A real timestamp is the single most common reason two builds of the same
+    /// source produce different bytes (directive section 12). The format has
+    /// nowhere to put "unspecified", so the earliest representable moment is
+    /// used and the same value goes into every entry.
+    pub const FIXED_DOS_DATE: u16 = 0x0021;
+
+    /// Fixed modification time: midnight.
+    pub const FIXED_DOS_TIME: u16 = 0x0000;
+
+    /// How an entry's bytes are stored.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+    pub enum Compression {
+        /// Stored byte for byte.
+        Stored,
+        /// Deflated. Readable as metadata; this implementation does not
+        /// decompress.
+        Deflate,
+        /// Something else the format defines and this implementation does not
+        /// model.
+        Other(u16),
+    }
+
+    impl Compression {
+        /// The method number the format uses.
+        pub const fn method(self) -> u16 {
+            match self {
+                Compression::Stored => 0,
+                Compression::Deflate => 8,
+                Compression::Other(method) => method,
+            }
+        }
+
+        /// Reads a method number.
+        pub const fn from_method(method: u16) -> Compression {
+            match method {
+                0 => Compression::Stored,
+                8 => Compression::Deflate,
+                other => Compression::Other(other),
+            }
+        }
+
+        /// Stable machine-readable name.
+        pub fn as_str(self) -> &'static str {
+            match self {
+                Compression::Stored => "STORED",
+                Compression::Deflate => "DEFLATE",
+                Compression::Other(_) => "OTHER",
+            }
+        }
+    }
+
+    /// One entry, as the archive describes it.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Entry {
+        /// Name, as stored. Always uses `/`.
+        pub name: String,
+        /// How the bytes are stored.
+        pub compression: Compression,
+        /// CRC-32 of the uncompressed bytes, as the archive claims.
+        pub crc32: u32,
+        /// Size of the stored bytes.
+        pub compressed_size: u64,
+        /// Size of the original bytes.
+        pub uncompressed_size: u64,
+        /// Offset of the local file header.
+        pub local_header_offset: u64,
+        /// Offset of the entry's bytes, once the local header has been read.
+        pub data_offset: u64,
+    }
+
+    impl Entry {
+        /// Whether the entry names a directory rather than a file.
+        pub fn is_directory(&self) -> bool {
+            self.name.ends_with('/')
+        }
+
+        /// Whether the entry's bytes start on a multiple of `alignment`.
+        pub fn is_aligned_to(&self, alignment: u64) -> bool {
+            alignment != 0 && self.data_offset.is_multiple_of(alignment)
+        }
+    }
+
+    /// An archive that has been read and checked.
+    #[derive(Clone, Debug)]
+    pub struct Archive {
+        entries: Vec<Entry>,
+        size: u64,
+        central_directory_offset: u64,
+        digest: Digest,
+    }
+
+    impl Archive {
+        /// Every entry, in central directory order.
+        pub fn entries(&self) -> &[Entry] {
+            &self.entries
+        }
+
+        /// Number of entries.
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        /// Whether the archive holds nothing.
+        pub fn is_empty(&self) -> bool {
+            self.entries.is_empty()
+        }
+
+        /// Size of the archive in bytes.
+        pub fn size(&self) -> u64 {
+            self.size
+        }
+
+        /// Digest of the whole archive.
+        pub fn digest(&self) -> Digest {
+            self.digest
+        }
+
+        /// Looks an entry up by name.
+        pub fn entry(&self, name: &str) -> Option<&Entry> {
+            self.entries.iter().find(|entry| entry.name == name)
+        }
+
+        /// Borrows one entry's stored bytes.
+        ///
+        /// For a stored entry these are the file's bytes. For a deflated one
+        /// they are the compressed bytes, and the caller is told so rather than
+        /// handed something that looks like content.
+        pub fn stored_bytes<'a>(
+            &self,
+            data: &'a [u8],
+            entry: &Entry,
+        ) -> Result<&'a [u8], Diagnostic> {
+            let reader = Reader::new(data, Endian::Little, "archive");
+            reader.slice_at(entry.data_offset, entry.compressed_size)
+        }
+
+        /// Serialises the archive as the object member `key`.
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_u64("size", self.size);
+            w.field_u64("entries", self.entries.len() as u64);
+            w.field_u64("centralDirectoryOffset", self.central_directory_offset);
+            w.field_str("digest", &self.digest.to_hex());
+            w.begin_array(Some("detail"));
+            for entry in &self.entries {
+                w.begin_object(None);
+                w.field_str("name", &entry.name);
+                w.field_str("compression", entry.compression.as_str());
+                w.field_u64("size", entry.uncompressed_size);
+                w.field_u64("stored", entry.compressed_size);
+                w.field_u64("dataOffset", entry.data_offset);
+                w.field_str("crc32", &format!("{:08x}", entry.crc32));
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.archive",
+            message,
+        )
+    }
+
+    /// Checks that an entry name is one an archive may safely carry.
+    ///
+    /// Directive section 23 names path traversal and invalid names as mandatory
+    /// checks. An archive is a directory tree written by somebody else, and an
+    /// entry called `../../etc/passwd` is how that tree reaches outside wherever
+    /// it is unpacked.
+    pub fn validate_entry_name(name: &str) -> Result<(), Diagnostic> {
+        let reject = |code: &str, message: String, suggestion: &str| {
+            Err(Diagnostic::new(
+                code,
+                Severity::Error,
+                FailureClass::SecurityFailure,
+                "core.archive",
+                message,
+            )
+            .with_context(format!("Name: {}", truncate(name, 96)))
+            .with_suggestion(suggestion.to_string()))
+        };
+
+        if name.is_empty() {
+            return reject(
+                "EA001",
+                "An entry has no name.".into(),
+                "Every entry is named.",
+            );
+        }
+        if name.len() > MAX_NAME_BYTES {
+            return reject(
+                "EA002",
+                "An entry name is longer than the accepted limit.".into(),
+                "Names are limited to 4096 bytes.",
+            );
+        }
+        if name.starts_with('/') {
+            return reject(
+                "EA003",
+                "An entry name is absolute.".into(),
+                "An absolute name would write outside wherever the archive is unpacked.",
+            );
+        }
+        if name.contains('\\') {
+            return reject(
+                "EA004",
+                "An entry name contains a backslash.".into(),
+                "The format uses '/'. Two spellings of one path are two chances to \
+                 get a security check wrong.",
+            );
+        }
+        if let Some(bad) = name.chars().find(|c| (*c as u32) < 0x20 || *c == '\u{7f}') {
+            return reject(
+                "EA005",
+                format!("An entry name contains U+{:04X}.", bad as u32),
+                "A control character in a name is either a mistake or an attempt to \
+                 confuse something downstream.",
+            );
+        }
+        if name.split('/').any(|segment| segment == "..") {
+            return reject(
+                "EA006",
+                "An entry name climbs out of the archive.".into(),
+                "Remove the '..' segment. Nothing an archive contains needs to reach \
+                 above its own root.",
+            );
+        }
+        if name.len() >= 2 && name.as_bytes()[1] == b':' {
+            return reject(
+                "EA007",
+                "An entry name names a drive.".into(),
+                "Use a name relative to the archive root.",
+            );
+        }
+        Ok(())
+    }
+
+    fn truncate(value: &str, max: usize) -> String {
+        if value.chars().count() <= max {
+            return value.to_string();
+        }
+        let mut out: String = value.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+
+    /// Reads an archive and checks everything directive section 23 requires.
+    ///
+    /// Returns `None` when the archive cannot be trusted; every reason is in
+    /// `sink`. Reading stops at the first structural problem, because after one
+    /// the offsets are guesses.
+    pub fn read(data: &[u8], sink: &mut Sink) -> Option<Archive> {
+        if data.len() as u64 > MAX_ARCHIVE_BYTES {
+            sink.emit(
+                Diagnostic::new(
+                    "EA010",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.archive",
+                    "The archive is larger than this implementation reads.",
+                )
+                .with_context(format!("Limit: {MAX_ARCHIVE_BYTES} bytes"))
+                .with_suggestion("ZIP64 is not implemented."),
+            );
+            return None;
+        }
+
+        let end = match find_end_of_central_directory(data) {
+            Ok(end) => end,
+            Err(error) => {
+                sink.emit(error);
+                return None;
+            }
+        };
+
+        let mut reader = Reader::new(data, Endian::Little, "archive");
+        if let Err(error) = reader.seek(end) {
+            sink.emit(error);
+            return None;
+        }
+
+        let record = match read_end_record(&mut reader, data.len() as u64) {
+            Ok(record) => record,
+            Err(error) => {
+                sink.emit(error);
+                return None;
+            }
+        };
+
+        let mut entries: Vec<Entry> = Vec::with_capacity(record.entry_count as usize);
+        if let Err(error) = reader.seek(record.central_directory_offset) {
+            sink.emit(error);
+            return None;
+        }
+
+        for index in 0..record.entry_count {
+            match read_central_entry(&mut reader, data, index) {
+                Ok(entry) => entries.push(entry),
+                Err(error) => {
+                    sink.emit(error);
+                    return None;
+                }
+            }
+        }
+
+        // Duplicate names are a mandatory check: two entries answering to one
+        // name make every lookup ambiguous, and which one a reader picks has
+        // been a source of real Android vulnerabilities.
+        let mut seen: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        seen.sort_unstable();
+        for pair in seen.windows(2) {
+            if pair[0] == pair[1] {
+                sink.emit(
+                    fail("EA011", "The archive contains the same entry twice.")
+                        .with_context(format!("Name: {}", truncate(pair[0], 96)))
+                        .with_suggestion(
+                            "Which of the two a reader uses is not defined, so the \
+                             archive is refused rather than guessed at.",
+                        )
+                        .with_class(FailureClass::SecurityFailure),
+                );
+                return None;
+            }
+        }
+
+        Some(Archive {
+            entries,
+            size: data.len() as u64,
+            central_directory_offset: record.central_directory_offset,
+            digest: sha256(data),
+        })
+    }
+
+    struct EndRecord {
+        entry_count: u16,
+        central_directory_offset: u64,
+    }
+
+    /// Finds the end-of-central-directory record.
+    ///
+    /// It is at the end, unless there is a comment, in which case it is up to
+    /// 65535 bytes earlier. The search is backwards and bounded, which is what
+    /// keeps a hostile archive from making it quadratic.
+    fn find_end_of_central_directory(data: &[u8]) -> Result<u64, Diagnostic> {
+        let size = END_OF_CENTRAL_DIRECTORY_SIZE as usize;
+        if data.len() < size {
+            return Err(fail("EA012", "The file is too small to be an archive.")
+                .with_context(format!("Size: {} bytes", data.len()))
+                .with_context(format!("Smallest possible: {size} bytes")));
+        }
+
+        let signature = END_OF_CENTRAL_DIRECTORY_SIGNATURE.to_le_bytes();
+        let furthest = data.len().saturating_sub(size + u16::MAX as usize);
+
+        for start in (furthest..=data.len() - size).rev() {
+            if data[start..start + 4] == signature {
+                let comment_length =
+                    u16::from_le_bytes([data[start + 20], data[start + 21]]) as usize;
+                if start + size + comment_length == data.len() {
+                    return Ok(start as u64);
+                }
+            }
+        }
+
+        Err(fail(
+            "EA013",
+            "The archive has no end-of-central-directory record.",
+        )
+        .with_suggestion(
+            "The file is truncated, or it is not an archive. Every ZIP ends \
+                     with this record.",
+        ))
+    }
+
+    fn read_end_record(reader: &mut Reader<'_>, total: u64) -> Result<EndRecord, Diagnostic> {
+        let signature = reader.u32()?;
+        if signature != END_OF_CENTRAL_DIRECTORY_SIGNATURE {
+            return Err(fail(
+                "EA014",
+                "The end-of-central-directory signature is wrong.",
+            ));
+        }
+
+        let this_disk = reader.u16()?;
+        let start_disk = reader.u16()?;
+        let entries_here = reader.u16()?;
+        let entries_total = reader.u16()?;
+        let directory_size = u64::from(reader.u32()?);
+        let directory_offset = u64::from(reader.u32()?);
+
+        if this_disk != 0 || start_disk != 0 {
+            return Err(fail("EA015", "The archive is split across several disks.")
+                .with_suggestion("Split archives are not read."));
+        }
+        if entries_here != entries_total {
+            return Err(fail(
+                "EA016",
+                "The archive disagrees with itself about its entry count.",
+            )
+            .with_context(format!(
+                "On this disk: {entries_here}, in total: {entries_total}"
+            )));
+        }
+
+        let Some(directory_end) = directory_offset.checked_add(directory_size) else {
+            return Err(fail(
+                "EA017",
+                "The central directory's offset and size overflow.",
+            ));
+        };
+        if directory_end > total {
+            return Err(fail(
+                "EA018",
+                "The central directory extends past the end of the file.",
+            )
+            .with_context(format!("Directory: {directory_offset}..{directory_end}"))
+            .with_context(format!("File: {total} bytes"))
+            .with_suggestion("The file is truncated, or the record is wrong."));
+        }
+
+        Ok(EndRecord {
+            entry_count: entries_total,
+            central_directory_offset: directory_offset,
+        })
+    }
+
+    fn read_central_entry(
+        reader: &mut Reader<'_>,
+        data: &[u8],
+        index: u16,
+    ) -> Result<Entry, Diagnostic> {
+        let signature = reader.u32()?;
+        if signature != CENTRAL_HEADER_SIGNATURE {
+            return Err(fail(
+                "EA020",
+                "A central directory record has the wrong signature.",
+            )
+            .with_context(format!("Entry: {index}"))
+            .with_context(format!("Found: 0x{signature:08x}")));
+        }
+
+        let _version_made_by = reader.u16()?;
+        let _version_needed = reader.u16()?;
+        let flags = reader.u16()?;
+        let method = reader.u16()?;
+        let _time = reader.u16()?;
+        let _date = reader.u16()?;
+        let crc32 = reader.u32()?;
+        let compressed_size = u64::from(reader.u32()?);
+        let uncompressed_size = u64::from(reader.u32()?);
+        let name_length = usize::from(reader.u16()?);
+        let extra_length = usize::from(reader.u16()?);
+        let comment_length = usize::from(reader.u16()?);
+        let _disk_start = reader.u16()?;
+        let _internal = reader.u16()?;
+        let _external = reader.u32()?;
+        let local_header_offset = u64::from(reader.u32()?);
+
+        if flags & 0x0001 != 0 {
+            return Err(fail("EA021", "An entry is encrypted.")
+                .with_context(format!("Entry: {index}"))
+                .with_suggestion("Encrypted archives are not read."));
+        }
+
+        let name_bytes = reader.bytes(name_length)?;
+        let Ok(name) = core::str::from_utf8(name_bytes) else {
+            return Err(fail("EA022", "An entry name is not valid UTF-8.")
+                .with_context(format!("Entry: {index}")));
+        };
+        let name = name.to_string();
+        validate_entry_name(&name)?;
+
+        reader.skip(extra_length)?;
+        reader.skip(comment_length)?;
+
+        // The local header is read too, and must agree. An archive whose two
+        // descriptions of an entry differ is how a reader and a verifier are
+        // made to see different files.
+        let data_offset = read_local_header(data, &name, local_header_offset, crc32, method)?;
+
+        Ok(Entry {
+            name,
+            compression: Compression::from_method(method),
+            crc32,
+            compressed_size,
+            uncompressed_size,
+            local_header_offset,
+            data_offset,
+        })
+    }
+
+    fn read_local_header(
+        data: &[u8],
+        expected_name: &str,
+        offset: u64,
+        expected_crc: u32,
+        expected_method: u16,
+    ) -> Result<u64, Diagnostic> {
+        let mut reader = Reader::new(data, Endian::Little, "archive");
+        reader.seek(offset)?;
+
+        let signature = reader.u32()?;
+        if signature != LOCAL_HEADER_SIGNATURE {
+            return Err(
+                fail("EA030", "A local file header has the wrong signature.")
+                    .with_context(format!("Entry: {}", truncate(expected_name, 96)))
+                    .with_context(format!("At offset: {offset}"))
+                    .with_context(format!("Found: 0x{signature:08x}"))
+                    .with_suggestion(
+                        "The central directory points somewhere that is not a header. \
+                     The archive has been rewritten by something that did not \
+                     update both.",
+                    ),
+            );
+        }
+
+        let _version = reader.u16()?;
+        let flags = reader.u16()?;
+        let method = reader.u16()?;
+        let _time = reader.u16()?;
+        let _date = reader.u16()?;
+        let crc32 = reader.u32()?;
+        let _compressed = reader.u32()?;
+        let _uncompressed = reader.u32()?;
+        let name_length = usize::from(reader.u16()?);
+        let extra_length = usize::from(reader.u16()?);
+
+        let name_bytes = reader.bytes(name_length)?;
+        if name_bytes != expected_name.as_bytes() {
+            return Err(
+                fail("EA031", "An entry is named differently in its two headers.")
+                    .with_context(format!(
+                        "Central directory: {}",
+                        truncate(expected_name, 64)
+                    ))
+                    .with_context(format!(
+                        "Local header: {}",
+                        truncate(&String::from_utf8_lossy(name_bytes), 64)
+                    ))
+                    .with_class(FailureClass::SecurityFailure)
+                    .with_suggestion(
+                        "Which name a reader uses decides which file it gets. An archive \
+                     that gives two answers is refused.",
+                    ),
+            );
+        }
+
+        if method != expected_method {
+            return Err(fail(
+                "EA032",
+                "An entry's two headers disagree about compression.",
+            )
+            .with_context(format!("Entry: {}", truncate(expected_name, 96))));
+        }
+
+        // A data descriptor moves the CRC and sizes to after the data, so the
+        // zeroes in the local header are expected rather than a disagreement.
+        let has_descriptor = flags & 0x0008 != 0;
+        if !has_descriptor && crc32 != expected_crc {
+            return Err(fail(
+                "EA033",
+                "An entry's two headers disagree about its checksum.",
+            )
+            .with_context(format!("Entry: {}", truncate(expected_name, 96)))
+            .with_context(format!("Central directory: {expected_crc:08x}"))
+            .with_context(format!("Local header: {crc32:08x}"))
+            .with_class(FailureClass::SecurityFailure));
+        }
+
+        reader.skip(extra_length)?;
+        Ok(reader.position() as u64)
+    }
+
+    /// Verifies that every stored entry's bytes match the checksum recorded for
+    /// them.
+    ///
+    /// Only stored entries can be checked: a deflated entry's checksum covers
+    /// what it decompresses to, and nothing here decompresses. Which entries
+    /// were checked is reported rather than glossed over.
+    pub fn verify_checksums(archive: &Archive, data: &[u8], sink: &mut Sink) -> (u64, u64) {
+        let mut checked = 0;
+        let mut skipped = 0;
+
+        for entry in archive.entries() {
+            if entry.compression != Compression::Stored {
+                skipped += 1;
+                continue;
+            }
+
+            let bytes = match archive.stored_bytes(data, entry) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    sink.emit(error);
+                    continue;
+                }
+            };
+
+            if bytes.len() as u64 != entry.uncompressed_size {
+                sink.emit(
+                    fail("EA040", "A stored entry's size does not match its header.")
+                        .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                        .with_context(format!(
+                            "Header: {}, found: {}",
+                            entry.uncompressed_size,
+                            bytes.len()
+                        )),
+                );
+                continue;
+            }
+
+            let actual = checksum::crc32(bytes);
+            if actual != entry.crc32 {
+                sink.emit(
+                    fail("EA041", "A stored entry does not match its checksum.")
+                        .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                        .with_context(format!("Recorded: {:08x}", entry.crc32))
+                        .with_context(format!("Found: {actual:08x}"))
+                        .with_suggestion("The entry's bytes changed after it was written."),
+                );
+                continue;
+            }
+
+            checked += 1;
+        }
+
+        (checked, skipped)
+    }
+
+    // -----------------------------------------------------------------------
+    // Writer
+    // -----------------------------------------------------------------------
+
+    /// Header identifier of the padding record used for alignment.
+    ///
+    /// `0xd935` is the identifier Android's own alignment tool writes. Using a
+    /// well-formed extra-field record rather than raw padding means every reader
+    /// skips it correctly instead of tolerating it.
+    pub const ALIGNMENT_EXTRA_ID: u16 = 0xd935;
+
+    /// Alignment every entry gets unless something asks for more.
+    pub const DEFAULT_ALIGNMENT: u64 = 4;
+
+    /// Alignment a native library needs.
+    ///
+    /// A device with 16 KB memory pages maps a shared library straight out of
+    /// the package, which it can only do when the library starts on a page
+    /// boundary. This was measured against `zipalign -P 16` on a real package.
+    pub const NATIVE_LIBRARY_ALIGNMENT: u64 = 16 * 1024;
+
+    /// An entry waiting to be written.
+    #[derive(Clone, Debug)]
+    struct Pending {
+        name: String,
+        bytes: Vec<u8>,
+        alignment: u64,
+    }
+
+    /// Builds an archive.
+    ///
+    /// Output is deterministic by construction: entries are sorted by name, all
+    /// timestamps are the same fixed value, and nothing about the machine that
+    /// ran the build reaches the bytes (directive section 12).
+    #[derive(Clone, Debug, Default)]
+    pub struct Builder {
+        entries: Vec<Pending>,
+        android_alignment: bool,
+    }
+
+    impl Builder {
+        /// A builder that aligns every entry to four bytes.
+        pub fn new() -> Builder {
+            Builder {
+                entries: Vec::new(),
+                android_alignment: false,
+            }
+        }
+
+        /// A builder that also puts native libraries on a page boundary.
+        ///
+        /// This is the policy an Android package needs: `lib/**/*.so` aligned to
+        /// 16 KB so the platform can map it directly, everything else to four.
+        pub fn for_android() -> Builder {
+            Builder {
+                entries: Vec::new(),
+                android_alignment: true,
+            }
+        }
+
+        /// Number of entries added.
+        pub fn len(&self) -> usize {
+            self.entries.len()
+        }
+
+        /// Whether nothing has been added.
+        pub fn is_empty(&self) -> bool {
+            self.entries.is_empty()
+        }
+
+        /// Adds an entry, choosing its alignment from the builder's policy.
+        pub fn add(&mut self, name: impl Into<String>, bytes: Vec<u8>) -> Result<(), Diagnostic> {
+            let name = name.into();
+            let alignment = if self.android_alignment && is_native_library(&name) {
+                NATIVE_LIBRARY_ALIGNMENT
+            } else {
+                DEFAULT_ALIGNMENT
+            };
+            self.add_aligned(name, bytes, alignment)
+        }
+
+        /// Adds an entry with an explicit alignment.
+        pub fn add_aligned(
+            &mut self,
+            name: impl Into<String>,
+            bytes: Vec<u8>,
+            alignment: u64,
+        ) -> Result<(), Diagnostic> {
+            let name = name.into();
+            validate_entry_name(&name)?;
+
+            if !alignment.is_power_of_two() {
+                return Err(Diagnostic::new(
+                    "EA050",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.archive",
+                    "Alignment must be a power of two.",
+                )
+                .with_context(format!("Given: {alignment}")));
+            }
+
+            if self.entries.iter().any(|existing| existing.name == name) {
+                return Err(Diagnostic::new(
+                    "EA051",
+                    Severity::Error,
+                    FailureClass::InternalError,
+                    "core.archive",
+                    "That entry has already been added.",
+                )
+                .with_context(format!("Name: {}", truncate(&name, 96)))
+                .with_suggestion(
+                    "An archive with one name twice is ambiguous, so it is refused \
+                     here rather than produced and refused later.",
+                ));
+            }
+
+            if self.entries.len() >= MAX_ENTRIES {
+                return Err(Diagnostic::new(
+                    "EA052",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.archive",
+                    "The archive would hold more entries than the format allows.",
+                )
+                .with_context(format!("Limit: {MAX_ENTRIES}"))
+                .with_suggestion("ZIP64 is not implemented."));
+            }
+
+            self.entries.push(Pending {
+                name,
+                bytes,
+                alignment,
+            });
+            Ok(())
+        }
+
+        /// Writes the archive.
+        ///
+        /// Entries are sorted by name first. Directive section 23 requires
+        /// deterministic ordering, and sorting is the only ordering that does not
+        /// depend on how the caller happened to walk a directory.
+        pub fn finish(mut self) -> Result<Vec<u8>, Diagnostic> {
+            self.entries
+                .sort_by(|left, right| left.name.cmp(&right.name));
+
+            let mut writer = BinaryWriter::new(Endian::Little);
+            let mut written: Vec<(Pending, u64, u32)> = Vec::with_capacity(self.entries.len());
+
+            for entry in self.entries {
+                let header_offset = writer.position() as u64;
+                let crc = checksum::crc32(&entry.bytes);
+
+                let size = u32::try_from(entry.bytes.len()).map_err(|_| {
+                    Diagnostic::new(
+                        "EA053",
+                        Severity::Error,
+                        FailureClass::ResourceExhaustion,
+                        "core.archive",
+                        "An entry is larger than the format's 32-bit size field.",
+                    )
+                    .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                    .with_suggestion("ZIP64 is not implemented.")
+                })?;
+
+                let name_bytes = entry.name.as_bytes();
+                let name_length = u16::try_from(name_bytes.len()).map_err(|_| {
+                    Diagnostic::new(
+                        "EA002",
+                        Severity::Error,
+                        FailureClass::SecurityFailure,
+                        "core.archive",
+                        "An entry name is longer than the format's length field.",
+                    )
+                })?;
+
+                // The extra field is sized so that the entry's bytes land on the
+                // boundary it asked for. A record is four bytes of header plus
+                // its payload, so padding of one to three bytes is grown by one
+                // whole alignment step rather than written as a malformed record.
+                let base = header_offset + LOCAL_HEADER_SIZE + u64::from(name_length);
+                let mut padding = (entry.alignment - (base % entry.alignment)) % entry.alignment;
+                while padding != 0 && padding < 4 {
+                    padding += entry.alignment;
+                }
+                let extra_length = u16::try_from(padding).map_err(|_| {
+                    Diagnostic::new(
+                        "EA054",
+                        Severity::Error,
+                        FailureClass::InternalError,
+                        "core.archive",
+                        "The alignment padding is larger than the extra field allows.",
+                    )
+                    .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                    .with_context(format!("Padding: {padding} bytes"))
+                })?;
+
+                writer.u32(LOCAL_HEADER_SIGNATURE)?;
+                writer.u16(20)?; // version needed: 2.0, which is stored and deflate
+                writer.u16(0)?; // no flags: no encryption, no data descriptor
+                writer.u16(Compression::Stored.method())?;
+                writer.u16(FIXED_DOS_TIME)?;
+                writer.u16(FIXED_DOS_DATE)?;
+                writer.u32(crc)?;
+                writer.u32(size)?;
+                writer.u32(size)?;
+                writer.u16(name_length)?;
+                writer.u16(extra_length)?;
+                writer.bytes(name_bytes)?;
+
+                if extra_length >= 4 {
+                    writer.u16(ALIGNMENT_EXTRA_ID)?;
+                    writer.u16(extra_length - 4)?;
+                    for _ in 0..extra_length - 4 {
+                        writer.u8(0)?;
+                    }
+                }
+
+                debug_assert_eq!(writer.position() as u64 % entry.alignment, 0);
+                writer.bytes(&entry.bytes)?;
+                written.push((entry, header_offset, crc));
+            }
+
+            let directory_offset = writer.position() as u64;
+
+            for (entry, header_offset, crc) in &written {
+                let size = entry.bytes.len() as u32;
+                writer.u32(CENTRAL_HEADER_SIGNATURE)?;
+                writer.u16(20)?; // version made by
+                writer.u16(20)?; // version needed
+                writer.u16(0)?;
+                writer.u16(Compression::Stored.method())?;
+                writer.u16(FIXED_DOS_TIME)?;
+                writer.u16(FIXED_DOS_DATE)?;
+                writer.u32(*crc)?;
+                writer.u32(size)?;
+                writer.u32(size)?;
+                writer.u16(entry.name.len() as u16)?;
+                writer.u16(0)?; // the central directory carries no extra field
+                writer.u16(0)?; // no comment
+                writer.u16(0)?; // disk number
+                writer.u16(0)?; // internal attributes
+                writer.u32(0)?; // external attributes: none, so no host's umask
+                writer.u32(*header_offset as u32)?;
+                writer.bytes(entry.name.as_bytes())?;
+            }
+
+            let directory_size = writer.position() as u64 - directory_offset;
+            let count = u16::try_from(written.len()).map_err(|_| {
+                Diagnostic::new(
+                    "EA052",
+                    Severity::Error,
+                    FailureClass::ResourceExhaustion,
+                    "core.archive",
+                    "The archive holds more entries than the format's counter allows.",
+                )
+            })?;
+
+            writer.u32(END_OF_CENTRAL_DIRECTORY_SIGNATURE)?;
+            writer.u16(0)?;
+            writer.u16(0)?;
+            writer.u16(count)?;
+            writer.u16(count)?;
+            writer.u32(directory_size as u32)?;
+            writer.u32(directory_offset as u32)?;
+            writer.u16(0)?; // no archive comment
+
+            Ok(writer.finish())
+        }
+    }
+
+    /// Whether a name is a native library, which needs page alignment.
+    fn is_native_library(name: &str) -> bool {
+        name.starts_with("lib/") && name.ends_with(".so")
+    }
+}
+
+// ===========================================================================
 // report — the single source of truth the user interface renders
 // ===========================================================================
 
@@ -8803,6 +9809,7 @@ pub mod ffi {
 
 #[cfg(test)]
 mod tests {
+    use super::archive::{self, Builder as ArchiveBuilder};
     use super::artifact::{Artifact, ArtifactId, State as ArtifactState};
     use super::binary::{
         checksum, Endian, Reader as BinaryReader, Section, Table as BinaryTable,
@@ -10600,6 +11607,536 @@ mod tests {
             table.read_values(&document, "fuzz.xml", &mut sink);
             let _ = table.compile(&mut sink);
         }
+    }
+
+    // --- archive: conformance against an independently produced file --------
+
+    /// An archive produced by the Info-ZIP `zip` tool, byte for byte.
+    ///
+    /// Directive section 24 ends its list with conformance tests, and a parser
+    /// tested only against its own writer proves that the two agree, not that
+    /// either follows the specification. This file was made by a tool that has
+    /// nothing to do with this project and holds two entries: `a.txt` with
+    /// "hello omni", and `dir/b.txt` with "second entry".
+    const INFOZIP_SAMPLE: &[u8] = &[
+        0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x04,
+        0xc9, 0x25, 0x28, 0x0a, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00,
+        0x61, 0x2e, 0x74, 0x78, 0x74, 0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x20, 0x6f, 0x6d, 0x6e, 0x69,
+        0x50, 0x4b, 0x03, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x33,
+        0xeb, 0xbf, 0xe0, 0x0c, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00,
+        0x64, 0x69, 0x72, 0x2f, 0x62, 0x2e, 0x74, 0x78, 0x74, 0x73, 0x65, 0x63, 0x6f, 0x6e, 0x64,
+        0x20, 0x65, 0x6e, 0x74, 0x72, 0x79, 0x50, 0x4b, 0x01, 0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x04, 0xc9, 0x25, 0x28, 0x0a, 0x00, 0x00, 0x00,
+        0x0a, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
+        0x00, 0xa4, 0x81, 0x00, 0x00, 0x00, 0x00, 0x61, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b, 0x01,
+        0x02, 0x1e, 0x03, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0xd7, 0x40, 0x14, 0x5d, 0x33, 0xeb,
+        0xbf, 0xe0, 0x0c, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0xa4, 0x81, 0x2d, 0x00, 0x00, 0x00, 0x64, 0x69,
+        0x72, 0x2f, 0x62, 0x2e, 0x74, 0x78, 0x74, 0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00,
+        0x02, 0x00, 0x02, 0x00, 0x6a, 0x00, 0x00, 0x00, 0x60, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn an_archive_written_by_another_tool_reads_correctly() {
+        let mut sink = Sink::new();
+        let archive = archive::read(INFOZIP_SAMPLE, &mut sink).expect("must read");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        assert_eq!(archive.len(), 2);
+        assert_eq!(archive.size(), INFOZIP_SAMPLE.len() as u64);
+
+        let a = archive.entry("a.txt").expect("a.txt");
+        assert_eq!(a.uncompressed_size, 10);
+        assert_eq!(a.compression, archive::Compression::Stored);
+        assert!(!a.is_directory());
+
+        let b = archive.entry("dir/b.txt").expect("dir/b.txt");
+        assert_eq!(b.uncompressed_size, 12);
+
+        // The bytes are where the headers say they are.
+        assert_eq!(
+            archive.stored_bytes(INFOZIP_SAMPLE, a).unwrap(),
+            b"hello omni"
+        );
+        assert_eq!(
+            archive.stored_bytes(INFOZIP_SAMPLE, b).unwrap(),
+            b"second entry"
+        );
+
+        // And the checksums that tool computed match the ones this one does.
+        let mut verify_sink = Sink::new();
+        let (checked, skipped) =
+            archive::verify_checksums(&archive, INFOZIP_SAMPLE, &mut verify_sink);
+        assert_eq!(checked, 2);
+        assert_eq!(skipped, 0);
+        assert!(!verify_sink.has_blocking(), "{:?}", verify_sink.entries());
+    }
+
+    // --- archive: writing ----------------------------------------------------
+
+    #[test]
+    fn an_archive_round_trips_through_the_writer_and_the_reader() {
+        let mut builder = ArchiveBuilder::new();
+        builder
+            .add("AndroidManifest.xml", b"<manifest/>".to_vec())
+            .unwrap();
+        builder.add("classes.dex", vec![0x11; 300]).unwrap();
+        builder.add("res/values.arsc", b"table".to_vec()).unwrap();
+        let bytes = builder.finish().unwrap();
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).expect("must read back");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        assert_eq!(archive.len(), 3);
+
+        assert_eq!(
+            archive
+                .stored_bytes(&bytes, archive.entry("AndroidManifest.xml").unwrap())
+                .unwrap(),
+            b"<manifest/>"
+        );
+        assert_eq!(
+            archive
+                .stored_bytes(&bytes, archive.entry("classes.dex").unwrap())
+                .unwrap()
+                .len(),
+            300
+        );
+
+        let (checked, skipped) = archive::verify_checksums(&archive, &bytes, &mut sink);
+        assert_eq!(checked, 3);
+        assert_eq!(skipped, 0);
+        assert!(!sink.has_blocking());
+    }
+
+    #[test]
+    fn entries_are_written_in_sorted_order_whatever_order_they_arrive_in() {
+        // Directive section 23 lists deterministic ordering as mandatory.
+        // Sorting is the only ordering that does not depend on how the caller
+        // happened to walk a directory.
+        let build = |names: &[&str]| {
+            let mut builder = ArchiveBuilder::new();
+            for name in names {
+                builder.add(*name, name.as_bytes().to_vec()).unwrap();
+            }
+            builder.finish().unwrap()
+        };
+
+        let forwards = build(&["a.txt", "b.txt", "c.txt"]);
+        let backwards = build(&["c.txt", "b.txt", "a.txt"]);
+        assert_eq!(forwards, backwards, "entry order changed the archive");
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&forwards, &mut sink).unwrap();
+        let names: Vec<&str> = archive.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["a.txt", "b.txt", "c.txt"]);
+    }
+
+    #[test]
+    fn the_same_input_always_produces_the_same_archive() {
+        // No timestamp, no host attributes, nothing about the machine.
+        let build = || {
+            let mut builder = ArchiveBuilder::for_android();
+            builder.add("classes.dex", vec![7; 64]).unwrap();
+            builder
+                .add("lib/arm64-v8a/libomni.so", vec![9; 100])
+                .unwrap();
+            builder.finish().unwrap()
+        };
+        assert_eq!(build(), build());
+        assert_eq!(super::hash::sha256(&build()), super::hash::sha256(&build()));
+    }
+
+    #[test]
+    fn native_libraries_land_on_a_page_boundary() {
+        // A device with 16 KB pages maps a library straight out of the package,
+        // which it can only do when the library starts on a page boundary.
+        let mut builder = ArchiveBuilder::for_android();
+        builder
+            .add("AndroidManifest.xml", b"<manifest/>".to_vec())
+            .unwrap();
+        builder
+            .add("lib/arm64-v8a/libomni_builder.so", vec![0x7f; 5_000])
+            .unwrap();
+        builder
+            .add("lib/x86_64/libomni_builder.so", vec![0x7f; 3_000])
+            .unwrap();
+        builder.add("classes.dex", vec![1; 200]).unwrap();
+        let bytes = builder.finish().unwrap();
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).unwrap();
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        for entry in archive.entries() {
+            if entry.name.starts_with("lib/") && entry.name.ends_with(".so") {
+                assert!(
+                    entry.is_aligned_to(16 * 1024),
+                    "{} starts at {}, which is not a 16 KB boundary",
+                    entry.name,
+                    entry.data_offset
+                );
+            } else {
+                assert!(
+                    entry.is_aligned_to(4),
+                    "{} is not 4-byte aligned",
+                    entry.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alignment_padding_is_a_well_formed_extra_field() {
+        // Raw padding is tolerated by most readers; a proper record is skipped
+        // correctly by all of them.
+        let mut builder = ArchiveBuilder::new();
+        builder.add_aligned("x", vec![1; 4], 64).unwrap();
+        let bytes = builder.finish().unwrap();
+
+        let extra_length = u16::from_le_bytes([bytes[28], bytes[29]]);
+        assert!(extra_length >= 4, "padding must be a whole record");
+        let start = 30 + 1;
+        assert_eq!(
+            u16::from_le_bytes([bytes[start], bytes[start + 1]]),
+            0xd935,
+            "the padding record must carry Android's identifier"
+        );
+        assert_eq!(
+            u16::from_le_bytes([bytes[start + 2], bytes[start + 3]]),
+            extra_length - 4
+        );
+    }
+
+    #[test]
+    fn the_writer_refuses_a_name_no_archive_should_carry() {
+        // Directive section 23 names path traversal and invalid names as
+        // mandatory checks, and refusing at write time is better than producing
+        // an archive that will be refused later.
+        let mut builder = ArchiveBuilder::new();
+        for (name, code) in [
+            ("", "EA001"),
+            ("/absolute", "EA003"),
+            ("dir\\file", "EA004"),
+            ("../escape", "EA006"),
+            ("a/../../b", "EA006"),
+            ("C:/windows", "EA007"),
+        ] {
+            let error = builder.add(name, Vec::new()).unwrap_err();
+            assert_eq!(error.code, code, "name {name:?}");
+            assert_eq!(error.class, FailureClass::SecurityFailure);
+        }
+
+        let with_control = format!("a{}b", '\u{7}');
+        assert_eq!(
+            builder.add(with_control, Vec::new()).unwrap_err().code,
+            "EA005"
+        );
+    }
+
+    #[test]
+    fn the_writer_refuses_the_same_name_twice() {
+        let mut builder = ArchiveBuilder::new();
+        builder.add("a.txt", b"one".to_vec()).unwrap();
+        let error = builder.add("a.txt", b"two".to_vec()).unwrap_err();
+        assert_eq!(error.code, "EA051");
+    }
+
+    #[test]
+    fn an_empty_archive_is_still_a_valid_archive() {
+        let bytes = ArchiveBuilder::new().finish().unwrap();
+        assert_eq!(bytes.len(), 22, "an empty archive is just its end record");
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).expect("must read");
+        assert!(archive.is_empty());
+        assert!(!sink.has_blocking());
+    }
+
+    // --- archive: refusing what should be refused ----------------------------
+
+    #[test]
+    fn a_truncated_or_absent_end_record_is_reported() {
+        let mut sink = Sink::new();
+        assert!(archive::read(b"", &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "EA012"));
+
+        let mut sink = Sink::new();
+        assert!(archive::read(&[0u8; 64], &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "EA013"));
+
+        // A real archive with its tail cut off.
+        let mut sink = Sink::new();
+        let cut = &INFOZIP_SAMPLE[..INFOZIP_SAMPLE.len() - 4];
+        assert!(archive::read(cut, &mut sink).is_none());
+    }
+
+    #[test]
+    fn a_central_directory_that_points_outside_the_file_is_refused() {
+        let mut bytes = ArchiveBuilder::new();
+        bytes.add("a", b"x".to_vec()).unwrap();
+        let mut bytes = bytes.finish().unwrap();
+
+        // The end record's last four bytes before the comment length are the
+        // directory offset. Point it past the end.
+        let offset_position = bytes.len() - 6;
+        bytes[offset_position..offset_position + 4].copy_from_slice(&0xffff_fff0u32.to_le_bytes());
+
+        let mut sink = Sink::new();
+        assert!(archive::read(&bytes, &mut sink).is_none());
+        assert!(sink
+            .entries()
+            .iter()
+            .any(|d| d.code == "EA018" || d.code == "EA017"));
+    }
+
+    #[test]
+    fn an_entry_whose_two_headers_disagree_is_refused() {
+        // Which of the two a reader believes decides which file it gets. An
+        // archive that gives two answers is refused rather than guessed at.
+        let mut builder = ArchiveBuilder::new();
+        builder.add("a.txt", b"content".to_vec()).unwrap();
+        let mut bytes = builder.finish().unwrap();
+
+        // Corrupt the checksum in the local header only.
+        bytes[14..18].copy_from_slice(&0xdead_beefu32.to_le_bytes());
+
+        let mut sink = Sink::new();
+        assert!(archive::read(&bytes, &mut sink).is_none());
+        let error = sink.entries().iter().find(|d| d.code == "EA033").unwrap();
+        assert_eq!(error.class, FailureClass::SecurityFailure);
+    }
+
+    #[test]
+    fn an_entry_that_does_not_match_its_checksum_is_reported() {
+        let mut builder = ArchiveBuilder::new();
+        builder.add("a.txt", b"content".to_vec()).unwrap();
+        let mut bytes = builder.finish().unwrap();
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).unwrap();
+        let offset = archive.entry("a.txt").unwrap().data_offset as usize;
+        bytes[offset] = b'X';
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&bytes, &mut sink).unwrap();
+        let (checked, _) = archive::verify_checksums(&archive, &bytes, &mut sink);
+        assert_eq!(checked, 0);
+        assert!(sink.entries().iter().any(|d| d.code == "EA041"));
+    }
+
+    #[test]
+    fn an_archive_naming_the_same_entry_twice_is_refused() {
+        // The writer will not produce one, so the archive is built by hand: two
+        // central directory records pointing at one local header.
+        let mut builder = ArchiveBuilder::new();
+        builder.add("a.txt", b"x".to_vec()).unwrap();
+        let single = builder.finish().unwrap();
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&single, &mut sink).unwrap();
+        let directory_start = single.len() - 22 - (46 + 5);
+        let record = single[directory_start..single.len() - 22].to_vec();
+        assert_eq!(archive.len(), 1);
+
+        let mut doubled = single[..directory_start].to_vec();
+        doubled.extend_from_slice(&record);
+        doubled.extend_from_slice(&record);
+        let directory_size = (record.len() * 2) as u32;
+
+        let mut end = single[single.len() - 22..].to_vec();
+        end[8..10].copy_from_slice(&2u16.to_le_bytes());
+        end[10..12].copy_from_slice(&2u16.to_le_bytes());
+        end[12..16].copy_from_slice(&directory_size.to_le_bytes());
+        end[16..20].copy_from_slice(&(directory_start as u32).to_le_bytes());
+        doubled.extend_from_slice(&end);
+
+        let mut sink = Sink::new();
+        assert!(archive::read(&doubled, &mut sink).is_none());
+        let error = sink.entries().iter().find(|d| d.code == "EA011").unwrap();
+        assert_eq!(error.class, FailureClass::SecurityFailure);
+    }
+
+    #[test]
+    fn an_archive_carrying_a_traversing_name_is_refused_when_read() {
+        // The writer refuses these, so this one is assembled by hand to prove
+        // the reader refuses them too. A hostile archive was not written here.
+        let mut builder = ArchiveBuilder::new();
+        builder.add("aa/bb", b"x".to_vec()).unwrap();
+        let mut bytes = builder.finish().unwrap();
+
+        // Rewrite the name in both headers, keeping its length.
+        let first = bytes
+            .windows(5)
+            .position(|window| window == b"aa/bb")
+            .unwrap();
+        bytes[first..first + 5].copy_from_slice(b"../bb");
+        let second = bytes[first + 5..]
+            .windows(5)
+            .position(|window| window == b"aa/bb")
+            .unwrap()
+            + first
+            + 5;
+        bytes[second..second + 5].copy_from_slice(b"../bb");
+
+        let mut sink = Sink::new();
+        assert!(archive::read(&bytes, &mut sink).is_none());
+        assert!(sink.entries().iter().any(|d| d.code == "EA006"));
+    }
+
+    #[test]
+    fn the_archive_reader_survives_arbitrary_input() {
+        // Directive section 41 names ZIP and APK as fuzz targets. An archive is
+        // a structure of offsets pointing at other offsets, which is the shape
+        // that makes a reader loop or read out of bounds.
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut valid = ArchiveBuilder::new();
+        valid.add("a.txt", b"hello".to_vec()).unwrap();
+        valid.add("dir/b.bin", vec![3; 40]).unwrap();
+        let base = valid.finish().unwrap();
+
+        for _ in 0..3_000 {
+            let mut bytes = base.clone();
+
+            // Corrupt a few bytes of a real archive: mutations near a structure
+            // reach code that random noise never would.
+            let mutations = (xorshift(&mut seed) % 6) + 1;
+            for _ in 0..mutations {
+                let position = (xorshift(&mut seed) as usize) % bytes.len();
+                bytes[position] = (xorshift(&mut seed) & 0xff) as u8;
+            }
+
+            let mut sink = Sink::new();
+            if let Some(archive) = archive::read(&bytes, &mut sink) {
+                // Anything it accepts must be self-consistent.
+                for entry in archive.entries() {
+                    assert!(entry.data_offset <= bytes.len() as u64);
+                    assert!(archive::validate_entry_name(&entry.name).is_ok());
+                }
+                let _ = archive::verify_checksums(&archive, &bytes, &mut sink);
+            }
+        }
+
+        // And pure noise, which mostly exercises the end-record search.
+        for _ in 0..2_000 {
+            let length = (xorshift(&mut seed) % 300) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|_| (xorshift(&mut seed) & 0xff) as u8)
+                .collect();
+            let mut sink = Sink::new();
+            let _ = archive::read(&bytes, &mut sink);
+        }
+    }
+
+    #[test]
+    fn an_archive_this_build_writes_satisfies_independent_tools() {
+        // Directive section 24 ends with conformance tests. Reading a file made
+        // by another tool proves the parser follows the specification; this
+        // proves the writer does, which is the half a round-trip cannot show.
+        //
+        // The tools are used where they exist and the test says so when they do
+        // not, rather than passing quietly on a machine that checked nothing.
+        let directory = temp_directory("conformance");
+        let path = directory.join("omni.apk");
+
+        let mut builder = ArchiveBuilder::for_android();
+        builder
+            .add(
+                "AndroidManifest.xml",
+                b"<manifest package=\"com.omni\"/>".to_vec(),
+            )
+            .unwrap();
+        builder.add("classes.dex", vec![0x64; 1_234]).unwrap();
+        builder
+            .add("lib/arm64-v8a/libomni_builder.so", vec![0x7f; 9_999])
+            .unwrap();
+        builder
+            .add("res/values/strings.arsc", b"table".to_vec())
+            .unwrap();
+        std::fs::write(&path, builder.finish().unwrap()).unwrap();
+
+        let run = |program: &str, arguments: &[&str]| -> Option<(bool, String)> {
+            let output = std::process::Command::new(program)
+                .args(arguments)
+                .output()
+                .ok()?;
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            text.push_str(&String::from_utf8_lossy(&output.stderr));
+            Some((output.status.success(), text))
+        };
+
+        let mut checked = 0;
+
+        // Info-ZIP: does the archive hold together, and do its checksums pass?
+        if let Some((ok, text)) = run("unzip", &["-t", path.to_str().unwrap()]) {
+            assert!(ok, "unzip -t refused the archive:\n{text}");
+            assert!(
+                text.contains("No errors detected"),
+                "unzip -t said:\n{text}"
+            );
+            checked += 1;
+        }
+
+        // And does it list what was put in it?
+        if let Some((ok, text)) = run("unzip", &["-l", path.to_str().unwrap()]) {
+            assert!(ok, "unzip -l failed:\n{text}");
+            for name in [
+                "AndroidManifest.xml",
+                "classes.dex",
+                "lib/arm64-v8a/libomni_builder.so",
+                "res/values/strings.arsc",
+            ] {
+                assert!(text.contains(name), "unzip -l did not list {name}:\n{text}");
+            }
+            checked += 1;
+        }
+
+        // Android's own tool: are the native libraries on a page boundary?
+        if let Ok(sdk) = std::env::var("ANDROID_HOME") {
+            let zipalign = format!("{sdk}/build-tools/36.0.0/zipalign");
+            if std::path::Path::new(&zipalign).is_file() {
+                let (ok, text) = run(
+                    &zipalign,
+                    &["-c", "-P", "16", "-v", "4", path.to_str().unwrap()],
+                )
+                .expect("zipalign is present");
+                assert!(ok, "zipalign refused the archive:\n{text}");
+                assert!(
+                    text.contains("Verification successful"),
+                    "zipalign said:\n{text}"
+                );
+                checked += 1;
+            }
+        }
+
+        if checked == 0 {
+            eprintln!(
+                "conformance: neither unzip nor zipalign is available here, so the \
+                 archive was written but not independently checked"
+            );
+        } else {
+            eprintln!("conformance: {checked} independent check(s) accepted the archive");
+        }
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn an_archive_serialises_into_a_valid_report() {
+        let mut builder = ArchiveBuilder::for_android();
+        builder.add("classes.dex", vec![1; 10]).unwrap();
+        let bytes = builder.finish().unwrap();
+        let archive = archive::read(&bytes, &mut Sink::new()).unwrap();
+
+        let mut w = Writer::new();
+        w.begin_object(None);
+        archive.write_json(&mut w, "archive");
+        w.end_object();
+        let document = w.finish();
+
+        assert!(is_structurally_valid(&document), "{document}");
+        assert!(document.contains("\"compression\":\"STORED\""));
+        assert!(document.contains(&archive.digest().to_hex()));
     }
 
     // --- subsystem inventory -------------------------------------------------

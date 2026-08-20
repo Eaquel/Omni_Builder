@@ -52,10 +52,19 @@
     <string name="omni_section_logs">Logs</string>
 
     <!-- %1$s the directory name created under the shared Documents folder -->
-    <string name="omni_log_explanation">Every run appends to these files. A copy
-        always stays in the application\'s own storage, so a log is never lost
-        when shared storage is unavailable; the copy under Documents/%1$s is the
-        one you can open with a file manager.</string>
+    <string name="omni_log_explanation">Every run rewrites these files. The copy in
+        the application\'s own storage always succeeds and is what the crash
+        handler relies on. The copy under Android/data/com.omni.builder/files/%1$s
+        needs no permission and any file manager reaches it. The copy under
+        Documents/%1$s is the easiest to find when the device allows it. Whichever
+        of them failed says so above, with the reason.</string>
+
+    <string name="omni_log_written">WRITTEN</string>
+    <string name="omni_log_failed">FAILED</string>
+    <string name="omni_log_not_written_yet">The log has not been written yet.</string>
+
+    <!-- %1$s where the copy would have gone, %2$s what went wrong -->
+    <string name="omni_log_copy_failed">%1$s — %2$s</string>
 
     <string name="omni_no_crash">No crash has been recorded.</string>
     <string name="omni_crash_recorded">A crash was recorded. The most recent
