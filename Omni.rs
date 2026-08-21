@@ -223,14 +223,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Archive engine",
         status: Status::Partial,
         directive_section: 23,
-        summary: "The ZIP container an APK is: read, validated, and written \
-                  deterministically with page-aligned native libraries.",
+        summary: "The ZIP container an APK is: read, validated, and written deterministically. Entries are compressed with this build\u{2019}s own DEFLATE where it saves bytes, while the resource table and native libraries stay stored and aligned because the platform maps them in place. unzip extracts what this writes byte for byte and zipalign agrees on the alignment.",
         missing: &[
-            "Writes stored entries only; nothing compresses.",
             "No ZIP64, so four gigabytes and 65535 entries are hard limits.",
-            "Nothing assembles an APK from a project yet; this is the container, \
-             not the packaging step.",
-            "No signature block is written; the signing module reads one.",
+            "One compression setting, chosen here rather than by the caller, and no store-only override for a caller who wants one.",
+            "No data descriptors and no streaming: every entry is held whole in memory while the archive is built.",
         ],
     },
     Subsystem {
@@ -370,7 +367,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &[
             "One block per stream, so a very large input is held in memory rather than streamed.",
             "The match search is a hash chain with a fixed limit and no lazy matching, so it finds a good match rather than the best one.",
-            "Nothing in the archive writer uses it yet: an APK this build makes still stores every entry.",
+            "The encoder is not asked how hard to try: there is one setting, and it is the one every caller gets.",
         ],
     },
     Subsystem {
@@ -7866,6 +7863,39 @@ pub mod archive {
             reader.slice_at(entry.data_offset, entry.compressed_size)
         }
 
+        pub fn content(&self, data: &[u8], entry: &Entry) -> Result<Vec<u8>, Diagnostic> {
+            let stored = self.stored_bytes(data, entry)?;
+            let out = match entry.compression {
+                Compression::Stored => stored.to_vec(),
+                Compression::Deflate => crate::inflate::raw(stored)?,
+                Compression::Other(method) => {
+                    return Err(Diagnostic::new(
+                        "EA060",
+                        Severity::Error,
+                        FailureClass::UserError,
+                        "core.archive",
+                        "An entry uses a compression method this build does not read.",
+                    )
+                    .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                    .with_context(format!("Method: {method}")))
+                }
+            };
+            let computed = checksum::crc32(&out);
+            if computed != entry.crc32 {
+                return Err(Diagnostic::new(
+                    "EA061",
+                    Severity::Error,
+                    FailureClass::Corruption,
+                    "core.archive",
+                    "An entry does not match the checksum the archive records for it.",
+                )
+                .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                .with_context(format!("Recorded: 0x{:08x}", entry.crc32))
+                .with_context(format!("Computed: 0x{computed:08x}")));
+            }
+            Ok(out)
+        }
+
         pub fn write_json(&self, w: &mut Writer, key: &str) {
             w.begin_object(Some(key));
             w.field_u64("size", self.size);
@@ -8290,13 +8320,22 @@ pub mod archive {
         let mut skipped = 0;
 
         for entry in archive.entries() {
-            if entry.compression != Compression::Stored {
+            if matches!(entry.compression, Compression::Other(_)) {
                 skipped += 1;
                 continue;
             }
 
-            let bytes = match archive.stored_bytes(data, entry) {
+            let bytes = match archive.content(data, entry) {
                 Ok(bytes) => bytes,
+                Err(error) if error.code == "EA061" => {
+                    sink.emit(
+                        fail("EA041", "An entry does not match its checksum.")
+                            .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                            .with_context(format!("Recorded: {:08x}", entry.crc32))
+                            .with_suggestion("The entry's bytes changed after it was written."),
+                    );
+                    continue;
+                }
                 Err(error) => {
                     sink.emit(error);
                     continue;
@@ -8305,25 +8344,13 @@ pub mod archive {
 
             if bytes.len() as u64 != entry.uncompressed_size {
                 sink.emit(
-                    fail("EA040", "A stored entry's size does not match its header.")
+                    fail("EA040", "An entry's size does not match its header.")
                         .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
                         .with_context(format!(
                             "Header: {}, found: {}",
                             entry.uncompressed_size,
                             bytes.len()
                         )),
-                );
-                continue;
-            }
-
-            let actual = checksum::crc32(bytes);
-            if actual != entry.crc32 {
-                sink.emit(
-                    fail("EA041", "A stored entry does not match its checksum.")
-                        .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
-                        .with_context(format!("Recorded: {:08x}", entry.crc32))
-                        .with_context(format!("Found: {actual:08x}"))
-                        .with_suggestion("The entry's bytes changed after it was written."),
                 );
                 continue;
             }
@@ -8345,6 +8372,13 @@ pub mod archive {
         name: String,
         bytes: Vec<u8>,
         alignment: u64,
+        must_store: bool,
+    }
+
+    pub const TABLE_ENTRY: &str = "resources.arsc";
+
+    pub fn must_be_stored(name: &str) -> bool {
+        name == TABLE_ENTRY || is_native_library(name)
     }
 
     #[derive(Clone, Debug, Default)]
@@ -8433,10 +8467,12 @@ pub mod archive {
                 .with_suggestion("ZIP64 is not implemented."));
             }
 
+            let must_store = must_be_stored(&name);
             self.entries.push(Pending {
                 name,
                 bytes,
                 alignment,
+                must_store,
             });
             Ok(())
         }
@@ -8446,11 +8482,42 @@ pub mod archive {
                 .sort_by(|left, right| left.name.cmp(&right.name));
 
             let mut writer = BinaryWriter::new(Endian::Little);
-            let mut written: Vec<(Pending, u64, u32)> = Vec::with_capacity(self.entries.len());
+            let mut written: Vec<(Pending, u64, u32, Compression, u32)> =
+                Vec::with_capacity(self.entries.len());
 
             for entry in self.entries {
                 let header_offset = writer.position() as u64;
                 let crc = checksum::crc32(&entry.bytes);
+
+                let packed = if entry.must_store || entry.bytes.is_empty() {
+                    None
+                } else {
+                    let candidate = crate::deflate::raw(&entry.bytes);
+                    (candidate.len() < entry.bytes.len()).then_some(candidate)
+                };
+                let method = if packed.is_some() {
+                    Compression::Deflate
+                } else {
+                    Compression::Stored
+                };
+                let alignment = if packed.is_some() {
+                    DEFAULT_ALIGNMENT
+                } else {
+                    entry.alignment
+                };
+                let payload = packed.as_deref().unwrap_or(&entry.bytes);
+
+                let stored_size = u32::try_from(payload.len()).map_err(|_| {
+                    Diagnostic::new(
+                        "EA053",
+                        Severity::Error,
+                        FailureClass::ResourceExhaustion,
+                        "core.archive",
+                        "An entry is larger than the format's 32-bit size field.",
+                    )
+                    .with_context(format!("Entry: {}", truncate(&entry.name, 96)))
+                    .with_suggestion("ZIP64 is not implemented.")
+                })?;
 
                 let size = u32::try_from(entry.bytes.len()).map_err(|_| {
                     Diagnostic::new(
@@ -8476,9 +8543,9 @@ pub mod archive {
                 })?;
 
                 let base = header_offset + LOCAL_HEADER_SIZE + u64::from(name_length);
-                let mut padding = (entry.alignment - (base % entry.alignment)) % entry.alignment;
+                let mut padding = (alignment - (base % alignment)) % alignment;
                 while padding != 0 && padding < 4 {
-                    padding += entry.alignment;
+                    padding += alignment;
                 }
                 let extra_length = u16::try_from(padding).map_err(|_| {
                     Diagnostic::new(
@@ -8495,11 +8562,11 @@ pub mod archive {
                 writer.u32(LOCAL_HEADER_SIGNATURE)?;
                 writer.u16(20)?;
                 writer.u16(0)?;
-                writer.u16(Compression::Stored.method())?;
+                writer.u16(method.method())?;
                 writer.u16(FIXED_DOS_TIME)?;
                 writer.u16(FIXED_DOS_DATE)?;
                 writer.u32(crc)?;
-                writer.u32(size)?;
+                writer.u32(stored_size)?;
                 writer.u32(size)?;
                 writer.u16(name_length)?;
                 writer.u16(extra_length)?;
@@ -8513,24 +8580,24 @@ pub mod archive {
                     }
                 }
 
-                debug_assert_eq!(writer.position() as u64 % entry.alignment, 0);
-                writer.bytes(&entry.bytes)?;
-                written.push((entry, header_offset, crc));
+                debug_assert_eq!(writer.position() as u64 % alignment, 0);
+                writer.bytes(payload)?;
+                written.push((entry, header_offset, crc, method, stored_size));
             }
 
             let directory_offset = writer.position() as u64;
 
-            for (entry, header_offset, crc) in &written {
+            for (entry, header_offset, crc, method, stored_size) in &written {
                 let size = entry.bytes.len() as u32;
                 writer.u32(CENTRAL_HEADER_SIGNATURE)?;
                 writer.u16(20)?;
                 writer.u16(20)?;
                 writer.u16(0)?;
-                writer.u16(Compression::Stored.method())?;
+                writer.u16(method.method())?;
                 writer.u16(FIXED_DOS_TIME)?;
                 writer.u16(FIXED_DOS_DATE)?;
                 writer.u32(*crc)?;
-                writer.u32(size)?;
+                writer.u32(*stored_size)?;
                 writer.u32(size)?;
                 writer.u16(entry.name.len() as u16)?;
                 writer.u16(0)?;
@@ -20947,17 +21014,24 @@ mod tests {
 
         assert_eq!(
             archive
-                .stored_bytes(&bytes, archive.entry("AndroidManifest.xml").unwrap())
+                .content(&bytes, archive.entry("AndroidManifest.xml").unwrap())
                 .unwrap(),
             b"<manifest/>"
         );
+
+        let classes = archive.entry("classes.dex").unwrap();
         assert_eq!(
-            archive
-                .stored_bytes(&bytes, archive.entry("classes.dex").unwrap())
-                .unwrap()
-                .len(),
-            300
+            archive.content(&bytes, classes).unwrap(),
+            vec![0x11; 300],
+            "what comes out is what went in, whichever way it was carried"
         );
+        assert_eq!(classes.uncompressed_size, 300);
+        assert_eq!(
+            classes.compression,
+            archive::Compression::Deflate,
+            "three hundred identical bytes are exactly what compression is for"
+        );
+        assert!(classes.compressed_size < 300);
 
         let (checked, skipped) = archive::verify_checksums(&archive, &bytes, &mut sink);
         assert_eq!(checked, 3);
@@ -21351,7 +21425,11 @@ mod tests {
         let document = w.finish();
 
         assert!(is_structurally_valid(&document), "{document}");
-        assert!(document.contains("\"compression\":\"STORED\""));
+        assert!(
+            document.contains("\"compression\":\"STORED\"")
+                || document.contains("\"compression\":\"DEFLATE\""),
+            "{document}"
+        );
         assert!(document.contains(&archive.digest().to_hex()));
     }
 
@@ -25176,8 +25254,8 @@ mod tests {
                 let entry = archive
                     .entry(&wanted)
                     .unwrap_or_else(|| panic!("the package must carry {wanted}"));
-                let bytes = archive.stored_bytes(&outcome.package, entry).unwrap();
-                let header = super::image::read_png(bytes).unwrap();
+                let bytes = archive.content(&outcome.package, entry).unwrap();
+                let header = super::image::read_png(&bytes).unwrap();
                 assert_eq!(header.width, *edge, "{wanted}");
                 assert_eq!(header.height, *edge, "{wanted}");
             }
@@ -25248,6 +25326,134 @@ mod tests {
             project.icon.as_ref().map(|png| png.len()).unwrap_or(0),
             super::image::LAUNCHER_SIZES.len() * 2,
             super::image::LAUNCHER_SIZES.len(),
+        );
+    }
+
+    #[test]
+    fn a_package_this_build_writes_is_compressed_where_compressing_is_allowed() {
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 8);
+            }
+        }
+        let picture = files
+            .into_iter()
+            .find(|file| super::image::read_png_file(file.to_str().unwrap_or_default()).is_ok());
+
+        let mut project = super::builder::starter("com.tr.yt", "Packed");
+        project.icon = picture.as_ref().map(|path| std::fs::read(path).unwrap());
+        project.files = vec![
+            (
+                "lib/arm64-v8a/libomni.so".to_string(),
+                b"\x7fELF".iter().copied().cycle().take(64_000).collect(),
+            ),
+            (
+                "assets/notes.txt".to_string(),
+                "the same sentence over and over. ".repeat(400).into_bytes(),
+            ),
+        ];
+
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let mut own = Sink::new();
+        let archive = archive::read(&outcome.package, &mut own).expect("it must read back");
+
+        let table = archive.entry(super::builder::TABLE_ENTRY);
+        if let Some(table) = table {
+            assert_eq!(
+                table.compression,
+                archive::Compression::Stored,
+                "Android maps the resource table in place, so it may never be compressed"
+            );
+            assert!(table.is_aligned_to(4));
+        }
+
+        let library = archive
+            .entry("lib/arm64-v8a/libomni.so")
+            .expect("the library must be there");
+        assert_eq!(
+            library.compression,
+            archive::Compression::Stored,
+            "a native library is loaded straight out of the package, so it stays stored"
+        );
+        assert!(library.is_aligned_to(super::builder::PAGE_ALIGNMENT));
+
+        let notes = archive
+            .entry("assets/notes.txt")
+            .expect("the asset must be there");
+        assert_eq!(
+            notes.compression,
+            archive::Compression::Deflate,
+            "a repetitive asset is exactly what compression is for"
+        );
+        assert!(
+            notes.compressed_size * 4 < notes.uncompressed_size,
+            "{} bytes out of {} is not compression",
+            notes.compressed_size,
+            notes.uncompressed_size
+        );
+
+        for entry in archive.entries() {
+            let read = archive
+                .content(&outcome.package, entry)
+                .unwrap_or_else(|error| panic!("{}: {} {}", entry.name, error.code, error.message));
+            assert_eq!(read.len() as u64, entry.uncompressed_size, "{}", entry.name);
+        }
+
+        let directory = temp_directory("omni-packed");
+        let path = directory.join("packed.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+
+        let listed = std::process::Command::new("unzip")
+            .args(["-p", path.to_str().unwrap(), "assets/notes.txt"])
+            .output()
+            .unwrap();
+        assert!(listed.status.success());
+        assert_eq!(
+            listed.stdout,
+            "the same sentence over and over. ".repeat(400).into_bytes(),
+            "an independent reader must get back exactly what went in"
+        );
+
+        if let Some(zipalign) = find_build_tool("zipalign") {
+            let checked = std::process::Command::new(&zipalign)
+                .args(["-c", "-P", "16", "-v", "4", path.to_str().unwrap()])
+                .output()
+                .unwrap();
+            assert!(
+                checked.status.success(),
+                "zipalign refused it:\n{}{}",
+                String::from_utf8_lossy(&checked.stdout),
+                String::from_utf8_lossy(&checked.stderr)
+            );
+        }
+
+        let stored: u64 = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.uncompressed_size)
+            .sum();
+        let packed: u64 = archive
+            .entries()
+            .iter()
+            .map(|entry| entry.compressed_size)
+            .sum();
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "archive: {} entries, {stored} bytes of content carried in {packed}, with the \
+             resource table and the native library left stored and aligned",
+            archive.entries().len()
         );
     }
 
