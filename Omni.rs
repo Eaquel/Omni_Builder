@@ -449,6 +449,17 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         ],
     },
     Subsystem {
+        name: "Bundle writer",
+        status: Status::Partial,
+        directive_section: 22,
+        summary: "Writes an Android App Bundle: a protobuf writer, the manifest in aapt2 proto form with the platform identifier and typed value on every attribute, BundleConfig, and the archive around them. bundletool builds and signs a universal package from what this writes, and aapt2 reads that package back attribute for attribute.",
+        missing: &[
+            "No resource table, so a bundle carries no resources and a manifest that names one by reference is refused rather than guessed at.",
+            "One module, base, and no configuration splits: no density, language or architecture splits, and no asset packs or feature modules.",
+            "The bundle is not signed. Play signs what it generates, and bundletool signs what it generates for testing, so nothing here needs to; JAR signing is not implemented either way.",
+        ],
+    },
+    Subsystem {
         name: "Image reader",
         status: Status::Beta,
         directive_section: 22,
@@ -14748,6 +14759,305 @@ pub mod workspace {
     }
 }
 
+pub mod protobuf {
+    pub const VARINT: u32 = 0;
+    pub const LENGTH_DELIMITED: u32 = 2;
+
+    pub fn varint(value: u64) -> Vec<u8> {
+        let mut out = Vec::with_capacity(10);
+        let mut left = value;
+        loop {
+            let byte = (left & 0x7f) as u8;
+            left >>= 7;
+            if left == 0 {
+                out.push(byte);
+                return out;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    pub fn tag(field: u32, wire: u32) -> Vec<u8> {
+        varint(u64::from((field << 3) | wire))
+    }
+
+    #[derive(Default, Debug, Clone)]
+    pub struct Message {
+        body: Vec<u8>,
+    }
+
+    impl Message {
+        pub fn new() -> Message {
+            Message { body: Vec::new() }
+        }
+
+        pub fn number(&mut self, field: u32, value: u64) -> &mut Message {
+            self.body.extend_from_slice(&tag(field, VARINT));
+            self.body.extend_from_slice(&varint(value));
+            self
+        }
+
+        pub fn bytes(&mut self, field: u32, value: &[u8]) -> &mut Message {
+            self.body.extend_from_slice(&tag(field, LENGTH_DELIMITED));
+            self.body.extend_from_slice(&varint(value.len() as u64));
+            self.body.extend_from_slice(value);
+            self
+        }
+
+        pub fn text(&mut self, field: u32, value: &str) -> &mut Message {
+            self.bytes(field, value.as_bytes())
+        }
+
+        pub fn message(&mut self, field: u32, value: &Message) -> &mut Message {
+            self.bytes(field, value.as_bytes())
+        }
+
+        pub fn as_bytes(&self) -> &[u8] {
+            &self.body
+        }
+
+        pub fn finish(self) -> Vec<u8> {
+            self.body
+        }
+
+        pub fn len(&self) -> usize {
+            self.body.len()
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.body.is_empty()
+        }
+    }
+}
+
+pub mod bundle {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::json::Writer;
+    use crate::protobuf::Message;
+    use crate::xml::Element;
+    use crate::FailureClass;
+
+    pub const ANDROID_NAMESPACE: &str = "http://schemas.android.com/apk/res/android";
+    pub const BUNDLETOOL_VERSION: &str = "1.18.3";
+    pub const CONFIG_ENTRY: &str = "BundleConfig.pb";
+    pub const MANIFEST_ENTRY: &str = "base/manifest/AndroidManifest.xml";
+    pub const DEX_ENTRY: &str = "base/dex/classes.dex";
+    pub const LIB_PREFIX: &str = "base/lib/";
+
+    const NODE_ELEMENT: u32 = 1;
+    const ELEMENT_NAMESPACE: u32 = 1;
+    const ELEMENT_NAME: u32 = 3;
+    const ELEMENT_ATTRIBUTE: u32 = 4;
+    const ELEMENT_CHILD: u32 = 5;
+    const NAMESPACE_PREFIX: u32 = 1;
+    const NAMESPACE_URI: u32 = 2;
+    const ATTRIBUTE_NAMESPACE: u32 = 1;
+    const ATTRIBUTE_NAME: u32 = 2;
+    const ATTRIBUTE_VALUE: u32 = 3;
+    const ATTRIBUTE_RESOURCE_ID: u32 = 5;
+    const ATTRIBUTE_COMPILED: u32 = 6;
+    const ITEM_PRIMITIVE: u32 = 7;
+    const PRIMITIVE_INT_DECIMAL: u32 = 6;
+    const PRIMITIVE_BOOLEAN: u32 = 8;
+    const CONFIG_BUNDLETOOL: u32 = 1;
+    const BUNDLETOOL_VERSION_FIELD: u32 = 2;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.bundle",
+            message,
+        )
+    }
+
+    fn primitive(field: u32, value: u64) -> Message {
+        let mut item = Message::new();
+        let mut prim = Message::new();
+        prim.number(field, value);
+        item.message(ITEM_PRIMITIVE, &prim);
+        item
+    }
+
+    fn attribute(name: &str, value: &str) -> Result<Message, Diagnostic> {
+        let mut out = Message::new();
+        let Some(local) = name.strip_prefix("android:") else {
+            out.text(ATTRIBUTE_NAME, name);
+            out.text(ATTRIBUTE_VALUE, value);
+            return Ok(out);
+        };
+
+        let identifier = crate::axml::attribute_id(local).ok_or_else(|| {
+            fail(
+                "EN010",
+                "The bundle writer does not know that android attribute.",
+            )
+            .with_context(format!("Attribute: android:{local}"))
+            .with_suggestion(
+                "Every attribute this build writes carries the identifier the platform gives \
+                 it. One that is not in the table would be dropped by Android without a word, \
+                 so it is refused instead.",
+            )
+        })?;
+
+        out.text(ATTRIBUTE_NAMESPACE, ANDROID_NAMESPACE);
+        out.text(ATTRIBUTE_NAME, local);
+
+        match value {
+            "true" => {
+                out.number(ATTRIBUTE_RESOURCE_ID, u64::from(identifier));
+                out.message(ATTRIBUTE_COMPILED, &primitive(PRIMITIVE_BOOLEAN, 1));
+            }
+            "false" => {
+                out.number(ATTRIBUTE_RESOURCE_ID, u64::from(identifier));
+                out.message(ATTRIBUTE_COMPILED, &primitive(PRIMITIVE_BOOLEAN, 0));
+            }
+            other => match other.parse::<u32>() {
+                Ok(number) => {
+                    out.number(ATTRIBUTE_RESOURCE_ID, u64::from(identifier));
+                    out.message(
+                        ATTRIBUTE_COMPILED,
+                        &primitive(PRIMITIVE_INT_DECIMAL, u64::from(number)),
+                    );
+                }
+                Err(_) => {
+                    if other.starts_with('@') {
+                        return Err(fail(
+                            "EN011",
+                            "A resource reference cannot be written into a bundle yet.",
+                        )
+                        .with_context(format!("Attribute: android:{local}"))
+                        .with_context(format!("Value: {other}"))
+                        .with_suggestion(
+                            "Resolving a name to an identifier needs the resource table, \
+                             which this build does not write.",
+                        ));
+                    }
+                    out.text(ATTRIBUTE_VALUE, other);
+                    out.number(ATTRIBUTE_RESOURCE_ID, u64::from(identifier));
+                }
+            },
+        }
+        Ok(out)
+    }
+
+    fn node(element: &Element, root: bool) -> Result<Message, Diagnostic> {
+        let mut body = Message::new();
+        if root {
+            let mut namespace = Message::new();
+            namespace.text(NAMESPACE_PREFIX, "android");
+            namespace.text(NAMESPACE_URI, ANDROID_NAMESPACE);
+            body.message(ELEMENT_NAMESPACE, &namespace);
+        }
+        body.text(ELEMENT_NAME, &element.name);
+
+        for entry in &element.attributes {
+            if entry.name.starts_with("xmlns:") {
+                continue;
+            }
+            let written = attribute(&entry.name, &entry.value)?;
+            body.message(ELEMENT_ATTRIBUTE, &written);
+        }
+
+        for child in &element.children {
+            let written = node(child, false)?;
+            body.message(ELEMENT_CHILD, &written);
+        }
+
+        let mut out = Message::new();
+        out.message(NODE_ELEMENT, &body);
+        Ok(out)
+    }
+
+    pub fn encode_manifest(root: &Element) -> Result<Vec<u8>, Diagnostic> {
+        if root.name != "manifest" {
+            return Err(fail(
+                "EN001",
+                "A bundle manifest must begin with a manifest element.",
+            )
+            .with_context(format!("Found: {}", root.name)));
+        }
+        Ok(node(root, true)?.finish())
+    }
+
+    pub fn encode_config() -> Vec<u8> {
+        let mut version = Message::new();
+        version.text(BUNDLETOOL_VERSION_FIELD, BUNDLETOOL_VERSION);
+        let mut config = Message::new();
+        config.message(CONFIG_BUNDLETOOL, &version);
+        config.finish()
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Outcome {
+        pub bundle: Vec<u8>,
+        pub entries: usize,
+        pub carries_code: bool,
+    }
+
+    impl Outcome {
+        pub fn write_json(&self, w: &mut Writer, name: &str) {
+            w.begin_object(Some(name));
+            w.field_u64("bytes", self.bundle.len() as u64);
+            w.field_u64("entries", self.entries as u64);
+            w.field_bool("carriesCode", self.carries_code);
+            w.field_bool("signed", false);
+            w.field_str(
+                "note",
+                "A bundle is not signed here. Play signs the packages it generates from it, \
+                 and bundletool signs the ones it generates for testing.",
+            );
+            w.end_object();
+        }
+    }
+
+    pub fn write(project: &crate::builder::Project) -> Result<Outcome, Diagnostic> {
+        let mut sink = crate::diag::Sink::new();
+        let root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut sink)
+            .ok_or_else(|| fail("EN002", "The manifest could not be read."))?;
+
+        let report = crate::guard::inspect_manifest(&root);
+        if report.verdict() == crate::guard::Verdict::Refused {
+            return Err(fail(
+                "EN003",
+                "The project does not meet the security policy, so no bundle was produced.",
+            )
+            .with_context(format!("Findings: {}", report.findings.len())));
+        }
+
+        let manifest = encode_manifest(&root)?;
+
+        let mut archive = crate::archive::Builder::new();
+        archive.add(CONFIG_ENTRY, encode_config())?;
+        archive.add(MANIFEST_ENTRY, manifest)?;
+
+        let carries_code = !project.code.is_empty();
+        if carries_code {
+            let classes = crate::dexwrite::write(&project.code, &project.references)?;
+            archive.add(DEX_ENTRY, classes)?;
+        }
+
+        for (name, contents) in &project.files {
+            if name == "AndroidManifest.xml" || name == "classes.dex" {
+                continue;
+            }
+            let placed = match name.strip_prefix("lib/") {
+                Some(rest) => format!("{LIB_PREFIX}{rest}"),
+                None => format!("base/root/{name}"),
+            };
+            archive.add(placed, contents.clone())?;
+        }
+
+        let entries = archive.len();
+        Ok(Outcome {
+            bundle: archive.finish()?,
+            entries,
+            carries_code,
+        })
+    }
+}
+
 pub mod keystore {
     use crate::certificate;
     use crate::diag::{Diagnostic, Severity};
@@ -16309,6 +16619,44 @@ pub mod ffi {
             }
 
             sink.write_json(&mut w, "diagnostics");
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_bundle_project(
+        root: *const c_char,
+        output_path: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(output_path)) = (text_from(root), text_from(output_path)) else {
+                return std::ptr::null_mut();
+            };
+
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+
+            let outcome = crate::scaffold::read_manifest(&root)
+                .and_then(|manifest| crate::builder::from_manifest(&manifest))
+                .and_then(|project| crate::bundle::write(&project));
+
+            match outcome {
+                Ok(outcome) => match std::fs::write(&output_path, &outcome.bundle) {
+                    Ok(()) => {
+                        w.field_bool("bundled", true);
+                        w.field_str("path", &output_path);
+                        outcome.write_json(&mut w, "bundle");
+                    }
+                    Err(why) => {
+                        w.field_bool("bundled", false);
+                        w.field_str("error", &format!("the bundle could not be written: {why}"));
+                    }
+                },
+                Err(error) => write_failure(&mut w, "bundled", &error),
+            }
+
             w.end_object();
             hand_back(w)
         });
@@ -21632,6 +21980,293 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    fn find_bundletool() -> Option<Vec<String>> {
+        if let Ok(command) = std::env::var("OMNI_BUNDLETOOL") {
+            let parts: Vec<String> = command
+                .split_whitespace()
+                .map(|part| part.to_string())
+                .collect();
+            if !parts.is_empty() {
+                return Some(parts);
+            }
+        }
+
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+        let cache = std::path::PathBuf::from(&home).join(".gradle/caches/modules-2/files-2.1");
+        if !cache.join("com.android.tools.build/bundletool").is_dir() {
+            return None;
+        }
+
+        let mut jars = Vec::new();
+        collect_jars(&cache, &mut jars, 0);
+        if jars.is_empty() {
+            return None;
+        }
+        jars.sort();
+        Some(vec![
+            "java".to_string(),
+            "-cp".to_string(),
+            jars.join(":"),
+            "com.android.tools.build.bundletool.BundleToolMain".to_string(),
+        ])
+    }
+
+    fn collect_jars(root: &std::path::Path, into: &mut Vec<String>, depth: usize) {
+        if depth > 8 || into.len() > 4_000 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_jars(&path, into, depth + 1);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("jar") {
+                let Some(text) = path.to_str() else { continue };
+                if text.contains("-sources") || text.contains("-javadoc") {
+                    continue;
+                }
+                into.push(text.to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn the_bundle_writer_produces_a_bundle_bundletool_accepts() {
+        let Some(bundletool) = find_bundletool() else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_BUNDLETOOL").is_err(),
+                "OMNI_REQUIRE_BUNDLETOOL is set but bundletool was not found, so the bundle \
+                 this build writes was never handed to the tool that judges one"
+            );
+            eprintln!("bundle conformance: bundletool is not available here");
+            return;
+        };
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_BUNDLETOOL").is_err(),
+                "OMNI_REQUIRE_BUNDLETOOL is set but aapt2 is missing, and bundletool needs it"
+            );
+            eprintln!("bundle conformance: aapt2 is not available here");
+            return;
+        };
+
+        let spec = super::scaffold::Spec {
+            package: "com.tr.yt".to_string(),
+            label: "Bundled".to_string(),
+            version_name: "1.0.0".to_string(),
+            version_code: 3,
+            ..super::scaffold::Spec::default()
+        };
+        let project = super::builder::from_manifest(&spec.manifest()).unwrap();
+        let outcome = super::bundle::write(&project).expect("a compliant project must bundle");
+        assert!(outcome.carries_code);
+        assert_eq!(outcome.entries, 3);
+
+        let directory = temp_directory("omni-bundle");
+        let path = directory.join("omni.aab");
+        std::fs::write(&path, &outcome.bundle).unwrap();
+
+        let store = directory.join("bundle.jks");
+        let keytool = std::process::Command::new("keytool")
+            .args([
+                "-genkeypair",
+                "-keystore",
+                store.to_str().unwrap(),
+                "-storepass",
+                "password",
+                "-keypass",
+                "password",
+                "-alias",
+                "omni",
+                "-keyalg",
+                "RSA",
+                "-keysize",
+                "2048",
+                "-validity",
+                "3650",
+                "-dname",
+                "CN=Omni",
+            ])
+            .output()
+            .expect("keytool must run");
+        assert!(
+            keytool.status.success(),
+            "{}",
+            String::from_utf8_lossy(&keytool.stderr)
+        );
+
+        let apks = directory.join("omni.apks");
+        let mut command = std::process::Command::new(&bundletool[0]);
+        command.args(&bundletool[1..]);
+        command.args([
+            "build-apks",
+            &format!("--bundle={}", path.to_str().unwrap()),
+            &format!("--output={}", apks.to_str().unwrap()),
+            "--mode=universal",
+            &format!("--aapt2={}", aapt2.to_str().unwrap()),
+            &format!("--ks={}", store.to_str().unwrap()),
+            "--ks-pass=pass:password",
+            "--ks-key-alias=omni",
+            "--key-pass=pass:password",
+            "--overwrite",
+        ]);
+        let built = command.output().expect("bundletool must run");
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&built.stdout),
+            String::from_utf8_lossy(&built.stderr)
+        );
+        assert!(built.status.success(), "bundletool refused it:\n{report}");
+
+        let unpacked = directory.join("apks");
+        std::fs::create_dir_all(&unpacked).unwrap();
+        let unzipped = std::process::Command::new("unzip")
+            .args([
+                "-o",
+                "-q",
+                apks.to_str().unwrap(),
+                "-d",
+                unpacked.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(unzipped.status.success());
+
+        let universal = unpacked.join("universal.apk");
+        assert!(universal.is_file(), "bundletool produced no universal APK");
+
+        let dumped = std::process::Command::new(&aapt2)
+            .args([
+                "dump",
+                "xmltree",
+                universal.to_str().unwrap(),
+                "--file",
+                "AndroidManifest.xml",
+            ])
+            .output()
+            .unwrap();
+        let tree = String::from_utf8_lossy(&dumped.stdout).to_string();
+        assert!(dumped.status.success(), "{tree}");
+
+        for expected in [
+            "A: package=\"com.tr.yt\"",
+            "android:versionCode(0x0101021b)=3",
+            "android:versionName(0x0101021c)=\"1.0.0\"",
+            "android:minSdkVersion(0x0101020c)=28",
+            "android:targetSdkVersion(0x01010270)=36",
+            "android:label(0x01010001)=\"Bundled\"",
+            "android:allowBackup(0x01010280)=false",
+            "android:extractNativeLibs(0x010104ea)=false",
+            "E: activity",
+            "android:name(0x01010003)=\"com.tr.yt.MainActivity\"",
+            "android:exported(0x01010010)=true",
+            "android.intent.action.MAIN",
+            "android.intent.category.LAUNCHER",
+        ] {
+            assert!(tree.contains(expected), "missing {expected:?} in\n{tree}");
+        }
+
+        let extracted = std::process::Command::new("unzip")
+            .args(["-p", universal.to_str().unwrap(), "classes.dex"])
+            .output()
+            .unwrap();
+        assert!(extracted.status.success());
+        let classes = dex::read(&extracted.stdout, &mut Sink::new()).expect("our dex must read");
+        assert_eq!(classes.class_names(), vec!["com.tr.yt.MainActivity"]);
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "bundle conformance: {} bytes handed to bundletool, which built and signed a \
+             universal APK aapt2 reads back attribute for attribute",
+            outcome.bundle.len()
+        );
+    }
+
+    #[test]
+    fn the_bundle_writer_refuses_what_it_cannot_write_faithfully() {
+        let mut sink = Sink::new();
+        let referenced = super::xml::parse(
+            concat!(
+                "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ",
+                "package=\"com.tr.yt\">",
+                "<uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />",
+                "<application android:label=\"@string/name\" android:allowBackup=\"false\" />",
+                "</manifest>",
+            ),
+            "AndroidManifest.xml",
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(
+            super::bundle::encode_manifest(&referenced)
+                .expect_err("a name this build cannot resolve must be refused")
+                .code,
+            "EN011"
+        );
+
+        let unknown = super::xml::parse(
+            concat!(
+                "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ",
+                "package=\"com.tr.yt\">",
+                "<application android:notAnAttributeAndroidHas=\"1\" />",
+                "</manifest>",
+            ),
+            "AndroidManifest.xml",
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(
+            super::bundle::encode_manifest(&unknown)
+                .expect_err("an attribute with no identifier must be refused")
+                .code,
+            "EN010"
+        );
+
+        let wrong_root = super::xml::parse("<application />", "x.xml", &mut sink).unwrap();
+        assert_eq!(
+            super::bundle::encode_manifest(&wrong_root)
+                .unwrap_err()
+                .code,
+            "EN001"
+        );
+    }
+
+    #[test]
+    fn protobuf_varints_are_written_the_way_the_wire_format_defines_them() {
+        use super::protobuf::{tag, varint};
+        assert_eq!(varint(0), vec![0x00]);
+        assert_eq!(varint(1), vec![0x01]);
+        assert_eq!(varint(127), vec![0x7f]);
+        assert_eq!(varint(128), vec![0x80, 0x01]);
+        assert_eq!(varint(300), vec![0xac, 0x02]);
+        assert_eq!(varint(16_843_291), vec![0x9b, 0x84, 0x84, 0x08]);
+        assert_eq!(
+            varint(u64::MAX),
+            vec![0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01]
+        );
+
+        assert_eq!(tag(1, 2), vec![0x0a]);
+        assert_eq!(tag(3, 2), vec![0x1a]);
+        assert_eq!(tag(5, 0), vec![0x28]);
+        assert_eq!(tag(16, 2), vec![0x82, 0x01]);
+
+        let mut message = super::protobuf::Message::new();
+        message.text(1, "testing");
+        assert_eq!(
+            message.as_bytes(),
+            &[0x0a, 0x07, b't', b'e', b's', b't', b'i', b'n', b'g']
+        );
+
+        let mut outer = super::protobuf::Message::new();
+        outer.message(2, &message);
+        assert_eq!(
+            outer.as_bytes(),
+            &[0x12, 0x09, 0x0a, 0x07, b't', b'e', b's', b't', b'i', b'n', b'g']
+        );
     }
 
     #[test]

@@ -71,4 +71,6 @@
     <string name="omni_working">Работа...</string>
     <string name="omni_settings_watch">Наблюдение</string>
     <string name="omni_settings_watch_note">Пока Android это позволяет, проверка выполняется каждые пятнадцать минут и при каждом запуске. Она видит замену этого пакета на диске на устройстве с root. Она не видит нападающего, который убрал саму проверку, и не выполняется, когда Android остановил приложение.</string>
+    <string name="omni_action_bundle">СОБРАТЬ AAB</string>
+    <string name="omni_bundle_note">Комплект не несёт ресурсов и здесь не подписывается. Google Play подписывает пакеты, которые из него делает.</string>
 </resources>

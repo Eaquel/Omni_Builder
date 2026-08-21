@@ -71,4 +71,6 @@
     <string name="omni_working">处理中...</string>
     <string name="omni_settings_watch">监视</string>
     <string name="omni_settings_watch_note">只要 Android 允许，每十五分钟以及每次启动都会运行一次检查。它能发现这个软件包在已 root 的设备上被替换。它发现不了移除检查本身的攻击者，Android 停止应用后它也不会运行。</string>
+    <string name="omni_action_bundle">构建 AAB</string>
+    <string name="omni_bundle_note">应用包不携带资源，也不在这里签名。Google Play 会为由它生成的软件包签名。</string>
 </resources>

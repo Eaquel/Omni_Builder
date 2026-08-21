@@ -454,6 +454,17 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSetIcon(
   return HandBack(env, omni_set_icon(root_text.c_str(), source_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBundleProject(
+    JNIEnv *env, jobject , jstring root, jstring output_path) {
+  std::string root_text;
+  std::string path_text;
+  if (!TwoPaths(env, root, output_path, &root_text, &path_text,
+                "A bundle needs a project and an output.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_bundle_project(root_text.c_str(), path_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(
     JNIEnv *env, jobject , jstring observed_environment) {
   if (observed_environment == nullptr) {

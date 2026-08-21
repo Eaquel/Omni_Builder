@@ -450,6 +450,20 @@ jobs:
           cargo test --locked a_project_is_a_manifest -- --nocapture
           cargo test --locked a_package_checks_itself -- --nocapture
 
+      - name: Hand a bundle this build wrote to bundletool
+        # An Android App Bundle is protobuf, not binary XML, and nothing in this
+        # tree can tell whether its own protobuf is right. bundleRelease is run
+        # first only to put bundletool in the Gradle cache, where the test finds
+        # it; the bundle the test checks is written by the Core alone.
+        env:
+          OMNI_REQUIRE_BUNDLETOOL: "1"
+        run: |
+          set -euo pipefail
+          ./gradlew :Builder:bundleRelease --console=plain
+          ls Builder/build/outputs/bundle/release/*.aab
+          cargo test --locked the_bundle_writer -- --nocapture
+          cargo test --locked protobuf_varints -- --nocapture
+
       - name: Read the classes this build produced with the Core's own reader
         # Every class file the Kotlin compiler just produced, compared field for
         # field with javap: version, name, superclass, interfaces, fields,
@@ -509,5 +523,7 @@ jobs:
         uses: actions/upload-artifact@v5
         with:
           name: omni-builder-release
-          path: Builder/build/outputs/apk/release/*.apk
+          path: |
+            Builder/build/outputs/apk/release/*.apk
+            Builder/build/outputs/bundle/release/*.aab
           if-no-files-found: error

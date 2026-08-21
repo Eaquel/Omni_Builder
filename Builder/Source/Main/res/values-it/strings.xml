@@ -71,4 +71,6 @@
     <string name="omni_working">In corso...</string>
     <string name="omni_settings_watch">Sorveglianza</string>
     <string name="omni_settings_watch_note">Finché Android lo consente, un controllo viene eseguito ogni quindici minuti e a ogni avvio. Può vedere questo pacchetto sostituito sul disco su un dispositivo con root. Non può vedere un attaccante che ha rimosso il controllo stesso, e non viene eseguito quando Android ha fermato l’applicazione.</string>
+    <string name="omni_action_bundle">CREA AAB</string>
+    <string name="omni_bundle_note">Un bundle non porta risorse e qui non viene firmato. Google Play firma i pacchetti che ne ricava.</string>
 </resources>

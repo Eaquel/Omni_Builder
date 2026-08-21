@@ -44,6 +44,8 @@ char *omni_remove_path(const char *root, const char *relative);
 
 char *omni_set_icon(const char *root, const char *source);
 
+char *omni_bundle_project(const char *root, const char *output_path);
+
 void omni_string_free(char *value);
 
 }

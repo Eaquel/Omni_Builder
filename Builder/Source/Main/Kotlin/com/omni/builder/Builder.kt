@@ -703,6 +703,8 @@ object Builder {
 
     external fun nativeSetIcon(root: String, source: String): String
 
+    external fun nativeBundleProject(root: String, outputPath: String): String
+
     fun observedEnvironment(context: Context): String {
         val info = context.applicationInfo
         return buildString {
@@ -1491,6 +1493,8 @@ class BuilderActivity : Activity() {
             content.addView(secret.first)
             content.addView(action(getString(R.string.omni_action_build)) { buildProject(root, chosen) })
         }
+        content.addView(action(getString(R.string.omni_action_bundle)) { bundleProject(root) })
+        content.addView(body(getString(R.string.omni_bundle_note)))
         content.addView(action(getString(R.string.omni_action_back), R.color.omni_muted) {
             go(Screen.Projects)
         })
@@ -1764,6 +1768,31 @@ class BuilderActivity : Activity() {
                 )
             )
             outcome.path?.let { results.addView(mono(it)) }
+        }
+    }
+
+    private fun bundleProject(root: String) {
+        results.removeAllViews()
+        val destination = File(getExternalFilesDir(null) ?: filesDir, "${File(root).name}.aab")
+        working({ Builder.nativeBundleProject(root, destination.absolutePath) }) finished@{ answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+            if (!document.optBoolean("bundled", false)) {
+                results.addView(banner(getString(R.string.omni_refused), R.color.omni_error))
+                showRefusal(Refusal.parse(document), results)
+                return@finished
+            }
+            val made = document.optJSONObject("bundle")
+            OmniLog.event(LogLevel.INFO, "bundle", "Bundled ${made?.optLong("bytes")} bytes")
+            results.addView(banner("${made?.optLong("bytes")}", R.color.omni_ok))
+            results.addView(
+                keyValue(
+                    getString(R.string.omni_result_contents),
+                    made?.optString("note").orEmpty(),
+                    R.color.omni_muted,
+                    trailing = "${made?.optLong("entries")}",
+                )
+            )
+            results.addView(mono(document.optString("path")))
         }
     }
 
