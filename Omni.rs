@@ -15019,11 +15019,20 @@ pub mod bundle {
 
         let report = crate::guard::inspect_manifest(&root);
         if report.verdict() == crate::guard::Verdict::Refused {
-            return Err(fail(
+            let mut refusal = fail(
                 "EN003",
                 "The project does not meet the security policy, so no bundle was produced.",
-            )
-            .with_context(format!("Findings: {}", report.findings.len())));
+            );
+            for finding in &report.findings {
+                refusal = refusal.with_context(format!(
+                    "{}: {} {}",
+                    finding.code, finding.what, finding.remedy
+                ));
+            }
+            return Err(refusal.with_suggestion(
+                "Each line above names what is wrong and what to change. A bundle is produced \
+                 only when none of them is left.",
+            ));
         }
 
         let manifest = encode_manifest(&root)?;
@@ -22061,10 +22070,20 @@ mod tests {
             version_code: 3,
             ..super::scaffold::Spec::default()
         };
-        let project = super::builder::from_manifest(&spec.manifest()).unwrap();
+        let mut project = super::builder::from_manifest(&spec.manifest()).unwrap();
+        project.files = vec![
+            (
+                "lib/arm64-v8a/libomni_core.so".to_string(),
+                b"\x7fELF not a real object, only a path to place".to_vec(),
+            ),
+            (
+                "notes.txt".to_string(),
+                b"carried at the package root".to_vec(),
+            ),
+        ];
         let outcome = super::bundle::write(&project).expect("a compliant project must bundle");
         assert!(outcome.carries_code);
-        assert_eq!(outcome.entries, 3);
+        assert_eq!(outcome.entries, 5);
 
         let directory = temp_directory("omni-bundle");
         let path = directory.join("omni.aab");
@@ -22178,6 +22197,14 @@ mod tests {
         let classes = dex::read(&extracted.stdout, &mut Sink::new()).expect("our dex must read");
         assert_eq!(classes.class_names(), vec!["com.tr.yt.MainActivity"]);
 
+        let listed = std::process::Command::new("unzip")
+            .args(["-l", universal.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let names = String::from_utf8_lossy(&listed.stdout).to_string();
+        assert!(names.contains("lib/arm64-v8a/libomni_core.so"), "{names}");
+        assert!(names.contains("notes.txt"), "{names}");
+
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
             "bundle conformance: {} bytes handed to bundletool, which built and signed a \
@@ -22232,6 +22259,25 @@ mod tests {
                 .unwrap_err()
                 .code,
             "EN001"
+        );
+
+        let weak = super::builder::from_manifest(concat!(
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ",
+            "package=\"com.tr.yt\" android:versionCode=\"1\" android:versionName=\"1.0.0\">",
+            "<uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />",
+            "<application android:label=\"X\" android:allowBackup=\"false\" ",
+            "android:debuggable=\"true\">",
+            "<activity android:name=\"com.tr.yt.MainActivity\" android:exported=\"false\" />",
+            "</application></manifest>",
+        ))
+        .unwrap();
+        let refused = super::bundle::write(&weak)
+            .expect_err("the security policy governs a bundle exactly as it governs a package");
+        assert_eq!(refused.code, "EN003");
+        assert!(
+            refused.context.iter().any(|line| line.starts_with("EG001")),
+            "a refusal must name what is wrong: {:?}",
+            refused.context
         );
     }
 
