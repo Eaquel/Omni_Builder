@@ -2068,12 +2068,7 @@ class BuilderActivity : Activity() {
             )
             tree.addView(
                 subtle(getString(R.string.omni_action_delete), palette.error) {
-                    results.removeAllViews()
-                    report(
-                        Builder.nativeRemovePath(root, entry.path, trashFolder()),
-                        "removed",
-                    )
-                    render(false)
+                    act(Builder.nativeRemovePath(root, entry.path, trashFolder()), "removed")
                 }
             )
         }
@@ -2092,8 +2087,7 @@ class BuilderActivity : Activity() {
             palette.accent,
         ) {
             named(folder)?.let { path ->
-                report(Builder.nativeWriteFile(root, path, ""), "saved")
-                render(false)
+                act(Builder.nativeWriteFile(root, path, ""), "saved")
             }
         })
         making.addView(rule(), MATCH_PARENT, 1)
@@ -2104,8 +2098,7 @@ class BuilderActivity : Activity() {
             palette.accent,
         ) {
             named(folder)?.let { path ->
-                report(Builder.nativeNewFolder(root, path), "made")
-                render(false)
+                act(Builder.nativeNewFolder(root, path), "made")
             }
         })
         content.addView(making)
@@ -2125,8 +2118,7 @@ class BuilderActivity : Activity() {
                 results.removeAllViews()
                 results.addView(notice(getString(R.string.omni_files_move_needs), palette.warning))
             } else {
-                report(Builder.nativeRenamePath(root, source, target), "moved")
-                render(false)
+                act(Builder.nativeRenamePath(root, source, target), "moved")
             }
         })
         content.addView(moving)
@@ -2270,9 +2262,7 @@ class BuilderActivity : Activity() {
             )
             shelf.addView(
                 subtle(getString(R.string.omni_action_delete), palette.error) {
-                    results.removeAllViews()
-                    report(Builder.nativeTrashSend(trashFolder(), one.path), "removed")
-                    render(false)
+                    act(Builder.nativeTrashSend(trashFolder(), one.path), "removed")
                 }
             )
         }
@@ -2314,16 +2304,12 @@ class BuilderActivity : Activity() {
                     "",
                     palette.ok,
                 ) {
-                    results.removeAllViews()
-                    report(Builder.nativeTrashRestore(trashFolder(), one.id), "restored")
-                    render(false)
+                    act(Builder.nativeTrashRestore(trashFolder(), one.id), "restored")
                 }
             )
             card.addView(
                 subtle(getString(R.string.omni_action_purge), palette.error) {
-                    results.removeAllViews()
-                    report(Builder.nativeTrashPurge(trashFolder(), one.id), "purged")
-                    render(false)
+                    act(Builder.nativeTrashPurge(trashFolder(), one.id), "purged")
                 }
             )
         }
@@ -2917,11 +2903,18 @@ class BuilderActivity : Activity() {
         }.start()
     }
 
-    private fun report(answer: String, field: String) {
-        val root = runCatching { JSONObject(answer) }.getOrNull() ?: return
+    private fun act(answer: String, field: String) {
+        results.removeAllViews()
+        val root = runCatching { JSONObject(answer) }.getOrNull()
+        if (root == null) {
+            results.addView(notice(getString(R.string.omni_refused), palette.error))
+            return
+        }
         if (!root.optBoolean(field, false)) {
             showRefusal(Refusal.parse(root), results)
+            return
         }
+        render(false)
     }
 
     private fun showRefusal(refusal: Refusal, into: LinearLayout) {
