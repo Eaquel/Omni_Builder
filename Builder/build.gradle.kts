@@ -1,26 +1,3 @@
-// Omni_Builder — Builder application module
-//
-// FILE NAME NOTE (ADR-0001 in Omni.rs): directive section 46 spells this file
-// "Build.gradle.kts". Gradle resolves only "build.gradle.kts".
-//
-// WHAT THIS MODULE IS (directive section 15)
-// -----------------------------------------------------------------------------
-// The bootstrap shell: an Android application that loads the Omni Core through
-// JNI and shows what the Core reports. It is not the Omni build engine, and the
-// Gradle/AGP machinery below is scaffolding that Omni Build is meant to replace.
-//
-// BUILD ORDER
-// -----------------------------------------------------------------------------
-//   cargo build --target <abi triple>   ->  target/<triple>/release/libomni_core.a
-//   CMake                               ->  libomni_builder.so   (links the archive)
-//   AGP                                 ->  Builder-<variant>.apk
-//
-// The CMake file fails loudly if the archive is missing, so an APK can never be
-// produced without the Core actually linked into it.
-
-// `compilerVersion` below is marked experimental by the Kotlin Gradle Plugin.
-// The alternative is to let AGP choose the compiler, which directive section 14
-// does not allow, so the opt-in is deliberate and recorded in ADR-0006.
 @file:OptIn(org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi::class)
 
 import java.util.Properties
@@ -28,42 +5,22 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
 plugins {
-    // Kotlin support comes from AGP itself (AGP 9.0+). Applying
-    // org.jetbrains.kotlin.android as well is rejected outright.
     id("com.android.application")
 }
 
-// -----------------------------------------------------------------------------
-// Pins. These literals are checked against the Core's toolchain lock by the
-// root project's `verifyToolchainLock` task (directive section 14).
-// -----------------------------------------------------------------------------
 val omniNdkVersion = "29.0.14206865"
 val omniBuildToolsVersion = "36.0.0"
-// Directive section 14 pins "CMake 4.x stable". Without an explicit version AGP
-// silently installs and uses its own default (3.22.1), which is exactly the kind
-// of unpinned toolchain the directive forbids.
-//
-// The Android SDK only publishes CMake up to 4.1.2, so 4.4.2 is provisioned from
-// upstream Kitware and pointed at through `cmake.dir` in local.properties. The
-// `verifyCmakeToolchain` task below refuses to build if that is not in place.
 val omniCmakeVersion = "4.4.2"
 val omniCompileSdk = 36
 val omniMinSdk = 28
 val omniTargetSdk = 36
 
-// Android ABI -> Rust target triple. The same mapping appears in
-// Source/Main/Native/CMakeLists.txt, where an unknown ABI is a hard error.
-//
-// 32-bit x86 is deliberately absent: no current device ships it, and every ABI
-// in this list costs a full Rust compilation and a native link on every build
-// (directive section 36).
 val omniAbis = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
     "armeabi-v7a" to "armv7-linux-androideabi",
     "x86_64" to "x86_64-linux-android",
 )
 
-// Clang driver prefix per triple. It differs from the Rust triple for 32-bit ARM.
 val omniClangPrefix = mapOf(
     "aarch64-linux-android" to "aarch64-linux-android",
     "armv7-linux-androideabi" to "armv7a-linux-androideabi",
@@ -74,15 +31,6 @@ val omniRustProfile = "release"
 val omniCoreDirectory = rootProject.layout.projectDirectory
 val omniRustArtifactDirectory = omniCoreDirectory.dir("target").asFile.absolutePath
 
-/**
- * Locates the Android SDK.
- *
- * Order: ANDROID_HOME, ANDROID_SDK_ROOT, then local.properties. The environment
- * is read through Gradle's provider API so that the configuration cache treats it
- * as a tracked input rather than an untracked side effect. Failing loudly here is
- * better than letting CMake fail later with an empty path segment in the middle
- * of a filename.
- */
 val omniSdkDirectory: String = run {
     val fromEnvironment = providers.environmentVariable("ANDROID_HOME")
         .orElse(providers.environmentVariable("ANDROID_SDK_ROOT"))
@@ -106,53 +54,16 @@ val omniSdkDirectory: String = run {
     }
 }
 
-/**
- * Host-specific settings, read once.
- *
- * `local.properties` is deliberately not committed (.gitignore), so it is the
- * right place for machine paths and for a reference to signing material that
- * must never enter the repository (directive section 25).
- */
 val omniLocalProperties: Properties = Properties().apply {
     rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use(::load)
 }
 
-/**
- * Reads a setting from local.properties, falling back to an environment variable.
- *
- * The environment is read through Gradle's provider API so the configuration
- * cache treats it as a tracked input.
- */
 fun omniSetting(propertyName: String, environmentName: String): String? =
     omniLocalProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
         ?: providers.environmentVariable(environmentName).orNull?.takeIf { it.isNotBlank() }
 
-/**
- * Location of the CMake pinned by directive section 14.
- *
- * The Android SDK publishes CMake only up to 4.1.2, so 4.4.2 is provisioned from
- * upstream and pointed at here. `verifyCmakeToolchain` turns a missing or wrong
- * entry into a precise failure rather than an AGP error about a package it
- * cannot find.
- */
 val omniCmakeDirectory: String? = omniSetting("cmake.dir", "OMNI_CMAKE_DIR")
 
-// -----------------------------------------------------------------------------
-// Bootstrap signing (directive sections 15 and 25)
-// -----------------------------------------------------------------------------
-// This is AGP signing the bootstrap APK, not the Omni signing subsystem. That is
-// directive section 25 and roadmap phase 6; the Core reads and checks a signing
-// block but writes none, so Plugins/Sign.rs stays PLANNED.
-//
-// No key material lives in this repository and none ever will. The keystore is
-// referenced from local.properties, which is not committed, or from the
-// environment. Nothing here is printed, logged or written into a diagnostic.
-//
-// Signing matters for more than provenance: an application targeting API 30 or
-// later is rejected at install time unless it carries an APK Signature Scheme v2
-// or later signature. A v1-only JAR signature - still the default in some
-// third-party signing tools - produces "App not installed" with no further
-// explanation.
 val omniSigningStoreFile = omniSetting("omni.signing.storeFile", "OMNI_SIGNING_STORE_FILE")
 val omniSigningStorePassword =
     omniSetting("omni.signing.storePassword", "OMNI_SIGNING_STORE_PASSWORD")
@@ -170,9 +81,6 @@ val omniSigningSettings = mapOf(
     "omni.signing.keyPassword" to omniSigningKeyPassword,
 )
 
-// All four or none. A half-configured identity would silently produce an
-// unsigned APK, and the person who set three of them would find out at install
-// time instead of at build time.
 val omniSigningConfigured: Boolean = when (omniSigningSettings.count { it.value != null }) {
     0 -> false
     omniSigningSettings.size -> true
@@ -193,14 +101,7 @@ val omniHostTag: String = when {
 val omniNdkToolchainBin =
     "$omniSdkDirectory/ndk/$omniNdkVersion/toolchains/llvm/prebuilt/$omniHostTag/bin"
 
-// -----------------------------------------------------------------------------
-// Rust compilation, one task per ABI.
-// -----------------------------------------------------------------------------
 val cargoTasks = omniAbis.map { (abi, triple) ->
-    // Everything the task body needs is resolved to a plain String here. A task
-    // action that reaches back into the build script cannot be serialised by the
-    // configuration cache, and a build without the configuration cache is a
-    // slower build for every contributor.
     val clangDriver = "$omniNdkToolchainBin/${omniClangPrefix.getValue(triple)}$omniMinSdk-clang"
     val linkerVariable = "CARGO_TARGET_${triple.uppercase().replace('-', '_')}_LINKER"
     val archivePath = "$omniRustArtifactDirectory/$triple/$omniRustProfile/libomni_core.a"
@@ -214,13 +115,8 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
 
         workingDir = coreDirectory
 
-        // --locked refuses to change Cargo.lock during a build. A build that can
-        // silently move a dependency is not reproducible (directive section 12).
         commandLine("cargo", "build", "--locked", "--$omniRustProfile", "--target", triple)
 
-        // Only consulted when a crate type needs a linker. The Core is built as a
-        // static archive, so this keeps the environment correct rather than
-        // making the current build work.
         environment(linkerVariable, clangDriver)
         environment("TARGET_CC", clangDriver)
 
@@ -242,9 +138,6 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
     }
 }
 
-// -----------------------------------------------------------------------------
-// Android
-// -----------------------------------------------------------------------------
 android {
     namespace = "com.omni.builder"
     compileSdk = omniCompileSdk
@@ -274,30 +167,15 @@ android {
         }
     }
 
-    // Directive section 46 fixes the source layout, which is not the Gradle
-    // default. Every path below points at a directory the directive defines.
     sourceSets.getByName("main") {
         manifest.srcFile("Source/Main/AndroidManifest.xml")
 
-        // Both source sets are redirected, and both matter.
-        //
-        // AGP's built-in Kotlin compiles what `kotlin.directories` names, not what
-        // `java.directories` names. Redirecting only the latter left
-        // compileDebugKotlin reporting NO-SOURCE: the build succeeded, the APK was
-        // well formed, signed and installable, and it contained none of this
-        // module's code - only the generated R classes. The application then died
-        // at launch with ClassNotFoundException for its own activity.
-        //
-        // `verifyApkClasses` below exists so that this cannot happen again
-        // without the build failing first.
         kotlin.directories.clear()
         kotlin.directories.add("Source/Main/Kotlin")
         java.directories.clear()
         java.directories.add("Source/Main/Kotlin")
         res.directories.clear()
         res.directories.add("Source/Main/res")
-        // No res/layout directory exists, by design: the report screen is built
-        // in code so that it cannot drift from the Core's state shape.
     }
 
     externalNativeBuild {
@@ -315,9 +193,6 @@ android {
                 keyAlias = omniSigningKeyAlias
                 keyPassword = omniSigningKeyPassword
 
-                // minSdk is 28, so every device that can run this application
-                // understands scheme v2. The v1 JAR signature would add weight
-                // and a weaker guarantee for no reader.
                 enableV1Signing = false
                 enableV2Signing = true
                 enableV3Signing = true
@@ -341,9 +216,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // Signed when this machine has been told where the keystore is, and
-            // left unsigned otherwise. An unsigned APK is honest; an APK signed
-            // with a key committed to the repository would not be.
             signingConfig = signingConfigs.findByName("omniRelease")
         }
     }
@@ -355,16 +227,10 @@ android {
 
     packaging {
         jniLibs {
-            // Native libraries stay compressed inside the APK and are mapped
-            // directly, which is also what android:extractNativeLibs="false"
-            // in the manifest requires.
             useLegacyPackaging = false
         }
     }
 
-    // The dependency metadata block AGP normally embeds is an opaque, signed
-    // blob that changes between builds. Omitting it removes one obstacle to a
-    // reproducible APK (directive section 12).
     dependenciesInfo {
         includeInApk = false
         includeInBundle = false
@@ -383,39 +249,13 @@ android {
 }
 
 kotlin {
-    // Directive section 14 pins this version. It takes effect only because
-    // kotlin.compiler.runViaBuildToolsApi is enabled in gradle.properties; the
-    // Build Tools API is the supported way to drive a compiler other than the one
-    // the Android Gradle Plugin ships with (ADR-0006).
     compilerVersion.set(omniKotlinPin)
 
     compilerOptions {
-        // jvmTarget is intentionally not set: with AGP's built-in Kotlin it
-        // defaults to android.compileOptions.targetCompatibility, so setting it
-        // here would create a second place for the same value to drift.
-        //
-        // A warning in this module is a defect. It carries no third-party
-        // dependency to blame one on.
         allWarningsAsErrors.set(true)
     }
 }
 
-// -----------------------------------------------------------------------------
-// Kotlin version drift (directive sections 14 and 64)
-// -----------------------------------------------------------------------------
-// AGP 9.3.0 ships its own Kotlin and offers no supported way to choose the
-// version: the only knob, android.builtInKotlin, turns the whole feature on or
-// off, and the AGP 9.3.0 artifacts were inspected to confirm nothing else exists.
-// The directive pins Kotlin 2.4.10; AGP currently delivers a different version.
-//
-// Forcing the pin with a resolution rule would substitute a compiler AGP was
-// never tested against, which trades a visible mismatch for an invisible one.
-// So the mismatch is measured and reported instead. A major-version drift is
-// treated as fatal, because that changes the language; a minor drift is reported
-// loudly and left for a human to decide on.
-// -----------------------------------------------------------------------------
-// CMake provisioning check (directive sections 14 and 31, ADR-0005)
-// -----------------------------------------------------------------------------
 tasks.register("verifyCmakeToolchain") {
     group = "verification"
     description = "Checks that the pinned CMake is provisioned and reachable."
@@ -456,9 +296,6 @@ tasks.register("verifyCmakeToolchain") {
             )
         }
 
-        // ProcessBuilder rather than a Gradle Exec task: this runs inside a task
-        // action and must not reach back into the build script, which the
-        // configuration cache cannot serialise.
         val process = ProcessBuilder(cmakeBinary.absolutePath, "--version")
             .redirectErrorStream(true)
             .start()
@@ -481,17 +318,6 @@ tasks.register("verifyCmakeToolchain") {
 
 val omniKotlinPin = "2.4.10"
 
-// AGP 9.3.0 ships its own Kotlin and offers no DSL to choose the version; the
-// only knob, android.builtInKotlin, turns the feature on or off. The version is
-// therefore pinned where Gradle does have authority: dependency resolution. Every
-// org.jetbrains.kotlin module - the compiler AGP runs through the Kotlin Build
-// Tools API, and the standard library that ends up in the APK - is forced to the
-// pinned version.
-//
-// The Build Tools API exists precisely so that a build system can drive a Kotlin
-// compiler it was not shipped with, so this is the mechanism working as intended
-// rather than a version being smuggled past AGP. `verifyKotlinToolchain` proves
-// the result instead of assuming it.
 configurations.configureEach {
     resolutionStrategy.eachDependency {
         if (requested.group == "org.jetbrains.kotlin") {
@@ -501,8 +327,6 @@ configurations.configureEach {
     }
 }
 
-// The compile classpath only exists once AGP has created its variants, which is
-// why this is registered from the variant callback rather than at script level.
 androidComponents {
     onVariants(selector().withBuildType("release")) { variant ->
         val resolved = variant.compileConfiguration.incoming.artifacts.resolvedArtifacts
@@ -555,18 +379,9 @@ androidComponents {
     }
 }
 
-// That is deliberate (ADR-0003 in Omni.rs): the JSON parser it uses, org.json,
-// is part of Android itself.
 dependencies {
 }
 
-// -----------------------------------------------------------------------------
-// Installability (directive sections 33, 51 and 55)
-// -----------------------------------------------------------------------------
-// "App not installed" is the least actionable message Android produces: the
-// package manager refuses and explains nothing. Every condition below has already
-// caused it on this project, so each one is checked against the real APK and
-// turned into a build failure that says what is wrong and how to fix it.
 tasks.register("verifyApkInstallability") {
     group = "verification"
     description = "Checks that every built APK can actually be installed."
@@ -580,9 +395,6 @@ tasks.register("verifyApkInstallability") {
         val directory = apkDirectory.get().asFile
         val packages = directory.walkTopDown().filter { it.extension == "apk" }.sorted().toList()
         if (packages.isEmpty()) {
-            // This task finalises every assemble task, so it also runs when the
-            // assemble failed. Failing here too would bury the real error under a
-            // second one about a missing file.
             logger.lifecycle("No APK found under $directory; nothing to check.")
             return@doLast
         }
@@ -599,14 +411,6 @@ tasks.register("verifyApkInstallability") {
             val name = apk.name
             logger.lifecycle("Checking $name")
 
-            // 1. Native libraries must be stored, not deflated.
-            //
-            // AndroidManifest.xml declares android:extractNativeLibs="false", which
-            // means the platform maps each library straight out of the APK instead
-            // of unpacking it. A compressed entry cannot be mapped, and the
-            // installer refuses the package. Re-zipping an APK with an ordinary
-            // archiver - which is what most third-party signing tools do - turns
-            // every stored entry into a deflated one and breaks exactly this.
             ZipFile(apk).use { zip ->
                 val compressed = zip.entries().toList()
                     .filter { it.name.startsWith("lib/") && it.name.endsWith(".so") }
@@ -625,10 +429,6 @@ tasks.register("verifyApkInstallability") {
                 }
             }
 
-            // 2. Native libraries must stay 16 KB aligned.
-            //
-            // Devices with 16 KB memory pages cannot map a library that is not
-            // aligned to that boundary, and refuse to install the package.
             val (alignStatus, alignOutput) = run("$buildTools/zipalign", "-c", "-P", "16", "-v", "4", apk.path)
             if (alignStatus != 0) {
                 problems += "$name: native libraries are not 16 KB aligned, so the " +
@@ -636,7 +436,6 @@ tasks.register("verifyApkInstallability") {
                     alignOutput.lines().filter { it.contains("BAD") }.joinToString("\n")
             }
 
-            // 3. The signature must be one the platform accepts.
             val (_, verifyOutput) = run(
                 "$buildTools/apksigner", "verify",
                 "--min-sdk-version", minSdk.toString(),
@@ -677,16 +476,6 @@ tasks.register("verifyApkInstallability") {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Class presence (directive sections 51 and 55)
-// -----------------------------------------------------------------------------
-// The bug this exists for: the Kotlin source directory was redirected on the
-// `java` source set but not on the `kotlin` one, so compileDebugKotlin reported
-// NO-SOURCE. The build succeeded, the APK was well formed, correctly aligned,
-// signed and installable - and it contained none of this module's code. The
-// application died at launch with ClassNotFoundException for its own activity.
-//
-// Nothing in the build objected, because nothing was looking. This does.
 tasks.register("verifyApkClasses") {
     group = "verification"
     description = "Checks that every class the manifest names is really in the APK."
@@ -697,8 +486,6 @@ tasks.register("verifyApkClasses") {
     val dexdump = "$omniSdkDirectory/build-tools/$omniBuildToolsVersion/dexdump"
     val scratch = layout.buildDirectory.dir("tmp/verifyApkClasses")
 
-    // Named in code rather than in the manifest, and just as fatal when absent:
-    // the JNI symbols in Builder.cpp are bound to this class by name.
     val alsoRequired = listOf("$namespace.Builder")
 
     inputs.file(manifestFile)
@@ -711,7 +498,6 @@ tasks.register("verifyApkClasses") {
             return@doLast
         }
 
-        // Every component Android will try to instantiate by name.
         val document = javax.xml.parsers.DocumentBuilderFactory.newInstance()
             .apply { isNamespaceAware = true }
             .newDocumentBuilder()
@@ -876,22 +662,12 @@ tasks.register("signingHelp") {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Wiring: CMake must not run before cargo has produced the archive it links.
-// Matching by task name avoids depending on an AGP task class that has moved
-// between major versions.
-// -----------------------------------------------------------------------------
 tasks.matching { it.name.startsWith("buildCMake") || it.name.startsWith("configureCMake") }
     .configureEach {
         dependsOn(cargoTasks)
     }
 
-// The APK is only meaningful if every pin holds: the ones this file and the Core
-// both declare, the CMake that is provisioned outside the SDK, and the Kotlin
-// version AGP would otherwise have chosen for us.
 tasks.matching { it.name.startsWith("assemble") }.configureEach {
     dependsOn(":verifyToolchainLock", "verifyCmakeToolchain", "verifyKotlinToolchain")
-    // Checked after the APK exists, so a package that cannot be installed is a
-    // build failure rather than a discovery made on a device.
     finalizedBy("verifyApkInstallability", "verifyApkClasses")
 }

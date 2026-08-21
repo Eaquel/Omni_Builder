@@ -36,7 +36,6 @@ pub static CONTRACT: Contract = Contract {
         "Compiling anything.",
         "Inventing an archive format. Directive section 24 requires the published specification to be implemented, not replaced.",
     ],
-    roadmap_phase: "PHASE 9 — TOOLCHAIN",
 };
 
 pub struct ApkPlugin;

@@ -1,60 +1,3 @@
-# Omni_Builder — build and verification workflow
-#
-# WHY THIS FILE EXISTS
-# -----------------------------------------------------------------------------
-# Directive section 46 does not define a location for continuous integration, but
-# section 51 makes "tests pass", "determinism verified" and "no unresolved
-# critical TODO" gates that something has to actually run. This workflow is that
-# something. It is deliberately the only file outside the layout of section 46
-# besides the Rust manifest and crate root.
-#
-# WHAT IT PROVES
-# -----------------------------------------------------------------------------
-#   1. The Core compiles on the exact pinned Rust version, with no warnings.
-#   2. The Core's tests pass.
-#   3. The Gradle pins and the Core's toolchain lock agree.
-#   4. The pinned CMake and the pinned Kotlin are the ones actually used, not
-#      whatever the Android Gradle Plugin would have chosen on its own.
-#   5. A debug APK and an unsigned release APK build from source, with the Core
-#      linked into libomni_builder.so for every target ABI.
-#   6. Two clean release builds produce a byte-identical APK.
-#   7. Both APKs the build produces contain every class the manifest names.
-#   8. Both APKs can actually be installed: native libraries stored and 16 KB
-#      aligned, and, for the debug artifact, a signature the platform accepts.
-#   9. The v2 content digest the Core recomputes is the one Google's apksigner
-#      wrote, checked against a package apksigner signs during the test run.
-#  10. The Core's signing reader reads the APK this build produced -- an Android
-#      Gradle Plugin layout, not one the Core wrote -- and its digest holds.
-#  11. The Core's DEX reader reads the classes.dex this build produced, and its
-#      header fields and class list agree with dexdump.
-#  12. The Core's class file reader reads every .class the Kotlin compiler
-#      produced here, and agrees with javap on all of them.
-#  13. aapt2 reads the binary XML the Core writes and agrees on every value,
-#      and every attribute identifier the Core carries is the one aapt2 uses.
-#  14. The Core's RSA signatures are byte-identical to OpenSSL's from the same
-#      key, and OpenSSL verifies them.
-#  15. An APK built and signed with nothing but this tree - no aapt2, no d8,
-#      no apksigner, no library - is verified by apksigner under the v2 scheme.
-#  16. The build engine generates its own key and certificate, enforces the
-#      security policy, and produces a package apksigner verifies; a project
-#      that fails the policy produces no package and leaves nothing behind.
-#
-# WHAT IT DOES NOT PROVE
-# -----------------------------------------------------------------------------
-# Nothing here runs the application on a device.
-#
-# The published artifact is the release APK, signed with the key held in the
-# repository's OMNI_KEYSTORE_* secrets. No key material is in this repository
-# and none ever will be (directive section 25): the keystore arrives as a
-# secret, is written to the runner's temporary directory, and is never an
-# input or an output of the build. When the secrets are absent the release is
-# built unsigned and the job says so - an unsigned package cannot be installed,
-# and pretending otherwise would be worse than saying it plainly.
-#
-# Nothing here produces a signature with Omni's own code. The Core reads and
-# checks a signing block; it does not write one, and it never verifies the
-# signature over the signed data (ADR-0010). Plugins/Sign.rs remains PLANNED.
-
 name: Build and verify
 
 on:
@@ -65,7 +8,6 @@ on:
   pull_request:
   workflow_dispatch:
 
-# The workflow only reads the repository. It publishes nothing and needs no more.
 permissions:
   contents: read
 
@@ -74,20 +16,13 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Mirrors the toolchain lock in Omni.rs. Changing a value here without changing
-  # it there makes `verifyToolchainLock` fail, which is the point.
   OMNI_RUST_VERSION: "1.97.1"
   OMNI_JDK_VERSION: "25"
   OMNI_NDK_VERSION: "29.0.14206865"
   OMNI_BUILD_TOOLS_VERSION: "36.0.0"
   OMNI_ANDROID_API: "36"
   OMNI_CMAKE_VERSION: "4.4.2"
-  # The Android SDK publishes CMake only up to 4.1.2, so the pinned version comes
-  # from upstream Kitware and is verified against this checksum before it is used
-  # (directive section 31, ADR-0005). Nothing is trusted for having downloaded.
   OMNI_CMAKE_SHA256: "3ada9a3f5d8a85413579bdd0ea6aa8e8da86efdd6d15c91a1afa517f2021956c"
-  # Installed only to obtain a Ninja binary with clear provenance; the Kitware
-  # archive does not ship one. This version is never used to configure a build.
   OMNI_SDK_CMAKE_FOR_NINJA: "4.1.2"
 
 jobs:
@@ -99,17 +34,12 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install the pinned JDK
-        # keytool comes from the JDK, and the signing conformance tests use it to
-        # make the key apksigner then signs with.
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: ${{ env.OMNI_JDK_VERSION }}
 
       - name: Install the pinned build tools
-        # The signing conformance tests check the Core's digest against the one
-        # apksigner writes. Without apksigner they would skip, so it is installed
-        # explicitly rather than assumed to be on the image.
         run: |
           set -euo pipefail
           sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
@@ -124,8 +54,6 @@ jobs:
             --profile minimal --component rustfmt --component clippy
           rustup default "$OMNI_RUST_VERSION"
           rustc --version
-          # The pin is not advisory. Cargo refuses to build below the
-          # rust-version in Cargo.toml, so this failing means the lock is wrong.
           test "$(rustc --version | cut -d' ' -f2)" = "$OMNI_RUST_VERSION"
 
       - name: Check formatting
@@ -135,8 +63,6 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run the Core test suite
-        # A conformance test that skips reports success while checking nothing.
-        # Each guard below makes a missing tool fail the job instead.
         env:
           OMNI_REQUIRE_APKSIGNER: "1"
           OMNI_REQUIRE_AXML_CONFORMANCE: "1"
@@ -146,10 +72,6 @@ jobs:
       - name: Confirm every language carries every string
         run: |
           set -euo pipefail
-          # A missing translation falls back to English silently, so the screen
-          # would come out half in one language and half in another with nothing
-          # reporting it. Section 46: the interface has no hardcoded text, and
-          # that is only worth anything if every locale is complete.
           base=Builder/Source/Main/res
           keys=$(grep -o 'name="[^"]*"' "$base/values/strings.xml" | sort)
           count=$(echo "$keys" | wc -l)
@@ -169,9 +91,6 @@ jobs:
       - name: Confirm the Core carries no third-party dependency
         run: |
           set -euo pipefail
-          # ADR-0003: the Core's supply-chain surface is meant to be empty, and a
-          # dependency that arrives unnoticed is exactly what section 31 guards
-          # against. Cargo.lock holds one package - the Core itself.
           packages=$(grep -c '^\[\[package\]\]' Cargo.lock)
           echo "Packages in Cargo.lock: $packages"
           test "$packages" -eq 1
@@ -205,11 +124,6 @@ jobs:
           set -euo pipefail
           sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
 
-          # Not `yes | sdkmanager`. sdkmanager closes stdin once it has read the
-          # answers it needs, `yes` dies of SIGPIPE, and under `pipefail` that
-          # non-zero status fails the whole step even though the licences were
-          # accepted. A here-string has no upstream process to kill, and it keeps
-          # sdkmanager's own exit status meaningful.
           "$sdkmanager" --licenses > /dev/null <<< "$(printf 'y\n%.0s' $(seq 1 100))"
 
           "$sdkmanager" \
@@ -233,9 +147,6 @@ jobs:
           tar --extract --gzip --file "$archive" \
             --directory "$HOME/cmake-$OMNI_CMAKE_VERSION" --strip-components=1
 
-          # The Kitware archive ships no generator. Take the Ninja that Google
-          # publishes with its own CMake package rather than pulling a third
-          # binary from a third source.
           cp "$ANDROID_HOME/cmake/$OMNI_SDK_CMAKE_FOR_NINJA/bin/ninja" \
              "$HOME/cmake-$OMNI_CMAKE_VERSION/bin/ninja"
 
@@ -248,8 +159,6 @@ jobs:
           OMNI_SIGNING_CERT_SHA256: ${{ secrets.OMNI_SIGNING_CERT_SHA256 }}
         run: |
           set -euo pipefail
-          # local.properties is host-specific and deliberately not committed
-          # (.gitignore), so the runner writes its own.
           {
             echo "sdk.dir=$ANDROID_HOME"
             echo "cmake.dir=$HOME/cmake-$OMNI_CMAKE_VERSION"
@@ -257,10 +166,6 @@ jobs:
           cat local.properties
 
       - name: Provision the release signing key
-        # The keystore is a secret, not a file in the repository. It is written
-        # to the runner's temporary directory, which is destroyed with the job,
-        # and the four values the build reads are exported from here. GitHub
-        # masks registered secrets in logs; nothing below echoes them anyway.
         env:
           OMNI_KEYSTORE_BASE64: ${{ secrets.OMNI_KEYSTORE_BASE64 }}
           OMNI_KEYSTORE_PASSWORD: ${{ secrets.OMNI_KEYSTORE_PASSWORD }}
@@ -278,30 +183,12 @@ jobs:
 
           store="$RUNNER_TEMP/omni-release.jks"
 
-          # Two kinds of paste damage, both seen in practice, neither of
-          # which base64 explains:
-          #
-          #   spaces          rejected outright - "base64: invalid input" and
-          #                   nothing else to go on. Newlines it tolerates;
-          #                   spaces it does not.
-          #   a leading "="   the secret was copied together with a separator
-          #                   line. "=" is padding and is only ever valid at
-          #                   the end, so one at the front voids the lot.
-          #
-          # Stripping both is safe: a valid base64 value contains no
-          # whitespace and never begins with padding.
           printf '%s' "$OMNI_KEYSTORE_BASE64" \
             | tr -d '[:space:]' \
             | sed 's/^=*//' \
             | base64 --decode > "$store"
           test -s "$store"
 
-          # And prove it is actually the keystore before the build depends on
-          # it. This is not belt-and-braces: a truncated paste *decodes without
-          # complaint* into bytes that are not a keystore, so without this the
-          # first sign of trouble would be an AGP error during signing, several
-          # minutes later and far from the cause. keytool prints the certificate
-          # to nowhere; nothing secret reaches the log.
           if ! keytool -list -keystore "$store" \
                 -storepass "$OMNI_KEYSTORE_PASSWORD" \
                 -alias "$OMNI_KEY_ALIAS" > /dev/null 2>&1; then
@@ -324,8 +211,6 @@ jobs:
             exit 1
           fi
 
-          # The certificate fingerprint is public and worth having in the log:
-          # it is how you tell which key signed a given build.
           keytool -list -keystore "$store" \
             -storepass "$OMNI_KEYSTORE_PASSWORD" \
             -alias "$OMNI_KEY_ALIAS" 2>/dev/null | grep -i "fingerprint" || true
@@ -356,8 +241,6 @@ jobs:
       - name: Confirm the Core is linked into every ABI
         run: |
           set -euo pipefail
-          # The release artifact is named "-unsigned" only while no signing
-          # identity is configured, so resolve it rather than assuming the name.
           apk=$(ls Builder/build/outputs/apk/release/*.apk)
           nm="$ANDROID_HOME/ndk/$OMNI_NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
           work=$(mktemp -d)
@@ -367,12 +250,6 @@ jobs:
             so="$work/lib/$abi/libomni_builder.so"
             test -f "$so" || { echo "missing native library for $abi"; exit 1; }
 
-            # Every JNI entry point the Kotlin declares, JNI_OnLoad, and
-            # nothing else. A declared external fun with no entry point behind
-            # it is an UnsatisfiedLinkError the first time a person taps the
-            # button, and nothing else in this pipeline would catch it. If the
-            # Core's C ABI ever appears here, --exclude-libs has stopped working
-            # and the shared object is exposing more than it should.
             "$nm" -D --defined-only "$so" | awk '{print $3}' | sort > "$work/exported.txt"
 
             grep -o 'external fun native[A-Za-z]*' \
@@ -410,18 +287,10 @@ jobs:
           echo "The release APK is byte-identical across clean rebuilds."
 
       - name: Restore the debug APK the reproducibility check removed
-        # The step above runs `./gradlew clean` and then rebuilds only the
-        # release artifact, so the debug APK is gone by the time the checks
-        # below walk the output directory. They walk whatever is there and pass
-        # on one APK as readily as two, which is how the debug APK stopped being
-        # checked in CI without anything failing. The debug APK is the only one
-        # that carries a signature, so its absence also silently skipped the
-        # signature check - the very check added after "App not installed".
         run: |
           set -euo pipefail
           ./gradlew :Builder:assembleDebug --console=plain
           test -f Builder/build/outputs/apk/debug/Builder-debug.apk
-          # Named "-unsigned" only while no signing identity is configured.
           ls Builder/build/outputs/apk/release/*.apk
           echo "Both APKs are present; the checks below will see both."
 
@@ -432,10 +301,6 @@ jobs:
         run: ./gradlew :Builder:verifyApkInstallability --console=plain --rerun-tasks
 
       - name: Build and sign a package with nothing but the Core
-        # The milestone of phase 9: an APK whose manifest, container, content
-        # digest, RSA signature and certificate handling all come from this
-        # tree, handed to Google's apksigner for judgement. No aapt2, no d8,
-        # no apksigner and no third-party library took part in making it.
         env:
           OMNI_REQUIRE_SELF_BUILT_APK: "1"
           OMNI_REQUIRE_RSA_CONFORMANCE: "1"
@@ -451,19 +316,11 @@ jobs:
           cargo test --locked a_package_checks_itself -- --nocapture
 
       - name: Hold this application to the policy it enforces on others
-        # A build tool that refuses a debuggable, backup-enabled or carelessly
-        # exported package while shipping one itself is not enforcing anything.
-        # This runs Omni_Guard over this application's own merged release
-        # manifest, with the same rules and the same verdict.
         env:
           OMNI_REQUIRE_SELF_POLICY: "1"
         run: cargo test --locked this_application_meets_the_policy -- --nocapture
 
       - name: Hand a bundle this build wrote to bundletool
-        # An Android App Bundle is protobuf, not binary XML, and nothing in this
-        # tree can tell whether its own protobuf is right. bundleRelease is run
-        # first only to put bundletool in the Gradle cache, where the test finds
-        # it; the bundle the test checks is written by the Core alone.
         env:
           OMNI_REQUIRE_BUNDLETOOL: "1"
         run: |
@@ -474,9 +331,6 @@ jobs:
           cargo test --locked protobuf_varints -- --nocapture
 
       - name: Read the classes this build produced with the Core's own reader
-        # Every class file the Kotlin compiler just produced, compared field for
-        # field with javap: version, name, superclass, interfaces, fields,
-        # methods, constant pool size and the Kotlin metadata version.
         env:
           OMNI_REQUIRE_CLASS_CONFORMANCE: "1"
         run: |
@@ -484,10 +338,6 @@ jobs:
           cargo test --locked every_class_this_build_produced -- --nocapture
 
       - name: Read the DEX this build produced with the Core's own reader
-        # Reading a format correctly is not something a self-consistent parser
-        # can establish about itself. This checks the Core's header fields and
-        # class list against dexdump on the classes.dex the build just made,
-        # and fails rather than skips if either side is missing.
         env:
           OMNI_REQUIRE_DEX_CONFORMANCE: "1"
         run: |
@@ -495,15 +345,8 @@ jobs:
           cargo test --locked the_dex_this_build_produced -- --nocapture
 
       - name: Read the signed APK with the Core's own signing reader
-        # The Core's conformance tests sign an archive the Core itself wrote.
-        # This points the same reader at a package the Android Gradle Plugin
-        # laid out and apksigner signed, which is a different shape entirely.
         run: |
           set -euo pipefail
-          # Prefer the release artifact: it is the deliverable, and a large RSA
-          # signing key makes it SHA-512 signed, which the debug key does not
-          # exercise. Fall back to the debug APK when no signing key is set,
-          # because an unsigned package has no block to read.
           apk=$(ls Builder/build/outputs/apk/release/*.apk)
           case "$apk" in
             *-unsigned.apk) apk=Builder/build/outputs/apk/debug/Builder-debug.apk ;;
@@ -526,9 +369,6 @@ jobs:
             }
 
       - name: Publish the release APK
-        # The release artifact is the deliverable. The debug APK is built and
-        # checked above but not published: it carries the shared debug key, so
-        # it is a development build and not something to hand anyone.
         uses: actions/upload-artifact@v5
         with:
           name: omni-builder-release

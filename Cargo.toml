@@ -1,17 +1,3 @@
-# Omni_Builder — Rust Core crate manifest
-#
-# ARCHITECTURAL NOTE (see ADR-0002 in Omni.rs):
-# Directive section 46 does not define a location for the Omni Core sources, yet
-# Rust cannot be compiled without a manifest and a crate-root source file.
-# The theoretical minimum is exactly two files: this manifest and one crate root.
-# No new directory is introduced. The nine Plugins/*.rs files listed in section 46
-# are modules of this single crate, wired in from the crate root via #[path].
-#
-# Dependency policy (directive sections 14, 31):
-#   - zero third-party dependencies in the Core
-#   - no dynamic version ranges anywhere
-#   - every future dependency requires an exact version + provenance record
-
 [package]
 name          = "omni_core"
 version       = "0.1.0"
@@ -24,12 +10,9 @@ license       = "MIT"
 [lib]
 name       = "omni_core"
 path       = "Omni.rs"
-# staticlib -> linked into libomni_builder.so by Builder/Source/Main/Native/CMakeLists.txt
-# lib       -> required for `cargo test` on the host
 crate-type = ["staticlib", "lib"]
 
 [dependencies]
-# Intentionally empty. See dependency policy above.
 
 [profile.release]
 opt-level       = "s"
@@ -38,8 +21,4 @@ codegen-units   = 1
 strip           = "symbols"
 overflow-checks = true
 
-# Unwinding is kept ON deliberately. The C ABI in Omni.rs wraps every entry point
-# in `catch_unwind`, which is a no-op under `panic = "abort"`. Directive sections
-# 34 and 41 require a controlled failure rather than a process abort, so the
-# release profile trades a small binary-size increase for a graceful boundary.
 panic = "unwind"

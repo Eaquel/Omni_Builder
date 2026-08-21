@@ -76,4 +76,9 @@
     <string name="omni_action_install">安装</string>
     <string name="omni_action_share">分享</string>
     <string name="omni_install_note">Android 会询问一次是否允许从这里安装。本应用不持有安装其他软件包的权限，因为它自己的安全策略在所构建的包中拒绝该权限。</string>
+    <string name="omni_settings_theme">主题</string>
+    <string name="omni_settings_defaults">默认值</string>
+    <string name="omni_settings_toolchain">工具链</string>
+    <string name="omni_settings_abi">桥接</string>
+    <string name="omni_settings_about">关于</string>
 </resources>

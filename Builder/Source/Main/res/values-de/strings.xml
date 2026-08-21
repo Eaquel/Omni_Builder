@@ -76,4 +76,9 @@
     <string name="omni_action_install">INSTALLIEREN</string>
     <string name="omni_action_share">TEILEN</string>
     <string name="omni_install_note">Android fragt einmal, ob von hier installiert werden darf. Diese Anwendung hält die Berechtigung zum Installieren anderer Pakete nicht, weil ihre eigenen Sicherheitsregeln diese Berechtigung in dem, was sie baut, ablehnen.</string>
+    <string name="omni_settings_theme">Erscheinungsbild</string>
+    <string name="omni_settings_defaults">Vorgaben</string>
+    <string name="omni_settings_toolchain">Werkzeugkette</string>
+    <string name="omni_settings_abi">Brücke</string>
+    <string name="omni_settings_about">Über</string>
 </resources>

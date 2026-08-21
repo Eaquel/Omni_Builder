@@ -76,4 +76,9 @@
     <string name="omni_action_install">INSTALAR</string>
     <string name="omni_action_share">COMPARTIR</string>
     <string name="omni_install_note">Android pregunta una vez si puede instalar desde aquí. Esta aplicación no tiene el permiso de instalar otros paquetes, porque su propia política de seguridad lo rechaza en lo que construye.</string>
+    <string name="omni_settings_theme">Tema</string>
+    <string name="omni_settings_defaults">Valores por defecto</string>
+    <string name="omni_settings_toolchain">Cadena de herramientas</string>
+    <string name="omni_settings_abi">Puente</string>
+    <string name="omni_settings_about">Acerca de</string>
 </resources>

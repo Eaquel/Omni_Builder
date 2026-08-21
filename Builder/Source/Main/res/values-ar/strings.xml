@@ -76,4 +76,9 @@
     <string name="omni_action_install">تثبيت</string>
     <string name="omni_action_share">مشاركة</string>
     <string name="omni_install_note">يسأل أندرويد مرة واحدة عمّا إذا كان يُسمح بالتثبيت من هنا. لا يحمل هذا التطبيق إذن تثبيت حزم أخرى، لأن سياسته الأمنية نفسها ترفض هذا الإذن فيما يبنيه.</string>
+    <string name="omni_settings_theme">المظهر</string>
+    <string name="omni_settings_defaults">الإعدادات الافتراضية</string>
+    <string name="omni_settings_toolchain">سلسلة الأدوات</string>
+    <string name="omni_settings_abi">الجسر</string>
+    <string name="omni_settings_about">حول</string>
 </resources>

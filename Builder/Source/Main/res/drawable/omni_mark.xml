@@ -1,28 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Omni_Builder mark.
-
-  Three stacked layers over a rising chevron: Core, plugin runtime and artifact.
-  A vector drawable rather than a set of density-specific bitmaps, so the icon is
-  a reviewable text file and the repository carries no opaque binary assets.
--->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Artifact layer (top) -->
     <path
         android:fillColor="#6CB6FF"
         android:pathData="M54,26 L74,38 L54,50 L34,38 Z" />
 
-    <!-- Plugin runtime layer (middle) -->
     <path
         android:fillColor="#4A90D9"
         android:pathData="M34,46 L54,58 L74,46 L74,52 L54,64 L34,52 Z" />
 
-    <!-- Core layer (bottom) -->
     <path
         android:fillColor="#2F6DA8"
         android:pathData="M34,60 L54,72 L74,60 L74,66 L54,78 L34,66 Z" />

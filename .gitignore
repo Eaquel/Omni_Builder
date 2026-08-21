@@ -1,5 +1,3 @@
-# Build output. Nothing generated belongs in the repository: directive section 58
-# makes artifacts something that is produced, hashed and verified, never stored.
 /build/
 /Builder/build/
 /Builder/.cxx/
@@ -7,12 +5,8 @@
 /.gradle/
 /.kotlin/
 
-# Host-specific, never shared.
 /local.properties
 
-# Signing material. Directive section 25 forbids a private key from reaching an
-# artifact, a log or a diagnostic; a repository is worse than all three. This
-# pattern is a safety net, not permission to keep one nearby.
 *.jks
 *.keystore
 *.p12

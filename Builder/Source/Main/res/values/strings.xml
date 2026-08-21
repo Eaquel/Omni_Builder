@@ -76,4 +76,9 @@
     <string name="omni_action_install">INSTALL</string>
     <string name="omni_action_share">SHARE</string>
     <string name="omni_install_note">Android asks once whether it may install from here. This application does not hold the permission to install other packages, because its own security policy refuses that permission in what it builds.</string>
+    <string name="omni_settings_theme">Theme</string>
+    <string name="omni_settings_defaults">Defaults</string>
+    <string name="omni_settings_toolchain">Toolchain</string>
+    <string name="omni_settings_abi">Bridge</string>
+    <string name="omni_settings_about">About</string>
 </resources>

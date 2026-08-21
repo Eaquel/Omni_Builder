@@ -76,4 +76,9 @@
     <string name="omni_action_install">KUR</string>
     <string name="omni_action_share">PAYLAŞ</string>
     <string name="omni_install_note">Android buradan kurulum yapılıp yapılmayacağını bir kez sorar. Bu uygulama başka paket kurma iznini taşımıyor, çünkü kendi güvenlik ilkesi ürettiği paketlerde bu izni reddediyor.</string>
+    <string name="omni_settings_theme">Tema</string>
+    <string name="omni_settings_defaults">Varsayılanlar</string>
+    <string name="omni_settings_toolchain">Araç zinciri</string>
+    <string name="omni_settings_abi">Köprü</string>
+    <string name="omni_settings_about">Hakkında</string>
 </resources>

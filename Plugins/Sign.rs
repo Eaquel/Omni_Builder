@@ -35,7 +35,6 @@ pub static CONTRACT: Contract = Contract {
         "Packaging; it receives a finished archive.",
         "Storing private keys. Key custody is a separate, reviewed design.",
     ],
-    roadmap_phase: "PHASE 9 — TOOLCHAIN",
 };
 
 pub struct SignPlugin;

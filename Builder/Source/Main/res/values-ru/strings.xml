@@ -76,4 +76,9 @@
     <string name="omni_action_install">УСТАНОВИТЬ</string>
     <string name="omni_action_share">ПОДЕЛИТЬСЯ</string>
     <string name="omni_install_note">Android один раз спросит, можно ли устанавливать отсюда. Это приложение не имеет разрешения устанавливать другие пакеты, потому что его собственные правила безопасности отклоняют это разрешение в том, что оно собирает.</string>
+    <string name="omni_settings_theme">Тема</string>
+    <string name="omni_settings_defaults">По умолчанию</string>
+    <string name="omni_settings_toolchain">Инструменты</string>
+    <string name="omni_settings_abi">Мост</string>
+    <string name="omni_settings_about">О программе</string>
 </resources>

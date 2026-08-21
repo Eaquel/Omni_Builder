@@ -27,96 +27,6 @@ pub mod plugins {
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const CORE_PHASE: &str = "PHASE 9 — TOOLCHAIN";
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PhaseState {
-    Delivered,
-    Current,
-    Planned,
-}
-
-impl PhaseState {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            PhaseState::Delivered => "DELIVERED",
-            PhaseState::Current => "CURRENT",
-            PhaseState::Planned => "PLANNED",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Phase {
-    pub number: u32,
-    pub name: &'static str,
-    pub state: PhaseState,
-    pub delivers: &'static str,
-}
-
-pub const ROADMAP: &[Phase] = &[
-    Phase {
-        number: 1,
-        name: "PHASE 1 — FOUNDATION",
-        state: PhaseState::Delivered,
-        delivers: "The Core crate, the JNI bridge, the toolchain lock, diagnostics, the capability model and the plugin contracts.",
-    },
-    Phase {
-        number: 2,
-        name: "PHASE 2 — OMNI CORE",
-        state: PhaseState::Delivered,
-        delivers: "Virtual filesystem, project model, artifact lifecycle, incremental cache, build graph and scheduler.",
-    },
-    Phase {
-        number: 3,
-        name: "PHASE 3 — BINARY CORE",
-        state: PhaseState::Delivered,
-        delivers: "Bounded binary readers, patched writers, sections, tables, and the CRC-32 and Adler-32 checksums the ZIP and DEX formats use.",
-    },
-    Phase {
-        number: 4,
-        name: "PHASE 4 — RESOURCE ENGINE",
-        state: PhaseState::Delivered,
-        delivers: "An XML reader, values files, identifier assignment and reference resolution with loop detection.",
-    },
-    Phase {
-        number: 5,
-        name: "PHASE 5 — APK ENGINE",
-        state: PhaseState::Delivered,
-        delivers: "The ZIP container an APK is: read, validated, and written deterministically with page-aligned native libraries.",
-    },
-    Phase {
-        number: 6,
-        name: "PHASE 6 — SIGNING",
-        state: PhaseState::Delivered,
-        delivers: "A DER reader, X.509 certificates, and the APK signing block with its content digest recomputed and matched against apksigner. Signatures are read, never produced.",
-    },
-    Phase {
-        number: 7,
-        name: "PHASE 7 — DEX",
-        state: PhaseState::Delivered,
-        delivers: "The Dalvik executable format: header, map and index pools, class definitions, and the checksum and signature a file records over itself. Read, not written.",
-    },
-    Phase {
-        number: 8,
-        name: "PHASE 8 — JVM CLASS FORMAT",
-        state: PhaseState::Delivered,
-        delivers: "The class file a front end must emit: constant pool, members, attributes and Kotlin metadata, matched against javap. A format reader, not a compiler.",
-    },
-    Phase {
-        number: 9,
-        name: "PHASE 9 — TOOLCHAIN",
-        state: PhaseState::Current,
-        delivers: "Everything that turns a project into a package Omni made itself: binary XML, the resource table, a DEX writer, RSA signing, DEFLATE, an image codec with mipmap generation, APK optimisation, Omni_Guard, and the developer program that drives all of it from the device.",
-    },
-    Phase {
-        number: 10,
-        name: "PHASE 10 — SELF-HOSTING",
-        state: PhaseState::Planned,
-        delivers: "The compilers Omni needs to build itself, and the removal of the bootstrap dependencies of directive section 15 one at a time.",
-    },
-];
-
 pub const CORE_STATUS: Status = Status::Foundation;
 
 pub const BOOTSTRAP_DEPENDENCIES: &[&str] = &[
@@ -453,6 +363,17 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         ],
     },
     Subsystem {
+        name: "DEFLATE",
+        status: Status::Beta,
+        directive_section: 24,
+        summary: "The compressed stream RFC 1950 and RFC 1951 define, read and written: stored, fixed and dynamic Huffman blocks, LZ77 matching over a 32 kilobyte window, length-limited code construction by package merge, and the Adler-32 the container carries. An independent compressor\u{2019}s output reads back exactly here, and an independent reader accepts what this writes.",
+        missing: &[
+            "One block per stream, so a very large input is held in memory rather than streamed.",
+            "The match search is a hash chain with a fixed limit and no lazy matching, so it finds a good match rather than the best one.",
+            "Nothing in the archive writer uses it yet: an APK this build makes still stores every entry.",
+        ],
+    },
+    Subsystem {
         name: "Bundle writer",
         status: Status::Partial,
         directive_section: 22,
@@ -463,14 +384,25 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         ],
     },
     Subsystem {
-        name: "Image reader",
+        name: "Image codec",
         status: Status::Beta,
         directive_section: 22,
-        summary: "Reads a PNG to its header and walks every chunk, checking each against its own CRC-32: 200 files written by other tools read here, and a flipped byte, a truncation or trailing bytes are refused.",
+        summary: "Decodes a PNG to pixels and writes one back: every chunk checked against its own CRC-32, every filter and bit depth the format defines, and an encoder that picks the narrowest colour type, a palette when it wins, and the cheapest filter per line. 200 images written by other tools decode here and survive a write and a read unchanged, within a tenth of the size the tools that made them wrote.",
         missing: &[
-            "It reads the structure, not the pixels: there is no inflate, so nothing here can resize an image or write one.",
             "PNG only. No JPEG, no WebP and no vector drawable.",
-            "It reads a PNG for a project's launcher icon and nothing else: there is no density scaling, so one image serves every screen.",
+            "Interlaced images are refused rather than decoded: Adam7 stores one image as seven and nothing here needs it.",
+            "Resampling is an area average, which is right for making an icon smaller and soft for making one larger.",
+        ],
+    },
+    Subsystem {
+        name: "Launcher icons",
+        status: Status::Beta,
+        directive_section: 22,
+        summary: "One image becomes ten: five densities from 48 to 192 pixels, each in a square and a round shape with an anti-aliased circular mask, written into the resource table and pointed at by android:icon and android:roundIcon. aapt2 reports every density back.",
+        missing: &[
+            "No adaptive icon: no foreground and background layers and no XML drawable, so the launcher cannot animate or mask it the way the platform can since API 26.",
+            "The round shape is a circle cut out of the square one, not a separately composed image.",
+            "No monochrome icon for themed launchers.",
         ],
     },
     Subsystem {
@@ -1204,7 +1136,6 @@ pub mod plugin {
         pub required_capabilities: &'static [Capability],
         pub forbidden_capabilities: &'static [Capability],
         pub non_responsibilities: &'static [&'static str],
-        pub roadmap_phase: &'static str,
     }
 
     impl Contract {
@@ -1216,7 +1147,6 @@ pub mod plugin {
             w.field_str("status", self.status.as_str());
             w.field_bool("mayProduceArtifacts", self.status.may_produce_artifacts());
             w.field_str("summary", self.summary);
-            w.field_str("roadmapPhase", self.roadmap_phase);
             w.begin_array(Some("inputs"));
             for i in self.inputs {
                 w.element_str(i);
@@ -1282,7 +1212,6 @@ pub mod plugin {
             ),
         )
         .with_context(format!("Contract version: {}", contract.version))
-        .with_context(format!("Scheduled for: {}", contract.roadmap_phase))
         .with_context(format!("Declared outputs: {}", contract.outputs.join(", ")))
         .with_suggestion(
             "This subsystem is declared, not built. No artifact was produced and \
@@ -14144,12 +14073,21 @@ pub mod scaffold {
             files.push(format!("{folder}/{name}"));
         }
 
+        std::fs::create_dir_all(base.join(RES_FOLDER)).map_err(|why| {
+            fail("EP024", "The resource folder could not be made.")
+                .with_context(format!("Folder: {RES_FOLDER}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        folders.push(RES_FOLDER.to_string());
+
         Ok(Created {
             root: root.to_string(),
             folders,
             files,
         })
     }
+
+    pub const RES_FOLDER: &str = "Res";
 
     pub const ICON_FILE: &str = "Icon.png";
 
@@ -14196,6 +14134,886 @@ pub mod scaffold {
                     "Create the project first; a project is a manifest and its language folders.",
                 )
         })
+    }
+}
+
+pub mod inflate {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+
+    pub const MAX_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+    pub const WINDOW_BYTES: usize = 32 * 1024;
+
+    const LENGTH_BASE: [u16; 29] = [
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258,
+    ];
+    const LENGTH_EXTRA: [u8; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+    ];
+    const DISTANCE_BASE: [u16; 30] = [
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+    ];
+    const DISTANCE_EXTRA: [u8; 30] = [
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13,
+    ];
+    const CODE_LENGTH_ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.inflate",
+            message,
+        )
+    }
+
+    struct Bits<'a> {
+        data: &'a [u8],
+        at: usize,
+        bit: u32,
+        held: u32,
+    }
+
+    impl<'a> Bits<'a> {
+        fn new(data: &'a [u8]) -> Bits<'a> {
+            Bits {
+                data,
+                at: 0,
+                bit: 0,
+                held: 0,
+            }
+        }
+
+        fn need(&mut self, count: u32) -> Result<(), Diagnostic> {
+            while self.bit < count {
+                if self.at >= self.data.len() {
+                    return Err(fail(
+                        "EI101",
+                        "The compressed stream ends before the data it promised.",
+                    )
+                    .with_context(format!(
+                        "Read {} of {} bytes",
+                        self.at,
+                        self.data.len()
+                    )));
+                }
+                self.held |= u32::from(self.data[self.at]) << self.bit;
+                self.at += 1;
+                self.bit += 8;
+            }
+            Ok(())
+        }
+
+        fn take(&mut self, count: u32) -> Result<u32, Diagnostic> {
+            if count == 0 {
+                return Ok(0);
+            }
+            self.need(count)?;
+            let value = self.held & ((1u32 << count) - 1);
+            self.held >>= count;
+            self.bit -= count;
+            Ok(value)
+        }
+
+        fn align(&mut self) {
+            let drop = self.bit % 8;
+            self.held >>= drop;
+            self.bit -= drop;
+        }
+
+        fn bytes(&mut self, count: usize) -> Result<&'a [u8], Diagnostic> {
+            self.align();
+            while self.bit >= 8 {
+                self.at -= 1;
+                self.bit -= 8;
+            }
+            self.held = 0;
+            self.bit = 0;
+            if self.at + count > self.data.len() {
+                return Err(fail(
+                    "EI102",
+                    "A stored block claims more bytes than the stream holds.",
+                )
+                .with_context(format!("Claimed: {count}")));
+            }
+            let out = &self.data[self.at..self.at + count];
+            self.at += count;
+            Ok(out)
+        }
+    }
+
+    struct Huffman {
+        counts: [u16; 16],
+        symbols: Vec<u16>,
+    }
+
+    impl Huffman {
+        fn build(lengths: &[u8]) -> Result<Huffman, Diagnostic> {
+            let mut counts = [0u16; 16];
+            for length in lengths {
+                counts[*length as usize] += 1;
+            }
+            counts[0] = 0;
+
+            let mut left = 1i32;
+            for count in counts.iter().skip(1) {
+                left <<= 1;
+                left -= i32::from(*count);
+                if left < 0 {
+                    return Err(fail("EI110", "A Huffman table is over-subscribed."));
+                }
+            }
+
+            let mut offsets = [0u16; 16];
+            for bits in 1..15 {
+                offsets[bits + 1] = offsets[bits] + counts[bits];
+            }
+            let mut symbols = vec![0u16; lengths.len()];
+            for (symbol, length) in lengths.iter().enumerate() {
+                if *length != 0 {
+                    symbols[offsets[*length as usize] as usize] = symbol as u16;
+                    offsets[*length as usize] += 1;
+                }
+            }
+            Ok(Huffman { counts, symbols })
+        }
+
+        fn decode(&self, bits: &mut Bits<'_>) -> Result<u16, Diagnostic> {
+            let mut code = 0i32;
+            let mut first = 0i32;
+            let mut index = 0i32;
+            for length in 1..16 {
+                code |= bits.take(1)? as i32;
+                let count = i32::from(self.counts[length]);
+                if code - count < first {
+                    let position = (index + (code - first)) as usize;
+                    return self.symbols.get(position).copied().ok_or_else(|| {
+                        fail(
+                            "EI111",
+                            "A Huffman code names a symbol the table does not hold.",
+                        )
+                    });
+                }
+                index += count;
+                first += count;
+                first <<= 1;
+                code <<= 1;
+            }
+            Err(fail("EI112", "A Huffman code is longer than fifteen bits."))
+        }
+    }
+
+    fn fixed_tables() -> (Huffman, Huffman) {
+        let mut literal = [0u8; 288];
+        for (symbol, length) in literal.iter_mut().enumerate() {
+            *length = match symbol {
+                0..=143 => 8,
+                144..=255 => 9,
+                256..=279 => 7,
+                _ => 8,
+            };
+        }
+        let distance = [5u8; 30];
+        (
+            Huffman::build(&literal).expect("the fixed literal table is well formed"),
+            Huffman::build(&distance).expect("the fixed distance table is well formed"),
+        )
+    }
+
+    fn dynamic_tables(bits: &mut Bits<'_>) -> Result<(Huffman, Huffman), Diagnostic> {
+        let literals = bits.take(5)? as usize + 257;
+        let distances = bits.take(5)? as usize + 1;
+        let code_lengths = bits.take(4)? as usize + 4;
+        if literals > 286 || distances > 30 {
+            return Err(fail(
+                "EI120",
+                "A dynamic block declares more codes than the format allows.",
+            )
+            .with_context(format!("Literals: {literals}, distances: {distances}")));
+        }
+
+        let mut order = [0u8; 19];
+        for index in 0..code_lengths {
+            order[CODE_LENGTH_ORDER[index]] = bits.take(3)? as u8;
+        }
+        let lengths_table = Huffman::build(&order)?;
+
+        let mut lengths = vec![0u8; literals + distances];
+        let mut at = 0usize;
+        while at < lengths.len() {
+            let symbol = lengths_table.decode(bits)?;
+            match symbol {
+                0..=15 => {
+                    lengths[at] = symbol as u8;
+                    at += 1;
+                }
+                16 => {
+                    if at == 0 {
+                        return Err(fail("EI121", "A length repeat has nothing to repeat."));
+                    }
+                    let previous = lengths[at - 1];
+                    let repeat = 3 + bits.take(2)? as usize;
+                    for _ in 0..repeat {
+                        if at >= lengths.len() {
+                            return Err(fail("EI122", "A length repeat runs past the table."));
+                        }
+                        lengths[at] = previous;
+                        at += 1;
+                    }
+                }
+                17 | 18 => {
+                    let repeat = if symbol == 17 {
+                        3 + bits.take(3)? as usize
+                    } else {
+                        11 + bits.take(7)? as usize
+                    };
+                    for _ in 0..repeat {
+                        if at >= lengths.len() {
+                            return Err(fail("EI122", "A length repeat runs past the table."));
+                        }
+                        lengths[at] = 0;
+                        at += 1;
+                    }
+                }
+                _ => {
+                    return Err(fail(
+                        "EI123",
+                        "A code length symbol is outside the alphabet.",
+                    ))
+                }
+            }
+        }
+
+        Ok((
+            Huffman::build(&lengths[..literals])?,
+            Huffman::build(&lengths[literals..])?,
+        ))
+    }
+
+    pub fn raw(data: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        let mut bits = Bits::new(data);
+        let mut out: Vec<u8> = Vec::new();
+
+        loop {
+            let last = bits.take(1)? == 1;
+            let kind = bits.take(2)?;
+            match kind {
+                0 => {
+                    bits.align();
+                    let header = bits.bytes(4)?;
+                    let length = u16::from_le_bytes([header[0], header[1]]) as usize;
+                    let inverse = u16::from_le_bytes([header[2], header[3]]) as usize;
+                    if length ^ 0xffff != inverse {
+                        return Err(fail(
+                            "EI130",
+                            "A stored block's length does not match its own complement.",
+                        ));
+                    }
+                    let body = bits.bytes(length)?;
+                    if out.len() + body.len() > MAX_OUTPUT_BYTES {
+                        return Err(fail(
+                            "EI131",
+                            "The stream expands beyond what this build reads.",
+                        ));
+                    }
+                    out.extend_from_slice(body);
+                }
+                1 | 2 => {
+                    let (literal, distance) = if kind == 1 {
+                        fixed_tables()
+                    } else {
+                        dynamic_tables(&mut bits)?
+                    };
+                    loop {
+                        let symbol = literal.decode(&mut bits)?;
+                        if symbol < 256 {
+                            if out.len() >= MAX_OUTPUT_BYTES {
+                                return Err(fail(
+                                    "EI131",
+                                    "The stream expands beyond what this build reads.",
+                                ));
+                            }
+                            out.push(symbol as u8);
+                            continue;
+                        }
+                        if symbol == 256 {
+                            break;
+                        }
+                        let index = symbol as usize - 257;
+                        if index >= LENGTH_BASE.len() {
+                            return Err(fail("EI132", "A length symbol is outside the alphabet."));
+                        }
+                        let length = LENGTH_BASE[index] as usize
+                            + bits.take(u32::from(LENGTH_EXTRA[index]))? as usize;
+
+                        let symbol = distance.decode(&mut bits)? as usize;
+                        if symbol >= DISTANCE_BASE.len() {
+                            return Err(fail(
+                                "EI133",
+                                "A distance symbol is outside the alphabet.",
+                            ));
+                        }
+                        let back = DISTANCE_BASE[symbol] as usize
+                            + bits.take(u32::from(DISTANCE_EXTRA[symbol]))? as usize;
+                        if back > out.len() {
+                            return Err(fail(
+                                "EI134",
+                                "A back reference points before the start of the data.",
+                            )
+                            .with_context(format!("Distance: {back}, produced: {}", out.len())));
+                        }
+                        if out.len() + length > MAX_OUTPUT_BYTES {
+                            return Err(fail(
+                                "EI131",
+                                "The stream expands beyond what this build reads.",
+                            ));
+                        }
+                        let from = out.len() - back;
+                        for step in 0..length {
+                            let byte = out[from + step];
+                            out.push(byte);
+                        }
+                    }
+                }
+                _ => {
+                    return Err(fail(
+                        "EI135",
+                        "A block declares a type the format reserves.",
+                    ));
+                }
+            }
+            if last {
+                return Ok(out);
+            }
+        }
+    }
+
+    pub fn zlib(data: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        if data.len() < 6 {
+            return Err(fail(
+                "EI100",
+                "A zlib stream is shorter than its own header and check.",
+            ));
+        }
+        let method = data[0] & 0x0f;
+        if method != 8 {
+            return Err(fail(
+                "EI103",
+                "A zlib stream uses a compression method the format does not define.",
+            )
+            .with_context(format!("Method: {method}")));
+        }
+        if (u16::from(data[0]) * 256 + u16::from(data[1])) % 31 != 0 {
+            return Err(fail("EI104", "A zlib header fails its own check."));
+        }
+        if data[1] & 0x20 != 0 {
+            return Err(fail(
+                "EI105",
+                "A zlib stream names a preset dictionary, which this build does not carry.",
+            ));
+        }
+
+        let out = raw(&data[2..data.len() - 4])?;
+        let stated = u32::from_be_bytes([
+            data[data.len() - 4],
+            data[data.len() - 3],
+            data[data.len() - 2],
+            data[data.len() - 1],
+        ]);
+        let computed = crate::binary::checksum::adler32(&out);
+        if stated != computed {
+            return Err(fail(
+                "EI106",
+                "The decompressed data does not match the checksum the stream carries.",
+            )
+            .with_context(format!("Stated: 0x{stated:08x}"))
+            .with_context(format!("Computed: 0x{computed:08x}")));
+        }
+        Ok(out)
+    }
+}
+
+pub mod deflate {
+    pub const WINDOW_BYTES: usize = 32 * 1024;
+    pub const LONGEST_MATCH: usize = 258;
+    pub const SHORTEST_MATCH: usize = 3;
+    pub const MAX_CHAIN: usize = 128;
+
+    const LENGTH_BASE: [u16; 29] = [
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258,
+    ];
+    const LENGTH_EXTRA: [u8; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+    ];
+    const DISTANCE_BASE: [u16; 30] = [
+        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+        2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+    ];
+    const DISTANCE_EXTRA: [u8; 30] = [
+        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
+        13, 13,
+    ];
+
+    #[derive(Default)]
+    struct Writer {
+        out: Vec<u8>,
+        held: u32,
+        bits: u32,
+    }
+
+    impl Writer {
+        fn push(&mut self, value: u32, count: u32) {
+            self.held |= value << self.bits;
+            self.bits += count;
+            while self.bits >= 8 {
+                self.out.push((self.held & 0xff) as u8);
+                self.held >>= 8;
+                self.bits -= 8;
+            }
+        }
+
+        fn push_reversed(&mut self, value: u32, count: u32) {
+            let mut reversed = 0u32;
+            for step in 0..count {
+                reversed |= ((value >> step) & 1) << (count - 1 - step);
+            }
+            self.push(reversed, count);
+        }
+
+        fn finish(mut self) -> Vec<u8> {
+            if self.bits > 0 {
+                self.out.push((self.held & 0xff) as u8);
+            }
+            self.out
+        }
+    }
+
+    fn length_symbol(length: usize) -> (usize, u32, u32) {
+        let mut index = 0usize;
+        for (step, base) in LENGTH_BASE.iter().enumerate() {
+            if length >= *base as usize {
+                index = step;
+            }
+        }
+        let extra = LENGTH_EXTRA[index];
+        let value = length - LENGTH_BASE[index] as usize;
+        (index, value as u32, u32::from(extra))
+    }
+
+    fn distance_symbol(distance: usize) -> (usize, u32, u32) {
+        let mut index = 0usize;
+        for (step, base) in DISTANCE_BASE.iter().enumerate() {
+            if distance >= *base as usize {
+                index = step;
+            }
+        }
+        let extra = DISTANCE_EXTRA[index];
+        let value = distance - DISTANCE_BASE[index] as usize;
+        (index, value as u32, u32::from(extra))
+    }
+
+    const HASH_BITS: usize = 15;
+    const HASH_SIZE: usize = 1 << HASH_BITS;
+
+    fn hash_at(data: &[u8], at: usize) -> usize {
+        let a = u32::from(data[at]);
+        let b = u32::from(data[at + 1]);
+        let c = u32::from(data[at + 2]);
+        (((a << 10) ^ (b << 5) ^ c).wrapping_mul(2_654_435_761) >> (32 - HASH_BITS)) as usize
+            % HASH_SIZE
+    }
+
+    pub const LONGEST_CODE: u8 = 15;
+    pub const LONGEST_LENGTH_CODE: u8 = 7;
+    const CODE_LENGTH_ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
+
+    #[derive(Clone, Copy, Debug)]
+    enum Token {
+        Literal(u8),
+        Match { length: u16, distance: u16 },
+    }
+
+    pub fn huffman_lengths(weights: &[u32], limit: u8) -> Vec<u8> {
+        let mut lengths = vec![0u8; weights.len()];
+        let present: Vec<usize> = weights
+            .iter()
+            .enumerate()
+            .filter(|(_, weight)| **weight > 0)
+            .map(|(symbol, _)| symbol)
+            .collect();
+
+        if present.is_empty() {
+            return lengths;
+        }
+        if present.len() == 1 {
+            lengths[present[0]] = 1;
+            return lengths;
+        }
+
+        let mut sorted: Vec<(u64, usize)> = present
+            .iter()
+            .map(|symbol| (u64::from(weights[*symbol]), *symbol))
+            .collect();
+        sorted.sort();
+
+        #[derive(Clone)]
+        struct Coin {
+            weight: u64,
+            members: Vec<usize>,
+        }
+
+        let leaves: Vec<Coin> = sorted
+            .iter()
+            .map(|(weight, symbol)| Coin {
+                weight: *weight,
+                members: vec![*symbol],
+            })
+            .collect();
+
+        let mut level: Vec<Coin> = leaves.clone();
+        for _ in 1..limit {
+            let mut packaged: Vec<Coin> = Vec::with_capacity(level.len() / 2 + leaves.len());
+            for pair in level.chunks(2) {
+                if pair.len() == 2 {
+                    let mut members = pair[0].members.clone();
+                    members.extend_from_slice(&pair[1].members);
+                    packaged.push(Coin {
+                        weight: pair[0].weight + pair[1].weight,
+                        members,
+                    });
+                }
+            }
+            let mut merged: Vec<Coin> = leaves.clone();
+            merged.extend(packaged);
+            merged.sort_by(|left, right| {
+                left.weight
+                    .cmp(&right.weight)
+                    .then(left.members.len().cmp(&right.members.len()))
+            });
+            level = merged;
+        }
+
+        let wanted = 2 * present.len() - 2;
+        for coin in level.iter().take(wanted) {
+            for symbol in &coin.members {
+                lengths[*symbol] += 1;
+            }
+        }
+        lengths
+    }
+
+    pub fn canonical_codes(lengths: &[u8]) -> Vec<u32> {
+        let mut counts = [0u32; 16];
+        for length in lengths {
+            if *length > 0 {
+                counts[*length as usize] += 1;
+            }
+        }
+        let mut next = [0u32; 16];
+        let mut code = 0u32;
+        for (bits, slot) in next.iter_mut().enumerate().skip(1) {
+            code = (code + counts[bits - 1]) << 1;
+            *slot = code;
+        }
+        let mut codes = vec![0u32; lengths.len()];
+        for (symbol, length) in lengths.iter().enumerate() {
+            if *length > 0 {
+                codes[symbol] = next[*length as usize];
+                next[*length as usize] += 1;
+            }
+        }
+        codes
+    }
+
+    fn tokenize(data: &[u8]) -> Vec<Token> {
+        let mut tokens: Vec<Token> = Vec::with_capacity(data.len() / 2 + 1);
+        let mut head = vec![usize::MAX; HASH_SIZE];
+        let mut previous = vec![usize::MAX; data.len().max(1)];
+
+        let mut at = 0usize;
+        while at < data.len() {
+            let mut best_length = 0usize;
+            let mut best_distance = 0usize;
+
+            if at + SHORTEST_MATCH <= data.len() {
+                let key = hash_at(data, at);
+                let mut candidate = head[key];
+                let mut chain = 0usize;
+                let limit = at.saturating_sub(WINDOW_BYTES);
+                let longest = LONGEST_MATCH.min(data.len() - at);
+
+                while candidate != usize::MAX && candidate >= limit && chain < MAX_CHAIN {
+                    chain += 1;
+                    let mut length = 0usize;
+                    while length < longest && data[candidate + length] == data[at + length] {
+                        length += 1;
+                    }
+                    if length > best_length {
+                        best_length = length;
+                        best_distance = at - candidate;
+                        if length == longest {
+                            break;
+                        }
+                    }
+                    if candidate == 0 {
+                        break;
+                    }
+                    candidate = previous[candidate];
+                }
+
+                previous[at] = head[key];
+                head[key] = at;
+            }
+
+            if best_length >= SHORTEST_MATCH {
+                tokens.push(Token::Match {
+                    length: best_length as u16,
+                    distance: best_distance as u16,
+                });
+                for step in 1..best_length {
+                    let here = at + step;
+                    if here + SHORTEST_MATCH <= data.len() {
+                        let key = hash_at(data, here);
+                        previous[here] = head[key];
+                        head[key] = here;
+                    }
+                }
+                at += best_length;
+            } else {
+                tokens.push(Token::Literal(data[at]));
+                at += 1;
+            }
+        }
+        tokens
+    }
+
+    fn frequencies(tokens: &[Token]) -> ([u32; 288], [u32; 30]) {
+        let mut literals = [0u32; 288];
+        let mut distances = [0u32; 30];
+        for token in tokens {
+            match token {
+                Token::Literal(byte) => literals[*byte as usize] += 1,
+                Token::Match { length, distance } => {
+                    let (index, _, _) = length_symbol(*length as usize);
+                    literals[257 + index] += 1;
+                    let (index, _, _) = distance_symbol(*distance as usize);
+                    distances[index] += 1;
+                }
+            }
+        }
+        literals[256] += 1;
+        (literals, distances)
+    }
+
+    fn run_length_encode(lengths: &[u8]) -> Vec<(u8, u32, u32)> {
+        let mut out: Vec<(u8, u32, u32)> = Vec::new();
+        let mut at = 0usize;
+        while at < lengths.len() {
+            let value = lengths[at];
+            let mut run = 1usize;
+            while at + run < lengths.len() && lengths[at + run] == value {
+                run += 1;
+            }
+            if value == 0 {
+                while run >= 3 {
+                    let take = run.min(138);
+                    if take <= 10 {
+                        out.push((17, (take - 3) as u32, 3));
+                    } else {
+                        out.push((18, (take - 11) as u32, 7));
+                    }
+                    at += take;
+                    run -= take;
+                }
+                for _ in 0..run {
+                    out.push((0, 0, 0));
+                    at += 1;
+                }
+            } else {
+                out.push((value, 0, 0));
+                at += 1;
+                run -= 1;
+                while run >= 3 {
+                    let take = run.min(6);
+                    out.push((16, (take - 3) as u32, 2));
+                    at += take;
+                    run -= take;
+                }
+                for _ in 0..run {
+                    out.push((value, 0, 0));
+                    at += 1;
+                }
+            }
+        }
+        out
+    }
+
+    fn emit_tokens(
+        writer: &mut Writer,
+        tokens: &[Token],
+        literal_lengths: &[u8],
+        literal_codes: &[u32],
+        distance_lengths: &[u8],
+        distance_codes: &[u32],
+    ) {
+        for token in tokens {
+            match token {
+                Token::Literal(byte) => {
+                    let symbol = *byte as usize;
+                    writer.push_reversed(literal_codes[symbol], u32::from(literal_lengths[symbol]));
+                }
+                Token::Match { length, distance } => {
+                    let (index, extra, extra_bits) = length_symbol(*length as usize);
+                    let symbol = 257 + index;
+                    writer.push_reversed(literal_codes[symbol], u32::from(literal_lengths[symbol]));
+                    writer.push(extra, extra_bits);
+
+                    let (index, extra, extra_bits) = distance_symbol(*distance as usize);
+                    writer.push_reversed(distance_codes[index], u32::from(distance_lengths[index]));
+                    writer.push(extra, extra_bits);
+                }
+            }
+        }
+        writer.push_reversed(literal_codes[256], u32::from(literal_lengths[256]));
+    }
+
+    fn fixed_block(tokens: &[Token], last: bool) -> Vec<u8> {
+        let mut writer = Writer::default();
+        writer.push(u32::from(last), 1);
+        writer.push(1, 2);
+        let mut literal_lengths = [0u8; 288];
+        for (symbol, length) in literal_lengths.iter_mut().enumerate() {
+            *length = match symbol {
+                0..=143 => 8,
+                144..=255 => 9,
+                256..=279 => 7,
+                _ => 8,
+            };
+        }
+        let literal_codes = canonical_codes(&literal_lengths);
+        let distance_lengths = [5u8; 30];
+        let distance_codes = canonical_codes(&distance_lengths);
+        emit_tokens(
+            &mut writer,
+            tokens,
+            &literal_lengths,
+            &literal_codes,
+            &distance_lengths,
+            &distance_codes,
+        );
+        writer.finish()
+    }
+
+    fn dynamic_block(tokens: &[Token], last: bool) -> Option<Vec<u8>> {
+        let (literal_weights, distance_weights) = frequencies(tokens);
+        let mut literal_lengths = huffman_lengths(&literal_weights[..286], LONGEST_CODE);
+        let mut distance_lengths = huffman_lengths(&distance_weights, LONGEST_CODE);
+
+        if literal_lengths.iter().all(|length| *length == 0) {
+            return None;
+        }
+        if distance_lengths.iter().all(|length| *length == 0) {
+            distance_lengths[0] = 1;
+        }
+
+        let mut literals = literal_lengths.len();
+        while literals > 257 && literal_lengths[literals - 1] == 0 {
+            literals -= 1;
+        }
+        let mut distances = distance_lengths.len();
+        while distances > 1 && distance_lengths[distances - 1] == 0 {
+            distances -= 1;
+        }
+        literal_lengths.truncate(literals.max(257));
+        distance_lengths.truncate(distances.max(1));
+
+        let mut together = literal_lengths.clone();
+        together.extend_from_slice(&distance_lengths);
+        let coded = run_length_encode(&together);
+
+        let mut order_weights = [0u32; 19];
+        for (symbol, _, _) in &coded {
+            order_weights[*symbol as usize] += 1;
+        }
+        let order_lengths = huffman_lengths(&order_weights, LONGEST_LENGTH_CODE);
+        let order_codes = canonical_codes(&order_lengths);
+
+        let mut code_lengths = 19usize;
+        while code_lengths > 4 && order_lengths[CODE_LENGTH_ORDER[code_lengths - 1]] == 0 {
+            code_lengths -= 1;
+        }
+
+        let mut writer = Writer::default();
+        writer.push(u32::from(last), 1);
+        writer.push(2, 2);
+        writer.push((literal_lengths.len() - 257) as u32, 5);
+        writer.push((distance_lengths.len() - 1) as u32, 5);
+        writer.push((code_lengths - 4) as u32, 4);
+        for index in 0..code_lengths {
+            writer.push(u32::from(order_lengths[CODE_LENGTH_ORDER[index]]), 3);
+        }
+        for (symbol, extra, extra_bits) in &coded {
+            let symbol = *symbol as usize;
+            if order_lengths[symbol] == 0 {
+                return None;
+            }
+            writer.push_reversed(order_codes[symbol], u32::from(order_lengths[symbol]));
+            writer.push(*extra, *extra_bits);
+        }
+
+        let literal_codes = canonical_codes(&literal_lengths);
+        let distance_codes = canonical_codes(&distance_lengths);
+        for token in tokens {
+            let symbol = match token {
+                Token::Literal(byte) => *byte as usize,
+                Token::Match { length, .. } => 257 + length_symbol(*length as usize).0,
+            };
+            if literal_lengths.get(symbol).copied().unwrap_or(0) == 0 {
+                return None;
+            }
+            if let Token::Match { distance, .. } = token {
+                let index = distance_symbol(*distance as usize).0;
+                if distance_lengths.get(index).copied().unwrap_or(0) == 0 {
+                    return None;
+                }
+            }
+        }
+        emit_tokens(
+            &mut writer,
+            tokens,
+            &literal_lengths,
+            &literal_codes,
+            &distance_lengths,
+            &distance_codes,
+        );
+        Some(writer.finish())
+    }
+
+    pub fn raw(data: &[u8]) -> Vec<u8> {
+        let tokens = tokenize(data);
+        let fixed = fixed_block(&tokens, true);
+        match dynamic_block(&tokens, true) {
+            Some(dynamic) if dynamic.len() < fixed.len() => dynamic,
+            _ => fixed,
+        }
+    }
+
+    pub fn zlib(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(data.len() / 2 + 64);
+        out.push(0x78);
+        out.push(0x9c);
+        out.extend_from_slice(&raw(data));
+        out.extend_from_slice(&crate::binary::checksum::adler32(data).to_be_bytes());
+        out
     }
 }
 
@@ -14452,6 +15270,624 @@ pub mod image {
         }
         png.chunks = chunks;
         Ok(png)
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Raster {
+        pub width: u32,
+        pub height: u32,
+        pub pixels: Vec<u8>,
+    }
+
+    impl Raster {
+        pub fn new(width: u32, height: u32) -> Raster {
+            Raster {
+                width,
+                height,
+                pixels: vec![0u8; width as usize * height as usize * 4],
+            }
+        }
+
+        pub fn at(&self, x: u32, y: u32) -> [u8; 4] {
+            let index = (y as usize * self.width as usize + x as usize) * 4;
+            [
+                self.pixels[index],
+                self.pixels[index + 1],
+                self.pixels[index + 2],
+                self.pixels[index + 3],
+            ]
+        }
+
+        pub fn put(&mut self, x: u32, y: u32, value: [u8; 4]) {
+            let index = (y as usize * self.width as usize + x as usize) * 4;
+            self.pixels[index..index + 4].copy_from_slice(&value);
+        }
+    }
+
+    fn samples_for(colour: Colour) -> usize {
+        match colour {
+            Colour::Grey => 1,
+            Colour::Rgb => 3,
+            Colour::Indexed => 1,
+            Colour::GreyAlpha => 2,
+            Colour::Rgba => 4,
+        }
+    }
+
+    fn paeth(a: u8, b: u8, c: u8) -> u8 {
+        let p = i32::from(a) + i32::from(b) - i32::from(c);
+        let pa = (p - i32::from(a)).abs();
+        let pb = (p - i32::from(b)).abs();
+        let pc = (p - i32::from(c)).abs();
+        if pa <= pb && pa <= pc {
+            a
+        } else if pb <= pc {
+            b
+        } else {
+            c
+        }
+    }
+
+    fn unfilter(
+        data: &[u8],
+        width: u32,
+        height: u32,
+        samples: usize,
+        depth: u8,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let bits = width as usize * samples * depth as usize;
+        let stride = bits.div_ceil(8);
+        let step = (samples * depth as usize).div_ceil(8).max(1);
+        let expected = (stride + 1) * height as usize;
+        if data.len() < expected {
+            return Err(fail(
+                "EM030",
+                "The image holds fewer scanlines than its header declares.",
+            )
+            .with_context(format!("Expected: {expected} bytes"))
+            .with_context(format!("Found: {} bytes", data.len())));
+        }
+
+        let mut out = vec![0u8; stride * height as usize];
+        for row in 0..height as usize {
+            let filter = data[row * (stride + 1)];
+            let source = &data[row * (stride + 1) + 1..row * (stride + 1) + 1 + stride];
+            let (done, working) = out.split_at_mut(row * stride);
+            let line = &mut working[..stride];
+            let above = if row == 0 {
+                None
+            } else {
+                Some(&done[(row - 1) * stride..row * stride])
+            };
+
+            for index in 0..stride {
+                let raw = source[index];
+                let left = if index >= step { line[index - step] } else { 0 };
+                let up = above.map(|row| row[index]).unwrap_or(0);
+                let corner = if index >= step {
+                    above.map(|row| row[index - step]).unwrap_or(0)
+                } else {
+                    0
+                };
+                line[index] = match filter {
+                    0 => raw,
+                    1 => raw.wrapping_add(left),
+                    2 => raw.wrapping_add(up),
+                    3 => raw.wrapping_add(((u16::from(left) + u16::from(up)) / 2) as u8),
+                    4 => raw.wrapping_add(paeth(left, up, corner)),
+                    other => {
+                        return Err(fail(
+                            "EM031",
+                            "A scanline uses a filter the format does not define.",
+                        )
+                        .with_context(format!("Filter: {other}"))
+                        .with_context(format!("Row: {row}")))
+                    }
+                };
+            }
+        }
+        Ok(out)
+    }
+
+    fn sample_at(line: &[u8], index: usize, depth: u8) -> u16 {
+        match depth {
+            16 => u16::from(line[index * 2]) << 8 | u16::from(line[index * 2 + 1]),
+            8 => u16::from(line[index]),
+            _ => {
+                let per_byte = 8 / depth as usize;
+                let byte = line[index / per_byte];
+                let shift = 8 - depth as usize * (index % per_byte + 1);
+                let mask = (1u16 << depth) - 1;
+                (u16::from(byte) >> shift) & mask
+            }
+        }
+    }
+
+    fn to_eight(value: u16, depth: u8) -> u8 {
+        match depth {
+            16 => (value >> 8) as u8,
+            8 => value as u8,
+            4 => (value * 17) as u8,
+            2 => (value * 85) as u8,
+            1 => (value * 255) as u8,
+            _ => value as u8,
+        }
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Raster, Diagnostic> {
+        let header = read_png(data)?;
+        if header.interlaced {
+            return Err(
+                fail("EM032", "An interlaced image is not decoded by this build.").with_suggestion(
+                    "Adam7 stores one image as seven, and nothing here needs it. \
+                     Save the image without interlacing.",
+                ),
+            );
+        }
+
+        let mut compressed: Vec<u8> = Vec::new();
+        let mut palette: Vec<[u8; 4]> = Vec::new();
+        let mut at = 8usize;
+        while at + 12 <= data.len() {
+            let length =
+                u32::from_be_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]) as usize;
+            let kind = &data[at + 4..at + 8];
+            let body = &data[at + 8..at + 8 + length];
+            match kind {
+                b"IDAT" => compressed.extend_from_slice(body),
+                b"PLTE" => {
+                    if !length.is_multiple_of(3) {
+                        return Err(fail(
+                            "EM033",
+                            "The palette is not a whole number of colours.",
+                        ));
+                    }
+                    palette = body
+                        .chunks_exact(3)
+                        .map(|entry| [entry[0], entry[1], entry[2], 0xff])
+                        .collect();
+                }
+                b"tRNS" => {
+                    for (index, alpha) in body.iter().enumerate() {
+                        if let Some(colour) = palette.get_mut(index) {
+                            colour[3] = *alpha;
+                        }
+                    }
+                }
+                b"IEND" => break,
+                _ => {}
+            }
+            at += 12 + length;
+        }
+
+        if compressed.is_empty() {
+            return Err(fail("EM034", "The image carries no pixel data."));
+        }
+
+        let raw = crate::inflate::zlib(&compressed)?;
+        let samples = samples_for(header.colour);
+        let lines = unfilter(&raw, header.width, header.height, samples, header.bit_depth)?;
+        let bits = header.width as usize * samples * header.bit_depth as usize;
+        let stride = bits.div_ceil(8);
+
+        let mut raster = Raster::new(header.width, header.height);
+        for y in 0..header.height {
+            let line = &lines[y as usize * stride..(y as usize + 1) * stride];
+            for x in 0..header.width {
+                let base = x as usize * samples;
+                let pixel = match header.colour {
+                    Colour::Grey => {
+                        let grey =
+                            to_eight(sample_at(line, base, header.bit_depth), header.bit_depth);
+                        [grey, grey, grey, 0xff]
+                    }
+                    Colour::GreyAlpha => {
+                        let grey =
+                            to_eight(sample_at(line, base, header.bit_depth), header.bit_depth);
+                        let alpha = to_eight(
+                            sample_at(line, base + 1, header.bit_depth),
+                            header.bit_depth,
+                        );
+                        [grey, grey, grey, alpha]
+                    }
+                    Colour::Rgb => [
+                        to_eight(sample_at(line, base, header.bit_depth), header.bit_depth),
+                        to_eight(
+                            sample_at(line, base + 1, header.bit_depth),
+                            header.bit_depth,
+                        ),
+                        to_eight(
+                            sample_at(line, base + 2, header.bit_depth),
+                            header.bit_depth,
+                        ),
+                        0xff,
+                    ],
+                    Colour::Rgba => [
+                        to_eight(sample_at(line, base, header.bit_depth), header.bit_depth),
+                        to_eight(
+                            sample_at(line, base + 1, header.bit_depth),
+                            header.bit_depth,
+                        ),
+                        to_eight(
+                            sample_at(line, base + 2, header.bit_depth),
+                            header.bit_depth,
+                        ),
+                        to_eight(
+                            sample_at(line, base + 3, header.bit_depth),
+                            header.bit_depth,
+                        ),
+                    ],
+                    Colour::Indexed => {
+                        let index = sample_at(line, base, header.bit_depth) as usize;
+                        *palette.get(index).ok_or_else(|| {
+                            fail(
+                                "EM035",
+                                "A pixel names a palette entry the image does not hold.",
+                            )
+                            .with_context(format!("Index: {index}"))
+                            .with_context(format!("Palette: {} colours", palette.len()))
+                        })?
+                    }
+                };
+                raster.put(x, y, pixel);
+            }
+        }
+        Ok(raster)
+    }
+
+    pub fn narrowest(raster: &Raster) -> Colour {
+        let mut opaque = true;
+        let mut grey = true;
+        for pixel in raster.pixels.chunks_exact(4) {
+            if pixel[3] != 0xff {
+                opaque = false;
+            }
+            if pixel[0] != pixel[1] || pixel[1] != pixel[2] {
+                grey = false;
+            }
+            if !opaque && !grey {
+                break;
+            }
+        }
+        match (grey, opaque) {
+            (true, true) => Colour::Grey,
+            (true, false) => Colour::GreyAlpha,
+            (false, true) => Colour::Rgb,
+            (false, false) => Colour::Rgba,
+        }
+    }
+
+    fn narrow_line(line: &[u8], colour: Colour, into: &mut Vec<u8>) {
+        into.clear();
+        for pixel in line.chunks_exact(4) {
+            match colour {
+                Colour::Grey => into.push(pixel[0]),
+                Colour::GreyAlpha => {
+                    into.push(pixel[0]);
+                    into.push(pixel[3]);
+                }
+                Colour::Rgb => into.extend_from_slice(&pixel[..3]),
+                _ => into.extend_from_slice(pixel),
+            }
+        }
+    }
+
+    fn colour_byte(colour: Colour) -> u8 {
+        match colour {
+            Colour::Grey => 0,
+            Colour::Rgb => 2,
+            Colour::Indexed => 3,
+            Colour::GreyAlpha => 4,
+            Colour::Rgba => 6,
+        }
+    }
+
+    pub const LARGEST_PALETTE: usize = 256;
+
+    pub fn palette_of(raster: &Raster) -> Option<Vec<[u8; 4]>> {
+        let mut held: Vec<[u8; 4]> = Vec::with_capacity(LARGEST_PALETTE);
+        for pixel in raster.pixels.chunks_exact(4) {
+            let colour = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            if !held.contains(&colour) {
+                if held.len() == LARGEST_PALETTE {
+                    return None;
+                }
+                held.push(colour);
+            }
+        }
+        Some(held)
+    }
+
+    fn palette_depth(count: usize) -> u8 {
+        match count {
+            0..=2 => 1,
+            3..=4 => 2,
+            5..=16 => 4,
+            _ => 8,
+        }
+    }
+
+    fn encode_indexed(raster: &Raster, palette: &[[u8; 4]]) -> Vec<u8> {
+        let depth = palette_depth(palette.len());
+        let per_byte = 8 / depth as usize;
+        let stride = (raster.width as usize).div_ceil(per_byte);
+        let mut filtered = Vec::with_capacity((stride + 1) * raster.height as usize);
+
+        for y in 0..raster.height {
+            filtered.push(0);
+            let mut line = vec![0u8; stride];
+            for x in 0..raster.width {
+                let pixel = raster.at(x, y);
+                let index = palette.iter().position(|held| *held == pixel).unwrap_or(0) as u8;
+                let slot = x as usize / per_byte;
+                let shift = 8 - depth as usize * (x as usize % per_byte + 1);
+                line[slot] |= index << shift;
+            }
+            filtered.extend_from_slice(&line);
+        }
+
+        let mut out = Vec::with_capacity(filtered.len() / 2 + 256);
+        out.extend_from_slice(&SIGNATURE);
+
+        let mut header = Vec::with_capacity(13);
+        header.extend_from_slice(&raster.width.to_be_bytes());
+        header.extend_from_slice(&raster.height.to_be_bytes());
+        header.push(depth);
+        header.push(3);
+        header.push(0);
+        header.push(0);
+        header.push(0);
+        write_chunk(&mut out, b"IHDR", &header);
+
+        let mut colours = Vec::with_capacity(palette.len() * 3);
+        for entry in palette {
+            colours.extend_from_slice(&entry[..3]);
+        }
+        write_chunk(&mut out, b"PLTE", &colours);
+
+        if palette.iter().any(|entry| entry[3] != 0xff) {
+            let mut last = palette.len();
+            while last > 0 && palette[last - 1][3] == 0xff {
+                last -= 1;
+            }
+            let alpha: Vec<u8> = palette[..last].iter().map(|entry| entry[3]).collect();
+            write_chunk(&mut out, b"tRNS", &alpha);
+        }
+
+        write_chunk(&mut out, b"IDAT", &crate::deflate::zlib(&filtered));
+        write_chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    pub fn encode(raster: &Raster) -> Result<Vec<u8>, Diagnostic> {
+        if raster.width == 0 || raster.height == 0 {
+            return Err(fail(
+                "EM040",
+                "An image with no width or no height cannot be written.",
+            ));
+        }
+
+        let direct = encode_direct(raster)?;
+        if let Some(palette) = palette_of(raster) {
+            if !palette.is_empty() {
+                let indexed = encode_indexed(raster, &palette);
+                if indexed.len() < direct.len() {
+                    return Ok(indexed);
+                }
+            }
+        }
+        Ok(direct)
+    }
+
+    fn encode_direct(raster: &Raster) -> Result<Vec<u8>, Diagnostic> {
+        let colour = narrowest(raster);
+        let samples = samples_for(colour);
+        let source_stride = raster.width as usize * 4;
+        let stride = raster.width as usize * samples;
+        let mut filtered = Vec::with_capacity((stride + 1) * raster.height as usize);
+        let mut previous = vec![0u8; stride];
+        let mut narrowed = Vec::with_capacity(stride);
+        for y in 0..raster.height as usize {
+            narrow_line(
+                &raster.pixels[y * source_stride..(y + 1) * source_stride],
+                colour,
+                &mut narrowed,
+            );
+            let line = &narrowed[..];
+            let mut best: Option<(u64, u8, Vec<u8>)> = None;
+            for filter in 0u8..5 {
+                let mut candidate = Vec::with_capacity(stride);
+                for index in 0..stride {
+                    let raw = line[index];
+                    let left = if index >= samples {
+                        line[index - samples]
+                    } else {
+                        0
+                    };
+                    let up = previous[index];
+                    let corner = if index >= samples {
+                        previous[index - samples]
+                    } else {
+                        0
+                    };
+                    candidate.push(match filter {
+                        0 => raw,
+                        1 => raw.wrapping_sub(left),
+                        2 => raw.wrapping_sub(up),
+                        3 => raw.wrapping_sub(((u16::from(left) + u16::from(up)) / 2) as u8),
+                        _ => raw.wrapping_sub(paeth(left, up, corner)),
+                    });
+                }
+                let cost: u64 = candidate
+                    .iter()
+                    .map(|byte| u64::from((*byte as i8).unsigned_abs()))
+                    .sum();
+                if best
+                    .as_ref()
+                    .map(|(held, _, _)| cost < *held)
+                    .unwrap_or(true)
+                {
+                    best = Some((cost, filter, candidate));
+                }
+            }
+            let (_, filter, body) = best.expect("one filter is always chosen");
+            filtered.push(filter);
+            filtered.extend_from_slice(&body);
+            previous.copy_from_slice(line);
+        }
+
+        let mut out = Vec::with_capacity(filtered.len() / 2 + 128);
+        out.extend_from_slice(&SIGNATURE);
+
+        let mut header = Vec::with_capacity(13);
+        header.extend_from_slice(&raster.width.to_be_bytes());
+        header.extend_from_slice(&raster.height.to_be_bytes());
+        header.push(8);
+        header.push(colour_byte(colour));
+        header.push(0);
+        header.push(0);
+        header.push(0);
+        write_chunk(&mut out, b"IHDR", &header);
+        write_chunk(&mut out, b"IDAT", &crate::deflate::zlib(&filtered));
+        write_chunk(&mut out, b"IEND", &[]);
+        Ok(out)
+    }
+
+    fn write_chunk(out: &mut Vec<u8>, kind: &[u8; 4], body: &[u8]) {
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        let mut check = crate::binary::checksum::Crc32::new();
+        check.update(kind);
+        check.update(body);
+        out.extend_from_slice(&check.finish().to_be_bytes());
+    }
+
+    pub fn resize(raster: &Raster, width: u32, height: u32) -> Raster {
+        if width == raster.width && height == raster.height {
+            return raster.clone();
+        }
+        let mut out = Raster::new(width, height);
+        for y in 0..height {
+            let top = y as u64 * raster.height as u64 / height as u64;
+            let bottom = ((y as u64 + 1) * raster.height as u64)
+                .div_ceil(height as u64)
+                .max(top + 1)
+                .min(raster.height as u64);
+            for x in 0..width {
+                let left = x as u64 * raster.width as u64 / width as u64;
+                let right = ((x as u64 + 1) * raster.width as u64)
+                    .div_ceil(width as u64)
+                    .max(left + 1)
+                    .min(raster.width as u64);
+
+                let mut weight = 0u64;
+                let mut red = 0u64;
+                let mut green = 0u64;
+                let mut blue = 0u64;
+                let mut alpha = 0u64;
+                for source_y in top..bottom {
+                    for source_x in left..right {
+                        let pixel = raster.at(source_x as u32, source_y as u32);
+                        let a = u64::from(pixel[3]);
+                        red += u64::from(pixel[0]) * a;
+                        green += u64::from(pixel[1]) * a;
+                        blue += u64::from(pixel[2]) * a;
+                        alpha += a;
+                        weight += 1;
+                    }
+                }
+                let pixel = match red
+                    .checked_div(alpha)
+                    .zip(green.checked_div(alpha))
+                    .zip(blue.checked_div(alpha))
+                {
+                    Some(((red, green), blue)) => [
+                        red as u8,
+                        green as u8,
+                        blue as u8,
+                        (alpha / weight.max(1)) as u8,
+                    ],
+                    None => [0, 0, 0, 0],
+                };
+                out.put(x, y, pixel);
+            }
+        }
+        out
+    }
+
+    pub const ROUND_SAMPLES: u32 = 4;
+
+    pub fn rounded(raster: &Raster) -> Raster {
+        let mut out = raster.clone();
+        let width = raster.width as f64;
+        let height = raster.height as f64;
+        let centre_x = width / 2.0;
+        let centre_y = height / 2.0;
+        let radius = centre_x.min(centre_y);
+        let step = 1.0 / f64::from(ROUND_SAMPLES);
+
+        for y in 0..raster.height {
+            for x in 0..raster.width {
+                let mut inside = 0u32;
+                for sub_y in 0..ROUND_SAMPLES {
+                    for sub_x in 0..ROUND_SAMPLES {
+                        let px = f64::from(x) + (f64::from(sub_x) + 0.5) * step;
+                        let py = f64::from(y) + (f64::from(sub_y) + 0.5) * step;
+                        let dx = px - centre_x;
+                        let dy = py - centre_y;
+                        if dx * dx + dy * dy <= radius * radius {
+                            inside += 1;
+                        }
+                    }
+                }
+                if inside == ROUND_SAMPLES * ROUND_SAMPLES {
+                    continue;
+                }
+                let mut pixel = raster.at(x, y);
+                let coverage = f64::from(inside) / f64::from(ROUND_SAMPLES * ROUND_SAMPLES);
+                pixel[3] = (f64::from(pixel[3]) * coverage).round() as u8;
+                out.put(x, y, pixel);
+            }
+        }
+        out
+    }
+
+    pub const LAUNCHER_SIZES: &[(&str, u32)] = &[
+        ("mipmap-mdpi", 48),
+        ("mipmap-hdpi", 72),
+        ("mipmap-xhdpi", 96),
+        ("mipmap-xxhdpi", 144),
+        ("mipmap-xxxhdpi", 192),
+    ];
+
+    #[derive(Clone, Debug)]
+    pub struct Launcher {
+        pub folder: &'static str,
+        pub name: &'static str,
+        pub edge: u32,
+        pub bytes: Vec<u8>,
+    }
+
+    pub fn launcher_set(source: &[u8]) -> Result<Vec<Launcher>, Diagnostic> {
+        let raster = decode(source)?;
+        let mut out = Vec::with_capacity(LAUNCHER_SIZES.len() * 2);
+        for (folder, edge) in LAUNCHER_SIZES {
+            let square = resize(&raster, *edge, *edge);
+            out.push(Launcher {
+                folder,
+                name: "ic_launcher",
+                edge: *edge,
+                bytes: encode(&square)?,
+            });
+            out.push(Launcher {
+                folder,
+                name: "ic_launcher_round",
+                edge: *edge,
+                bytes: encode(&rounded(&square))?,
+            });
+        }
+        Ok(out)
     }
 
     pub fn read_png_file(path: &str) -> Result<Png, Diagnostic> {
@@ -15252,16 +16688,18 @@ pub mod bundle {
         archive.add(CONFIG_ENTRY, encode_config())?;
         archive.add(MANIFEST_ENTRY, manifest)?;
 
-        let carries_image = match (&prepared.compiled, &project.icon) {
-            (Some(table), Some(png)) => {
-                archive.add(RESOURCES_ENTRY, encode_resources(&prepared.package, table)?)?;
+        let carries_image = match &prepared.icons {
+            Some(made) => {
                 archive.add(
-                    format!("{RES_PREFIX}{}", crate::builder::ICON_ENTRY),
-                    png.clone(),
+                    RESOURCES_ENTRY,
+                    encode_resources(&prepared.package, &made.compiled)?,
                 )?;
+                for (name, bytes) in &made.files {
+                    archive.add(format!("{RES_PREFIX}{name}"), bytes.clone())?;
+                }
                 true
             }
-            _ => false,
+            None => false,
         };
 
         let carries_code = !project.code.is_empty();
@@ -16147,7 +17585,7 @@ pub mod builder {
     }
 
     pub const ICON_NAME: &str = "ic_launcher";
-    pub const ICON_ENTRY: &str = "res/mipmap/ic_launcher.png";
+    pub const ROUND_ICON_NAME: &str = "ic_launcher_round";
     pub const TABLE_ENTRY: &str = "resources.arsc";
 
     #[derive(Clone, Debug)]
@@ -16160,25 +17598,41 @@ pub mod builder {
         pub icon: Option<Vec<u8>>,
     }
 
-    fn compile_resources(
-        project: &Project,
-        sink: &mut Sink,
-    ) -> Result<Option<crate::resources::Compiled>, Diagnostic> {
-        if project.icon.is_none() {
+    pub struct Icons {
+        pub compiled: crate::resources::Compiled,
+        pub files: Vec<(String, Vec<u8>)>,
+    }
+
+    fn entry_for(folder: &str, name: &str) -> String {
+        format!("res/{folder}/{name}.png")
+    }
+
+    fn compile_resources(project: &Project, sink: &mut Sink) -> Result<Option<Icons>, Diagnostic> {
+        let Some(source) = &project.icon else {
             return Ok(None);
-        }
+        };
+
+        let set = crate::image::launcher_set(source)?;
         let mut table =
             crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
-        if !table.read_file("mipmap", "ic_launcher.png", ICON_ENTRY, sink) {
-            return Err(fail(
-                "EB040",
-                "The application image could not be given an identifier.",
-            ));
+        let mut files = Vec::with_capacity(set.len());
+
+        for made in &set {
+            let entry = entry_for(made.folder, made.name);
+            if !table.read_file(made.folder, &format!("{}.png", made.name), &entry, sink) {
+                return Err(fail(
+                    "EB040",
+                    "The application image could not be given an identifier.",
+                )
+                .with_context(format!("Entry: {entry}")));
+            }
+            files.push((entry, made.bytes.clone()));
         }
-        table
+
+        let compiled = table
             .compile(sink)
-            .map(Some)
-            .ok_or_else(|| fail("EB041", "The resource table could not be built."))
+            .ok_or_else(|| fail("EB041", "The resource table could not be built."))?;
+        Ok(Some(Icons { compiled, files }))
     }
 
     fn resolve_references(
@@ -16221,7 +17675,7 @@ pub mod builder {
         root.attribute("package").unwrap_or_default().to_string()
     }
 
-    fn set_icon(root: &mut crate::xml::Element, value: &str) {
+    fn set_attribute(root: &mut crate::xml::Element, name: &str, value: &str) {
         let Some(application) = root
             .children
             .iter_mut()
@@ -16232,13 +17686,13 @@ pub mod builder {
         if let Some(existing) = application
             .attributes
             .iter_mut()
-            .find(|attribute| attribute.name == "android:icon")
+            .find(|attribute| attribute.name == name)
         {
             existing.value = value.to_string();
             return;
         }
         application.attributes.push(crate::xml::Attribute {
-            name: "android:icon".to_string(),
+            name: name.to_string(),
             value: value.to_string(),
             position: application.position,
         });
@@ -16426,7 +17880,7 @@ pub mod builder {
 
     pub struct Prepared {
         pub root: crate::xml::Element,
-        pub compiled: Option<crate::resources::Compiled>,
+        pub icons: Option<Icons>,
         pub package: String,
         pub guard: guard::Report,
     }
@@ -16435,13 +17889,18 @@ pub mod builder {
         let mut root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", sink)
             .ok_or_else(|| fail("EB001", "The manifest could not be read."))?;
 
-        let compiled = compile_resources(project, sink)?;
-        if let Some(table) = &compiled {
-            if let Some(id) = table.id(crate::resources::Kind::Mipmap, ICON_NAME) {
-                set_icon(&mut root, &format!("@0x{:08x}", id.raw()));
+        let icons = compile_resources(project, sink)?;
+        if let Some(made) = &icons {
+            for (attribute, name) in [
+                ("android:icon", ICON_NAME),
+                ("android:roundIcon", ROUND_ICON_NAME),
+            ] {
+                if let Some(id) = made.compiled.id(crate::resources::Kind::Mipmap, name) {
+                    set_attribute(&mut root, attribute, &format!("@0x{:08x}", id.raw()));
+                }
             }
         }
-        resolve_references(&mut root, compiled.as_ref())?;
+        resolve_references(&mut root, icons.as_ref().map(|made| &made.compiled))?;
 
         let report = guard::inspect_manifest(&root);
         if report.verdict() == guard::Verdict::Refused {
@@ -16465,7 +17924,7 @@ pub mod builder {
         let package = package_name(&root);
         Ok(Prepared {
             root,
-            compiled,
+            icons,
             package,
             guard: report,
         })
@@ -16479,7 +17938,7 @@ pub mod builder {
     ) -> Result<Outcome, Diagnostic> {
         let Prepared {
             root,
-            compiled,
+            icons,
             package: named,
             guard: report,
         } = prepare(project, sink)?;
@@ -16488,9 +17947,11 @@ pub mod builder {
 
         let mut archive = ArchiveBuilder::for_android();
         archive.add("AndroidManifest.xml", manifest)?;
-        if let (Some(table), Some(png)) = (&compiled, &project.icon) {
-            archive.add(TABLE_ENTRY, crate::arsc::write(&named, table)?)?;
-            archive.add(ICON_ENTRY, png.clone())?;
+        if let Some(made) = &icons {
+            archive.add(TABLE_ENTRY, crate::arsc::write(&named, &made.compiled)?)?;
+            for (name, bytes) in &made.files {
+                archive.add(name.clone(), bytes.clone())?;
+            }
         }
         if !project.code.is_empty() {
             let classes = crate::dexwrite::write(&project.code, &project.references)?;
@@ -17086,7 +18547,6 @@ pub fn state_report(observed_environment: &str) -> String {
     w.field_str("name", "Omni_Builder Core");
     w.field_str("version", CORE_VERSION);
     w.field_str("status", CORE_STATUS.as_str());
-    w.field_str("phase", CORE_PHASE);
     w.field_u64("abiVersion", ffi::OMNI_ABI_VERSION as u64);
     w.field_bool("selfHosted", false);
     w.field_str(
@@ -17098,28 +18558,6 @@ pub fn state_report(observed_environment: &str) -> String {
     w.begin_array(Some("bootstrapDependencies"));
     for dependency in BOOTSTRAP_DEPENDENCIES {
         w.element_str(dependency);
-    }
-    w.end_array();
-    w.end_object();
-
-    w.begin_object(Some("roadmap"));
-    w.field_str("current", CORE_PHASE);
-    w.field_u64("count", ROADMAP.len() as u64);
-    w.field_u64(
-        "delivered",
-        ROADMAP
-            .iter()
-            .filter(|p| p.state == PhaseState::Delivered)
-            .count() as u64,
-    );
-    w.begin_array(Some("phases"));
-    for phase in ROADMAP {
-        w.begin_object(None);
-        w.field_u64("number", phase.number as u64);
-        w.field_str("name", phase.name);
-        w.field_str("state", phase.state.as_str());
-        w.field_str("delivers", phase.delivers);
-        w.end_object();
     }
     w.end_array();
     w.end_object();
@@ -18067,7 +19505,6 @@ mod tests {
                 "{} must state what it does not do",
                 contract.id
             );
-            assert!(!contract.roadmap_phase.is_empty(), "{}", contract.id);
         }
     }
 
@@ -20537,26 +21974,6 @@ mod tests {
     }
 
     #[test]
-    fn the_roadmap_agrees_with_the_phase_this_tree_is_on() {
-        let current: Vec<&super::Phase> = super::ROADMAP
-            .iter()
-            .filter(|p| p.state == super::PhaseState::Current)
-            .collect();
-        assert_eq!(current.len(), 1, "exactly one phase is the current one");
-        assert_eq!(current[0].name, super::CORE_PHASE);
-
-        let here = current[0].number;
-        for phase in super::ROADMAP {
-            let expected = match phase.number.cmp(&here) {
-                std::cmp::Ordering::Less => super::PhaseState::Delivered,
-                std::cmp::Ordering::Equal => super::PhaseState::Current,
-                std::cmp::Ordering::Greater => super::PhaseState::Planned,
-            };
-            assert_eq!(phase.state, expected, "phase {}", phase.number);
-        }
-    }
-
-    #[test]
     fn no_text_the_interface_shows_carries_a_stray_run_of_spaces() {
         let check = |what: &str, text: &str| {
             assert!(
@@ -20565,10 +21982,6 @@ mod tests {
             );
         };
 
-        for phase in super::ROADMAP {
-            check(phase.name, phase.name);
-            check(phase.name, phase.delivers);
-        }
         for subsystem in super::SUBSYSTEMS {
             check(subsystem.name, subsystem.name);
             check(subsystem.name, subsystem.summary);
@@ -20585,44 +21998,6 @@ mod tests {
             for note in contract.non_responsibilities {
                 check(contract.id, note);
             }
-        }
-    }
-
-    #[test]
-    fn the_roadmap_is_numbered_without_a_gap() {
-        for (index, phase) in super::ROADMAP.iter().enumerate() {
-            assert_eq!(phase.number as usize, index + 1);
-            assert!(!phase.name.is_empty());
-            assert!(!phase.delivers.is_empty(), "phase {}", phase.number);
-        }
-    }
-
-    #[test]
-    fn every_plugin_names_a_phase_the_roadmap_has() {
-        let registry = super::plugin::Registry::builtin();
-        for contract in registry.all().iter().map(|plugin| plugin.contract()) {
-            assert!(
-                super::ROADMAP
-                    .iter()
-                    .any(|phase| phase.name == contract.roadmap_phase),
-                "{} names {:?}, which is not a phase",
-                contract.id,
-                contract.roadmap_phase
-            );
-        }
-    }
-
-    #[test]
-    fn a_delivered_phase_does_not_make_anything_production() {
-        let report = super::state_report("");
-        let delivered = super::ROADMAP
-            .iter()
-            .filter(|p| p.state == super::PhaseState::Delivered)
-            .count();
-        assert!(report.contains(&format!("\"delivered\":{delivered}")));
-        assert!(report.contains("\"production\":0"));
-        for phase in super::ROADMAP {
-            assert!(report.contains(phase.name), "missing: {}", phase.name);
         }
     }
 
@@ -22405,8 +23780,16 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            vec!["AndroidManifest.xml", "Java", "Kotlin", "Native", "Rust"],
-            "the root holds the manifest and the language folders, nothing else"
+            vec![
+                "AndroidManifest.xml",
+                "Java",
+                "Kotlin",
+                "Native",
+                "Res",
+                "Rust"
+            ],
+            "the root holds the manifest, the language folders and the resource folder, \
+             and nothing else"
         );
 
         for (folder, file) in [
@@ -22458,6 +23841,245 @@ mod tests {
                 into.push(child);
             }
         }
+    }
+
+    fn python_available() -> bool {
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import zlib")
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+
+    fn python_compress(data: &[u8], level: u32, raw: bool) -> Option<Vec<u8>> {
+        let directory = temp_directory("omni-zlib-in");
+        let source = directory.join("plain.bin");
+        let target = directory.join("packed.bin");
+        std::fs::write(&source, data).ok()?;
+        let program = format!(
+            "import zlib\ndata = open(r'{}', 'rb').read()\nc = zlib.compressobj({}, zlib.DEFLATED, {})\nout = c.compress(data) + c.flush()\nopen(r'{}', 'wb').write(out)\n",
+            source.to_str()?,
+            level,
+            if raw { -15 } else { 15 },
+            target.to_str()?,
+        );
+        let run = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&program)
+            .output()
+            .ok()?;
+        if !run.status.success() {
+            std::fs::remove_dir_all(&directory).ok();
+            return None;
+        }
+        let packed = std::fs::read(&target).ok();
+        std::fs::remove_dir_all(&directory).ok();
+        packed
+    }
+
+    #[test]
+    fn deflate_writes_a_stream_an_independent_reader_accepts() {
+        let mut seed = 0x2b7e_1516_28ae_d2a6u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec(),
+            b"the same words the same words the same words the same words".to_vec(),
+            vec![0u8; 200_000],
+            (0..=255u8).cycle().take(120_000).collect(),
+        ];
+        for size in [2usize, 3, 4, 258, 259, 1_024, 40_000] {
+            cases.push((0..size).map(|_| (next() & 0xff) as u8).collect());
+        }
+        let mut lumpy = Vec::new();
+        for _ in 0..4_000 {
+            let run = (next() % 60) as usize;
+            let byte = (next() & 0x0f) as u8;
+            lumpy.extend(std::iter::repeat_n(byte, run));
+        }
+        cases.push(lumpy);
+
+        let mut original = 0usize;
+        let mut packed_total = 0usize;
+        for case in &cases {
+            let packed = super::deflate::zlib(case);
+            let read = super::inflate::zlib(&packed).unwrap_or_else(|error| {
+                panic!("{} bytes: {} {}", case.len(), error.code, error.message)
+            });
+            assert_eq!(
+                &read,
+                case,
+                "{} bytes did not survive the round trip",
+                case.len()
+            );
+            original += case.len();
+            packed_total += packed.len();
+        }
+
+        if python_available() {
+            for case in &cases {
+                let packed = super::deflate::zlib(case);
+                let directory = temp_directory("omni-deflate");
+                let source = directory.join("packed.bin");
+                std::fs::write(&source, &packed).unwrap();
+                let program = format!(
+                    "import zlib,sys\nd=open(r'{}','rb').read()\nsys.stdout.write(str(len(zlib.decompress(d))))\n",
+                    source.to_str().unwrap()
+                );
+                let run = std::process::Command::new("python3")
+                    .arg("-c")
+                    .arg(&program)
+                    .output()
+                    .unwrap();
+                let reported = String::from_utf8_lossy(&run.stdout).to_string();
+                assert!(
+                    run.status.success(),
+                    "an independent reader refused what this build wrote for {} bytes:\n{}",
+                    case.len(),
+                    String::from_utf8_lossy(&run.stderr)
+                );
+                assert_eq!(
+                    reported,
+                    case.len().to_string(),
+                    "an independent reader read a different length back"
+                );
+                std::fs::remove_dir_all(&directory).ok();
+            }
+        } else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_INFLATE_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_INFLATE_CONFORMANCE is set but no independent reader is here"
+            );
+        }
+
+        assert!(
+            packed_total < original,
+            "{packed_total} bytes out of {original} is not compression"
+        );
+        eprintln!(
+            "deflate: {original} bytes written as {packed_total}, read back exactly by this \
+             build and by an independent reader"
+        );
+    }
+
+    #[test]
+    fn inflate_reads_what_an_independent_compressor_wrote() {
+        if !python_available() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_INFLATE_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_INFLATE_CONFORMANCE is set but no independent compressor is here"
+            );
+            eprintln!("inflate: no independent compressor is available here");
+            return;
+        }
+
+        let mut seed = 0x51ed_2701_9fa3_1c5du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+
+        let mut cases: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"the same words the same words the same words the same words".to_vec(),
+            vec![0u8; 70_000],
+            (0..=255u8).cycle().take(100_000).collect(),
+        ];
+        for size in [1usize, 17, 255, 4096, 33_000] {
+            cases.push((0..size).map(|_| (next() & 0xff) as u8).collect());
+        }
+        let mut lumpy = Vec::new();
+        for _ in 0..2_000 {
+            let run = (next() % 40) as usize;
+            let byte = (next() & 0xff) as u8;
+            lumpy.extend(std::iter::repeat_n(byte, run));
+        }
+        cases.push(lumpy);
+
+        let mut checked = 0usize;
+        for case in &cases {
+            for level in [0u32, 1, 6, 9] {
+                let Some(packed) = python_compress(case, level, false) else {
+                    continue;
+                };
+                let read = super::inflate::zlib(&packed).unwrap_or_else(|error| {
+                    panic!(
+                        "level {level}, {} bytes: {} {}",
+                        case.len(),
+                        error.code,
+                        error.message
+                    )
+                });
+                assert_eq!(&read, case, "level {level}, {} bytes", case.len());
+
+                let Some(raw) = python_compress(case, level, true) else {
+                    continue;
+                };
+                assert_eq!(&super::inflate::raw(&raw).unwrap(), case);
+                checked += 2;
+            }
+        }
+
+        assert!(checked >= 20, "only {checked} streams were checked");
+        eprintln!(
+            "inflate: {checked} streams written by an independent compressor read back exactly, \
+             across stored, fixed and dynamic blocks"
+        );
+    }
+
+    #[test]
+    fn inflate_refuses_a_stream_that_has_been_damaged() {
+        if !python_available() {
+            eprintln!("inflate: no independent compressor is available here");
+            return;
+        }
+        let plain: Vec<u8> = (0..5_000u32).map(|value| (value % 251) as u8).collect();
+        let Some(packed) = python_compress(&plain, 6, false) else {
+            return;
+        };
+        assert_eq!(super::inflate::zlib(&packed).unwrap(), plain);
+
+        let mut wrong_header = packed.clone();
+        wrong_header[0] ^= 0x10;
+        assert!(super::inflate::zlib(&wrong_header).is_err());
+
+        let mut wrong_check = packed.clone();
+        let last = wrong_check.len() - 1;
+        wrong_check[last] ^= 0x01;
+        assert_eq!(
+            super::inflate::zlib(&wrong_check).unwrap_err().code,
+            "EI106"
+        );
+
+        let truncated = &packed[..packed.len() - 8];
+        assert!(super::inflate::zlib(truncated).is_err());
+
+        assert!(super::inflate::zlib(&[]).is_err());
+        assert_eq!(
+            super::inflate::zlib(&[0x78, 0x9c, 0, 0, 0, 0])
+                .unwrap_err()
+                .code,
+            "EI101",
+            "a header with no deflate payload behind it ends before its data"
+        );
+        assert_eq!(
+            super::inflate::zlib(&[0x78, 0x9c, 0x06, 0, 0, 0, 0])
+                .unwrap_err()
+                .code,
+            "EI135",
+            "block type three is the one the format reserves"
+        );
     }
 
     #[test]
@@ -22523,6 +24145,243 @@ mod tests {
         eprintln!(
             "image conformance: {read} PNG files written by other tools read here, \
              {oversized} refused only for being larger than an icon"
+        );
+    }
+
+    #[test]
+    fn every_real_png_decodes_and_what_this_build_writes_reads_back() {
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                roots.push(path);
+            }
+        }
+        let mut files = Vec::new();
+        for root in &roots {
+            gather_png_files(root, &mut files, 200);
+        }
+        if files.is_empty() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_IMAGE_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_IMAGE_CONFORMANCE is set but no PNG files were found"
+            );
+            eprintln!("codec: no PNG files are available here");
+            return;
+        }
+
+        let mut decoded = 0usize;
+        let mut interlaced = 0usize;
+        let mut source_bytes = 0usize;
+        let mut written_bytes = 0usize;
+
+        for file in &files {
+            let bytes = std::fs::read(file).unwrap();
+            let raster = match super::image::decode(&bytes) {
+                Ok(raster) => raster,
+                Err(error) if error.code == "EM032" => {
+                    interlaced += 1;
+                    continue;
+                }
+                Err(error) if error.code == "EM015" => continue,
+                Err(error) => panic!(
+                    "the codec refused a real PNG: {} {} {}\n{:?}",
+                    file.display(),
+                    error.code,
+                    error.message,
+                    error.context
+                ),
+            };
+
+            let header = super::image::read_png(&bytes).unwrap();
+            assert_eq!(raster.width, header.width, "{}", file.display());
+            assert_eq!(raster.height, header.height, "{}", file.display());
+            assert_eq!(
+                raster.pixels.len(),
+                raster.width as usize * raster.height as usize * 4
+            );
+
+            let written = super::image::encode(&raster).unwrap();
+            super::image::read_png(&written).unwrap_or_else(|error| {
+                panic!(
+                    "this build wrote a PNG it will not read: {} {}",
+                    error.code, error.message
+                )
+            });
+            let again = super::image::decode(&written).unwrap();
+            assert_eq!(again.width, raster.width);
+            assert_eq!(again.height, raster.height);
+            assert_eq!(
+                again.pixels,
+                raster.pixels,
+                "{} did not survive a write and a read",
+                file.display()
+            );
+
+            decoded += 1;
+            source_bytes += bytes.len();
+            written_bytes += written.len();
+        }
+
+        assert!(decoded > 0, "no PNG was decoded");
+        assert!(
+            written_bytes * 10 < source_bytes * 11,
+            "this build wrote {written_bytes} bytes where the tools that made these images wrote \
+             {source_bytes}. Within a tenth is the bar an encoder that picks its own colour type, \
+             palette, filter and Huffman tables should clear; further from it means one of those \
+             stopped working."
+        );
+        eprintln!(
+            "codec: {decoded} images written by other tools decoded to pixels, written again by \
+             this build and read back identical ({source_bytes} bytes in, {written_bytes} out, \
+             {interlaced} interlaced refused)"
+        );
+    }
+
+    #[test]
+    fn the_pixels_of_a_known_image_are_the_ones_an_independent_reader_sees() {
+        if !python_available() {
+            eprintln!("codec: no independent reader is available here");
+            return;
+        }
+
+        let directory = temp_directory("omni-codec");
+        let source = directory.join("made.png");
+        let dump = directory.join("pixels.txt");
+        let program = format!(
+            "import zlib,struct\n\
+             w,h=7,5\n\
+             rows=b''\n\
+             for y in range(h):\n\
+             \x20   rows+=b'\\x00'\n\
+             \x20   for x in range(w):\n\
+             \x20       rows+=bytes([(x*31)%256,(y*57)%256,(x*y*13)%256,(255-(x*9))%256])\n\
+             def chunk(k,b):\n\
+             \x20   return struct.pack('>I',len(b))+k+b+struct.pack('>I',zlib.crc32(k+b)&0xffffffff)\n\
+             png=b'\\x89PNG\\r\\n\\x1a\\n'\n\
+             png+=chunk(b'IHDR',struct.pack('>IIBBBBB',w,h,8,6,0,0,0))\n\
+             png+=chunk(b'IDAT',zlib.compress(rows,9))\n\
+             png+=chunk(b'IEND',b'')\n\
+             open(r'{}','wb').write(png)\n\
+             open(r'{}','w').write(','.join(str(v) for v in rows if True))\n",
+            source.to_str().unwrap(),
+            dump.to_str().unwrap(),
+        );
+        let made = std::process::Command::new("python3")
+            .arg("-c")
+            .arg(&program)
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+
+        let bytes = std::fs::read(&source).unwrap();
+        let raster = super::image::decode(&bytes).expect("a PNG another tool wrote must decode");
+        assert_eq!(raster.width, 7);
+        assert_eq!(raster.height, 5);
+        for y in 0..5u32 {
+            for x in 0..7u32 {
+                assert_eq!(
+                    raster.at(x, y),
+                    [
+                        ((x * 31) % 256) as u8,
+                        ((y * 57) % 256) as u8,
+                        ((x * y * 13) % 256) as u8,
+                        ((255 - (x * 9)) % 256) as u8,
+                    ],
+                    "pixel {x},{y}"
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("codec: every pixel of a known image matches what it was written with");
+    }
+
+    #[test]
+    fn a_launcher_set_is_every_size_android_asks_for_in_both_shapes() {
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 12);
+            }
+        }
+        let Some(source) = files.into_iter().find(|file| {
+            std::fs::read(file)
+                .ok()
+                .and_then(|bytes| super::image::decode(&bytes).ok())
+                .map(|raster| raster.width >= 24 && raster.height >= 24)
+                .unwrap_or(false)
+        }) else {
+            eprintln!("launcher: no usable PNG is available here");
+            return;
+        };
+
+        let bytes = std::fs::read(&source).unwrap();
+        let set = super::image::launcher_set(&bytes).expect("a launcher set must be produced");
+        assert_eq!(set.len(), super::image::LAUNCHER_SIZES.len() * 2);
+
+        for made in &set {
+            let header = super::image::read_png(&made.bytes)
+                .unwrap_or_else(|error| panic!("{} {}", error.code, error.message));
+            assert_eq!(header.width, made.edge, "{} {}", made.folder, made.name);
+            assert_eq!(header.height, made.edge);
+            assert!(header.colour.has_alpha());
+            assert_eq!(header.bit_depth, 8);
+            assert!(!header.interlaced);
+        }
+
+        for (folder, edge) in super::image::LAUNCHER_SIZES {
+            let square = set
+                .iter()
+                .find(|made| made.folder == *folder && made.name == "ic_launcher")
+                .unwrap();
+            let round = set
+                .iter()
+                .find(|made| made.folder == *folder && made.name == "ic_launcher_round")
+                .unwrap();
+            let square_pixels = super::image::decode(&square.bytes).unwrap();
+            let round_pixels = super::image::decode(&round.bytes).unwrap();
+
+            assert_eq!(
+                square_pixels.at(edge / 2, edge / 2),
+                round_pixels.at(edge / 2, edge / 2),
+                "the centre of the round icon is the centre of the square one"
+            );
+            assert_eq!(
+                round_pixels.at(0, 0)[3],
+                0,
+                "a corner of the round icon at {edge} is outside the circle and must be clear"
+            );
+            assert_eq!(
+                round_pixels.at(edge - 1, edge - 1)[3],
+                0,
+                "the opposite corner at {edge} must be clear too"
+            );
+        }
+
+        let total: usize = set.iter().map(|made| made.bytes.len()).sum();
+        eprintln!(
+            "launcher: {} images from one source, {} to {} pixels, square and round, {total} bytes",
+            set.len(),
+            super::image::LAUNCHER_SIZES[0].1,
+            super::image::LAUNCHER_SIZES[super::image::LAUNCHER_SIZES.len() - 1].1,
         );
     }
 
@@ -22834,7 +24693,13 @@ mod tests {
         let outcome = super::bundle::write(&project).expect("a compliant project must bundle");
         assert!(outcome.carries_code);
         assert_eq!(outcome.carries_image, project.icon.is_some());
-        assert_eq!(outcome.entries, if outcome.carries_image { 7 } else { 5 });
+        let images = super::image::LAUNCHER_SIZES.len() * 2;
+        assert_eq!(
+            outcome.entries,
+            if outcome.carries_image { 6 + images } else { 5 },
+            "config, manifest, dex, a native library, a root file, and when there is an image \
+             the resource table and {images} launcher images"
+        );
 
         let directory = temp_directory("omni-bundle");
         let path = directory.join("omni.aab");
@@ -23292,7 +25157,6 @@ mod tests {
         for wanted in [
             "AndroidManifest.xml",
             super::builder::TABLE_ENTRY,
-            super::builder::ICON_ENTRY,
             "classes.dex",
         ] {
             assert!(
@@ -23300,16 +25164,18 @@ mod tests {
                 "the package must carry {wanted}"
             );
         }
-        assert_eq!(
-            archive
-                .stored_bytes(
-                    &outcome.package,
-                    archive.entry(super::builder::ICON_ENTRY).unwrap()
-                )
-                .unwrap(),
-            std::fs::read(&source).unwrap().as_slice(),
-            "the image in the package must be the one the developer chose"
-        );
+        for (folder, edge) in super::image::LAUNCHER_SIZES {
+            for name in ["ic_launcher", "ic_launcher_round"] {
+                let wanted = format!("res/{folder}/{name}.png");
+                let entry = archive
+                    .entry(&wanted)
+                    .unwrap_or_else(|| panic!("the package must carry {wanted}"));
+                let bytes = archive.stored_bytes(&outcome.package, entry).unwrap();
+                let header = super::image::read_png(bytes).unwrap();
+                assert_eq!(header.width, *edge, "{wanted}");
+                assert_eq!(header.height, *edge, "{wanted}");
+            }
+        }
 
         let Some(aapt2) = find_build_tool("aapt2") else {
             assert!(
@@ -23334,11 +25200,19 @@ mod tests {
             String::from_utf8_lossy(&badging.stderr)
         );
         assert!(badging.status.success(), "{report}");
-        assert!(
-            report.contains("application-icon-160:'res/mipmap/ic_launcher.png'")
-                || report.contains("icon='res/mipmap/ic_launcher.png'"),
-            "aapt2 must report the icon this build placed:\n{report}"
-        );
+        for (folder, density) in [
+            ("mipmap-mdpi", 160),
+            ("mipmap-hdpi", 240),
+            ("mipmap-xhdpi", 320),
+            ("mipmap-xxhdpi", 480),
+            ("mipmap-xxxhdpi", 640),
+        ] {
+            let wanted = format!("application-icon-{density}:'res/{folder}/ic_launcher.png'");
+            assert!(
+                report.contains(&wanted),
+                "aapt2 must report {wanted}:\n{report}"
+            );
+        }
 
         let tree = std::process::Command::new(&aapt2)
             .args([
@@ -23356,12 +25230,18 @@ mod tests {
             manifest.contains("android:icon(0x01010002)=@0x7f010000"),
             "the manifest must point at the identifier the table assigned:\n{manifest}"
         );
+        assert!(
+            manifest.contains("android:roundIcon(0x0101052c)=@0x7f010001"),
+            "the round icon must be pointed at as well:\n{manifest}"
+        );
 
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
-            "icon: {} bytes of PNG placed at {} and reported by aapt2 as the application icon",
+            "icon: one {} byte image became {} launcher images across {} densities, square and \
+             round, and aapt2 reports them as the application icon",
             project.icon.as_ref().map(|png| png.len()).unwrap_or(0),
-            super::builder::ICON_ENTRY
+            super::image::LAUNCHER_SIZES.len() * 2,
+            super::image::LAUNCHER_SIZES.len(),
         );
     }
 
@@ -23609,7 +25489,7 @@ mod tests {
             ..super::scaffold::Spec::default()
         };
         let made = super::scaffold::create(root.to_str().unwrap(), &spec).unwrap();
-        assert_eq!(made.folders, vec!["Rust"]);
+        assert_eq!(made.folders, vec!["Rust", "Res"]);
         assert!(!root.join("Kotlin").exists());
         assert!(!root.join("Native").exists());
         std::fs::remove_dir_all(&directory).ok();

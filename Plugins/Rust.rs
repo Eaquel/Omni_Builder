@@ -35,7 +35,6 @@ pub static CONTRACT: Contract = Contract {
         "Packaging libraries into an APK.",
         "Replacing rustc for the Core's own build until self-hosting is real.",
     ],
-    roadmap_phase: "PHASE 10 — SELF-HOSTING",
 };
 
 pub struct RustPlugin;

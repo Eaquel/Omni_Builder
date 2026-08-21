@@ -28,7 +28,6 @@ pub static CONTRACT: Contract = Contract {
         "Packaging or signing the result.",
         "Optimising bytecode beyond what the DEX format requires.",
     ],
-    roadmap_phase: "PHASE 9 — TOOLCHAIN",
 };
 
 pub struct DexPlugin;

@@ -28,7 +28,6 @@ pub static CONTRACT: Contract = Contract {
         "Rendering or rasterising drawables.",
         "Downloading remote resources.",
     ],
-    roadmap_phase: "PHASE 9 — TOOLCHAIN",
 };
 
 pub struct ResourcesPlugin;

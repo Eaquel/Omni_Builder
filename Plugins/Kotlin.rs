@@ -28,7 +28,6 @@ pub static CONTRACT: Contract = Contract {
         "Packaging or signing anything.",
         "Resolving external dependencies from a network.",
     ],
-    roadmap_phase: "PHASE 10 — SELF-HOSTING",
 };
 
 pub struct KotlinPlugin;

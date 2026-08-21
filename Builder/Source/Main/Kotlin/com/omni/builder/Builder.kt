@@ -1,6 +1,7 @@
 package com.omni.builder
 
 import android.Manifest
+import android.animation.LayoutTransition
 import android.app.Activity
 import android.app.Application
 import android.app.job.JobInfo
@@ -8,33 +9,47 @@ import android.app.job.JobParameters
 import android.app.job.JobScheduler
 import android.app.job.JobService
 import android.content.ComponentName
+import android.content.ContentProvider
 import android.content.ContentUris
 import android.content.ContentValues
-import android.content.ContentProvider
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.content.res.Configuration
-import android.graphics.Typeface
 import android.database.Cursor
 import android.database.MatrixCursor
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.LinearGradient
+import android.graphics.Paint
+import android.graphics.RadialGradient
+import android.graphics.Shader
+import android.graphics.Typeface
+import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
 import android.net.Uri
 import android.os.Build
-import android.os.ParcelFileDescriptor
-import android.provider.OpenableColumns
 import android.os.Bundle
 import android.os.Environment
+import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.text.Editable
+import android.text.InputType
+import android.text.TextWatcher
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-import android.text.Editable
-import android.text.InputType
-import android.text.TextWatcher
+import android.view.animation.AccelerateInterpolator
+import android.view.animation.DecelerateInterpolator
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -45,7 +60,8 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import org.json.JSONArray
+import kotlin.math.cos
+import kotlin.math.sin
 import org.json.JSONObject
 
 enum class LogLevel {
@@ -554,7 +570,9 @@ class BuilderApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         OmniLog.install(this)
-        Sentry.arm(this)
+        if (Preferences.watching(this)) {
+            Sentry.arm(this)
+        }
     }
 }
 
@@ -616,6 +634,12 @@ object Sentry {
             )
         }
         return standing
+    }
+
+    fun disarm(context: Context) {
+        val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
+        runCatching { scheduler.cancel(JOB_ID) }
+        OmniLog.event(LogLevel.INFO, "sentry", "Watch stopped; the check at every start remains.")
     }
 
     fun refused(context: Context): Boolean = store(context).getBoolean(REFUSED, false)
@@ -1054,116 +1078,108 @@ data class SelfCheck(
     }
 }
 
-data class PhaseRow(
-    val number: Int,
-    val name: String,
-    val state: String,
-    val delivers: String,
-)
-
-data class SubsystemRow(
-    val name: String,
-    val status: String,
-    val directiveSection: Int,
-    val summary: String,
-    val missing: List<String>,
-)
-
-data class DiagnosticRow(
-    val code: String,
-    val severity: String,
-    val message: String,
-    val suggestion: String?,
-)
-
 data class CoreState(
     val version: String,
     val status: String,
-    val phase: String,
-    val roadmap: List<PhaseRow>,
-    val roadmapDelivered: Int,
     val abiVersion: Int,
     val selfHosted: Boolean,
-    val selfHostingNote: String,
-    val bootstrapDependencies: List<String>,
-    val subsystems: List<SubsystemRow>,
-    val subsystemsProduction: Int,
-    val toolchain: List<ToolchainRow>,
+    val subsystems: Int,
     val toolchainVerified: Int,
-    val plugins: List<PluginRow>,
-    val pluginsImplemented: Int,
-    val diagnostics: List<DiagnosticRow>,
+    val toolchainTotal: Int,
 ) {
     companion object {
         fun parse(document: String): CoreState {
             val root = JSONObject(document)
             val core = root.getJSONObject("core")
-            val roadmap = root.getJSONObject("roadmap")
-            val subsystems = root.getJSONObject("subsystems")
             val toolchain = root.getJSONObject("toolchain")
-            val plugins = root.getJSONObject("plugins")
-
             return CoreState(
                 version = core.getString("version"),
                 status = core.getString("status"),
-                phase = core.getString("phase"),
-                roadmap = roadmap.getJSONArray("phases").map { item ->
-                    PhaseRow(
-                        number = item.getInt("number"),
-                        name = item.getString("name"),
-                        state = item.getString("state"),
-                        delivers = item.getString("delivers"),
-                    )
-                },
-                roadmapDelivered = roadmap.getInt("delivered"),
                 abiVersion = core.getInt("abiVersion"),
                 selfHosted = core.getBoolean("selfHosted"),
-                selfHostingNote = core.getString("selfHostingNote"),
-                bootstrapDependencies = core.getJSONArray("bootstrapDependencies").strings(),
-                subsystems = subsystems.getJSONArray("detail").map { item ->
-                    SubsystemRow(
-                        name = item.getString("name"),
-                        status = item.getString("status"),
-                        directiveSection = item.getInt("directiveSection"),
-                        summary = item.getString("summary"),
-                        missing = item.getJSONArray("missing").strings(),
-                    )
-                },
-                subsystemsProduction = subsystems.getInt("production"),
-                toolchain = toolchain.getJSONArray("components").map { item ->
-                    ToolchainRow(
-                        displayName = item.getString("displayName"),
-                        pinned = item.getString("pinned"),
-                        observed = item.optString("observed").ifEmpty { null },
-                        state = item.getString("state"),
-                        checksumPinned = item.has("checksum"),
-                    )
-                },
+                subsystems = root.getJSONObject("subsystems").getInt("count"),
                 toolchainVerified = toolchain.getInt("verified"),
-                plugins = plugins.getJSONArray("contracts").map { item ->
-                    PluginRow(
-                        displayName = item.getString("displayName"),
-                        status = item.getString("status"),
-                        roadmapPhase = item.getString("roadmapPhase"),
-                    )
-                },
-                pluginsImplemented = plugins.getInt("implemented"),
-                diagnostics = root.getJSONArray("diagnostics").map { item ->
-                    DiagnosticRow(
-                        code = item.getString("code"),
-                        severity = item.getString("severity"),
-                        message = item.getString("message"),
-                        suggestion = item.optString("suggestion").ifEmpty { null },
-                    )
-                },
+                toolchainTotal = toolchain.getJSONArray("components").length(),
             )
         }
+    }
+}
 
-        private fun JSONArray.strings(): List<String> =
-            (0 until length()).map { getString(it) }
+data class Palette(
+    val key: String,
+    val label: String,
+    val background: Int,
+    val surface: Int,
+    val raised: Int,
+    val foreground: Int,
+    val muted: Int,
+    val accent: Int,
+    val ok: Int,
+    val warning: Int,
+    val error: Int,
+    val divider: Int,
+    val glowFirst: Int,
+    val glowSecond: Int,
+    val glowThird: Int,
+) {
+    companion object {
+        val MIDNIGHT = Palette(
+            key = "midnight",
+            label = "Midnight",
+            background = 0xFF05070B.toInt(),
+            surface = 0xFF0D1119.toInt(),
+            raised = 0xFF141A25.toInt(),
+            foreground = 0xFFE8EEF6.toInt(),
+            muted = 0xFF8A94A6.toInt(),
+            accent = 0xFF6CB6FF.toInt(),
+            ok = 0xFF5BD48A.toInt(),
+            warning = 0xFFE9B44C.toInt(),
+            error = 0xFFE5534B.toInt(),
+            divider = 0xFF1C2432.toInt(),
+            glowFirst = 0xFF1B4B8F.toInt(),
+            glowSecond = 0xFF0E5C52.toInt(),
+            glowThird = 0xFF3A2166.toInt(),
+        )
 
-        private fun <T> JSONArray.map(transform: (JSONObject) -> T): List<T> =
-            (0 until length()).map { transform(getJSONObject(it)) }
+        val SLATE = Palette(
+            key = "slate",
+            label = "Slate",
+            background = 0xFF0E1116.toInt(),
+            surface = 0xFF171C24.toInt(),
+            raised = 0xFF202733.toInt(),
+            foreground = 0xFFE6EDF3.toInt(),
+            muted = 0xFF9198A1.toInt(),
+            accent = 0xFF6CB6FF.toInt(),
+            ok = 0xFF57C98A.toInt(),
+            warning = 0xFFE3B341.toInt(),
+            error = 0xFFE5534B.toInt(),
+            divider = 0xFF262C36.toInt(),
+            glowFirst = 0xFF23508C.toInt(),
+            glowSecond = 0xFF135E55.toInt(),
+            glowThird = 0xFF43286E.toInt(),
+        )
+
+        val DAYLIGHT = Palette(
+            key = "daylight",
+            label = "Daylight",
+            background = 0xFFF6F8FB.toInt(),
+            surface = 0xFFFFFFFF.toInt(),
+            raised = 0xFFEDF1F7.toInt(),
+            foreground = 0xFF121821.toInt(),
+            muted = 0xFF5A6472.toInt(),
+            accent = 0xFF1A6FD4.toInt(),
+            ok = 0xFF1E8E4F.toInt(),
+            warning = 0xFF9A6A00.toInt(),
+            error = 0xFFC0362C.toInt(),
+            divider = 0xFFD8DFE9.toInt(),
+            glowFirst = 0xFFBBD5F5.toInt(),
+            glowSecond = 0xFFBEE6DD.toInt(),
+            glowThird = 0xFFD6C9F0.toInt(),
+        )
+
+        val ALL: List<Palette> = listOf(MIDNIGHT, SLATE, DAYLIGHT)
+
+        fun of(key: String): Palette = ALL.firstOrNull { it.key == key } ?: MIDNIGHT
     }
 }
 
@@ -1171,7 +1187,13 @@ object Preferences {
 
     private const val FILE = "omni_settings"
     private const val LANGUAGE = "language"
+    private const val THEME = "theme"
     private const val SIGNING_KEY = "signing_key"
+    private const val WATCH = "watch"
+    private const val SHARE_LOG = "share_log"
+    private const val ABI = "abi"
+    private const val MIN_SDK = "min_sdk"
+    private const val TARGET_SDK = "target_sdk"
 
     val LANGUAGES: List<Pair<String, String>> = listOf(
         "en" to "English",
@@ -1195,10 +1217,137 @@ object Preferences {
         store(context).edit().putString(LANGUAGE, tag).apply()
     }
 
+    fun palette(context: Context): Palette =
+        Palette.of(store(context).getString(THEME, Palette.MIDNIGHT.key).orEmpty())
+
+    fun setPalette(context: Context, key: String) {
+        store(context).edit().putString(THEME, key).apply()
+    }
+
     fun signingKey(context: Context): String = store(context).getString(SIGNING_KEY, "").orEmpty()
 
     fun setSigningKey(context: Context, path: String) {
         store(context).edit().putString(SIGNING_KEY, path).apply()
+    }
+
+    fun watching(context: Context): Boolean = store(context).getBoolean(WATCH, true)
+
+    fun setWatching(context: Context, on: Boolean) {
+        store(context).edit().putBoolean(WATCH, on).apply()
+    }
+
+    fun sharingLog(context: Context): Boolean = store(context).getBoolean(SHARE_LOG, true)
+
+    fun setSharingLog(context: Context, on: Boolean) {
+        store(context).edit().putBoolean(SHARE_LOG, on).apply()
+    }
+
+    fun abi(context: Context): Int = store(context).getInt(ABI, 2)
+
+    fun setAbi(context: Context, index: Int) {
+        store(context).edit().putInt(ABI, index).apply()
+    }
+
+    fun minSdk(context: Context): Int = store(context).getInt(MIN_SDK, 28)
+
+    fun setMinSdk(context: Context, level: Int) {
+        store(context).edit().putInt(MIN_SDK, level).apply()
+    }
+
+    fun targetSdk(context: Context): Int = store(context).getInt(TARGET_SDK, 36)
+
+    fun setTargetSdk(context: Context, level: Int) {
+        store(context).edit().putInt(TARGET_SDK, level).apply()
+    }
+}
+
+class AuroraView(context: Context, private var palette: Palette) : View(context) {
+
+    private companion object {
+        const val PERIOD_MILLIS = 24_000f
+        const val BLOB_ALPHA = 190
+        const val FRAME_MILLIS = 32L
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val started = SystemClock.uptimeMillis()
+    private var running = false
+
+    private val step = object : Runnable {
+        override fun run() {
+            if (!running) {
+                return
+            }
+            invalidate()
+            postDelayed(this, FRAME_MILLIS)
+        }
+    }
+
+    fun repaint(next: Palette) {
+        palette = next
+        invalidate()
+    }
+
+    fun resumeDrawing() {
+        if (running) {
+            return
+        }
+        running = true
+        post(step)
+    }
+
+    fun pauseDrawing() {
+        running = false
+        removeCallbacks(step)
+    }
+
+    override fun onDetachedFromWindow() {
+        pauseDrawing()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) {
+            return
+        }
+        canvas.drawColor(palette.background)
+
+        val phase = ((SystemClock.uptimeMillis() - started) % PERIOD_MILLIS.toLong()) /
+            PERIOD_MILLIS
+        val turn = (phase * 2.0 * Math.PI).toFloat()
+        val radius = maxOf(w, h) * 0.72f
+
+        blob(canvas, w * (0.22f + 0.16f * sin(turn)), h * (0.18f + 0.10f * cos(turn * 0.8f)),
+            radius, palette.glowFirst)
+        blob(canvas, w * (0.82f + 0.12f * cos(turn * 1.3f)), h * (0.34f + 0.12f * sin(turn * 1.1f)),
+            radius * 0.85f, palette.glowSecond)
+        blob(canvas, w * (0.48f + 0.20f * sin(turn * 0.7f + 1.4f)),
+            h * (0.86f + 0.08f * cos(turn * 0.9f)), radius * 0.95f, palette.glowThird)
+
+        paint.shader = LinearGradient(
+            0f, 0f, 0f, h,
+            Color.argb(0, Color.red(palette.background), Color.green(palette.background),
+                Color.blue(palette.background)),
+            Color.argb(210, Color.red(palette.background), Color.green(palette.background),
+                Color.blue(palette.background)),
+            Shader.TileMode.CLAMP,
+        )
+        paint.alpha = 255
+        canvas.drawRect(0f, 0f, w, h, paint)
+        paint.shader = null
+    }
+
+    private fun blob(canvas: Canvas, x: Float, y: Float, radius: Float, colour: Int) {
+        paint.shader = RadialGradient(
+            x, y, radius,
+            Color.argb(BLOB_ALPHA, Color.red(colour), Color.green(colour), Color.blue(colour)),
+            Color.argb(0, Color.red(colour), Color.green(colour), Color.blue(colour)),
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawCircle(x, y, radius, paint)
+        paint.shader = null
     }
 }
 
@@ -1215,12 +1364,14 @@ private sealed interface Screen {
 
     data object Settings : Screen
 }
-
 class BuilderActivity : Activity() {
 
     private companion object {
         const val STORAGE_PERMISSION_REQUEST = 1
         const val IMAGE_REQUEST = 2
+        const val ENTER_MILLIS = 260L
+        const val LEAVE_MILLIS = 140L
+        const val RISE_DP = 18
 
         val ABI_CHOICES = listOf(
             "32" to listOf("armeabi-v7a"),
@@ -1240,6 +1391,14 @@ class BuilderActivity : Activity() {
         val KEY_SIZES = listOf(2048, 3072, 4096)
         const val DEFAULT_VALIDITY_DAYS = 10950
     }
+
+    private lateinit var palette: Palette
+    private lateinit var aurora: AuroraView
+    private lateinit var tabStrip: LinearLayout
+    private lateinit var indicator: View
+    private lateinit var scroller: ScrollView
+    private lateinit var content: LinearLayout
+    private lateinit var results: LinearLayout
 
     private var screen: Screen = Screen.Projects
     private var standing = "UNKNOWN"
@@ -1267,9 +1426,6 @@ class BuilderActivity : Activity() {
     private var editorText = ""
     private var newPathView: EditText? = null
 
-    private lateinit var content: LinearLayout
-    private lateinit var results: LinearLayout
-
     override fun attachBaseContext(base: Context) {
         val tag = Preferences.language(base)
         super.attachBaseContext(if (tag.isEmpty()) base else localised(base, tag))
@@ -1288,27 +1444,69 @@ class BuilderActivity : Activity() {
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
         requestLegacyStoragePermissionIfNeeded()
 
+        palette = Preferences.palette(this)
+        formAbi = Preferences.abi(this)
+        formMinSdk = Preferences.minSdk(this)
+        formTargetSdk = Preferences.targetSdk(this)
+
+        aurora = AuroraView(this, palette)
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(color(R.color.omni_background))
-            setPadding(dp(R.dimen.omni_screen_padding))
+            setPadding(gap(4), gap(3), gap(4), gap(8))
         }
-        results = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        setContentView(ScrollView(this).apply {
-            setBackgroundColor(color(R.color.omni_background))
+        results = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutTransition = LayoutTransition()
+        }
+        scroller = ScrollView(this).apply {
             isFillViewport = true
+            clipToPadding = false
+            overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
             addView(content, MATCH_PARENT, WRAP_CONTENT)
-        })
+        }
+
+        indicator = View(this).apply {
+            background = pill(palette.accent, gap(1).toFloat())
+        }
+        tabStrip = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(gap(4), gap(2), gap(4), 0)
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(tabStrip, MATCH_PARENT, WRAP_CONTENT)
+            addView(indicator, LinearLayout.LayoutParams(gap(8), gap(1) / 2).apply {
+                topMargin = gap(1)
+                marginStart = gap(4)
+            })
+            addView(rule(), MATCH_PARENT, 1)
+        }
+
+        val shell = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(header, MATCH_PARENT, WRAP_CONTENT)
+            addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+        }
+
+        val stack = FrameLayout(this).apply {
+            setBackgroundColor(palette.background)
+            addView(aurora, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(shell, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        }
+        setContentView(stack)
+
         standing = examine()
-        render()
+        render(false)
     }
 
     override fun onResume() {
         super.onResume()
+        aurora.resumeDrawing()
         if (Sentry.refused(this)) {
             if (standing != "TAMPERED") {
                 standing = "TAMPERED"
-                render()
+                render(false)
             }
             return
         }
@@ -1317,43 +1515,72 @@ class BuilderActivity : Activity() {
             runOnUiThread {
                 if (!isFinishing && found != standing) {
                     standing = found
-                    render()
+                    render(false)
                 }
             }
         }.start()
     }
 
-    private fun examine(): String {
-        if (Sentry.refused(this)) {
-            return "TAMPERED"
-        }
-        return Sentry.check(this)
+    override fun onPause() {
+        aurora.pauseDrawing()
+        super.onPause()
+        OmniLog.flushSession()
     }
 
-    private fun render() {
+    override fun onDestroy() {
+        OmniLog.setPublishListener(null)
+        OmniLog.flushSession()
+        super.onDestroy()
+    }
+
+    private fun examine(): String =
+        if (Sentry.refused(this)) "TAMPERED" else Sentry.check(this)
+
+    private fun go(next: Screen) {
+        if (next == screen) {
+            return
+        }
+        screen = next
+        content.animate()
+            .alpha(0f)
+            .translationY(-gap(RISE_DP / 6).toFloat())
+            .setDuration(LEAVE_MILLIS)
+            .setInterpolator(AccelerateInterpolator())
+            .withEndAction {
+                render(true)
+                scroller.scrollTo(0, 0)
+            }
+            .start()
+    }
+
+    private fun render(animated: Boolean) {
         content.removeAllViews()
         results.removeAllViews()
 
         when (val load = Builder.load()) {
             is Builder.LoadState.Failed -> {
-                content.addView(banner(load.reason, R.color.omni_error))
+                content.addView(notice(load.reason, palette.error))
+                content.alpha = 1f
+                content.translationY = 0f
                 return
             }
             is Builder.LoadState.Loaded -> Unit
         }
 
-        val where = standing
-        if (where == "TAMPERED") {
-            content.addView(banner(getString(R.string.omni_integrity_refused_title), R.color.omni_error))
+        if (standing == "TAMPERED") {
+            tabStrip.removeAllViews()
+            indicator.visibility = View.GONE
+            content.addView(notice(getString(R.string.omni_integrity_refused_title), palette.error))
             content.addView(body(getString(R.string.omni_integrity_refused_body)))
-            content.addView(body(getString(R.string.omni_integrity_checked)))
+            content.addView(quiet(getString(R.string.omni_integrity_checked)))
+            content.alpha = 1f
+            content.translationY = 0f
             return
         }
-        if (where == "UNKNOWN") {
-            content.addView(banner(getString(R.string.omni_integrity_unknown), R.color.omni_warning))
-        }
 
-        content.addView(tabs())
+        indicator.visibility = View.VISIBLE
+        drawTabs()
+
         when (val here = screen) {
             is Screen.Projects -> renderProjects()
             is Screen.NewProject -> renderNewProject()
@@ -1363,11 +1590,20 @@ class BuilderActivity : Activity() {
             is Screen.Settings -> renderSettings()
         }
         content.addView(results)
-    }
 
-    private fun go(next: Screen) {
-        screen = next
-        render()
+        if (animated) {
+            content.alpha = 0f
+            content.translationY = gap(RISE_DP / 6).toFloat()
+            content.animate()
+                .alpha(1f)
+                .translationY(0f)
+                .setDuration(ENTER_MILLIS)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        } else {
+            content.alpha = 1f
+            content.translationY = 0f
+        }
     }
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
@@ -1375,26 +1611,45 @@ class BuilderActivity : Activity() {
         when (val here = screen) {
             is Screen.Projects -> super.onBackPressed()
             is Screen.Editor -> go(Screen.Open(here.root))
+            is Screen.Open -> go(Screen.Projects)
             else -> go(Screen.Projects)
         }
     }
 
-    private fun tabs(): View {
-        val strip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        val onProjects = screen !is Screen.Settings
-        strip.addView(tab(getString(R.string.omni_tab_projects), onProjects) { go(Screen.Projects) })
-        strip.addView(tab(getString(R.string.omni_tab_settings), !onProjects) { go(Screen.Settings) })
-        return strip
-    }
+    private fun onSettings() = screen is Screen.Settings
 
-    private fun tab(label: String, active: Boolean, onPress: () -> Unit) = TextView(this).apply {
-        text = label
-        setTextColor(color(if (active) R.color.omni_accent else R.color.omni_muted))
-        setTypeface(Typeface.DEFAULT_BOLD)
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_section).toFloat())
-        setPadding(0, dp(R.dimen.omni_gap), dp(R.dimen.omni_screen_padding), dp(R.dimen.omni_gap))
-        isClickable = true
-        setOnClickListener { onPress() }
+    private fun drawTabs() {
+        tabStrip.removeAllViews()
+        val labels = listOf(
+            getString(R.string.omni_tab_projects) to (Screen.Projects as Screen),
+            getString(R.string.omni_tab_settings) to (Screen.Settings as Screen),
+        )
+        labels.forEachIndexed { index, (label, destination) ->
+            val active = (index == 1) == onSettings()
+            tabStrip.addView(
+                TextView(this).apply {
+                    text = label
+                    setTextColor(if (active) palette.foreground else palette.muted)
+                    setTypeface(Typeface.DEFAULT_BOLD)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    letterSpacing = 0.08f
+                    setPadding(0, gap(2), gap(6), gap(2))
+                    isClickable = true
+                    setOnClickListener { go(destination) }
+                }
+            )
+        }
+        tabStrip.post {
+            val target = tabStrip.getChildAt(if (onSettings()) 1 else 0) ?: return@post
+            val params = indicator.layoutParams as LinearLayout.LayoutParams
+            params.width = target.width - gap(6)
+            indicator.layoutParams = params
+            indicator.animate()
+                .translationX(target.left.toFloat())
+                .setDuration(ENTER_MILLIS)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        }
     }
 
     private fun projectsFolder() = File(getExternalFilesDir(null) ?: filesDir, "Projects")
@@ -1402,82 +1657,87 @@ class BuilderActivity : Activity() {
     private fun keysFolder() = File(filesDir, "Keys")
 
     private fun renderProjects() {
-        section(R.string.omni_projects_title)
-        content.addView(action(getString(R.string.omni_projects_new)) { go(Screen.NewProject) })
+        content.addView(heading(getString(R.string.omni_projects_title)))
 
         val projects = runCatching {
             ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
         }.getOrDefault(emptyList())
 
+        val card = card()
         if (projects.isEmpty()) {
-            content.addView(body(getString(R.string.omni_projects_none)))
+            card.addView(quiet(getString(R.string.omni_projects_none)))
         }
-        projects.forEach { project ->
-            content.addView(
+        projects.forEachIndexed { index, project ->
+            if (index > 0) {
+                card.addView(rule(), MATCH_PARENT, 1)
+            }
+            card.addView(
                 row(
                     project.label.ifEmpty { project.name },
-                    "${project.packageName} · ${project.versionName} (${project.versionCode}) · " +
-                        "API ${project.minSdk}-${project.targetSdk} · ${project.files}",
-                    R.color.omni_foreground,
+                    "${project.packageName}  ·  ${project.versionName}  ·  " +
+                        "API ${project.minSdk}–${project.targetSdk}",
+                    project.files.toString(),
                 ) { go(Screen.Open(project.root)) }
             )
-            project.icon?.let { content.addView(bullet(it)) }
         }
+        content.addView(card)
+        content.addView(primary(getString(R.string.omni_projects_new)) { go(Screen.NewProject) })
 
-        section(R.string.omni_keys_title)
-        content.addView(action(getString(R.string.omni_keys_new)) { go(Screen.NewKey) })
-        renderKeyList()
-    }
-
-    private fun renderKeyList() {
+        content.addView(heading(getString(R.string.omni_keys_title)))
         val keys = runCatching {
             SigningKey.list(Builder.nativeListKeys(keysFolder().absolutePath))
         }.getOrDefault(emptyList())
-
-        if (keys.isEmpty()) {
-            content.addView(body(getString(R.string.omni_keys_none)))
-            return
-        }
         val chosen = Preferences.signingKey(this)
-        keys.forEach { key ->
+
+        val vault = card()
+        if (keys.isEmpty()) {
+            vault.addView(quiet(getString(R.string.omni_keys_none)))
+        }
+        keys.forEachIndexed { index, key ->
+            if (index > 0) {
+                vault.addView(rule(), MATCH_PARENT, 1)
+            }
             val inUse = key.path == chosen
-            content.addView(
+            vault.addView(
                 row(
-                    if (inUse) "${key.alias}   [${getString(R.string.omni_keys_in_use)}]" else key.alias,
-                    "${key.subject} · ${key.bits} · " +
-                        "${getString(R.string.omni_keys_expires)} ${key.expires}",
-                    if (inUse) R.color.omni_ok else R.color.omni_foreground,
+                    key.alias,
+                    "${key.subject}\n${getString(R.string.omni_keys_expires)} ${key.expires}  ·  " +
+                        "${key.bits}\n${key.fingerprint}",
+                    if (inUse) getString(R.string.omni_keys_in_use) else getString(R.string.omni_keys_use),
+                    if (inUse) palette.ok else palette.accent,
                 ) {
                     Preferences.setSigningKey(this, key.path)
-                    render()
+                    render(false)
                 }
             )
-            content.addView(bullet("${getString(R.string.omni_keys_fingerprint)}: ${key.fingerprint}"))
-            content.addView(
-                action(getString(R.string.omni_action_delete), R.color.omni_error) {
-                    runCatching { Builder.nativeDeleteKey(key.path) }
-                    if (inUse) Preferences.setSigningKey(this, "")
-                    render()
-                }
-            )
+            vault.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
+                runCatching { Builder.nativeDeleteKey(key.path) }
+                if (inUse) Preferences.setSigningKey(this, "")
+                render(false)
+            })
         }
+        content.addView(vault)
+        content.addView(primary(getString(R.string.omni_keys_new)) { go(Screen.NewKey) })
     }
 
     private fun renderNewProject() {
-        section(R.string.omni_projects_new)
-        content.addView(field(getString(R.string.omni_form_package), formPackage) { formPackage = it })
-        content.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
-        content.addView(
+        content.addView(heading(getString(R.string.omni_projects_new)))
+
+        val identity = card()
+        identity.addView(field(getString(R.string.omni_form_package), formPackage) { formPackage = it })
+        identity.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
+        identity.addView(
             field(getString(R.string.omni_form_version_name), formVersionName) { formVersionName = it }
         )
-        content.addView(
+        identity.addView(
             field(getString(R.string.omni_form_version_code), formVersionCode) { formVersionCode = it }
         )
+        content.addView(identity)
 
-        section(R.string.omni_form_architecture)
+        content.addView(label(getString(R.string.omni_form_architecture)))
         content.addView(chips(ABI_CHOICES.map { it.first }, { it == formAbi }) { formAbi = it })
 
-        section(R.string.omni_form_min_sdk)
+        content.addView(label(getString(R.string.omni_form_min_sdk)))
         content.addView(
             chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == formMinSdk }) {
                 formMinSdk = ANDROID_RELEASES[it].first
@@ -1485,7 +1745,7 @@ class BuilderActivity : Activity() {
             }
         )
 
-        section(R.string.omni_form_target_sdk)
+        content.addView(label(getString(R.string.omni_form_target_sdk)))
         content.addView(
             chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == formTargetSdk }) {
                 formTargetSdk = ANDROID_RELEASES[it].first
@@ -1493,7 +1753,7 @@ class BuilderActivity : Activity() {
             }
         )
 
-        section(R.string.omni_form_languages)
+        content.addView(label(getString(R.string.omni_form_languages)))
         content.addView(
             chips(
                 LANGUAGE_CHOICES.map { it.second },
@@ -1503,58 +1763,102 @@ class BuilderActivity : Activity() {
                 if (!formLanguages.remove(key)) formLanguages.add(key)
             }
         )
-        content.addView(body(getString(R.string.omni_form_no_compiler)))
+        content.addView(quiet(getString(R.string.omni_form_no_compiler)))
 
-        section(R.string.omni_form_image)
-        content.addView(action(getString(R.string.omni_form_image_choose)) { chooseImage() })
-        content.addView(body(formImage ?: getString(R.string.omni_form_image_none)))
+        content.addView(label(getString(R.string.omni_form_image)))
+        val picture = card()
+        picture.addView(quiet(formImage?.let { File(it).name } ?: getString(R.string.omni_form_image_none)))
+        picture.addView(subtle(getString(R.string.omni_form_image_choose), palette.accent) { chooseImage() })
+        content.addView(picture)
 
-        content.addView(action(getString(R.string.omni_action_create)) { createProject() })
-        content.addView(action(getString(R.string.omni_action_cancel), R.color.omni_muted) {
+        content.addView(primary(getString(R.string.omni_action_create)) { createProject() })
+        content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
             go(Screen.Projects)
         })
     }
 
     private fun renderNewKey() {
-        section(R.string.omni_keys_new)
-        content.addView(field(getString(R.string.omni_key_alias), keyAlias) { keyAlias = it })
-        content.addView(
-            field(getString(R.string.omni_key_common_name), keyCommonName) { keyCommonName = it }
-        )
-        content.addView(
+        content.addView(heading(getString(R.string.omni_keys_new)))
+
+        val who = card()
+        who.addView(field(getString(R.string.omni_key_alias), keyAlias) { keyAlias = it })
+        who.addView(field(getString(R.string.omni_key_common_name), keyCommonName) { keyCommonName = it })
+        who.addView(
             field(getString(R.string.omni_key_organisation), keyOrganisation) { keyOrganisation = it }
         )
-        content.addView(field(getString(R.string.omni_key_country), keyCountry) { keyCountry = it })
-        content.addView(field(getString(R.string.omni_key_validity), keyValidity) { keyValidity = it })
+        who.addView(field(getString(R.string.omni_key_country), keyCountry) { keyCountry = it })
+        who.addView(field(getString(R.string.omni_key_validity), keyValidity) { keyValidity = it })
+        content.addView(who)
 
-        section(R.string.omni_key_size)
+        content.addView(label(getString(R.string.omni_key_size)))
         content.addView(chips(KEY_SIZES.map { it.toString() }, { it == keyBits }) { keyBits = it })
 
+        val secrets = card()
         val first = secret(getString(R.string.omni_key_password))
         val again = secret(getString(R.string.omni_key_password_again))
         keyPasswordView = first.second
         keyPasswordAgainView = again.second
-        content.addView(first.first)
-        content.addView(again.first)
-        content.addView(body(getString(R.string.omni_key_password_warning)))
+        secrets.addView(first.first)
+        secrets.addView(again.first)
+        content.addView(secrets)
+        content.addView(warning(getString(R.string.omni_key_password_warning)))
 
-        content.addView(action(getString(R.string.omni_action_create)) { createKey() })
-        content.addView(action(getString(R.string.omni_action_cancel), R.color.omni_muted) {
+        content.addView(primary(getString(R.string.omni_action_create)) { createKey() })
+        content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
             go(Screen.Projects)
         })
     }
 
     private fun renderProject(root: String) {
+        val summary = runCatching {
+            ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
+                .firstOrNull { it.root == root }
+        }.getOrNull()
+
+        content.addView(heading(summary?.label?.ifEmpty { null } ?: File(root).name))
+        summary?.let {
+            content.addView(
+                quiet("${it.packageName}  ·  ${it.versionName} (${it.versionCode})  ·  API ${it.minSdk}–${it.targetSdk}")
+            )
+        }
+
+        val chosen = Preferences.signingKey(this)
+        val output = card()
+        if (chosen.isEmpty()) {
+            output.addView(quiet(getString(R.string.omni_build_no_key)))
+        } else {
+            output.addView(quiet(File(chosen).name))
+            val secret = secret(getString(R.string.omni_build_password))
+            buildPasswordView = secret.second
+            output.addView(secret.first)
+        }
+        content.addView(output)
+
+        if (chosen.isNotEmpty()) {
+            content.addView(primary(getString(R.string.omni_action_build)) { buildProject(root, chosen) })
+        }
+        content.addView(subtle(getString(R.string.omni_action_bundle), palette.accent) {
+            bundleProject(root)
+        })
+        content.addView(quiet(getString(R.string.omni_bundle_note)))
+
+        content.addView(heading(getString(R.string.omni_editor_title)))
         val entries = runCatching {
             FileEntry.list(Builder.nativeProjectTree(root))
         }.getOrDefault(emptyList())
 
-        section(R.string.omni_editor_title)
-        content.addView(mono(root))
-        entries.forEach { entry ->
-            val trailing = if (entry.folder) "/" else " ${entry.bytes}"
-            content.addView(
-                row(entry.path + trailing, "", R.color.omni_foreground) {
+        val tree = card()
+        entries.forEachIndexed { index, entry ->
+            if (index > 0) {
+                tree.addView(rule(), MATCH_PARENT, 1)
+            }
+            tree.addView(
+                row(
+                    entry.path,
+                    "",
+                    if (entry.folder) "•" else entry.bytes.toString(),
+                    if (entry.folder) palette.muted else palette.accent,
+                ) {
                     if (!entry.folder) {
                         editorText = ""
                         go(Screen.Editor(root, entry.path))
@@ -1562,95 +1866,89 @@ class BuilderActivity : Activity() {
                 }
             )
         }
+        content.addView(tree)
 
+        val making = card()
         val prompt = input(getString(R.string.omni_editor_name_prompt), "")
         newPathView = prompt.second
-        content.addView(prompt.first)
-        content.addView(action(getString(R.string.omni_action_new_file)) {
-            val path = newPathView?.text?.toString().orEmpty()
-            if (path.isNotEmpty()) {
+        making.addView(prompt.first)
+        making.addView(subtle(getString(R.string.omni_action_new_file), palette.accent) {
+            newPathView?.text?.toString().orEmpty().takeIf { it.isNotEmpty() }?.let { path ->
                 report(Builder.nativeWriteFile(root, path, ""), "saved")
-                render()
+                render(false)
             }
         })
-        content.addView(action(getString(R.string.omni_action_new_folder)) {
-            val path = newPathView?.text?.toString().orEmpty()
-            if (path.isNotEmpty()) {
+        making.addView(subtle(getString(R.string.omni_action_new_folder), palette.accent) {
+            newPathView?.text?.toString().orEmpty().takeIf { it.isNotEmpty() }?.let { path ->
                 report(Builder.nativeNewFolder(root, path), "made")
-                render()
+                render(false)
             }
         })
+        content.addView(making)
 
-        section(R.string.omni_result_signature)
-        val chosen = Preferences.signingKey(this)
-        if (chosen.isEmpty()) {
-            content.addView(body(getString(R.string.omni_build_no_key)))
-        } else {
-            content.addView(mono(File(chosen).name))
-            val secret = secret(getString(R.string.omni_build_password))
-            buildPasswordView = secret.second
-            content.addView(secret.first)
-            content.addView(action(getString(R.string.omni_action_build)) { buildProject(root, chosen) })
-        }
-        content.addView(action(getString(R.string.omni_action_bundle)) { bundleProject(root) })
-        content.addView(body(getString(R.string.omni_bundle_note)))
-        content.addView(action(getString(R.string.omni_action_back), R.color.omni_muted) {
+        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
             go(Screen.Projects)
         })
     }
 
     private fun renderEditor(root: String, path: String) {
-        section(R.string.omni_editor_title)
-        content.addView(mono(path))
+        content.addView(heading(path.substringAfterLast('/')))
+        content.addView(quiet(path))
 
         val answer = runCatching { JSONObject(Builder.nativeReadFile(root, path)) }.getOrNull()
         if (answer == null || !answer.optBoolean("read", false)) {
             answer?.let { showRefusal(Refusal.parse(it), content) }
-            content.addView(action(getString(R.string.omni_action_back), R.color.omni_muted) {
+            content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
                 go(Screen.Open(root))
             })
             return
         }
         editorText = answer.optString("text")
 
-        val editor = EditText(this).apply {
-            setText(editorText)
-            setTextColor(color(R.color.omni_foreground))
-            setTypeface(Typeface.MONOSPACE)
-            setTextSize(TypedValue.COMPLEX_UNIT_PX, resources.getDimension(R.dimen.omni_text_small))
-            gravity = Gravity.TOP or Gravity.START
-            setHorizontallyScrolling(false)
-            minLines = 12
-            addTextChangedListener(object : TextWatcher {
-                override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                override fun afterTextChanged(s: Editable?) {
-                    editorText = s?.toString().orEmpty()
-                }
-            })
-        }
-        content.addView(editor)
-        content.addView(action(getString(R.string.omni_action_save)) {
+        val sheet = card()
+        sheet.addView(
+            EditText(this).apply {
+                setText(editorText)
+                setTextColor(palette.foreground)
+                setBackgroundColor(Color.TRANSPARENT)
+                setTypeface(Typeface.MONOSPACE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                gravity = Gravity.TOP or Gravity.START
+                setHorizontallyScrolling(false)
+                minLines = 14
+                setPadding(gap(2))
+                addTextChangedListener(object : TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
+                    override fun afterTextChanged(s: Editable?) {
+                        editorText = s?.toString().orEmpty()
+                    }
+                })
+            }
+        )
+        content.addView(sheet)
+
+        content.addView(primary(getString(R.string.omni_action_save)) {
             results.removeAllViews()
             val saved = runCatching { JSONObject(Builder.nativeWriteFile(root, path, editorText)) }
                 .getOrNull()
             if (saved != null && saved.optBoolean("saved", false)) {
-                results.addView(banner(getString(R.string.omni_editor_saved, path), R.color.omni_ok))
+                results.addView(notice(getString(R.string.omni_editor_saved, path), palette.ok))
             } else {
                 saved?.let { showRefusal(Refusal.parse(it), results) }
             }
         })
-        content.addView(action(getString(R.string.omni_action_delete), R.color.omni_error) {
+        content.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
             report(Builder.nativeRemovePath(root, path), "removed")
             go(Screen.Open(root))
         })
-        content.addView(action(getString(R.string.omni_action_back), R.color.omni_muted) {
+        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
             go(Screen.Open(root))
         })
     }
 
     private fun renderSettings() {
-        section(R.string.omni_settings_language)
+        content.addView(heading(getString(R.string.omni_settings_language)))
         val current = Preferences.language(this)
         content.addView(
             chips(
@@ -1661,61 +1959,129 @@ class BuilderActivity : Activity() {
                 recreate()
             }
         )
-        content.addView(body(getString(R.string.omni_settings_language_note)))
 
+        content.addView(heading(getString(R.string.omni_settings_theme)))
+        content.addView(
+            chips(
+                Palette.ALL.map { it.label },
+                { Palette.ALL[it].key == palette.key },
+            ) { index ->
+                Preferences.setPalette(this, Palette.ALL[index].key)
+                recreate()
+            }
+        )
+
+        content.addView(heading(getString(R.string.omni_settings_defaults)))
+        val defaults = card()
+        defaults.addView(label(getString(R.string.omni_form_architecture)))
+        defaults.addView(
+            chips(ABI_CHOICES.map { it.first }, { it == Preferences.abi(this) }) { index ->
+                Preferences.setAbi(this, index)
+                formAbi = index
+            }
+        )
+        defaults.addView(label(getString(R.string.omni_form_min_sdk)))
+        defaults.addView(
+            chips(
+                ANDROID_RELEASES.map { it.second },
+                { ANDROID_RELEASES[it].first == Preferences.minSdk(this) },
+            ) { index ->
+                val level = ANDROID_RELEASES[index].first
+                Preferences.setMinSdk(this, level)
+                formMinSdk = level
+                if (Preferences.targetSdk(this) < level) {
+                    Preferences.setTargetSdk(this, level)
+                    formTargetSdk = level
+                }
+            }
+        )
+        defaults.addView(label(getString(R.string.omni_form_target_sdk)))
+        defaults.addView(
+            chips(
+                ANDROID_RELEASES.map { it.second },
+                { ANDROID_RELEASES[it].first == Preferences.targetSdk(this) },
+            ) { index ->
+                val level = ANDROID_RELEASES[index].first
+                Preferences.setTargetSdk(this, level)
+                formTargetSdk = level
+                if (Preferences.minSdk(this) > level) {
+                    Preferences.setMinSdk(this, level)
+                    formMinSdk = level
+                }
+            }
+        )
+        content.addView(defaults)
+
+        content.addView(heading(getString(R.string.omni_settings_watch)))
+        val watching = card()
+        watching.addView(
+            toggle(getString(R.string.omni_settings_watch), Preferences.watching(this)) { on ->
+                Preferences.setWatching(this, on)
+                if (on) Sentry.arm(this) else Sentry.disarm(this)
+                render(false)
+            }
+        )
+        watching.addView(
+            keyValue(
+                getString(R.string.omni_settings_integrity),
+                Sentry.lastChecked(this).takeIf { it > 0L }?.let {
+                    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(it))
+                } ?: "",
+                standing,
+                when (standing) {
+                    "TRUSTED" -> palette.ok
+                    "TAMPERED" -> palette.error
+                    else -> palette.warning
+                },
+            )
+        )
+        content.addView(watching)
+        content.addView(quiet(getString(R.string.omni_settings_watch_note)))
+
+        content.addView(heading(getString(R.string.omni_settings_logs)))
+        val logging = card()
+        logging.addView(
+            toggle(getString(R.string.omni_settings_logs), Preferences.sharingLog(this)) { on ->
+                Preferences.setSharingLog(this, on)
+                render(false)
+            }
+        )
+        if (Preferences.sharingLog(this)) {
+            OmniLog.lastCopies().forEach { copy ->
+                logging.addView(
+                    keyValue(
+                        copy.label,
+                        copy.error ?: copy.location,
+                        if (copy.succeeded) "OK" else "—",
+                        if (copy.succeeded) palette.ok else palette.warning,
+                    )
+                )
+            }
+        }
+        content.addView(logging)
+
+        content.addView(heading(getString(R.string.omni_settings_about)))
         val state = runCatching {
             CoreState.parse(Builder.nativeStateReport(Builder.observedEnvironment(this)))
         }.getOrNull()
-
-        section(R.string.omni_settings_core)
+        val about = card()
         if (state == null) {
-            content.addView(body(getString(R.string.omni_integrity_unknown)))
+            about.addView(quiet(getString(R.string.omni_integrity_unknown)))
         } else {
-            content.addView(mono("${state.version} / ${state.phase} / ABI ${state.abiVersion}"))
-            content.addView(body(state.selfHostingNote))
-
-            section(R.string.omni_settings_unfinished)
-            state.subsystems.filter { it.missing.isNotEmpty() }.forEach { subsystem ->
-                content.addView(
-                    keyValue(
-                        subsystem.name,
-                        subsystem.summary,
-                        statusColor(subsystem.status),
-                        trailing = subsystem.status,
-                    )
-                )
-                subsystem.missing.forEach { content.addView(bullet(it)) }
-            }
-        }
-
-        section(R.string.omni_settings_integrity)
-        content.addView(mono(standing))
-        content.addView(body(getString(R.string.omni_integrity_checked)))
-
-        section(R.string.omni_settings_watch)
-        val checked = Sentry.lastChecked(this)
-        content.addView(
-            mono(
-                if (checked == 0L) {
-                    Sentry.lastStanding(this)
-                } else {
-                    "${Sentry.lastStanding(this)} " +
-                        SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date(checked))
-                }
-            )
-        )
-        content.addView(body(getString(R.string.omni_settings_watch_note)))
-
-        section(R.string.omni_settings_logs)
-        OmniLog.lastCopies().forEach { copy ->
-            content.addView(
+            about.addView(keyValue(getString(R.string.omni_settings_core), state.status, state.version, palette.accent))
+            about.addView(
                 keyValue(
-                    copy.label,
-                    copy.error ?: copy.location,
-                    if (copy.succeeded) R.color.omni_ok else R.color.omni_warning,
+                    getString(R.string.omni_settings_toolchain),
+                    "",
+                    "${state.toolchainVerified}/${state.toolchainTotal}",
+                    if (state.toolchainVerified == state.toolchainTotal) palette.ok else palette.warning,
                 )
             )
+            about.addView(
+                keyValue(getString(R.string.omni_settings_abi), "", state.abiVersion.toString(), palette.muted)
+            )
         }
+        content.addView(about)
     }
 
     private fun spec() = ProjectSpec(
@@ -1735,7 +2101,7 @@ class BuilderActivity : Activity() {
         val image = formImage
         working({ Builder.nativeCreateProject(root.absolutePath, spec().encode()) }) finished@{ answer ->
             val outcome = runCatching { CreateOutcome.parse(answer) }.getOrElse {
-                results.addView(banner(it.message ?: it.javaClass.simpleName, R.color.omni_error))
+                results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
                 return@finished
             }
             if (!outcome.created) {
@@ -1743,19 +2109,17 @@ class BuilderActivity : Activity() {
                 return@finished
             }
             OmniLog.event(LogLevel.INFO, "project", "Created ${outcome.root}")
-            results.addView(banner(getString(R.string.omni_created), R.color.omni_ok))
-            outcome.files.forEach { results.addView(bullet(it)) }
+            results.addView(notice(getString(R.string.omni_created), palette.ok))
             if (image != null) {
                 val stored = runCatching {
                     JSONObject(Builder.nativeSetIcon(root.absolutePath, image))
                 }.getOrNull()
-                if (stored != null && stored.optBoolean("stored", false)) {
-                    results.addView(bullet(stored.optString("note")))
-                } else {
+                if (stored == null || !stored.optBoolean("stored", false)) {
                     stored?.let { showRefusal(Refusal.parse(it), results) }
                 }
             }
-            screen = Screen.Open(root.absolutePath)
+            formImage = null
+            go(Screen.Open(root.absolutePath))
         }
     }
 
@@ -1766,9 +2130,7 @@ class BuilderActivity : Activity() {
         if (!first.contentEquals(again)) {
             first.fill(' ')
             again.fill(' ')
-            results.addView(
-                banner(getString(R.string.omni_key_password_mismatch), R.color.omni_error)
-            )
+            results.addView(notice(getString(R.string.omni_key_password_mismatch), palette.error))
             return
         }
         again.fill(' ')
@@ -1795,10 +2157,7 @@ class BuilderActivity : Activity() {
             val made = SigningKey.parse(root.getJSONObject("key"))
             OmniLog.event(LogLevel.INFO, "keystore", "Key ${made.alias} created, ${made.fingerprint}")
             Preferences.setSigningKey(this, made.path)
-            screen = Screen.Projects
-            render()
-            results.addView(banner(made.alias, R.color.omni_ok))
-            results.addView(bullet(made.fingerprint))
+            go(Screen.Projects)
         }
     }
 
@@ -1820,56 +2179,63 @@ class BuilderActivity : Activity() {
             buildPasswordView?.text?.clear()
             val elapsed = (System.nanoTime() - started) / 1_000_000
             val outcome = runCatching { BuildOutcome.parse(answer) }.getOrElse {
-                results.addView(banner(it.message ?: it.javaClass.simpleName, R.color.omni_error))
+                results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
                 return@finished
             }
             if (!outcome.built) {
                 OmniLog.event(LogLevel.ERROR, "build", "Refused: ${outcome.error}")
-                results.addView(banner(getString(R.string.omni_refused), R.color.omni_error))
+                results.addView(notice(getString(R.string.omni_refused), palette.error))
                 showRefusal(Refusal.parse(JSONObject(answer)), results)
-                outcome.findings.forEach { results.addView(bullet(it)) }
+                outcome.findings.forEach { results.addView(quiet(it)) }
                 return@finished
             }
 
             OmniLog.event(LogLevel.INFO, "build", "Built ${outcome.bytes} bytes in $elapsed ms")
-            results.addView(banner("${outcome.bytes} / $elapsed ms", R.color.omni_ok))
-            results.addView(
+            results.addView(notice("${outcome.bytes}  ·  $elapsed ms", palette.ok))
+            val facts = card()
+            facts.addView(
                 keyValue(
                     getString(R.string.omni_result_contents),
-                    if (outcome.carriesCode) {
-                        "AndroidManifest.xml + classes.dex"
-                    } else {
-                        "AndroidManifest.xml"
-                    },
-                    R.color.omni_muted,
-                    trailing = "${outcome.entries}",
+                    if (outcome.carriesCode) "AndroidManifest.xml + classes.dex" else "AndroidManifest.xml",
+                    outcome.entries.toString(),
+                    palette.muted,
                 )
             )
-            results.addView(
+            facts.addView(
                 keyValue(
                     getString(R.string.omni_result_signature),
+                    outcome.signedBy.orEmpty(),
                     "v2 + v3",
-                    if (outcome.signed) R.color.omni_ok else R.color.omni_error,
-                    trailing = if (outcome.signed) "OK" else "NONE",
+                    if (outcome.signed) palette.ok else palette.error,
                 )
             )
-            outcome.signedBy?.let {
-                results.addView(
-                    keyValue(getString(R.string.omni_result_signed_by), it, R.color.omni_muted)
-                )
-            }
-            results.addView(
+            facts.addView(
                 keyValue(
                     getString(R.string.omni_result_policy),
                     "${outcome.rulesApplied}",
-                    if (outcome.guardVerdict == "PASSED") R.color.omni_ok else R.color.omni_error,
-                    trailing = outcome.guardVerdict ?: "?",
+                    outcome.guardVerdict ?: "?",
+                    if (outcome.guardVerdict == "PASSED") palette.ok else palette.error,
                 )
             )
-            outcome.path?.let {
-                results.addView(mono(it))
-                offer(File(it))
+            results.addView(facts)
+            outcome.path?.let { offer(File(it)) }
+        }
+    }
+
+    private fun bundleProject(root: String) {
+        results.removeAllViews()
+        val destination = File(getExternalFilesDir(null) ?: filesDir, "${File(root).name}.aab")
+        working({ Builder.nativeBundleProject(root, destination.absolutePath) }) finished@{ answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+            if (!document.optBoolean("bundled", false)) {
+                results.addView(notice(getString(R.string.omni_refused), palette.error))
+                showRefusal(Refusal.parse(document), results)
+                return@finished
             }
+            val made = document.optJSONObject("bundle")
+            OmniLog.event(LogLevel.INFO, "bundle", "Bundled ${made?.optLong("bytes")} bytes")
+            results.addView(notice("${made?.optLong("bytes")}", palette.ok))
+            offer(File(document.optString("path")))
         }
     }
 
@@ -1882,15 +2248,16 @@ class BuilderActivity : Activity() {
         val installable = type == PackageProvider.PACKAGE_TYPE
 
         if (installable) {
-            results.addView(action(getString(R.string.omni_action_install)) {
-                val intent = Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(uri, type)
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                hand(intent)
+            results.addView(primary(getString(R.string.omni_action_install)) {
+                hand(
+                    Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(uri, type)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                )
             })
         }
-        results.addView(action(getString(R.string.omni_action_share), R.color.omni_accent) {
+        results.addView(subtle(getString(R.string.omni_action_share), palette.accent) {
             val sending = Intent(Intent.ACTION_SEND)
                 .setType(type)
                 .putExtra(Intent.EXTRA_STREAM, uri)
@@ -1901,43 +2268,14 @@ class BuilderActivity : Activity() {
             )
         })
         if (installable) {
-            results.addView(body(getString(R.string.omni_install_note)))
+            results.addView(quiet(getString(R.string.omni_install_note)))
         }
     }
 
     private fun hand(intent: Intent) {
         runCatching { startActivity(intent) }.onFailure { why ->
             OmniLog.event(LogLevel.WARN, "handoff", why.message ?: why.javaClass.simpleName)
-            results.addView(
-                banner(why.message ?: why.javaClass.simpleName, R.color.omni_error)
-            )
-        }
-    }
-
-    private fun bundleProject(root: String) {
-        results.removeAllViews()
-        val destination = File(getExternalFilesDir(null) ?: filesDir, "${File(root).name}.aab")
-        working({ Builder.nativeBundleProject(root, destination.absolutePath) }) finished@{ answer ->
-            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
-            if (!document.optBoolean("bundled", false)) {
-                results.addView(banner(getString(R.string.omni_refused), R.color.omni_error))
-                showRefusal(Refusal.parse(document), results)
-                return@finished
-            }
-            val made = document.optJSONObject("bundle")
-            OmniLog.event(LogLevel.INFO, "bundle", "Bundled ${made?.optLong("bytes")} bytes")
-            results.addView(banner("${made?.optLong("bytes")}", R.color.omni_ok))
-            results.addView(
-                keyValue(
-                    getString(R.string.omni_result_contents),
-                    made?.optString("note").orEmpty(),
-                    R.color.omni_muted,
-                    trailing = "${made?.optLong("entries")}",
-                )
-            )
-            val path = document.optString("path")
-            results.addView(mono(path))
-            offer(File(path))
+            results.addView(notice(why.message ?: why.javaClass.simpleName, palette.error))
         }
     }
 
@@ -1949,9 +2287,9 @@ class BuilderActivity : Activity() {
         runCatching { startActivityForResult(intent, IMAGE_REQUEST) }
             .onFailure {
                 results.addView(
-                    banner(
+                    notice(
                         it.message ?: getString(R.string.omni_form_image_none),
-                        R.color.omni_error,
+                        palette.error,
                     )
                 )
             }
@@ -1971,12 +2309,12 @@ class BuilderActivity : Activity() {
             }
             staged.absolutePath
         }.getOrNull()
-        render()
+        render(false)
     }
 
     private fun working(work: () -> String, finished: (String) -> Unit) {
         results.removeAllViews()
-        results.addView(banner(getString(R.string.omni_working), R.color.omni_accent))
+        results.addView(notice(getString(R.string.omni_working), palette.accent))
         Thread {
             val answer = runCatching(work)
             runOnUiThread {
@@ -1984,7 +2322,7 @@ class BuilderActivity : Activity() {
                 answer.fold(finished) { error ->
                     OmniLog.recordCrash(Thread.currentThread(), error)
                     results.addView(
-                        banner(error.message ?: error.javaClass.simpleName, R.color.omni_error)
+                        notice(error.message ?: error.javaClass.simpleName, palette.error)
                     )
                 }
             }
@@ -1999,10 +2337,14 @@ class BuilderActivity : Activity() {
     }
 
     private fun showRefusal(refusal: Refusal, into: LinearLayout) {
-        val heading = listOfNotNull(refusal.code, refusal.message).joinToString(" ")
-        into.addView(banner(heading.ifEmpty { getString(R.string.omni_refused) }, R.color.omni_error))
-        refusal.context.forEach { into.addView(bullet(it)) }
-        refusal.suggestion?.let { into.addView(body(it)) }
+        val heading = listOfNotNull(refusal.code, refusal.message).joinToString("  ")
+        into.addView(notice(heading.ifEmpty { getString(R.string.omni_refused) }, palette.error))
+        val detail = card()
+        refusal.context.forEach { detail.addView(quiet(it)) }
+        refusal.suggestion?.let { detail.addView(body(it)) }
+        if (detail.childCount > 0) {
+            into.addView(detail)
+        }
     }
 
     private fun readSecret(view: EditText?): CharArray {
@@ -2026,95 +2368,271 @@ class BuilderActivity : Activity() {
         }
     }
 
-    override fun onPause() {
-        super.onPause()
-        OmniLog.flushSession()
+    private fun gap(units: Int): Int =
+        (units * resources.displayMetrics.density * 4f).toInt().coerceAtLeast(1)
+
+    private fun pill(colour: Int, radius: Float) = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = radius
+        setColor(colour)
     }
 
-    override fun onDestroy() {
-        OmniLog.setPublishListener(null)
-        OmniLog.flushSession()
-        super.onDestroy()
+    private fun sheet(fill: Int, stroke: Int) = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = gap(4).toFloat()
+        setColor(fill)
+        setStroke(1, stroke)
     }
 
-    private fun section(titleRes: Int) {
-        content.addView(divider())
-        content.addView(
-            TextView(this).apply {
-                text = getString(titleRes)
-                setTextColor(color(R.color.omni_accent))
-                setTypeface(Typeface.DEFAULT_BOLD)
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_section).toFloat())
-                setPadding(0, dp(R.dimen.omni_gap), 0, dp(R.dimen.omni_gap_small))
-            }
-        )
-    }
+    private fun touchable(background: GradientDrawable, ripple: Int): Drawable =
+        RippleDrawable(ColorStateList.valueOf(ripple), background, null)
 
-    private fun action(label: String, colorRes: Int = R.color.omni_ok, onPress: () -> Unit) =
-        TextView(this).apply {
-            text = label
-            setTextColor(color(colorRes))
-            setTypeface(typeface, Typeface.BOLD)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-            gravity = Gravity.CENTER
-            setPadding(dp(R.dimen.omni_gap))
-            isClickable = true
-            setOnClickListener { onPress() }
+    private fun card(): LinearLayout = LinearLayout(this).apply {
+        orientation = LinearLayout.VERTICAL
+        background = sheet(palette.surface, palette.divider)
+        setPadding(gap(3), gap(2), gap(3), gap(2))
+        layoutTransition = LayoutTransition()
+        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = gap(2)
+            bottomMargin = gap(1)
         }
+    }
 
-    private fun row(title: String, detail: String, colorRes: Int, onPress: () -> Unit) =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
-            isClickable = true
-            setOnClickListener { onPress() }
-            addView(
-                TextView(context).apply {
-                    text = title
-                    setTextColor(color(colorRes))
-                    setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                    setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_body).toFloat())
-                }
-            )
-            if (detail.isNotEmpty()) {
+    private fun heading(value: String) = TextView(this).apply {
+        text = value
+        setTextColor(palette.foreground)
+        setTypeface(Typeface.DEFAULT_BOLD)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+        setPadding(0, gap(4), 0, gap(1))
+    }
+
+    private fun label(value: String) = TextView(this).apply {
+        text = value.uppercase(Locale.getDefault())
+        setTextColor(palette.muted)
+        setTypeface(Typeface.DEFAULT_BOLD)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        letterSpacing = 0.12f
+        setPadding(0, gap(3), 0, gap(1))
+    }
+
+    private fun body(value: String) = TextView(this).apply {
+        text = value
+        setTextColor(palette.foreground)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        setLineSpacing(gap(1).toFloat(), 1f)
+        setPadding(0, gap(1), 0, gap(1))
+    }
+
+    private fun quiet(value: String) = TextView(this).apply {
+        text = value
+        setTextColor(palette.muted)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setLineSpacing(gap(1).toFloat(), 1f)
+        setPadding(0, gap(1), 0, gap(1))
+    }
+
+    private fun warning(value: String) = TextView(this).apply {
+        text = value
+        setTextColor(palette.warning)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setLineSpacing(gap(1).toFloat(), 1f)
+        setPadding(gap(3), gap(2), gap(3), gap(2))
+        background = sheet(palette.surface, palette.warning)
+        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = gap(1)
+            bottomMargin = gap(1)
+        }
+    }
+
+    private fun notice(value: String, colour: Int) = TextView(this).apply {
+        text = value
+        setTextColor(colour)
+        setTypeface(Typeface.DEFAULT_BOLD)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        setPadding(gap(3), gap(3), gap(3), gap(3))
+        background = sheet(palette.surface, colour)
+        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = gap(2)
+            bottomMargin = gap(1)
+        }
+    }
+
+    private fun rule() = View(this).apply {
+        setBackgroundColor(palette.divider)
+    }
+
+    private fun primary(text: String, onPress: () -> Unit) = TextView(this).apply {
+        this.text = text
+        setTextColor(palette.background)
+        setTypeface(Typeface.DEFAULT_BOLD)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        letterSpacing = 0.06f
+        gravity = Gravity.CENTER
+        setPadding(gap(4), gap(4), gap(4), gap(4))
+        background = touchable(pill(palette.accent, gap(3).toFloat()), palette.background)
+        isClickable = true
+        setOnClickListener { onPress() }
+        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = gap(2)
+            bottomMargin = gap(1)
+        }
+    }
+
+    private fun subtle(text: String, colour: Int, onPress: () -> Unit) = TextView(this).apply {
+        this.text = text
+        setTextColor(colour)
+        setTypeface(Typeface.DEFAULT_BOLD)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        gravity = Gravity.CENTER
+        setPadding(gap(4), gap(3), gap(4), gap(3))
+        background = touchable(pill(Color.TRANSPARENT, gap(3).toFloat()), colour)
+        isClickable = true
+        setOnClickListener { onPress() }
+        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+            topMargin = gap(1)
+        }
+    }
+
+    private fun row(
+        title: String,
+        detail: String,
+        trailing: String,
+        trailingColour: Int = palette.muted,
+        onPress: () -> Unit,
+    ) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, gap(2), 0, gap(2))
+        background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+        isClickable = true
+        setOnClickListener { onPress() }
+
+        addView(
+            LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
                 addView(
                     TextView(context).apply {
-                        text = detail
-                        setTextColor(color(R.color.omni_muted))
-                        setTextSize(
-                            TypedValue.COMPLEX_UNIT_PX,
-                            dp(R.dimen.omni_text_small).toFloat(),
+                        text = title
+                        setTextColor(palette.foreground)
+                        setTypeface(Typeface.DEFAULT_BOLD)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                    }
+                )
+                if (detail.isNotEmpty()) {
+                    addView(
+                        TextView(context).apply {
+                            text = detail
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                            setLineSpacing(gap(1).toFloat(), 1f)
+                        }
+                    )
+                }
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+
+        if (trailing.isNotEmpty()) {
+            addView(
+                TextView(context).apply {
+                    text = trailing
+                    setTextColor(trailingColour)
+                    setTypeface(Typeface.DEFAULT_BOLD)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    letterSpacing = 0.08f
+                    setPadding(gap(2), gap(1), gap(2), gap(1))
+                    background = pill(palette.raised, gap(2).toFloat())
+                }
+            )
+        }
+    }
+
+    private fun keyValue(title: String, detail: String, trailing: String, colour: Int) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(2), 0, gap(2))
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = title
+                            setTextColor(palette.foreground)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                        }
+                    )
+                    if (detail.isNotEmpty()) {
+                        addView(
+                            TextView(context).apply {
+                                text = detail
+                                setTextColor(palette.muted)
+                                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                            }
                         )
+                    }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            if (trailing.isNotEmpty()) {
+                addView(
+                    TextView(context).apply {
+                        text = trailing
+                        setTextColor(colour)
+                        setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     }
                 )
             }
         }
 
+    private fun toggle(title: String, on: Boolean, onChange: (Boolean) -> Unit) =
+        LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(2), 0, gap(2))
+            isClickable = true
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { onChange(!on) }
+            addView(
+                TextView(context).apply {
+                    text = title
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+            addView(
+                View(context).apply {
+                    background = pill(if (on) palette.ok else palette.divider, gap(2).toFloat())
+                    layoutParams = LinearLayout.LayoutParams(gap(10), gap(5))
+                }
+            )
+        }
+
     private fun input(label: String, initial: String): Pair<View, EditText> {
         val holder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
+            setPadding(0, gap(2), 0, gap(1))
         }
         holder.addView(
             TextView(this).apply {
-                text = label
-                setTextColor(color(R.color.omni_muted))
-                setTextSize(
-                    TypedValue.COMPLEX_UNIT_PX,
-                    resources.getDimension(R.dimen.omni_text_small),
-                )
+                text = label.uppercase(Locale.getDefault())
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                letterSpacing = 0.12f
             }
         )
         val editor = EditText(this).apply {
             setText(initial)
-            setTextColor(color(R.color.omni_foreground))
-            setTextSize(
-                TypedValue.COMPLEX_UNIT_PX,
-                resources.getDimension(R.dimen.omni_text_body),
-            )
+            setTextColor(palette.foreground)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setBackgroundColor(Color.TRANSPARENT)
+            setPadding(0, gap(1), 0, gap(1))
             isSingleLine = true
         }
         holder.addView(editor)
+        holder.addView(rule(), LinearLayout.LayoutParams(MATCH_PARENT, 1))
         return holder to editor
     }
 
@@ -2132,8 +2650,7 @@ class BuilderActivity : Activity() {
 
     private fun secret(label: String): Pair<View, EditText> {
         val (holder, editor) = input(label, "")
-        editor.inputType =
-            InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        editor.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         editor.typeface = Typeface.MONOSPACE
         return holder to editor
     }
@@ -2145,36 +2662,41 @@ class BuilderActivity : Activity() {
     ): View {
         val holder = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
+            setPadding(0, gap(1), 0, gap(1))
         }
-        val scroller = HorizontalScrollView(this).apply { isHorizontalScrollBarEnabled = false }
+        val scroller = HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
+            clipToPadding = false
+        }
         val views = mutableListOf<TextView>()
 
         fun repaint() {
             views.forEachIndexed { index, view ->
-                view.setTextColor(
-                    color(if (selected(index)) R.color.omni_ok else R.color.omni_muted)
+                val on = selected(index)
+                view.setTextColor(if (on) palette.background else palette.foreground)
+                view.background = touchable(
+                    pill(if (on) palette.accent else palette.raised, gap(4).toFloat()),
+                    palette.accent,
                 )
             }
         }
 
-        labels.forEachIndexed { index, label ->
+        labels.forEachIndexed { index, text ->
             val chip = TextView(this).apply {
-                text = label
-                setTextSize(
-                    TypedValue.COMPLEX_UNIT_PX,
-                    resources.getDimension(R.dimen.omni_text_body),
-                )
-                setPadding(
-                    dp(R.dimen.omni_gap),
-                    dp(R.dimen.omni_gap_small),
-                    dp(R.dimen.omni_gap),
-                    dp(R.dimen.omni_gap_small),
-                )
+                this.text = text
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setPadding(gap(4), gap(2), gap(4), gap(2))
                 isClickable = true
                 setOnClickListener {
                     onPick(index)
                     repaint()
+                    animate().scaleX(0.94f).scaleY(0.94f).setDuration(70L).withEndAction {
+                        animate().scaleX(1f).scaleY(1f).setDuration(110L).start()
+                    }.start()
+                }
+                layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    marginEnd = gap(2)
                 }
             }
             views.add(chip)
@@ -2184,82 +2706,6 @@ class BuilderActivity : Activity() {
         scroller.addView(holder)
         return scroller
     }
-
-    private fun body(value: String) = TextView(this).apply {
-        text = value
-        setTextColor(color(R.color.omni_muted))
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_body).toFloat())
-        setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
-    }
-
-    private fun mono(value: String) = TextView(this).apply {
-        text = value
-        setTextColor(color(R.color.omni_muted))
-        setTypeface(Typeface.MONOSPACE)
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_small).toFloat())
-        setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
-    }
-
-    private fun bullet(value: String) = TextView(this).apply {
-        text = getString(R.string.omni_bullet, value)
-        setTextColor(color(R.color.omni_muted))
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_small).toFloat())
-        setPadding(dp(R.dimen.omni_gap), 0, 0, dp(R.dimen.omni_gap_small))
-    }
-
-    private fun banner(value: String, colorRes: Int) = TextView(this).apply {
-        text = value
-        setTextColor(color(R.color.omni_background))
-        setBackgroundColor(color(colorRes))
-        setTypeface(Typeface.DEFAULT_BOLD)
-        setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_body).toFloat())
-        setPadding(dp(R.dimen.omni_gap_small))
-        gravity = Gravity.START
-        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
-            topMargin = dp(R.dimen.omni_gap)
-            bottomMargin = dp(R.dimen.omni_gap)
-        }
-    }
-
-    private fun keyValue(
-        key: String,
-        value: String,
-        accentRes: Int,
-        trailing: String? = null,
-    ) = LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        setPadding(0, dp(R.dimen.omni_gap_small), 0, dp(R.dimen.omni_gap_small))
-        addView(
-            TextView(context).apply {
-                text = if (trailing == null) key else "$key   [$trailing]"
-                setTextColor(color(accentRes))
-                setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_body).toFloat())
-            }
-        )
-        addView(
-            TextView(context).apply {
-                text = value
-                setTextColor(color(R.color.omni_muted))
-                setTextSize(TypedValue.COMPLEX_UNIT_PX, dp(R.dimen.omni_text_small).toFloat())
-            }
-        )
-    }
-
-    private fun divider() = View(this).apply {
-        setBackgroundColor(color(R.color.omni_divider))
-        layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, dp(R.dimen.omni_divider_height))
-    }
-
-    private fun statusColor(status: String) = when (status) {
-        "PRODUCTION", "BETA" -> R.color.omni_ok
-        "EXPERIMENTAL", "PARTIAL" -> R.color.omni_warning
-        else -> R.color.omni_muted
-    }
-
-    private fun color(id: Int): Int = getColor(id)
-
-    private fun dp(id: Int): Int = resources.getDimensionPixelSize(id)
 
     private fun View.setPadding(all: Int) = setPadding(all, all, all, all)
 }

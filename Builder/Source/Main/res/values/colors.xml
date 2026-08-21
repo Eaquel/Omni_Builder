@@ -1,22 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Omni_Builder — colour palette.
-
-  The status colours are semantic, not decorative: they encode the maturity and
-  verification states the Core reports, so a reader can tell at a glance what is
-  real and what is only declared.
--->
 <resources>
-    <color name="omni_background">#FF0E1116</color>
-    <color name="omni_foreground">#FFE6EDF3</color>
-    <color name="omni_muted">#FF9198A1</color>
-    <color name="omni_divider">#FF262C36</color>
-    <color name="omni_accent">#FF6CB6FF</color>
-
-    <!-- Verified, or a subsystem that has actually reached maturity. -->
-    <color name="omni_ok">#FF57AB5A</color>
-    <!-- Declared but unproven, or a component that could not be verified. -->
-    <color name="omni_warning">#FFD29922</color>
-    <!-- A mismatch, a missing observation, or a blocking diagnostic. -->
-    <color name="omni_error">#FFE5534B</color>
+    <color name="omni_background">#FF05070B</color>
+    <color name="omni_foreground">#FFE8EEF6</color>
 </resources>
