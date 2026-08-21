@@ -1878,23 +1878,31 @@ class BuilderActivity : Activity() {
             return
         }
         val uri = PackageProvider.uriFor(this, file)
-        val type = contentResolver.getType(uri) ?: PackageProvider.PACKAGE_TYPE
+        val type = contentResolver.getType(uri) ?: PackageProvider.BUNDLE_TYPE
+        val installable = type == PackageProvider.PACKAGE_TYPE
 
-        results.addView(action(getString(R.string.omni_action_install)) {
-            val intent = Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, type)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            hand(intent)
-        })
+        if (installable) {
+            results.addView(action(getString(R.string.omni_action_install)) {
+                val intent = Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(uri, type)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                hand(intent)
+            })
+        }
         results.addView(action(getString(R.string.omni_action_share), R.color.omni_accent) {
-            val intent = Intent(Intent.ACTION_SEND)
+            val sending = Intent(Intent.ACTION_SEND)
                 .setType(type)
                 .putExtra(Intent.EXTRA_STREAM, uri)
                 .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            hand(Intent.createChooser(intent, file.name))
+            hand(
+                Intent.createChooser(sending, file.name)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            )
         })
-        results.addView(body(getString(R.string.omni_install_note)))
+        if (installable) {
+            results.addView(body(getString(R.string.omni_install_note)))
+        }
     }
 
     private fun hand(intent: Intent) {
