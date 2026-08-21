@@ -1476,9 +1476,8 @@ class BuilderActivity : Activity() {
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(tabStrip, MATCH_PARENT, WRAP_CONTENT)
-            addView(indicator, LinearLayout.LayoutParams(gap(8), gap(1) / 2).apply {
+            addView(indicator, LinearLayout.LayoutParams(gap(8), gap(1)).apply {
                 topMargin = gap(1)
-                marginStart = gap(4)
             })
             addView(rule(), MATCH_PARENT, 1)
         }

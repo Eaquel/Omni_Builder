@@ -67,6 +67,7 @@ jobs:
           OMNI_REQUIRE_APKSIGNER: "1"
           OMNI_REQUIRE_AXML_CONFORMANCE: "1"
           OMNI_REQUIRE_IMAGE_CONFORMANCE: "1"
+          OMNI_REQUIRE_INFLATE_CONFORMANCE: "1"
         run: cargo test --locked
 
       - name: Confirm every language carries every string

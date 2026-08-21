@@ -14092,7 +14092,7 @@ pub mod scaffold {
     pub const ICON_FILE: &str = "Icon.png";
 
     pub fn icon_path(root: &str) -> String {
-        format!("{}/{ICON_FILE}", root.trim_end_matches('/'))
+        format!("{}/{RES_FOLDER}/{ICON_FILE}", root.trim_end_matches('/'))
     }
 
     pub fn set_icon(root: &str, source: &str) -> Result<crate::image::Png, Diagnostic> {
@@ -14106,6 +14106,12 @@ pub mod scaffold {
             fail("EP041", "The image could not be read a second time.")
                 .with_context(format!("Reason: {why}"))
         })?;
+        std::fs::create_dir_all(format!("{}/{RES_FOLDER}", root.trim_end_matches('/'))).map_err(
+            |why| {
+                fail("EP043", "The resource folder could not be made.")
+                    .with_context(format!("Reason: {why}"))
+            },
+        )?;
         std::fs::write(icon_path(root), &bytes).map_err(|why| {
             fail("EP042", "The image could not be stored with the project.")
                 .with_context(format!("Path: {}", icon_path(root)))
@@ -25472,6 +25478,42 @@ mod tests {
             text.contains("android:versionName(0x0101021c)=\"2.4.10\""),
             "{text}"
         );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_new_project_keeps_its_resources_in_one_folder() {
+        let directory = temp_directory("omni-res");
+        let root = directory.join("Shaped");
+        let text = root.to_str().unwrap().to_string();
+        let made = super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+
+        assert!(
+            made.folders
+                .contains(&super::scaffold::RES_FOLDER.to_string()),
+            "{:?}",
+            made.folders
+        );
+        assert!(root.join(super::scaffold::RES_FOLDER).is_dir());
+        assert!(
+            super::scaffold::icon_path(&text)
+                .ends_with(&format!("{}/Icon.png", super::scaffold::RES_FOLDER)),
+            "the image belongs with the resources, not loose at the root"
+        );
+
+        let mut here: Vec<String> = std::fs::read_dir(&root)
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().map(|name| name.to_string()))
+            .collect();
+        here.sort();
+        assert_eq!(
+            here,
+            vec!["AndroidManifest.xml", "Kotlin", "Res"],
+            "the root holds the manifest, the folders for the languages chosen, and the \
+             resource folder"
+        );
+
         std::fs::remove_dir_all(&directory).ok();
     }
 
