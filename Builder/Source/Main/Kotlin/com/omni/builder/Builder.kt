@@ -1605,6 +1605,10 @@ class BuilderActivity : Activity() {
     private fun trashFolder() = File(getExternalFilesDir(null) ?: filesDir, "Trash").absolutePath
 
     private fun openHere(root: String) {
+        if (openProject != root) {
+            // What was picked up in one project has no place in another.
+            held = null
+        }
         openProject = root
         go(Screen.Files(root, ""))
     }

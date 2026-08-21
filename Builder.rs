@@ -255,7 +255,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Omni_Guard policy",
         status: Status::Partial,
         directive_section: 29,
-        summary: "Seven rules every project must pass before a package is produced: no debuggable build, no cleartext by default, backup off, no unguarded exported component, no exported provider handing out URI grants, a platform floor of API 28, and no high-risk permission.",
+        summary: "Eleven rules every project must pass before a package is produced: no debuggable build, no cleartext by default, backup off, no unguarded exported component, no exported provider handing out URI grants, a platform floor of API 28, no high-risk permission, no shared user identity, no opting out of scoped storage, no census of every installed application, and no exported activity in a task another application can take over.",
         missing: &[
             "Manifest rules only. Nothing inspects code, resources or native libraries.",
             "Passing says the package does not carry these specific weaknesses. It is not a statement that the application is secure, and every report says so.",
@@ -12769,6 +12769,71 @@ pub mod guard {
             }
         }
 
+        report.rules_applied += 1;
+        if let Some(shared) = root.attribute("android:sharedUserId") {
+            report.findings.push(Finding {
+                rule: "no-shared-user",
+                code: "EG008",
+                what: format!("The package shares a user identity, {shared}."),
+                why: "Every application signed with the same key and naming the same identity runs as one user: they read each other's files, databases and keys with no check of any kind. One weak application among them is a way into all of them, and Android has deprecated the whole idea.".to_string(),
+                remedy: "Remove android:sharedUserId. Where two applications must exchange something, let one expose it deliberately through a provider or a service and guard it with a signature permission.".to_string(),
+            });
+        }
+
+        report.rules_applied += 1;
+        if let Some(application) = application {
+            if attribute(application, "android:requestLegacyExternalStorage") == Some("true") {
+                report.findings.push(Finding {
+                    rule: "no-legacy-storage",
+                    code: "EG009",
+                    what: "The application asks to opt out of scoped storage.".to_string(),
+                    why: "Legacy external storage lets the application read and write everything on shared storage, including what every other application has left there. It is what scoped storage exists to end.".to_string(),
+                    remedy: "Remove android:requestLegacyExternalStorage. Use the media store for what is shared, and the application's own folders for what is not.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "uses-permission" {
+                continue;
+            }
+            if attribute(element, "android:name") == Some("android.permission.QUERY_ALL_PACKAGES") {
+                report.findings.push(Finding {
+                    rule: "no-package-census",
+                    code: "EG010",
+                    what: "The package asks to see every application installed.".to_string(),
+                    why: "The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.".to_string(),
+                    remedy: "Remove the permission and declare a <queries> element naming the few applications or intents this one genuinely needs to find.".to_string(),
+                });
+            }
+        }
+
+        report.rules_applied += 1;
+        for element in &elements {
+            if element.name != "activity" && element.name != "activity-alias" {
+                continue;
+            }
+            // Reachable means exported outright, or carrying an intent filter and
+            // not having said no: that is what Android takes it to mean.
+            let exported = match attribute(element, "android:exported") {
+                Some("true") => true,
+                Some("false") => false,
+                _ => element.children_named("intent-filter").next().is_some(),
+            };
+            let mode = attribute(element, "android:launchMode").unwrap_or("standard");
+            if exported && (mode == "singleTask" || mode == "singleInstance") {
+                let named = attribute(element, "android:name").unwrap_or("an activity");
+                report.findings.push(Finding {
+                    rule: "no-task-hijacking",
+                    code: "EG011",
+                    what: format!("{named} is reachable from outside and launches as {mode}."),
+                    why: "An activity another application can start, in a task of its own, can have that task taken over: a malicious application declares the same affinity, gets placed in front, and what the person types next goes to it instead. This is task hijacking, and it looks exactly like the real screen.".to_string(),
+                    remedy: "Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.".to_string(),
+                });
+            }
+        }
+
         report
     }
 
@@ -15968,6 +16033,196 @@ pub mod image {
         Some(held)
     }
 
+    /// Above this the difference stops being something an eye can find. It is the
+    /// usual visually-lossless bar, a peak signal-to-noise ratio of forty decibels,
+    /// written as the mean squared error that corresponds to it.
+    pub const INVISIBLE_ERROR: f64 = 255.0 * 255.0 / 10_000.0;
+
+    fn distinct_colours(raster: &Raster) -> Vec<([u8; 4], u32)> {
+        let mut counts: std::collections::HashMap<[u8; 4], u32> = std::collections::HashMap::new();
+        for pixel in raster.pixels.chunks_exact(4) {
+            *counts
+                .entry([pixel[0], pixel[1], pixel[2], pixel[3]])
+                .or_insert(0) += 1;
+        }
+        let mut held: Vec<([u8; 4], u32)> = counts.into_iter().collect();
+        held.sort_unstable();
+        held
+    }
+
+    fn average_of(box_of: &[([u8; 4], u32)]) -> [u8; 4] {
+        let weight: u64 = box_of.iter().map(|(_, count)| u64::from(*count)).sum();
+        if weight == 0 {
+            return [0, 0, 0, 0];
+        }
+        let mut totals = [0u64; 4];
+        for (colour, count) in box_of {
+            for channel in 0..4 {
+                totals[channel] += u64::from(colour[channel]) * u64::from(*count);
+            }
+        }
+        let mut made = [0u8; 4];
+        for channel in 0..4 {
+            made[channel] = ((totals[channel] + weight / 2) / weight).min(255) as u8;
+        }
+        made
+    }
+
+    /// Median cut: the colours are held in one box, and the box with the widest
+    /// spread is split at its middle along its widest channel, until there are as
+    /// many boxes as the palette has room for. Each box becomes the colour its
+    /// pixels average out to.
+    pub fn quantise(raster: &Raster, wanted: usize) -> Vec<[u8; 4]> {
+        let colours = distinct_colours(raster);
+        if colours.is_empty() || wanted == 0 {
+            return Vec::new();
+        }
+        if colours.len() <= wanted {
+            return colours.into_iter().map(|(colour, _)| colour).collect();
+        }
+
+        // How far a box's colours lie from the colour it would become, weighted by
+        // how much of the picture they are. Splitting the worst box each time puts
+        // the palette where the error is, rather than where the range happens to
+        // be widest.
+        fn cost(held: &[([u8; 4], u32)]) -> u64 {
+            if held.len() < 2 {
+                return 0;
+            }
+            let middle = average_of(held);
+            let mut total = 0u64;
+            for (colour, count) in held {
+                let mut apart = 0u64;
+                for channel in 0..4 {
+                    let step = i64::from(colour[channel]) - i64::from(middle[channel]);
+                    apart += (step * step) as u64;
+                }
+                total += apart * u64::from(*count);
+            }
+            total
+        }
+
+        let mut boxes: Vec<Vec<([u8; 4], u32)>> = vec![colours];
+        while boxes.len() < wanted {
+            let worst = boxes
+                .iter()
+                .enumerate()
+                .filter(|(_, held)| held.len() > 1)
+                .max_by_key(|(_, held)| cost(held))
+                .map(|(index, _)| index);
+            let Some(index) = worst else { break };
+            if cost(&boxes[index]) == 0 {
+                break;
+            }
+
+            let mut held = boxes.swap_remove(index);
+            let channel = (0..4)
+                .max_by_key(|channel| {
+                    let mut low = 255u16;
+                    let mut high = 0u16;
+                    for (colour, _) in held.iter() {
+                        low = low.min(u16::from(colour[*channel]));
+                        high = high.max(u16::from(colour[*channel]));
+                    }
+                    high - low
+                })
+                .unwrap_or(0);
+            held.sort_unstable_by_key(|(colour, _)| colour[channel]);
+
+            // Split where half the pixels lie, not half the colours, so a colour
+            // most of the picture is made of keeps a box to itself.
+            let total: u64 = held.iter().map(|(_, count)| u64::from(*count)).sum();
+            let mut running = 0u64;
+            let mut at = 1usize;
+            for (position, (_, count)) in held.iter().enumerate() {
+                running += u64::from(*count);
+                if running * 2 >= total {
+                    at = (position + 1).clamp(1, held.len() - 1);
+                    break;
+                }
+            }
+            let rest = held.split_off(at);
+            boxes.push(held);
+            boxes.push(rest);
+        }
+
+        let mut palette: Vec<[u8; 4]> = boxes
+            .iter()
+            .filter(|held| !held.is_empty())
+            .map(|held| average_of(held))
+            .collect();
+        palette.sort_unstable();
+        palette.dedup();
+        palette
+    }
+
+    fn nearest(palette: &[[u8; 4]], colour: [u8; 4]) -> usize {
+        let mut best = 0usize;
+        let mut closest = u32::MAX;
+        for (index, held) in palette.iter().enumerate() {
+            let mut distance = 0u32;
+            for channel in 0..4 {
+                let apart = i32::from(held[channel]) - i32::from(colour[channel]);
+                distance += (apart * apart) as u32;
+            }
+            if distance < closest {
+                closest = distance;
+                best = index;
+                if distance == 0 {
+                    break;
+                }
+            }
+        }
+        best
+    }
+
+    /// How far the picture moves when every pixel is replaced by its nearest
+    /// palette entry, as a mean squared error over all four channels.
+    pub fn error_against(raster: &Raster, palette: &[[u8; 4]]) -> f64 {
+        if palette.is_empty() || raster.pixels.is_empty() {
+            return f64::MAX;
+        }
+        let mut nearby: std::collections::HashMap<[u8; 4], usize> =
+            std::collections::HashMap::new();
+        let mut total = 0f64;
+        let mut counted = 0u64;
+        for pixel in raster.pixels.chunks_exact(4) {
+            let colour = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            let index = *nearby
+                .entry(colour)
+                .or_insert_with(|| nearest(palette, colour));
+            let held = palette[index];
+            for channel in 0..4 {
+                let apart = f64::from(held[channel]) - f64::from(colour[channel]);
+                total += apart * apart;
+                counted += 1;
+            }
+        }
+        if counted == 0 {
+            f64::MAX
+        } else {
+            total / counted as f64
+        }
+    }
+
+    fn mapped_to(raster: &Raster, palette: &[[u8; 4]]) -> Raster {
+        let mut nearby: std::collections::HashMap<[u8; 4], usize> =
+            std::collections::HashMap::new();
+        let mut pixels = Vec::with_capacity(raster.pixels.len());
+        for pixel in raster.pixels.chunks_exact(4) {
+            let colour = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            let index = *nearby
+                .entry(colour)
+                .or_insert_with(|| nearest(palette, colour));
+            pixels.extend_from_slice(&palette[index]);
+        }
+        Raster {
+            width: raster.width,
+            height: raster.height,
+            pixels,
+        }
+    }
+
     fn palette_depth(count: usize) -> u8 {
         match count {
             0..=2 => 1,
@@ -16047,6 +16302,29 @@ pub mod image {
             }
         }
         Ok(direct)
+    }
+
+    /// The same picture, written as small as it will go. Where it holds more
+    /// colours than a palette does, it is cut down to the ones it can spare —
+    /// but only while the difference stays under what an eye can find, so a
+    /// photograph whose gradients would band keeps every colour it came with.
+    ///
+    /// This is for pictures this build makes, the launcher icons above all.
+    /// [`encode`] stays exact, because a picture somebody handed us is theirs
+    /// and comes back out as it went in.
+    pub fn encode_smallest(raster: &Raster) -> Result<Vec<u8>, Diagnostic> {
+        let exact = encode(raster)?;
+        if palette_of(raster).is_some() {
+            return Ok(exact);
+        }
+        let palette = quantise(raster, LARGEST_PALETTE);
+        if palette.len() >= 2 && error_against(raster, &palette) <= INVISIBLE_ERROR {
+            let indexed = encode_indexed(&mapped_to(raster, &palette), &palette);
+            if indexed.len() < exact.len() {
+                return Ok(indexed);
+            }
+        }
+        Ok(exact)
     }
 
     fn encode_direct(raster: &Raster) -> Result<Vec<u8>, Diagnostic> {
@@ -16248,13 +16526,13 @@ pub mod image {
                 folder,
                 name: "ic_launcher",
                 edge: *edge,
-                bytes: encode(&square)?,
+                bytes: encode_smallest(&square)?,
             });
             out.push(Launcher {
                 folder,
                 name: "ic_launcher_round",
                 edge: *edge,
-                bytes: encode(&rounded(&square))?,
+                bytes: encode_smallest(&rounded(&square))?,
             });
         }
         Ok(out)
@@ -24784,6 +25062,16 @@ mod tests {
                 r#"<application android:label="X" android:allowBackup="false"><provider android:name="P" android:authorities="a" android:exported="true" android:grantUriPermissions="true" /></application>"#,
                 "EG005",
             ),
+            (
+                "legacy storage",
+                r#"<application android:label="X" android:allowBackup="false" android:requestLegacyExternalStorage="true" />"#,
+                "EG009",
+            ),
+            (
+                "task hijacking",
+                r#"<application android:label="X" android:allowBackup="false"><activity android:name="A" android:exported="true" android:launchMode="singleTask"><intent-filter><action android:name="x" /></intent-filter></activity></application>"#,
+                "EG011",
+            ),
         ];
 
         for (name, application, code) in cases {
@@ -24814,6 +25102,66 @@ mod tests {
                 "{name}: expected {code}, got {codes:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_shared_user_identity_and_a_census_of_every_application_are_refused() {
+        let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak"
+    android:sharedUserId="com.omni.shared">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
+    <application android:label="X" android:allowBackup="false" android:hasCode="false"
+        android:extractNativeLibs="false" />
+</manifest>"#;
+
+        let mut sink = Sink::new();
+        let root = super::xml::parse(manifest, "AndroidManifest.xml", &mut sink).unwrap();
+        let report = super::guard::inspect_manifest(&root);
+        assert_eq!(report.verdict(), super::guard::Verdict::Refused);
+
+        let codes: Vec<&str> = report.findings.iter().map(|one| one.code).collect();
+        assert!(codes.contains(&"EG008"), "{codes:?}");
+        assert!(codes.contains(&"EG010"), "{codes:?}");
+
+        for finding in &report.findings {
+            assert!(!finding.why.is_empty(), "{} says nothing", finding.code);
+            assert!(
+                !finding.remedy.is_empty(),
+                "{} offers nothing",
+                finding.code
+            );
+        }
+    }
+
+    #[test]
+    fn every_rule_the_policy_applies_has_a_code_of_its_own_and_a_way_out() {
+        // A manifest with nothing wrong: every rule runs and none of them fires.
+        let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.my.app">
+    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <application android:label="X" android:allowBackup="false" android:hasCode="false"
+        android:extractNativeLibs="false">
+        <activity android:name="A" android:exported="true" android:permission="p">
+            <intent-filter><action android:name="x" /></intent-filter>
+        </activity>
+    </application>
+</manifest>"#;
+        let mut sink = Sink::new();
+        let root = super::xml::parse(manifest, "AndroidManifest.xml", &mut sink).unwrap();
+        let report = super::guard::inspect_manifest(&root);
+        assert_eq!(
+            report.verdict(),
+            super::guard::Verdict::Passed,
+            "{:?}",
+            report.findings
+        );
+        assert!(
+            report.rules_applied >= 11,
+            "the policy applied {} rules",
+            report.rules_applied
+        );
+        eprintln!("policy: {} rules, all of them passed", report.rules_applied);
     }
 
     #[test]
@@ -26553,54 +26901,6 @@ mod tests {
     }
 
     #[test]
-    fn scratch_badging() {
-        let mut files = Vec::new();
-        for candidate in [
-            std::env::var("ANDROID_HOME").ok(),
-            Some("/usr/share/icons".to_string()),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            let path = std::path::PathBuf::from(candidate);
-            if path.is_dir() {
-                gather_png_files(&path, &mut files, 8);
-            }
-        }
-        let source = files
-            .into_iter()
-            .find(|f| super::image::read_png_file(f.to_str().unwrap_or_default()).is_ok())
-            .expect("a png");
-        let directory = temp_directory("omni-badging");
-        let root = directory.join("Badged");
-        let text = root.to_str().unwrap().to_string();
-        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
-        super::scaffold::set_icon(&text, source.to_str().unwrap()).unwrap();
-        let project = super::builder::from_project(&text).unwrap();
-        let key = super::rsa::generate(2048).unwrap();
-        let mut sink = Sink::new();
-        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
-        let apk = directory.join("badged.apk");
-        std::fs::write(&apk, &outcome.package).unwrap();
-        let aapt2 = find_build_tool("aapt2").expect("aapt2");
-        for args in [vec!["dump", "badging"], vec!["dump", "resources"]] {
-            let mut call = std::process::Command::new(&aapt2);
-            call.args(&args).arg(apk.to_str().unwrap());
-            let out = call.output().unwrap();
-            eprintln!("===== aapt2 {:?} (status {}) =====", args, out.status);
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines().take(60) {
-                eprintln!("{line}");
-            }
-            let err = String::from_utf8_lossy(&out.stderr);
-            if !err.trim().is_empty() {
-                eprintln!("--stderr-- {}", err.trim());
-            }
-        }
-        std::fs::remove_dir_all(&directory).ok();
-    }
-
-    #[test]
     fn the_image_the_developer_chose_becomes_the_icon_aapt2_reports() {
         let mut files = Vec::new();
         for candidate in [
@@ -27389,6 +27689,117 @@ mod tests {
         assert!(super::keystore::list(keys.to_str().unwrap()).is_empty());
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_picture_with_more_colours_than_a_palette_holds_is_cut_down_where_it_can_be() {
+        // Flat artwork photographed, or drawn with a soft brush: a few dozen
+        // colours the eye sees, and thousands the file holds because every pixel
+        // is off by a shade or two. The shades are what puts it past a palette,
+        // and they are also what nobody can see.
+        let edge = 192u32;
+        let mut pixels = Vec::with_capacity((edge * edge * 4) as usize);
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut wobble = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 33) % 5) as i16 - 2
+        };
+        for y in 0..edge {
+            for x in 0..edge {
+                let group = ((x / 24) + (y / 24) * 8) % 64;
+                let shade = |base: u32, by: i16| (base as i16 + by).clamp(0, 255) as u8;
+                pixels.extend_from_slice(&[
+                    shade(30 + group % 8 * 28, wobble()),
+                    shade(20 + group / 8 * 28, wobble()),
+                    shade(200 - group % 5 * 40, wobble()),
+                    255,
+                ]);
+            }
+        }
+        let raster = super::image::Raster {
+            width: edge,
+            height: edge,
+            pixels,
+        };
+
+        assert!(
+            super::image::palette_of(&raster).is_none(),
+            "this picture is meant to hold more colours than a palette does"
+        );
+
+        let palette = super::image::quantise(&raster, super::image::LARGEST_PALETTE);
+        assert!(palette.len() >= 2 && palette.len() <= super::image::LARGEST_PALETTE);
+        let error = super::image::error_against(&raster, &palette);
+        assert!(
+            error <= super::image::INVISIBLE_ERROR,
+            "the cut moved the picture by {error}, past what an eye cannot find"
+        );
+
+        let exact = super::image::encode(&raster).unwrap();
+        let written = super::image::encode_smallest(&raster).unwrap();
+        assert_eq!(
+            super::image::decode(&exact).unwrap().pixels,
+            raster.pixels,
+            "the encoder that is not asked to squeeze stays exact"
+        );
+        assert!(
+            written.len() * 2 < exact.len(),
+            "the squeeze must be worth having: {} against {}",
+            written.len(),
+            exact.len()
+        );
+
+        let read = super::image::decode(&written).unwrap();
+        assert_eq!(read.width, raster.width);
+        assert_eq!(read.height, raster.height);
+        assert!(
+            super::image::error_against(&read, &palette) <= super::image::INVISIBLE_ERROR,
+            "what was written reads back as the picture that went in"
+        );
+
+        eprintln!(
+            "quantise: thousands of colours became {}, {} bytes became {} ({}%), \
+             mean squared error {error:.3}",
+            palette.len(),
+            exact.len(),
+            written.len(),
+            written.len() * 100 / exact.len(),
+        );
+    }
+
+    #[test]
+    fn a_picture_a_palette_would_spoil_keeps_every_colour_it_came_with() {
+        // A smooth sweep across all three channels: cutting this to 256 colours
+        // bands it visibly, so the encoder must leave it alone.
+        let edge = 128u32;
+        let mut pixels = Vec::with_capacity((edge * edge * 4) as usize);
+        for y in 0..edge {
+            for x in 0..edge {
+                pixels.extend_from_slice(&[(x * 2) as u8, (y * 2) as u8, (x + y) as u8, 255]);
+            }
+        }
+        let raster = super::image::Raster {
+            width: edge,
+            height: edge,
+            pixels,
+        };
+
+        let palette = super::image::quantise(&raster, super::image::LARGEST_PALETTE);
+        let error = super::image::error_against(&raster, &palette);
+        assert!(
+            error > super::image::INVISIBLE_ERROR,
+            "a sweep this wide cannot survive 256 colours, yet the error was {error}"
+        );
+
+        let written = super::image::encode_smallest(&raster).unwrap();
+        let read = super::image::decode(&written).unwrap();
+        assert_eq!(
+            read.pixels, raster.pixels,
+            "a picture the palette would spoil is written exactly as it came"
+        );
+        eprintln!("quantise: refused, the cut would have moved the picture by {error:.1}");
     }
 
     #[test]
