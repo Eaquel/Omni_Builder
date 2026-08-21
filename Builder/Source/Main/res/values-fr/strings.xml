@@ -73,4 +73,7 @@
     <string name="omni_settings_watch_note">Tant qu’Android l’autorise, une vérification s’exécute toutes les quinze minutes et à chaque démarrage. Elle peut voir ce paquet remplacé sur le disque d’un appareil rooté. Elle ne peut pas voir un attaquant qui a retiré la vérification elle-même, et elle ne s’exécute pas quand Android a arrêté l’application.</string>
     <string name="omni_action_bundle">CONSTRUIRE L’AAB</string>
     <string name="omni_bundle_note">Un bundle porte le manifeste, le code, les ressources et l’icône, et n’est pas signé ici. Google Play signe les paquets qu’il en tire.</string>
+    <string name="omni_action_install">INSTALLER</string>
+    <string name="omni_action_share">PARTAGER</string>
+    <string name="omni_install_note">Android demande une fois s’il peut installer depuis ici. Cette application ne détient pas l’autorisation d’installer d’autres paquets, car sa propre politique de sécurité la refuse dans ce qu’elle construit.</string>
 </resources>

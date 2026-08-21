@@ -73,4 +73,7 @@
     <string name="omni_settings_watch_note">Finché Android lo consente, un controllo viene eseguito ogni quindici minuti e a ogni avvio. Può vedere questo pacchetto sostituito sul disco su un dispositivo con root. Non può vedere un attaccante che ha rimosso il controllo stesso, e non viene eseguito quando Android ha fermato l’applicazione.</string>
     <string name="omni_action_bundle">CREA AAB</string>
     <string name="omni_bundle_note">Un bundle porta il manifesto, il codice, le risorse e l’icona, e qui non viene firmato. Google Play firma i pacchetti che ne ricava.</string>
+    <string name="omni_action_install">INSTALLA</string>
+    <string name="omni_action_share">CONDIVIDI</string>
+    <string name="omni_install_note">Android chiede una volta se può installare da qui. Questa applicazione non ha il permesso di installare altri pacchetti, perché le sue stesse regole di sicurezza lo rifiutano in ciò che costruisce.</string>
 </resources>

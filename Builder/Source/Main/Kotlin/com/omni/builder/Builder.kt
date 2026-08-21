@@ -10,13 +10,18 @@ import android.app.job.JobService
 import android.content.ComponentName
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.ContentProvider
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Typeface
+import android.database.Cursor
+import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Build
+import android.os.ParcelFileDescriptor
+import android.provider.OpenableColumns
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
@@ -619,6 +624,85 @@ object Sentry {
         store(context).getString(LAST_STANDING, "").orEmpty()
 
     fun lastChecked(context: Context): Long = store(context).getLong(LAST_CHECKED, 0L)
+}
+
+class PackageProvider : ContentProvider() {
+
+    companion object {
+        const val PACKAGE_TYPE: String = "application/vnd.android.package-archive"
+        const val BUNDLE_TYPE: String = "application/octet-stream"
+
+        fun authority(context: Context): String = "${context.packageName}.packages"
+
+        fun uriFor(context: Context, file: File): Uri = Uri.Builder()
+            .scheme("content")
+            .authority(authority(context))
+            .appendPath(file.name)
+            .build()
+    }
+
+    override fun onCreate(): Boolean = true
+
+    private fun resolve(uri: Uri): File? {
+        val here = context ?: return null
+        val name = uri.lastPathSegment ?: return null
+        if (name.isEmpty() || name.contains('/') || name.contains('\\') || name.contains("..")) {
+            return null
+        }
+        val root = here.getExternalFilesDir(null) ?: here.filesDir
+        val file = File(root, name)
+        val inside = runCatching {
+            file.canonicalPath == File(root.canonicalPath, name).canonicalPath
+        }.getOrDefault(false)
+        return if (inside && file.isFile) file else null
+    }
+
+    override fun getType(uri: Uri): String =
+        if (uri.lastPathSegment?.endsWith(".apk") == true) PACKAGE_TYPE else BUNDLE_TYPE
+
+    override fun openFile(uri: Uri, mode: String): ParcelFileDescriptor? {
+        if (mode != "r") {
+            return null
+        }
+        val file = resolve(uri) ?: return null
+        return ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+    }
+
+    override fun query(
+        uri: Uri,
+        projection: Array<out String>?,
+        selection: String?,
+        selectionArgs: Array<out String>?,
+        sortOrder: String?,
+    ): Cursor? {
+        val file = resolve(uri) ?: return null
+        val columns = projection ?: arrayOf(
+            OpenableColumns.DISPLAY_NAME,
+            OpenableColumns.SIZE,
+        )
+        val cursor = MatrixCursor(columns, 1)
+        val row = arrayOfNulls<Any>(columns.size)
+        columns.forEachIndexed { index, column ->
+            row[index] = when (column) {
+                OpenableColumns.DISPLAY_NAME -> file.name
+                OpenableColumns.SIZE -> file.length()
+                else -> null
+            }
+        }
+        cursor.addRow(row)
+        return cursor
+    }
+
+    override fun insert(uri: Uri, values: ContentValues?): Uri? = null
+
+    override fun update(
+        uri: Uri,
+        values: ContentValues?,
+        selection: String?,
+        selectionArgs: Array<out String>?,
+    ): Int = 0
+
+    override fun delete(uri: Uri, selection: String?, selectionArgs: Array<out String>?): Int = 0
 }
 
 class SentryService : JobService() {
@@ -1782,7 +1866,43 @@ class BuilderActivity : Activity() {
                     trailing = outcome.guardVerdict ?: "?",
                 )
             )
-            outcome.path?.let { results.addView(mono(it)) }
+            outcome.path?.let {
+                results.addView(mono(it))
+                offer(File(it))
+            }
+        }
+    }
+
+    private fun offer(file: File) {
+        if (!file.isFile) {
+            return
+        }
+        val uri = PackageProvider.uriFor(this, file)
+        val type = contentResolver.getType(uri) ?: PackageProvider.PACKAGE_TYPE
+
+        results.addView(action(getString(R.string.omni_action_install)) {
+            val intent = Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, type)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            hand(intent)
+        })
+        results.addView(action(getString(R.string.omni_action_share), R.color.omni_accent) {
+            val intent = Intent(Intent.ACTION_SEND)
+                .setType(type)
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            hand(Intent.createChooser(intent, file.name))
+        })
+        results.addView(body(getString(R.string.omni_install_note)))
+    }
+
+    private fun hand(intent: Intent) {
+        runCatching { startActivity(intent) }.onFailure { why ->
+            OmniLog.event(LogLevel.WARN, "handoff", why.message ?: why.javaClass.simpleName)
+            results.addView(
+                banner(why.message ?: why.javaClass.simpleName, R.color.omni_error)
+            )
         }
     }
 
@@ -1807,7 +1927,9 @@ class BuilderActivity : Activity() {
                     trailing = "${made?.optLong("entries")}",
                 )
             )
-            results.addView(mono(document.optString("path")))
+            val path = document.optString("path")
+            results.addView(mono(path))
+            offer(File(path))
         }
     }
 

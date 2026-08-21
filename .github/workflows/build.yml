@@ -450,6 +450,15 @@ jobs:
           cargo test --locked a_project_is_a_manifest -- --nocapture
           cargo test --locked a_package_checks_itself -- --nocapture
 
+      - name: Hold this application to the policy it enforces on others
+        # A build tool that refuses a debuggable, backup-enabled or carelessly
+        # exported package while shipping one itself is not enforcing anything.
+        # This runs Omni_Guard over this application's own merged release
+        # manifest, with the same rules and the same verdict.
+        env:
+          OMNI_REQUIRE_SELF_POLICY: "1"
+        run: cargo test --locked this_application_meets_the_policy -- --nocapture
+
       - name: Hand a bundle this build wrote to bundletool
         # An Android App Bundle is protobuf, not binary XML, and nothing in this
         # tree can tell whether its own protobuf is right. bundleRelease is run

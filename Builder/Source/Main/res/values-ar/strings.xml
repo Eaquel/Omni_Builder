@@ -73,4 +73,7 @@
     <string name="omni_settings_watch_note">طالما سمح أندرويد بذلك، يجري فحص كل خمس عشرة دقيقة وعند كل تشغيل. يمكنه رؤية استبدال هذه الحزمة على القرص في جهاز مروَّت. ولا يمكنه رؤية مهاجم أزال الفحص نفسه، ولا يعمل عندما يوقف أندرويد التطبيق.</string>
     <string name="omni_action_bundle">بناء AAB</string>
     <string name="omni_bundle_note">تحمل الحزمة المجمّعة البيان والكود والموارد وأيقونة التطبيق، ولا تُوقَّع هنا. تتولى Google Play توقيع الحزم التي تنتجها منها.</string>
+    <string name="omni_action_install">تثبيت</string>
+    <string name="omni_action_share">مشاركة</string>
+    <string name="omni_install_note">يسأل أندرويد مرة واحدة عمّا إذا كان يُسمح بالتثبيت من هنا. لا يحمل هذا التطبيق إذن تثبيت حزم أخرى، لأن سياسته الأمنية نفسها ترفض هذا الإذن فيما يبنيه.</string>
 </resources>

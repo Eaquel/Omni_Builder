@@ -15,6 +15,12 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.Omni">
 
+        <provider
+            android:name=".PackageProvider"
+            android:authorities="${applicationId}.packages"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+
         <service
             android:name=".SentryService"
             android:exported="false"

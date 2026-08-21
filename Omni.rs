@@ -23459,6 +23459,66 @@ mod tests {
     }
 
     #[test]
+    fn this_application_meets_the_policy_it_enforces_on_what_it_builds() {
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        for variant in ["release"] {
+            for shape in ["merged_manifest", "merged_manifests"] {
+                let mut root = std::path::PathBuf::from("Builder/build/intermediates");
+                root.push(shape);
+                root.push(variant);
+                let Ok(entries) = std::fs::read_dir(&root) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path().join("AndroidManifest.xml");
+                    if path.is_file() {
+                        candidates.push(path);
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_SELF_POLICY").is_err(),
+                "OMNI_REQUIRE_SELF_POLICY is set but no merged manifest was found, so this \
+                 application was never held to the policy it enforces on what it builds"
+            );
+            eprintln!("self policy: no merged manifest has been produced here");
+            return;
+        }
+
+        for path in &candidates {
+            let text = std::fs::read_to_string(path).unwrap();
+            let mut sink = Sink::new();
+            let root = super::xml::parse(&text, "AndroidManifest.xml", &mut sink)
+                .unwrap_or_else(|| panic!("{} must parse", path.display()));
+            let report = super::guard::inspect_manifest(&root);
+            assert_eq!(
+                report.verdict(),
+                super::guard::Verdict::Passed,
+                "{} is refused by the policy this build applies to others:\n{}",
+                path.display(),
+                report
+                    .findings
+                    .iter()
+                    .map(|finding| format!("{}: {} {}", finding.code, finding.what, finding.remedy))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            assert!(report.rules_applied >= 7);
+        }
+
+        eprintln!(
+            "self policy: {} release manifest(s) of this application pass the rules it \
+             enforces. The debug manifest is deliberately not checked: it is marked \
+             debuggable, which is what EG001 exists to refuse, and it is never the artifact \
+             this build publishes.",
+            candidates.len()
+        );
+    }
+
+    #[test]
     fn a_name_with_xml_in_it_survives_the_manifest_intact() {
         let spec = super::scaffold::Spec {
             label: "Ali & <Veli> \"Co\"".to_string(),
