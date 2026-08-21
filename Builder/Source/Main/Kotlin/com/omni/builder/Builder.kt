@@ -252,7 +252,45 @@ class BuilderApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         OmniLog.install(this)
+        bindTheSharedKeyToThisDevice()
         Sentry.arm(this)
+    }
+
+    /**
+     * Ties the shared signing key to this installation on this device.
+     *
+     * The password on the shared key is written in this application and shown
+     * to whoever asks, because it is a way to start rather than a secret. What
+     * keeps the key itself worth having is that the file is also sealed with
+     * something that does not travel: the identifier Android gives this
+     * installation, which is different on every device and for every
+     * application signing key, and which is not in this source.
+     *
+     * A key that leaves this device -- in a backup, in a folder somebody
+     * shared, in any of the ways a file ends up somewhere it was not meant to
+     * -- does not open there, published password or not.
+     *
+     * If Android will not say, the Core is told so and falls back to the
+     * published password alone. That is the behaviour every version before
+     * this one had, so nothing stops working; it is simply not bound.
+     */
+    private fun bindTheSharedKeyToThisDevice() {
+        val identifier = runCatching {
+            Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull().orEmpty()
+
+        val answer = runCatching { Builder.nativeBindDevice(identifier) }.getOrNull()
+        val bound = answer?.contains("\"bound\":true") == true
+        OmniLog.event(
+            LogLevel.INFO,
+            "keys",
+            if (bound) {
+                "The shared key is sealed to this device as well as to its password."
+            } else {
+                "Android would not identify this device, so the shared key is sealed " +
+                    "to its password alone."
+            },
+        )
     }
 }
 
@@ -481,6 +519,8 @@ object Builder {
     external fun nativeCreateKey(directory: String, spec: String, keyPassword: CharArray): String
 
     external fun nativeDefaultKey(directory: String): String
+
+    external fun nativeBindDevice(secret: String): String
 
     external fun nativeListKeys(directory: String): String
 

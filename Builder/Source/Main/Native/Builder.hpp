@@ -25,6 +25,7 @@ char *omni_verify_self(const char *package_path,
 char *omni_create_key(const char *directory, const char *spec,
                       const char *password);
 
+char *omni_bind_device(const char *secret);
 char *omni_default_key(const char *directory);
 
 char *omni_list_keys(const char *directory);

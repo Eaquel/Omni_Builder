@@ -332,10 +332,10 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Symmetric cryptography",
         status: Status::Beta,
         directive_section: 30,
-        summary: "AES-256 in CBC with PKCS#7 padding, HMAC-SHA256 and HMAC-SHA512, and PBKDF2-HMAC-SHA256, each checked against the published vectors of FIPS-197, NIST SP 800-38A, RFC 4231 and RFC 6070.",
+        summary: "AES-256 in CBC with PKCS#7 padding, HMAC-SHA256 and HMAC-SHA512, and PBKDF2-HMAC-SHA256, each checked against the published vectors of FIPS-197, NIST SP 800-38A, RFC 4231 and RFC 6070. The substitution is computed in the field rather than read from a table, the reduction and the padding check are carried in masks rather than branches, and tags are compared to the last byte whatever the first one said, so what a key is changes what comes out and not how long it took or which memory was touched. All 256 bytes are held to the table the standard describes.",
         missing: &[
-            "Not constant-time: the S-box is a table lookup, so the cache timing of an encryption depends on the key.",
-            "CBC only. No GCM and no authenticated encryption, so a sealed file is checked by its padding and its contents, not by a tag.",
+            "Constant-time by construction and by reading, not by measurement: nothing here times the compiled code on a real device to confirm the compiler did not put a branch back.",
+            "CBC only, with authentication laid over it rather than built in. No GCM, and no single primitive that encrypts and authenticates in one pass.",
             "No key derivation other than PBKDF2, and no memory-hard function such as scrypt or Argon2.",
         ],
     },
@@ -343,12 +343,12 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Developer keystore",
         status: Status::Partial,
         directive_section: 25,
-        summary: "A signing key the developer makes, named, dated and sealed under their own password as PBES2 (PBKDF2-HMAC-SHA256 at 210000 iterations, AES-256-CBC). OpenSSL opens what this writes and refuses the wrong password. Listing a key needs no password; the certificate inside is checked against the key before either is used. A shared 4096-bit key is written once on first use so a package can be built without making one first.",
+        summary: "A signing key the developer makes, named, dated and sealed under their own password as PBES2 (PBKDF2-HMAC-SHA256 at 210000 iterations, AES-256-CBC). OpenSSL opens what this writes and refuses the wrong password. The container carries a tag over every byte of itself, taken with a key derived from the one the sealed blob is encrypted under, and the tag is checked between the derivation and the decryption so that an altered file never reaches a decryption at all. It also carries a plain digest, which proves nothing against anybody but tells a mistyped password apart from a damaged file. Listing a key needs no password; the certificate inside is checked against the key before either is used. A shared 4096-bit key is written once on first use so a package can be built without making one first, and it is sealed to the device it was made on as well as to its password.",
         missing: &[
-            "The shared key's password is a constant in this source, so it protects that key from nobody. It exists to get a first package built; anything published belongs under a key the developer made and only they know the password to.",
-            "The password protects the file and nothing more: the key is in ordinary memory while a package is signed, and Android's hardware-backed keystore is not used.",
+            "The shared key's password is a constant in this source and is meant to be: it is a way to start, not a secret. What keeps the file worth having is the device it is bound to, and that binding is only as good as the identifier Android gives an installation. Anything published belongs under a key the developer made and only they know the password to.",
+            "The password and the device protect the file and nothing more: the key is in ordinary memory while a package is signed, and Android's hardware-backed keystore is not used.",
             "No import and no export: a key made elsewhere cannot be brought in, and one made here cannot be taken out.",
-            "A sealed file carries no authentication tag, so a wrong password is told apart from a damaged file only by what comes out of the decryption.",
+            "Somebody who alters a file and recomputes its plain digest is reported as a wrong password rather than as an altered file. Nothing is decrypted for them either way, so this costs a message and not a guarantee.",
         ],
     },
     Subsystem {
@@ -11439,7 +11439,114 @@ pub mod cipher {
     use crate::hash::{Sha256, Sha512};
     use crate::FailureClass;
 
-    const fn build_sbox() -> [u8; 256] {
+    // Nothing below reads a table at an index a secret decides, and nothing
+    // below branches on one. A byte of the key or of the plaintext changes what
+    // comes out; it never changes which cache line is touched or which way a
+    // jump goes, and those are what a process sharing the machine can measure.
+    //
+    // The substitution is computed rather than looked up. It costs more than a
+    // table and it is worth it: the keys this seals are the ones every package
+    // built here is signed with, and they are unsealed on a device running
+    // whatever else the person installed.
+
+    /// All ones when the byte is zero, all zeros otherwise.
+    ///
+    /// A decision carried as a mask can be combined with `&` and `|` instead of
+    /// being taken as a jump, which is the whole point.
+    const fn ones_if_zero(value: u8) -> u8 {
+        // Anything but zero has the top bit set in `value | -value`.
+        let folded = value | value.wrapping_neg();
+        0u8.wrapping_sub((folded >> 7) ^ 1)
+    }
+
+    /// All ones when `left` is no greater than `right`.
+    const fn ones_if_at_most(left: u8, right: u8) -> u8 {
+        // Subtracting in a wider type leaves the borrow in bit eight, and a
+        // borrow is exactly the case where left was the larger of the two.
+        let difference = (right as u16).wrapping_sub(left as u16);
+        let borrowed = ((difference >> 8) & 1) as u8;
+        0u8.wrapping_sub(borrowed ^ 1)
+    }
+
+    /// True when two byte strings are the same, taking the same time whether
+    /// they part at the first byte or the last.
+    ///
+    /// A tag compared any other way tells whoever is guessing how much of their
+    /// guess was right, and a tag that can be guessed a byte at a time is not a
+    /// tag at all.
+    pub fn same_bytes(left: &[u8], right: &[u8]) -> bool {
+        if left.len() != right.len() {
+            return false;
+        }
+        let mut differs = 0u8;
+        for (a, b) in left.iter().zip(right.iter()) {
+            differs |= a ^ b;
+        }
+        differs == 0
+    }
+
+    /// Doubling in the field, with the reduction applied as a mask.
+    const fn xtime(value: u8) -> u8 {
+        let overflowed = 0u8.wrapping_sub(value >> 7);
+        (value << 1) ^ (0x1b & overflowed)
+    }
+
+    /// Multiplication in the field AES is built on.
+    ///
+    /// All eight steps run whatever the operands are. The bit being tested
+    /// becomes a mask of ones or zeros rather than a branch, and so does the
+    /// reduction that follows an overflow.
+    const fn multiply(value: u8, by: u8) -> u8 {
+        let mut result = 0u8;
+        let mut a = value;
+        let mut b = by;
+        let mut step = 0;
+        while step < 8 {
+            let wanted = 0u8.wrapping_sub(b & 1);
+            result ^= a & wanted;
+            a = xtime(a);
+            b >>= 1;
+            step += 1;
+        }
+        result
+    }
+
+    /// The multiplicative inverse, computed as `x` to the 254th, which is what
+    /// the inverse is in a field of 256 elements. Zero has none and comes back
+    /// zero, which is what the substitution asks for anyway.
+    const fn inverse_in_field(x: u8) -> u8 {
+        let x2 = multiply(x, x);
+        let x3 = multiply(x2, x);
+        let x6 = multiply(x3, x3);
+        let x12 = multiply(x6, x6);
+        let x15 = multiply(x12, x3);
+        let x30 = multiply(x15, x15);
+        let x60 = multiply(x30, x30);
+        let x120 = multiply(x60, x60);
+        let x240 = multiply(x120, x120);
+        let x252 = multiply(x240, x12);
+        multiply(x252, x2)
+    }
+
+    /// The AES substitution: invert in the field, then the affine map.
+    const fn substitute(x: u8) -> u8 {
+        let b = inverse_in_field(x);
+        b ^ b.rotate_left(1) ^ b.rotate_left(2) ^ b.rotate_left(3) ^ b.rotate_left(4) ^ 0x63
+    }
+
+    /// The substitution undone: the affine map undone, then invert in the field.
+    const fn unsubstitute(x: u8) -> u8 {
+        let b = x.rotate_left(1) ^ x.rotate_left(3) ^ x.rotate_left(6) ^ 0x05;
+        inverse_in_field(b)
+    }
+
+    /// The substitution as a table, built the way the standard describes it.
+    ///
+    /// This is here to be compared against, not to be used: a test walks all
+    /// 256 bytes through both and holds them to the same answer. Nothing that
+    /// touches a key reads it.
+    #[cfg(test)]
+    pub fn table_substitution() -> ([u8; 256], [u8; 256]) {
         let mut sbox = [0u8; 256];
         sbox[0] = 0x63;
         let mut p: u8 = 1;
@@ -11458,38 +11565,17 @@ pub mod cipher {
                 break;
             }
         }
-        sbox
-    }
-
-    const fn build_inverse(sbox: &[u8; 256]) -> [u8; 256] {
         let mut inverse = [0u8; 256];
-        let mut index = 0usize;
-        while index < 256 {
-            inverse[sbox[index] as usize] = index as u8;
-            index += 1;
+        for (index, value) in sbox.iter().enumerate() {
+            inverse[*value as usize] = index as u8;
         }
-        inverse
+        (sbox, inverse)
     }
 
-    static SBOX: [u8; 256] = build_sbox();
-    static INVERSE_SBOX: [u8; 256] = build_inverse(&SBOX);
-
-    fn xtime(value: u8) -> u8 {
-        (value << 1) ^ if value & 0x80 != 0 { 0x1b } else { 0 }
-    }
-
-    fn multiply(value: u8, by: u8) -> u8 {
-        let mut result = 0u8;
-        let mut a = value;
-        let mut b = by;
-        while b != 0 {
-            if b & 1 != 0 {
-                result ^= a;
-            }
-            a = xtime(a);
-            b >>= 1;
-        }
-        result
+    /// What the computed substitution answers, for a test to compare.
+    #[cfg(test)]
+    pub fn computed_substitution(x: u8) -> (u8, u8) {
+        (substitute(x), unsubstitute(x))
     }
 
     pub const KEY_BYTES: usize = 32;
@@ -11508,18 +11594,18 @@ pub mod cipher {
             let mut temp = words[index - 1];
             if index % nk == 0 {
                 temp = [
-                    SBOX[temp[1] as usize] ^ rcon,
-                    SBOX[temp[2] as usize],
-                    SBOX[temp[3] as usize],
-                    SBOX[temp[0] as usize],
+                    substitute(temp[1]) ^ rcon,
+                    substitute(temp[2]),
+                    substitute(temp[3]),
+                    substitute(temp[0]),
                 ];
                 rcon = xtime(rcon);
             } else if index % nk == 4 {
                 temp = [
-                    SBOX[temp[0] as usize],
-                    SBOX[temp[1] as usize],
-                    SBOX[temp[2] as usize],
-                    SBOX[temp[3] as usize],
+                    substitute(temp[0]),
+                    substitute(temp[1]),
+                    substitute(temp[2]),
+                    substitute(temp[3]),
                 ];
             }
             for byte in 0..4 {
@@ -11541,7 +11627,7 @@ pub mod cipher {
         add_round_key(block, words, 0);
         for round in 1..=ROUNDS {
             for byte in block.iter_mut() {
-                *byte = SBOX[*byte as usize];
+                *byte = substitute(*byte);
             }
             shift_rows(block);
             if round != ROUNDS {
@@ -11556,7 +11642,7 @@ pub mod cipher {
         for round in (1..=ROUNDS).rev() {
             inverse_shift_rows(block);
             for byte in block.iter_mut() {
-                *byte = INVERSE_SBOX[*byte as usize];
+                *byte = unsubstitute(*byte);
             }
             add_round_key(block, words, round - 1);
             if round != 1 {
@@ -11671,8 +11757,26 @@ pub mod cipher {
             previous = held;
         }
 
-        let padding = *out.last().unwrap() as usize;
-        if padding == 0 || padding > BLOCK_BYTES || padding > out.len() {
+        // The padding is read without letting how much of it was right show in
+        // what this does. Every byte of the last block is examined either way,
+        // and each answer is folded into a mask rather than taken as a branch.
+        // Only the one decision that has to be made — return the plaintext or
+        // refuse — is a branch, and it is the same branch for every failure.
+        let length = out.len();
+        let stated = out[length - 1];
+        let last_block = length - BLOCK_BYTES;
+
+        let mut wrong = ones_if_zero(stated);
+        wrong |= !ones_if_at_most(stated, BLOCK_BYTES as u8);
+        for index in 0..BLOCK_BYTES {
+            let from_the_end = (BLOCK_BYTES - index) as u8;
+            let covered = ones_if_at_most(from_the_end, stated);
+            let differs = !ones_if_zero(out[last_block + index] ^ stated);
+            wrong |= covered & differs;
+        }
+
+        if wrong != 0 {
+            out.iter_mut().for_each(|byte| *byte = 0);
             return Err(fail(
                 "EK002",
                 "The password is wrong, or the data is not what it claims.",
@@ -11681,19 +11785,7 @@ pub mod cipher {
                 "Nothing is returned from a decryption whose padding does not check out.",
             ));
         }
-        if !out[out.len() - padding..]
-            .iter()
-            .all(|byte| *byte as usize == padding)
-        {
-            return Err(fail(
-                "EK002",
-                "The password is wrong, or the data is not what it claims.",
-            )
-            .with_suggestion(
-                "Nothing is returned from a decryption whose padding does not check out.",
-            ));
-        }
-        out.truncate(out.len() - padding);
+        out.truncate(length - stated as usize);
         Ok(out)
     }
 
@@ -12018,7 +12110,30 @@ pub mod rsa {
 
     pub const KEY_ITERATIONS: u32 = 210_000;
 
+    /// What the tag on a key container is taken with.
+    ///
+    /// It comes out of the key the sealed blob is already encrypted under, so
+    /// forging a tag costs exactly what unsealing costs. Deriving it from the
+    /// password by any cheaper route would turn the tag into somewhere to test
+    /// password guesses without paying for the unsealing, which is the whole
+    /// thing the iteration count is there to make expensive.
+    pub fn container_tag_key(wrapping: &[u8; 32]) -> [u8; 32] {
+        crate::cipher::hmac_sha256(wrapping, CONTAINER_TAG_DOMAIN)
+    }
+
+    const CONTAINER_TAG_DOMAIN: &[u8] = b"Omni_Builder key container tag, version 2";
+
     pub fn seal_pkcs8(key: &PrivateKey, password: &str) -> Result<Vec<u8>, Diagnostic> {
+        seal_pkcs8_tagging(key, password).map(|(sealed, _)| sealed)
+    }
+
+    /// Seals a key and hands back the tag key alongside it, both out of the one
+    /// derivation. A caller that is about to write a container needs both, and
+    /// deriving twice would double what the person waits for.
+    pub fn seal_pkcs8_tagging(
+        key: &PrivateKey,
+        password: &str,
+    ) -> Result<(Vec<u8>, [u8; 32]), Diagnostic> {
         if password.chars().count() < 8 {
             return Err(fail(
                 "ER040",
@@ -12070,7 +12185,10 @@ pub mod rsa {
         let mut outer = Vec::new();
         outer.extend_from_slice(&der::encode_element(der::tag::SEQUENCE, &algorithm));
         outer.extend_from_slice(&der::encode_element(der::tag::OCTET_STRING, &sealed));
-        Ok(der::encode_element(der::tag::SEQUENCE, &outer))
+        Ok((
+            der::encode_element(der::tag::SEQUENCE, &outer),
+            container_tag_key(&wrapping),
+        ))
     }
 
     fn integer_bytes(value: u32) -> Vec<u8> {
@@ -12084,6 +12202,22 @@ pub mod rsa {
     }
 
     pub fn open_pkcs8(sealed: &[u8], password: &str) -> Result<PrivateKey, Diagnostic> {
+        open_pkcs8_authenticating(sealed, password, |_| Ok(()))
+    }
+
+    /// Opens a sealed key, letting the caller check whatever the sealed blob was
+    /// carried inside before anything is decrypted.
+    ///
+    /// The check is handed the tag key and runs after the derivation and before
+    /// the decryption, which is the order that matters: a container whose tag
+    /// does not hold has been altered, and altered ciphertext should never
+    /// reach a decryption at all. This is also the only way to pay for the
+    /// derivation once rather than twice.
+    pub fn open_pkcs8_authenticating(
+        sealed: &[u8],
+        password: &str,
+        check: impl FnOnce(&[u8; 32]) -> Result<(), Diagnostic>,
+    ) -> Result<PrivateKey, Diagnostic> {
         let mut outer = der::Reader::new(sealed, 0);
         let sequence = outer.expect(der::tag::SEQUENCE)?;
         let mut fields = sequence.reader();
@@ -12148,6 +12282,7 @@ pub mod rsa {
         let derived = crate::cipher::pbkdf2_sha256(password.as_bytes(), &salt, iterations, 32)?;
         let mut wrapping = [0u8; 32];
         wrapping.copy_from_slice(&derived);
+        check(&container_tag_key(&wrapping))?;
         let plain = crate::cipher::decrypt_cbc(&wrapping, &iv, sealed_data)?;
         parse_pkcs8(&plain)
     }
@@ -18259,7 +18394,21 @@ pub mod keystore {
     use crate::FailureClass;
 
     pub const MAGIC: &[u8; 8] = b"OMNIKEY1";
-    pub const CONTAINER_VERSION: u32 = 1;
+
+    /// Version two carries a tag over everything before it, taken with a key
+    /// derived from the one the sealed blob is encrypted under. Version one
+    /// carried no tag, and a file altered in place was found only later, by the
+    /// padding of a decryption that should never have been attempted or by the
+    /// certificate failing to match the key. Both of those are real checks and
+    /// both still run; neither is a substitute for knowing, before anything is
+    /// decrypted, that the bytes are the ones that were written.
+    ///
+    /// A version one file is still read, and is written back as version two the
+    /// first time it is opened with the password that made it.
+    pub const CONTAINER_VERSION: u32 = 2;
+    pub const OLDEST_CONTAINER_VERSION: u32 = 1;
+    pub const TAG_BYTES: usize = 32;
+    pub const CHECKSUM_BYTES: usize = 32;
     pub const EXTENSION: &str = "omnikey";
     pub const SHORTEST_PASSWORD: usize = 8;
     pub const SMALLEST_KEY_BITS: u32 = 2048;
@@ -18280,6 +18429,90 @@ pub mod keystore {
     pub const DEFAULT_VALIDITY_YEARS: u32 = 10;
     pub const DEFAULT_BITS: u32 = LARGEST_KEY_BITS;
     pub const DEFAULT_PASSWORD: &str = "My_App_Builder";
+
+    /// What the shared key is bound to, as far as this process is concerned.
+    ///
+    /// The application sets it once, at start, from something that belongs to
+    /// the installation and the device rather than to this build's source.
+    /// Everything else about a key is a parameter of the call that needs it;
+    /// this is not, because it is not a property of any one call. It is a
+    /// property of where the process is running, and threading it through every
+    /// signature would only be more places to forget it.
+    ///
+    /// Left unset — on a machine that is not a phone, which is where the tests
+    /// run — the shared key is sealed under the published password alone, and
+    /// says so.
+    static DEVICE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+    const SHARED_BINDING_DOMAIN: &[u8] = b"Omni_Builder shared key, bound to this device";
+
+    /// Binds the shared key to this device. Setting it again replaces it, which
+    /// is what has to happen when an installation is restored somewhere else:
+    /// the shared key there is a different key and is made afresh.
+    pub fn bind_device(secret: &str) {
+        let held = secret.trim();
+        let mut slot = DEVICE.write().unwrap_or_else(|held| held.into_inner());
+        *slot = (!held.is_empty()).then(|| held.to_string());
+    }
+
+    /// Whether the shared key on this machine is bound to anything.
+    pub fn device_is_bound() -> bool {
+        DEVICE.read().map(|held| held.is_some()).unwrap_or_default()
+    }
+
+    /// The password the shared key is really sealed under.
+    ///
+    /// What a person is shown is [`DEFAULT_PASSWORD`], and that stays true: the
+    /// shared key is a way to start rather than a secret, and the interface
+    /// says as much in every language it speaks. What the file is sealed with
+    /// is that password bound to the device it was made on, so the file is
+    /// worth nothing anywhere else. A key that leaves this device — in a
+    /// backup, in a folder somebody shared, in any of the ways a file goes
+    /// somewhere it was not meant to — does not open there.
+    pub fn shared_password() -> String {
+        shared_password_for(
+            &DEVICE
+                .read()
+                .ok()
+                .and_then(|held| held.clone())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// The same, for a device named outright rather than the one this process
+    /// was told about. Nothing about it depends on ambient state, which is what
+    /// lets it be reasoned about and tested.
+    ///
+    /// An empty device is a machine that would not say which one it is. There
+    /// the shared key falls back to the published password alone, which is what
+    /// it always was; it is simply not bound.
+    pub fn shared_password_for(device: &str) -> String {
+        if device.is_empty() {
+            return DEFAULT_PASSWORD.to_string();
+        }
+        let mark = crate::cipher::hmac_sha256(device.as_bytes(), SHARED_BINDING_DOMAIN);
+        let mut out = String::with_capacity(DEFAULT_PASSWORD.len() + 1 + mark.len() * 2);
+        out.push_str(DEFAULT_PASSWORD);
+        out.push(':');
+        for byte in mark {
+            out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+            out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
+        }
+        out
+    }
+
+    /// The password a key at this path is sealed under, given what was typed.
+    ///
+    /// Only the shared key is bound, and only when what was offered for it is
+    /// the published password. A password somebody chose is theirs and passes
+    /// through untouched, whatever the key is called.
+    fn effective_password(path: &str, password: &str) -> String {
+        if is_default(path) && password == DEFAULT_PASSWORD {
+            shared_password()
+        } else {
+            password.to_string()
+        }
+    }
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
@@ -18532,33 +18765,121 @@ pub mod keystore {
         Ok(part)
     }
 
-    pub fn encode(alias: &str, certificate: &[u8], sealed: &[u8]) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32 + certificate.len() + sealed.len());
+    /// A key container, read but not yet vouched for.
+    ///
+    /// Nothing here has been checked against the tag: reading is what a listing
+    /// does, and a listing has no password. What the tag covers is recorded so
+    /// that whoever does have the password can check it without parsing again.
+    #[derive(Clone, Debug)]
+    pub struct Container<'a> {
+        pub version: u32,
+        pub alias: String,
+        pub certificate: &'a [u8],
+        pub sealed: &'a [u8],
+        /// Absent on a version one file, which carried none.
+        pub tag: Option<&'a [u8]>,
+        /// Absent on a version one file, which carried none.
+        pub checksum: Option<&'a [u8]>,
+        /// The bytes from the start of the file that the tag is taken over.
+        pub covered: usize,
+        /// The bytes from the start of the file that the checksum is taken over.
+        pub summed: usize,
+    }
+
+    impl Container<'_> {
+        /// Whether this file can be shown to be the one that was written, given
+        /// the password. A version one file cannot; it is upgraded on first use.
+        pub fn is_authenticated(&self) -> bool {
+            self.tag.is_some()
+        }
+
+        /// Whether the file still adds up to what it says it does.
+        ///
+        /// This asks nothing of the password and proves nothing against anybody
+        /// who set out to alter the file, since the checksum can be recomputed
+        /// as easily as it can be read. What it does catch is a file that got
+        /// damaged rather than edited, and it is what lets a wrong password be
+        /// reported as a wrong password.
+        pub fn adds_up(&self, whole: &[u8]) -> bool {
+            match self.checksum {
+                None => true,
+                Some(recorded) => crate::cipher::same_bytes(
+                    recorded,
+                    crate::hash::sha256(&whole[..self.summed]).as_bytes(),
+                ),
+            }
+        }
+    }
+
+    pub fn encode(alias: &str, certificate: &[u8], sealed: &[u8], tag_key: &[u8; 32]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(96 + certificate.len() + sealed.len());
         out.extend_from_slice(MAGIC);
         out.extend_from_slice(&CONTAINER_VERSION.to_le_bytes());
         put(&mut out, alias.as_bytes());
         put(&mut out, certificate);
         put(&mut out, sealed);
+
+        // A plain digest of everything above, which anybody can recompute and
+        // therefore anybody can forge. It is not a security control and nothing
+        // is trusted because of it. It is here to tell two true sentences
+        // apart: the tag below fails both when a password is wrong and when a
+        // file has changed, and telling somebody their key has been altered
+        // when they only mistyped would be a cruel way to be right half the
+        // time. This says which happened, and the tag still decides whether
+        // anything is decrypted.
+        let summary = crate::hash::sha256(&out);
+        put(&mut out, summary.as_bytes());
+
+        let tag = crate::cipher::hmac_sha256(tag_key, &out);
+        put(&mut out, &tag);
         out
     }
 
-    pub fn parts(data: &[u8]) -> Result<(String, &[u8], &[u8]), Diagnostic> {
+    pub fn parts(data: &[u8]) -> Result<Container<'_>, Diagnostic> {
         if data.len() < 12 || &data[..8] != MAGIC {
             return Err(fail("EY032", "The file is not an Omni signing key.")
                 .with_suggestion("A key file made by this build starts with OMNIKEY1."));
         }
         let version = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
-        if version != CONTAINER_VERSION {
+        if !(OLDEST_CONTAINER_VERSION..=CONTAINER_VERSION).contains(&version) {
             return Err(
                 fail("EY033", "The key file was written by a different version.")
                     .with_context(format!("File: version {version}"))
-                    .with_context(format!("This build: version {CONTAINER_VERSION}")),
+                    .with_context(format!(
+                        "This build reads: version {OLDEST_CONTAINER_VERSION} to \
+                         {CONTAINER_VERSION}"
+                    )),
             );
         }
         let mut at = 12;
         let alias = take(data, &mut at)?;
         let certificate = take(data, &mut at)?;
         let sealed = take(data, &mut at)?;
+
+        let summed = at;
+        let (checksum, tag) = if version >= 2 {
+            let checksum = take(data, &mut at)?;
+            if checksum.len() != CHECKSUM_BYTES {
+                return Err(
+                    fail("EY039", "The checksum on the key file is the wrong size.")
+                        .with_context(format!("Found: {} bytes", checksum.len()))
+                        .with_context(format!("Expected: {CHECKSUM_BYTES} bytes")),
+                );
+            }
+            let covered_now = at;
+            let tag = take(data, &mut at)?;
+            if tag.len() != TAG_BYTES {
+                return Err(fail("EY038", "The tag on the key file is the wrong size.")
+                    .with_context(format!("Found: {} bytes", tag.len()))
+                    .with_context(format!("Expected: {TAG_BYTES} bytes")));
+            }
+            (Some(checksum), Some((tag, covered_now)))
+        } else {
+            (None, None)
+        };
+        let covered = tag.map(|(_, at)| at).unwrap_or(summed);
+        let tag = tag.map(|(tag, _)| tag);
+
         if at != data.len() {
             return Err(
                 fail("EY034", "The key file carries bytes after its last part.")
@@ -18568,7 +18889,16 @@ pub mod keystore {
         let alias = std::str::from_utf8(alias)
             .map_err(|_| fail("EY035", "The alias in the key file is not text."))?
             .to_string();
-        Ok((alias, certificate, sealed))
+        Ok(Container {
+            version,
+            alias,
+            certificate,
+            sealed,
+            tag,
+            checksum,
+            covered,
+            summed,
+        })
     }
 
     fn read_file(path: &str) -> Result<Vec<u8>, Diagnostic> {
@@ -18635,8 +18965,9 @@ pub mod keystore {
                 now_seconds + request.validity_days as i64 * SECONDS_PER_DAY,
             ),
         )?;
-        let sealed = rsa::seal_pkcs8(&key, password)?;
-        let container = encode(&request.alias, &certificate, &sealed);
+        let (sealed, tag_key) =
+            rsa::seal_pkcs8_tagging(&key, &effective_password(&path, password))?;
+        let container = encode(&request.alias, &certificate, &sealed, &tag_key);
 
         std::fs::create_dir_all(directory).map_err(|why| {
             fail("EY041", "The keys folder could not be made.")
@@ -18652,10 +18983,27 @@ pub mod keystore {
         record_from(&request.alias, &path, &certificate)
     }
 
+    /// The tag key for a container, derived from the password the way the
+    /// container's own tag was.
+    ///
+    /// A caller that changes something a container carries — an alias, say —
+    /// has to write a tag that matches what it wrote, and this is where that
+    /// key comes from. It costs a full unlock, because it is a full unlock: the
+    /// derivation is the expensive part and there is no cheaper honest route to
+    /// this key.
+    pub fn tag_key_for(sealed: &[u8], password: &str) -> Result<[u8; 32], Diagnostic> {
+        let mut found = [0u8; 32];
+        rsa::open_pkcs8_authenticating(sealed, password, |derived| {
+            found = *derived;
+            Ok(())
+        })?;
+        Ok(found)
+    }
+
     pub fn describe(path: &str) -> Result<Record, Diagnostic> {
         let data = read_file(path)?;
-        let (alias, certificate, _) = parts(&data)?;
-        record_from(&alias, path, certificate)
+        let container = parts(&data)?;
+        record_from(&container.alias, path, container.certificate)
     }
 
     pub fn is_default(path: &str) -> bool {
@@ -18717,8 +19065,62 @@ pub mod keystore {
 
     pub fn unlock(path: &str, password: &str) -> Result<Unlocked, Diagnostic> {
         let data = read_file(path)?;
-        let (alias, certificate, sealed) = parts(&data)?;
-        let key = rsa::open_pkcs8(sealed, password).map_err(|error| {
+        let container = parts(&data)?;
+        let alias = container.alias.clone();
+        let certificate = container.certificate;
+        let sealed = container.sealed;
+
+        // The tag is checked between the derivation and the decryption. A file
+        // that has been altered never reaches the decryption at all, which is
+        // the point of putting the tag over the ciphertext rather than under
+        // it. A version one file has no tag; it is opened the old way and
+        // written back with one below.
+        // The plain checksum first, which needs no password. A file that got
+        // damaged is caught here, before anybody is asked to wait for a
+        // derivation that cannot succeed.
+        if !container.adds_up(&data) {
+            return Err(
+                fail("EY051", "The key file is not the one that was written.")
+                    .with_context(format!("Path: {path}"))
+                    .with_suggestion(
+                        "The bytes no longer add up to what the file itself records. Nothing here \
+                     is decrypted once that fails: signing with an altered key would produce \
+                     a package no device accepts.",
+                    ),
+            );
+        }
+
+        let tag = container.tag;
+        let covered = &data[..container.covered];
+        let mut tag_key = [0u8; 32];
+
+        let offered = effective_password(path, password);
+        let key = rsa::open_pkcs8_authenticating(sealed, &offered, |derived| {
+            tag_key = *derived;
+            let Some(tag) = tag else { return Ok(()) };
+            if crate::cipher::same_bytes(tag, &crate::cipher::hmac_sha256(derived, covered)) {
+                return Ok(());
+            }
+            // The file adds up, so it is the one that was written and this is a
+            // password that does not open it. Somebody who altered the file and
+            // recomputed its checksum lands here too and is told the same
+            // thing; nothing is decrypted for them either, which is what
+            // actually matters. Being wrong about which of the two it was costs
+            // nothing. Being wrong the other way would tell a person their key
+            // had been tampered with every time they mistyped.
+            Err(fail("EY021", "The password did not open this key.").with_context(format!(
+                "Path: {path}"
+            )))
+        })
+        .map_err(|error| {
+            if error.code == "EY021" {
+                return error.with_suggestion(
+                    "Nothing in this build can recover a signing key from a lost password, \
+                     and nothing in it records the password anywhere. If this is a password \
+                     you are sure of, then the file is not the one it was written as. \
+                     Nothing is decrypted either way.",
+                );
+            }
             fail("EY021", "The password did not open this key.")
                 .with_context(format!("Path: {path}"))
                 .with_context(format!("Reported: {} {}", error.code, error.message))
@@ -18742,6 +19144,20 @@ pub mod keystore {
         }
 
         let record = record_from(&alias, path, certificate)?;
+
+        // A file written before there were tags is written back with one, now
+        // that the password that made it has been shown. It goes out beside the
+        // original and is moved over it, so a machine that stops in the middle
+        // still has a key afterwards.
+        if !container.is_authenticated() {
+            let upgraded = encode(&alias, certificate, sealed, &tag_key);
+            let beside = format!("{path}.upgrading");
+            if std::fs::write(&beside, &upgraded).is_ok() && std::fs::rename(&beside, path).is_err()
+            {
+                std::fs::remove_file(&beside).ok();
+            }
+        }
+
         Ok(Unlocked {
             key,
             certificate: certificate.to_vec(),
@@ -20172,6 +20588,29 @@ pub mod ffi {
                 }
                 Err(error) => write_failure(&mut w, "created", &error),
             }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Tells the Core which device it is running on, so the shared key can be
+    /// bound to it. Called once, at start, before any key is made or opened.
+    ///
+    /// What comes in is not a password and is never treated as one. It is
+    /// mixed into the shared key's seal so that the file is worth nothing off
+    /// this device, and it is never written anywhere, never returned, and never
+    /// put in a log.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_bind_device(secret: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(secret) = text_from(secret) else {
+                return std::ptr::null_mut();
+            };
+            crate::keystore::bind_device(&secret);
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_bool("bound", crate::keystore::device_is_bound());
             w.end_object();
             hand_back(w)
         });
@@ -24904,6 +25343,172 @@ mod tests {
         );
     }
 
+    /// The shared key's binding is one thing for the whole process, because the
+    /// device is one thing for the whole process. Tests that move it have to
+    /// take turns, or one will pull it out from under another.
+    static SHARED_KEY_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn the_shared_key_is_sealed_to_the_device_as_well_as_to_its_password() {
+        // What a person is shown never changes: the published password is the
+        // published password, and the interface is not lying when it says so.
+        assert_eq!(
+            super::keystore::shared_password_for(""),
+            super::keystore::DEFAULT_PASSWORD,
+            "a machine that will not name itself falls back to what it always was"
+        );
+
+        // Two devices, two different seals, and each one stable.
+        let here = super::keystore::shared_password_for("a1b2c3d4e5f60718");
+        let there = super::keystore::shared_password_for("a1b2c3d4e5f60719");
+        assert_ne!(here, there, "one byte apart must not seal the same");
+        assert_eq!(
+            here,
+            super::keystore::shared_password_for("a1b2c3d4e5f60718")
+        );
+        assert_ne!(here, super::keystore::DEFAULT_PASSWORD);
+        assert!(
+            here.starts_with(super::keystore::DEFAULT_PASSWORD),
+            "what the person types is still in there; what follows is the device"
+        );
+        assert!(here.len() > super::keystore::DEFAULT_PASSWORD.len() + 32);
+
+        let _turn = SHARED_KEY_TURN
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let directory = temp_directory("omni-keys-bound");
+        let folder = directory.to_str().unwrap().to_string();
+
+        // Made on one device.
+        super::keystore::bind_device("a1b2c3d4e5f60718");
+        assert!(super::keystore::device_is_bound());
+        let (made, created) = super::keystore::ensure_default(&folder, 1_787_000_000)
+            .expect("the shared key must be made");
+        assert!(created);
+        assert!(super::keystore::is_default(&made.path));
+
+        // On that device, the published password is all a person needs; the
+        // binding happens underneath and they never see it.
+        super::keystore::unlock(&made.path, super::keystore::DEFAULT_PASSWORD)
+            .expect("on the device that made it, the shared key opens");
+
+        // Carried to another device, it is worth nothing. This is the whole
+        // point: the password being public stops mattering once the file alone
+        // is not enough.
+        super::keystore::bind_device("a1b2c3d4e5f60719");
+        let refused = super::keystore::unlock(&made.path, super::keystore::DEFAULT_PASSWORD)
+            .expect_err("somewhere else, the same file must not open");
+        assert!(
+            refused.code == "EY051" || refused.code == "EY021",
+            "refused with {}: {}",
+            refused.code,
+            refused.message
+        );
+
+        // And the published password on its own does not open it either, which
+        // is what anybody reading this source would try first.
+        super::keystore::bind_device("");
+        assert!(!super::keystore::device_is_bound());
+        super::keystore::unlock(&made.path, super::keystore::DEFAULT_PASSWORD)
+            .expect_err("the published password alone must not open a bound key");
+
+        // Nothing said about the key anywhere gives the binding away.
+        let listed = super::keystore::list(&folder);
+        let mut said = String::new();
+        for record in &listed {
+            said.push_str(&format!("{record:?}"));
+        }
+        assert!(!said.contains(&here), "the seal must not be reported");
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("keystore: the shared key opens on the device that made it and nowhere else");
+    }
+
+    #[test]
+    fn a_key_written_before_there_were_tags_still_opens_and_is_given_one() {
+        let directory = temp_directory("omni-keys-upgrade");
+        let folder = directory.to_str().unwrap().to_string();
+        let password = "a password long enough";
+        let request = super::keystore::Request {
+            alias: "older".to_string(),
+            common_name: "Older".to_string(),
+            organisation: "Omni".to_string(),
+            country: "TR".to_string(),
+            validity_days: 400,
+            bits: 2048,
+        };
+        let made = super::keystore::create(&folder, &request, password, 1_787_000_000).unwrap();
+        let current = std::fs::read(&made.path).unwrap();
+        let parsed = super::keystore::parts(&current).unwrap();
+        assert_eq!(parsed.version, super::keystore::CONTAINER_VERSION);
+
+        // The shape version one had: no tag, and the version field to match.
+        let mut older = Vec::new();
+        older.extend_from_slice(super::keystore::MAGIC);
+        older.extend_from_slice(&super::keystore::OLDEST_CONTAINER_VERSION.to_le_bytes());
+        for part in [parsed.alias.as_bytes(), parsed.certificate, parsed.sealed] {
+            older.extend_from_slice(&(part.len() as u32).to_le_bytes());
+            older.extend_from_slice(part);
+        }
+        std::fs::write(&made.path, &older).unwrap();
+
+        let read_back = std::fs::read(&made.path).unwrap();
+        let before = super::keystore::parts(&read_back).unwrap();
+        assert_eq!(before.version, super::keystore::OLDEST_CONTAINER_VERSION);
+        assert!(!before.is_authenticated(), "version one carried no tag");
+
+        // A key somebody already has must keep working, whatever this build
+        // learned to write since.
+        let opened = super::keystore::unlock(&made.path, password)
+            .expect("a key written before there were tags must still open");
+        assert_eq!(opened.record.alias, "older");
+
+        // And having been opened with the password that made it, it is written
+        // back with a tag, so the next read is one that can be checked.
+        let after_file = std::fs::read(&made.path).unwrap();
+        let after = super::keystore::parts(&after_file).unwrap();
+        assert_eq!(after.version, super::keystore::CONTAINER_VERSION);
+        assert!(after.is_authenticated(), "it should carry a tag now");
+        assert_eq!(after.sealed, parsed.sealed, "the sealed key is untouched");
+        assert_eq!(after.certificate, parsed.certificate);
+
+        // Nothing is left beside it from the upgrade.
+        assert!(
+            !std::path::Path::new(&format!("{}.upgrading", made.path)).exists(),
+            "the file written beside it should have been moved over it"
+        );
+
+        super::keystore::unlock(&made.path, password).expect("and it opens again after");
+
+        // Altered inside what the file records about itself, which version one
+        // had no way to notice at all.
+        let mut altered = after_file.clone();
+        altered[12 + after.alias.len() + 8] ^= 0x40;
+        std::fs::write(&made.path, &altered).unwrap();
+        assert_eq!(
+            super::keystore::unlock(&made.path, password)
+                .expect_err("now that it records itself, altering it must be refused")
+                .code,
+            "EY051"
+        );
+
+        // And the tag itself, which the checksum does not cover: the file adds
+        // up, so this is the case that cannot be told from a wrong password.
+        let mut untagged = after_file.clone();
+        let last = untagged.len() - 1;
+        untagged[last] ^= 1;
+        std::fs::write(&made.path, &untagged).unwrap();
+        assert_eq!(
+            super::keystore::unlock(&made.path, password)
+                .expect_err("a tag that does not hold must refuse")
+                .code,
+            "EY021"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("keystore: a version one key opened, kept its key, and came back version two");
+    }
+
     #[test]
     fn a_developer_key_file_that_has_been_altered_is_refused() {
         let directory = temp_directory("omni-keys-altered");
@@ -24929,18 +25534,84 @@ mod tests {
 
         let mine_file = std::fs::read(&mine_made.path).unwrap();
         let theirs_file = std::fs::read(&theirs_made.path).unwrap();
-        let (_, mine_certificate, mine_sealed) = super::keystore::parts(&mine_file).unwrap();
-        let (_, theirs_certificate, _) = super::keystore::parts(&theirs_file).unwrap();
+        let mine_parts = super::keystore::parts(&mine_file).unwrap();
+        let theirs_parts = super::keystore::parts(&theirs_file).unwrap();
+        let mine_certificate = mine_parts.certificate;
+        let mine_sealed = mine_parts.sealed;
+        let theirs_certificate = theirs_parts.certificate;
+        assert!(mine_parts.is_authenticated());
 
-        let swapped = super::keystore::encode("mine", theirs_certificate, mine_sealed);
+        let borrowed = super::keystore::tag_key_for(mine_sealed, password).unwrap();
+
+        // Edited where it stands, which is what altering a file actually looks
+        // like. It no longer adds up to what it records, and that is caught
+        // without a password being asked for at all.
+        let mut edited = mine_file.clone();
+        let somewhere_inside = 12 + mine_parts.alias.len() + 8;
+        edited[somewhere_inside] ^= 0x40;
+        std::fs::write(&mine_made.path, &edited).unwrap();
+        let refused = super::keystore::unlock(&mine_made.path, password)
+            .expect_err("a file edited where it stands must be refused");
+        assert_eq!(refused.code, "EY051", "{}", refused.message);
+
+        // Rewritten whole, checksum and all, but tagged with a key nobody could
+        // have derived. Somebody who could do this could also recompute the
+        // checksum, so this is indistinguishable from a password that does not
+        // open the file, and it is reported as one. What matters is that the
+        // tag still refuses and nothing reaches a decryption.
+        let wrong_key = [0x11u8; 32];
+        let swapped = super::keystore::encode("mine", theirs_certificate, mine_sealed, &wrong_key);
         std::fs::write(&mine_made.path, &swapped).unwrap();
         let refused = super::keystore::unlock(&mine_made.path, password)
-            .expect_err("a certificate that does not match the key must be refused");
-        assert_eq!(refused.code, "EY050");
+            .expect_err("a file that does not match its own tag must be refused");
+        assert_eq!(refused.code, "EY021", "{}", refused.message);
+        assert!(
+            refused
+                .suggestion
+                .as_deref()
+                .is_some_and(|line| line.contains("not the one it was written as")),
+            "the person has to be told the other thing it could be: {:?}",
+            refused.suggestion
+        );
 
-        let honest = super::keystore::encode("mine", mine_certificate, mine_sealed);
+        // The same swap, tagged correctly this time, which is what somebody who
+        // did know the password could write. The certificate still has to
+        // belong to the key, and that check is what catches it.
+        let retagged = super::keystore::encode("mine", theirs_certificate, mine_sealed, &borrowed);
+        std::fs::write(&mine_made.path, &retagged).unwrap();
+        let refused = super::keystore::unlock(&mine_made.path, password)
+            .expect_err("a certificate that does not match the key must be refused");
+        assert_eq!(refused.code, "EY050", "{}", refused.message);
+
+        let honest = super::keystore::encode("mine", mine_certificate, mine_sealed, &borrowed);
         std::fs::write(&mine_made.path, &honest).unwrap();
         super::keystore::unlock(&mine_made.path, password).expect("the honest file must open");
+
+        // One bit, anywhere the tag covers, and the file is refused. Stepping
+        // over every byte would mean an unlock each time, so this walks the
+        // file at a stride and flips the lowest bit of each byte it lands on.
+        let covered = super::keystore::parts(&honest).unwrap().covered;
+        let mut checked = 0usize;
+        for at in (0..covered).step_by(covered / 12 + 1) {
+            let mut altered = honest.clone();
+            altered[at] ^= 1;
+            std::fs::write(&mine_made.path, &altered).unwrap();
+            let refused = super::keystore::unlock(&mine_made.path, password)
+                .expect_err("a byte changed anywhere under the tag must be refused");
+            assert!(
+                refused.code == "EY051" || refused.code == "EY032" || refused.code == "EY033",
+                "byte {at} was changed and the file was refused with {}: {}",
+                refused.code,
+                refused.message
+            );
+            assert_ne!(
+                refused.code, "EY050",
+                "byte {at} reached the certificate check, so it reached a decryption"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 12, "only {checked} bytes were tried");
+        std::fs::write(&mine_made.path, &honest).unwrap();
 
         std::fs::write(&mine_made.path, b"not a key at all").unwrap();
         assert_eq!(
@@ -28019,6 +28690,11 @@ mod tests {
 
     #[test]
     fn a_build_without_a_password_never_writes_over_a_sealed_key() {
+        // Makes a key at the shared alias, so it has to take its turn with
+        // whatever else is moving the device binding.
+        let _turn = SHARED_KEY_TURN
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
         let directory = temp_directory("omni-key-kept");
         let keys = directory.join("Keys");
         let path =
@@ -28074,6 +28750,9 @@ mod tests {
 
     #[test]
     fn the_shared_key_is_made_once_and_signs_the_package_and_the_bundle_together() {
+        let _turn = SHARED_KEY_TURN
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
         let directory = temp_directory("omni-shared-key");
         let keys = directory.join("Keys");
         let root = directory.join("Together");
@@ -28247,6 +28926,61 @@ mod tests {
 
     fn hex_string(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn the_substitution_is_computed_and_answers_what_the_table_would() {
+        // The table is the one the standard describes. Nothing that touches a
+        // key reads it; it is built here so that every one of the 256 bytes can
+        // be put through both and held to the same answer. If the arithmetic
+        // ever drifts from the standard, this says so before a vector does.
+        let (sbox, inverse) = super::cipher::table_substitution();
+
+        for value in 0..=255u8 {
+            let (forward, backward) = super::cipher::computed_substitution(value);
+            assert_eq!(
+                forward, sbox[value as usize],
+                "substituting {value:#04x} computed {forward:#04x}, the table says {:#04x}",
+                sbox[value as usize]
+            );
+            assert_eq!(
+                backward, inverse[value as usize],
+                "undoing {value:#04x} computed {backward:#04x}, the table says {:#04x}",
+                inverse[value as usize]
+            );
+        }
+
+        // And the two undo one another, which the tables above cannot prove on
+        // their own because one is built from the other.
+        for value in 0..=255u8 {
+            let (forward, _) = super::cipher::computed_substitution(value);
+            let (_, back) = super::cipher::computed_substitution(forward);
+            assert_eq!(back, value, "{value:#04x} did not survive the round trip");
+        }
+
+        eprintln!("cipher: 256 bytes substituted by arithmetic, none by table lookup");
+    }
+
+    #[test]
+    fn a_tag_is_compared_without_saying_where_it_parted() {
+        assert!(super::cipher::same_bytes(b"", b""));
+        assert!(super::cipher::same_bytes(&[1, 2, 3], &[1, 2, 3]));
+        assert!(!super::cipher::same_bytes(&[1, 2, 3], &[1, 2]));
+        assert!(!super::cipher::same_bytes(&[1, 2, 3], &[9, 2, 3]));
+        assert!(!super::cipher::same_bytes(&[1, 2, 3], &[1, 2, 9]));
+
+        // Every single-byte difference, at every position, has to be found.
+        let base = [0x5au8; 32];
+        for position in 0..base.len() {
+            for flip in 1..=255u8 {
+                let mut other = base;
+                other[position] ^= flip;
+                assert!(
+                    !super::cipher::same_bytes(&base, &other),
+                    "a difference at byte {position} was missed"
+                );
+            }
+        }
     }
 
     #[test]
