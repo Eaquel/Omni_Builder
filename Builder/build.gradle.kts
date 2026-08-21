@@ -205,10 +205,6 @@ android {
     }
 
     buildTypes {
-        debug {
-            isMinifyEnabled = false
-            isJniDebuggable = true
-        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -245,6 +241,17 @@ android {
     lint {
         warningsAsErrors = true
         abortOnError = true
+    }
+}
+
+// This project ships one variant. Android Gradle always creates a debug one
+// as well, and building it means a second CMake configure and build for each
+// of the three ABIs, a second Kotlin compile and a second package, none of
+// which anything here reads. Turning it off leaves `release` as the only
+// thing `assemble` builds.
+androidComponents {
+    beforeVariants(selector().withBuildType("debug")) { variant ->
+        variant.enable = false
     }
 }
 

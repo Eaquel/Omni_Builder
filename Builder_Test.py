@@ -264,30 +264,36 @@ def check_strings() -> str:
     return f"{len(base)} strings in {len(translations) + 1} languages, none spare"
 
 
-def check_debug_apk() -> str:
-    """The debug package builds, and holds the classes it declares."""
-    gradle(":Builder:assembleDebug")
-    apk = ROOT / "Builder/build/outputs/apk/debug/Builder-debug.apk"
-    if not apk.is_file():
-        raise AssertionError("assembleDebug produced no package")
-    return f"{apk.name}, {apk.stat().st_size // 1024} KB"
+def release_apk() -> Path:
+    """The package this build produced, which is the only one it produces.
+
+    A build with no signing key configured leaves a `-unsigned` package beside
+    nothing else; a build with one leaves the signed package. Prefer the signed
+    one where both are somehow present.
+    """
+    made = sorted(ROOT.glob("Builder/build/outputs/apk/release/*.apk"))
+    if not made:
+        raise Skip("the release package has not been built here")
+    signed = [one for one in made if not one.name.endswith("-unsigned.apk")]
+    return (signed or made)[0]
 
 
 def check_release_apk() -> str:
-    """The release package and the bundle both build."""
+    """The package and the bundle both build. This project ships one variant."""
     gradle(":Builder:assembleRelease", ":Builder:bundleRelease")
     made = sorted(ROOT.glob("Builder/build/outputs/apk/release/*.apk"))
     bundles = sorted(ROOT.glob("Builder/build/outputs/bundle/release/*.aab"))
     if not made or not bundles:
         raise AssertionError("the release package or the bundle is missing")
-    return f"{made[0].name} and {bundles[0].name}"
+    if sorted(ROOT.glob("Builder/build/outputs/apk/debug/*.apk")):
+        raise AssertionError("a debug package was built; this project ships one variant")
+    return (f"{made[0].name}, {made[0].stat().st_size // 1024} KB, "
+            f"and {bundles[0].name}")
 
 
 def check_bridge() -> str:
     """Every native method Kotlin declares is exported by every ABI, and nothing else is."""
-    apk = ROOT / "Builder/build/outputs/apk/debug/Builder-debug.apk"
-    if not apk.is_file():
-        raise Skip("the debug package has not been built here")
+    apk = release_apk()
     nm = ndk_tool("llvm-nm")
 
     declared = sorted(
@@ -359,8 +365,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "core": ("the Core suite", check_core),
     "dependencies": ("no third-party dependency", check_dependencies),
     "strings": ("every language, every string", check_strings),
-    "debug": ("the debug package", check_debug_apk),
-    "release": ("the release package and bundle", check_release_apk),
+    "release": ("the package and the bundle", check_release_apk),
     "bridge": ("the native bridge", check_bridge),
     "installable": ("what Android would accept", check_installable),
     "reproducible": ("byte-for-byte rebuild", check_reproducible),
@@ -369,7 +374,7 @@ CHECKS: dict[str, tuple[str, object]] = {
 # The Core suite reads the packages this build produced, so they are made first.
 DEFAULT = [
     "layout", "format", "lint", "dependencies", "strings",
-    "debug", "release", "core", "bridge", "installable",
+    "release", "core", "bridge", "installable",
 ]
 
 

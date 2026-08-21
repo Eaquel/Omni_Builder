@@ -16156,7 +16156,38 @@ pub mod image {
         palette
     }
 
+    /// The same picture with every invisible pixel reduced to one colour.
+    ///
+    /// A pixel at alpha zero shows nothing, so the three channels underneath it
+    /// are whatever the tool that wrote it happened to leave there. Letting them
+    /// into a palette spends entries on colours nobody can see and drags the
+    /// entries that are seen away from where they belong.
+    fn without_invisible_colour(raster: &Raster) -> Raster {
+        let mut pixels = Vec::with_capacity(raster.pixels.len());
+        for pixel in raster.pixels.chunks_exact(4) {
+            if pixel[3] == 0 {
+                pixels.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                pixels.extend_from_slice(pixel);
+            }
+        }
+        Raster {
+            width: raster.width,
+            height: raster.height,
+            pixels,
+        }
+    }
+
     fn nearest(palette: &[[u8; 4]], colour: [u8; 4]) -> usize {
+        // What is invisible stays invisible. A round icon whose clear corners
+        // came back faintly opaque draws a square halo around itself, and no
+        // measure of average error would ever notice: it is four pixels.
+        if colour[3] == 0 {
+            if let Some(index) = palette.iter().position(|held| held[3] == 0) {
+                return index;
+            }
+        }
+
         let mut best = 0usize;
         let mut closest = u32::MAX;
         for (index, held) in palette.iter().enumerate() {
@@ -16317,9 +16348,24 @@ pub mod image {
         if palette_of(raster).is_some() {
             return Ok(exact);
         }
-        let palette = quantise(raster, LARGEST_PALETTE);
-        if palette.len() >= 2 && error_against(raster, &palette) <= INVISIBLE_ERROR {
-            let indexed = encode_indexed(&mapped_to(raster, &palette), &palette);
+
+        let flat = without_invisible_colour(raster);
+        let mut palette = quantise(&flat, LARGEST_PALETTE);
+
+        // Where the picture has clear pixels the palette must have somewhere to
+        // put them, or `nearest` has nothing to hold them at and they come back
+        // as whatever colour lies closest.
+        let clear = flat.pixels.chunks_exact(4).any(|pixel| pixel[3] == 0);
+        if clear && !palette.iter().any(|entry| entry[3] == 0) {
+            if palette.len() >= LARGEST_PALETTE {
+                palette.pop();
+            }
+            palette.push([0, 0, 0, 0]);
+            palette.sort_unstable();
+        }
+
+        if palette.len() >= 2 && error_against(&flat, &palette) <= INVISIBLE_ERROR {
+            let indexed = encode_indexed(&mapped_to(&flat, &palette), &palette);
             if indexed.len() < exact.len() {
                 return Ok(indexed);
             }
@@ -23271,6 +23317,24 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    /// The package this build wrote. There is one variant, so there is one
+    /// directory to look in; a signed package is preferred over the unsigned
+    /// one beside it, which is what a build without signing secrets leaves.
+    fn built_package() -> Option<std::path::PathBuf> {
+        let mut found: Vec<std::path::PathBuf> =
+            std::fs::read_dir("Builder/build/outputs/apk/release")
+                .ok()?
+                .filter_map(|entry| Some(entry.ok()?.path()))
+                .filter(|path| path.extension().is_some_and(|end| end == "apk"))
+                .collect();
+        found.sort();
+        found
+            .iter()
+            .find(|path| !path.to_string_lossy().ends_with("-unsigned.apk"))
+            .or_else(|| found.first())
+            .cloned()
+    }
+
     fn package_this_build_produced() -> Option<Vec<u8>> {
         if let Ok(named) = std::env::var("OMNI_PACKAGE_UNDER_TEST") {
             if !named.is_empty() {
@@ -23279,7 +23343,7 @@ mod tests {
                 return Some(bytes);
             }
         }
-        std::fs::read("Builder/build/outputs/apk/debug/Builder-debug.apk").ok()
+        std::fs::read(built_package()?).ok()
     }
 
     #[test]
@@ -23288,7 +23352,7 @@ mod tests {
             eprintln!(
                 "signing conformance: no built package here, so a real Android \
                  Gradle Plugin package was not read. Build one with \
-                 `./gradlew :Builder:assembleDebug` or set \
+                 `./gradlew :Builder:assembleRelease` or set \
                  OMNI_PACKAGE_UNDER_TEST."
             );
             return;
@@ -23308,7 +23372,22 @@ mod tests {
             archive.end_record_offset(),
             &mut sink,
         );
-        assert!(report.has_block, "a debug package carries a v2 block");
+        // A build given no signing key leaves the package unsigned, and the
+        // reader has to say so rather than find a block that is not there.
+        // Where a key was given, every digest in the block it wrote has to come
+        // back matching.
+        if !report.has_block {
+            assert_eq!(report.digests_verified, 0, "{:?}", sink.entries());
+            assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
+            assert!(report.schemes.is_empty(), "{:?}", report.schemes);
+            eprintln!(
+                "signing conformance: {} entries, and no signature — this build \
+                 was given no key, so the package it wrote cannot be installed",
+                archive.entries().len()
+            );
+            return;
+        }
+
         assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
         assert!(report.digests_verified > 0, "{:?}", sink.entries());
         assert!(!report.signatures_checked);
@@ -23729,17 +23808,13 @@ mod tests {
     }
 
     fn dex_this_build_produced() -> Option<Vec<u8>> {
-        let Some(apk) = ["release/Builder-release.apk", "debug/Builder-debug.apk"]
-            .iter()
-            .map(|name| format!("Builder/build/outputs/apk/{name}"))
-            .find(|path| std::path::Path::new(path).exists())
-        else {
+        let Some(apk) = built_package() else {
             dex_conformance_may_skip("no APK has been built");
             return None;
         };
 
         let output = std::process::Command::new("unzip")
-            .args(["-p", &apk, "classes.dex"])
+            .args(["-p", &apk.to_string_lossy(), "classes.dex"])
             .output()
             .ok()?;
         if !output.status.success() || output.stdout.is_empty() {
@@ -25943,9 +26018,17 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{} {}", error.code, error.message));
             assert_eq!(header.width, made.edge, "{} {}", made.folder, made.name);
             assert_eq!(header.height, made.edge);
-            assert!(header.colour.has_alpha());
-            assert_eq!(header.bit_depth, 8);
             assert!(!header.interlaced);
+
+            // Written as small as it goes, an icon may come out indexed, and an
+            // indexed image carries its transparency in tRNS rather than in a
+            // channel of its own. Android reads either. What has to hold is that
+            // the picture reads back at the size it claims, with its alpha
+            // intact — which the corners below prove for every size.
+            let back = super::image::decode(&made.bytes)
+                .expect("a launcher icon this build wrote must read back");
+            assert_eq!(back.width, made.edge, "{} {}", made.folder, made.name);
+            assert_eq!(back.height, made.edge);
         }
 
         for (folder, edge) in super::image::LAUNCHER_SIZES {
@@ -27803,6 +27886,95 @@ mod tests {
     }
 
     #[test]
+    fn what_is_clear_in_a_picture_is_still_clear_after_it_is_squeezed() {
+        // A round icon: a busy disc on nothing at all. The corners are what an
+        // eye notices if a squeeze gets it wrong, because a corner that came
+        // back one step short of clear draws a square edge around the icon.
+        let edge = 128u32;
+        let middle = (edge as f64 - 1.0) / 2.0;
+        let radius = middle;
+        let mut pixels = Vec::with_capacity((edge * edge * 4) as usize);
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut wobble = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 33) % 7) as i16 - 3
+        };
+        for y in 0..edge {
+            for x in 0..edge {
+                let across = f64::from(x) - middle;
+                let down = f64::from(y) - middle;
+                let shade = |base: u32, by: i16| (base as i16 + by).clamp(0, 255) as u8;
+                if across * across + down * down <= radius * radius {
+                    let group = ((x / 16) + (y / 16) * 8) % 64;
+                    pixels.extend_from_slice(&[
+                        shade(40 + group % 8 * 26, wobble()),
+                        shade(30 + group / 8 * 26, wobble()),
+                        shade(190 - group % 5 * 34, wobble()),
+                        255,
+                    ]);
+                } else {
+                    // The channels under a clear pixel are whatever a tool left
+                    // there. They must not reach the palette, and they must not
+                    // come back.
+                    pixels.extend_from_slice(&[220, 40, 90, 0]);
+                }
+            }
+        }
+        let raster = super::image::Raster {
+            width: edge,
+            height: edge,
+            pixels,
+        };
+        assert!(
+            super::image::palette_of(&raster).is_none(),
+            "this picture is meant to hold more colours than a palette does"
+        );
+
+        let written = super::image::encode_smallest(&raster).unwrap();
+        let exact = super::image::encode(&raster).unwrap();
+        assert!(
+            written.len() < exact.len(),
+            "a picture like this must squeeze: {} against {}",
+            written.len(),
+            exact.len()
+        );
+
+        let read = super::image::decode(&written).unwrap();
+        assert_eq!(read.width, edge);
+        assert_eq!(read.height, edge);
+
+        let mut clear = 0usize;
+        for y in 0..edge {
+            for x in 0..edge {
+                let across = f64::from(x) - middle;
+                let down = f64::from(y) - middle;
+                let outside = across * across + down * down > radius * radius;
+                let alpha = read.at(x, y)[3];
+                if outside {
+                    assert_eq!(
+                        alpha, 0,
+                        "the corner at {x},{y} came back {alpha}, not clear"
+                    );
+                    clear += 1;
+                } else {
+                    assert_eq!(
+                        alpha, 255,
+                        "the disc at {x},{y} came back {alpha}, not solid"
+                    );
+                }
+            }
+        }
+        assert!(clear > 0, "the picture must have somewhere clear to test");
+        eprintln!(
+            "quantise: {clear} clear pixels stayed clear, {} bytes became {}",
+            exact.len(),
+            written.len()
+        );
+    }
+
+    #[test]
     fn a_second_project_is_never_written_over_the_first() {
         let directory = temp_directory("omni-two-projects");
         let root = directory.join("Same Name");
@@ -28764,7 +28936,7 @@ mod tests {
             );
             eprintln!(
                 "class conformance: nothing compiled here, so nothing was read. \
-                 Build with `./gradlew :Builder:assembleDebug`."
+                 Build with `./gradlew :Builder:assembleRelease`."
             );
             return;
         }

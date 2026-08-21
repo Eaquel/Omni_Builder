@@ -56,7 +56,7 @@ jobs:
           rustc --version
           test "$(rustc --version | cut -d' ' -f2)" = "$OMNI_RUST_VERSION"
 
-      - name: Run every check that needs no Android SDK
+      - name: Run every check that needs no Android build
         run: ./Builder_Test.py --strict layout format lint dependencies strings core
 
   apk:
@@ -71,6 +71,10 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ env.OMNI_JDK_VERSION }}
+          # The Gradle distribution, the Android Gradle Plugin and the Kotlin
+          # compiler are the same bytes every run. Fetching them again each
+          # time is the longest thing this job does before it builds anything.
+          cache: gradle
 
       - name: Install the pinned Rust toolchain and Android targets
         run: |
@@ -187,17 +191,22 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Release signing is configured."
 
-      - name: Verify the provisioned CMake
-        run: ./gradlew :Builder:verifyCmakeToolchain --console=plain
+      # Assembling depends on all three anyway. Running them first, in one
+      # invocation rather than three, fails on a toolchain that drifted before
+      # anything is compiled and pays Gradle's start-up once.
+      - name: Verify the toolchains against the lock
+        run: |
+          ./gradlew --console=plain \
+            verifyToolchainLock \
+            :Builder:verifyCmakeToolchain \
+            :Builder:verifyKotlinToolchain
 
-      - name: Verify the toolchain lock
-        run: ./gradlew verifyToolchainLock --console=plain
-
-      - name: Verify the Kotlin toolchain
-        run: ./gradlew :Builder:verifyKotlinToolchain --console=plain
-
-      - name: Run every check
-        run: ./Builder_Test.py --strict --all
+      # rustfmt and clippy belong to the Core job, which installs them and has
+      # nothing else to wait for. What is left here is what needs the Android
+      # build: the package and the bundle first, then the Core suite reading
+      # the real package this job just produced.
+      - name: Run every check that needs the Android build
+        run: ./Builder_Test.py --strict release core bridge installable reproducible
 
       - name: Report what the release artifact is
         run: |

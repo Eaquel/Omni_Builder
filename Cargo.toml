@@ -14,6 +14,18 @@ crate-type = ["staticlib", "lib"]
 
 [dependencies]
 
+# The suite generates real 4096-bit RSA keys and pushes real archives through
+# the deflate and resource writers. Unoptimised that is minutes of arithmetic
+# per run, so the development profile is optimised too. Overflow checks and
+# debug assertions stay on, which is the reason to run the suite here at all.
+[profile.dev]
+opt-level        = 2
+debug            = false
+codegen-units    = 256
+incremental      = true
+debug-assertions = true
+overflow-checks  = true
+
 [profile.release]
 opt-level       = "s"
 lto             = true
