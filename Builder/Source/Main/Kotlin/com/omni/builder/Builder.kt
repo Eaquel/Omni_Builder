@@ -624,6 +624,10 @@ object Sentry {
 class SentryService : JobService() {
 
     override fun onStartJob(params: JobParameters?): Boolean {
+        if (params == null) {
+            runCatching { Sentry.check(applicationContext) }
+            return false
+        }
         Thread {
             runCatching { Sentry.check(applicationContext) }
             jobFinished(params, false)
