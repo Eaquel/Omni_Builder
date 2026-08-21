@@ -72,5 +72,5 @@
     <string name="omni_settings_watch">المراقبة</string>
     <string name="omni_settings_watch_note">طالما سمح أندرويد بذلك، يجري فحص كل خمس عشرة دقيقة وعند كل تشغيل. يمكنه رؤية استبدال هذه الحزمة على القرص في جهاز مروَّت. ولا يمكنه رؤية مهاجم أزال الفحص نفسه، ولا يعمل عندما يوقف أندرويد التطبيق.</string>
     <string name="omni_action_bundle">بناء AAB</string>
-    <string name="omni_bundle_note">لا تحمل الحزمة المجمّعة أي موارد ولا تُوقَّع هنا. تتولى Google Play توقيع الحزم التي تنتجها منها.</string>
+    <string name="omni_bundle_note">تحمل الحزمة المجمّعة البيان والكود والموارد وأيقونة التطبيق، ولا تُوقَّع هنا. تتولى Google Play توقيع الحزم التي تنتجها منها.</string>
 </resources>

@@ -72,5 +72,5 @@
     <string name="omni_settings_watch">Watch</string>
     <string name="omni_settings_watch_note">A check runs every fifteen minutes while Android allows it, and at every start. It can see this package being replaced on disk on a rooted device. It cannot see an attacker who removed the check itself, and it does not run when Android has stopped the application.</string>
     <string name="omni_action_bundle">BUILD AAB</string>
-    <string name="omni_bundle_note">A bundle carries no resources and is not signed here. Google Play signs the packages it makes from one.</string>
+    <string name="omni_bundle_note">A bundle carries the manifest, the code, the resources and the launcher icon, and is not signed here. Google Play signs the packages it makes from one.</string>
 </resources>

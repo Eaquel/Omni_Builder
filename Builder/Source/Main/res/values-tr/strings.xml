@@ -72,5 +72,5 @@
     <string name="omni_settings_watch">İzleme</string>
     <string name="omni_settings_watch_note">Android izin verdiği sürece on beş dakikada bir ve her açılışta bir denetim çalışır. Root’lu bir cihazda bu paketin diskte değiştirilmesini görebilir. Denetimin kendisini kaldıran bir saldırganı göremez ve Android uygulamayı durdurduğunda çalışmaz.</string>
     <string name="omni_action_bundle">AAB ÜRET</string>
-    <string name="omni_bundle_note">Paket seti kaynak taşımaz ve burada imzalanmaz. Google Play, ondan ürettiği paketleri kendisi imzalar.</string>
+    <string name="omni_bundle_note">Paket seti manifesti, kodu, kaynakları ve uygulama simgesini taşır ve burada imzalanmaz. Google Play, ondan ürettiği paketleri kendisi imzalar.</string>
 </resources>

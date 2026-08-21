@@ -456,9 +456,8 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Bundle writer",
         status: Status::Partial,
         directive_section: 22,
-        summary: "Writes an Android App Bundle: a protobuf writer, the manifest in aapt2 proto form with the platform identifier and typed value on every attribute, BundleConfig, and the archive around them. bundletool builds and signs a universal package from what this writes, and aapt2 reads that package back attribute for attribute.",
+        summary: "Writes an Android App Bundle: a protobuf writer, the manifest and the resource table in aapt2 proto form with the platform identifier and typed value on every attribute, BundleConfig, and the archive around them. bundletool builds and signs a universal package from what this writes, and aapt2 reads that package back attribute for attribute, launcher icon included.",
         missing: &[
-            "The resource table is written for a package but not for a bundle: that needs the same table in its protobuf form, so a bundle carries no resources and no launcher icon.",
             "One module, base, and no configuration splits: no density, language or architecture splits, and no asset packs or feature modules.",
             "The bundle is not signed. Play signs what it generates, and bundletool signs what it generates for testing, so nothing here needs to; JAR signing is not implemented either way.",
         ],
@@ -14934,17 +14933,34 @@ pub mod bundle {
                     );
                 }
                 Err(_) => {
-                    if other.starts_with('@') {
-                        return Err(fail(
-                            "EN011",
-                            "A resource reference cannot be written into a bundle yet.",
-                        )
-                        .with_context(format!("Attribute: android:{local}"))
-                        .with_context(format!("Value: {other}"))
-                        .with_suggestion(
-                            "Resolving a name to an identifier needs the resource table, \
-                             which this build does not write.",
-                        ));
+                    if let Some(rest) = other.strip_prefix('@') {
+                        let hex = rest
+                            .strip_prefix("0x")
+                            .or_else(|| rest.strip_prefix("0X"))
+                            .ok_or_else(|| {
+                                fail(
+                                    "EN011",
+                                    "A resource reference reaches the bundle writer unresolved.",
+                                )
+                                .with_context(format!("Attribute: android:{local}"))
+                                .with_context(format!("Value: {other}"))
+                                .with_suggestion(
+                                    "The build engine resolves a name against the project's own \
+                                     table before this point. One that arrives by name has no \
+                                     table behind it.",
+                                )
+                            })?;
+                        let id = u32::from_str_radix(hex, 16).map_err(|_| {
+                            fail("EN012", "A resource reference is not a 32-bit value.")
+                                .with_context(format!("Value: {other}"))
+                        })?;
+                        out.number(ATTRIBUTE_RESOURCE_ID, u64::from(identifier));
+                        let mut held = Message::new();
+                        held.number(REFERENCE_ID, u64::from(id));
+                        let mut item = Message::new();
+                        item.message(ITEM_REFERENCE, &held);
+                        out.message(ATTRIBUTE_COMPILED, &item);
+                        return Ok(out);
                     }
                     out.text(ATTRIBUTE_VALUE, other);
                     out.number(ATTRIBUTE_RESOURCE_ID, u64::from(identifier));
@@ -15001,11 +15017,196 @@ pub mod bundle {
         config.finish()
     }
 
+    pub const RESOURCES_ENTRY: &str = "base/resources.pb";
+    pub const RES_PREFIX: &str = "base/";
+
+    const TABLE_PACKAGE: u32 = 2;
+    const PACKAGE_ID: u32 = 1;
+    const PACKAGE_NAME: u32 = 2;
+    const PACKAGE_TYPE: u32 = 3;
+    const IDENTIFIER: u32 = 1;
+    const TYPE_NAME: u32 = 2;
+    const TYPE_ENTRY: u32 = 3;
+    const ENTRY_NAME: u32 = 2;
+    const ENTRY_CONFIG_VALUE: u32 = 6;
+    const CONFIG_VALUE_CONFIG: u32 = 1;
+    const CONFIG_VALUE_VALUE: u32 = 2;
+    const CONFIG_LOCALE: u32 = 3;
+    const CONFIG_DENSITY: u32 = 18;
+    const VALUE_ITEM: u32 = 4;
+    const ITEM_REFERENCE: u32 = 1;
+    const ITEM_STRING: u32 = 2;
+    const ITEM_FILE: u32 = 5;
+    const REFERENCE_ID: u32 = 2;
+    const STRING_VALUE: u32 = 1;
+    const FILE_PATH: u32 = 1;
+    const FILE_TYPE: u32 = 2;
+    const FILE_TYPE_PNG: u64 = 1;
+    const PRIMITIVE_COLOUR_ARGB8: u32 = 9;
+    const PRIMITIVE_DIMENSION: u32 = 13;
+
+    fn numbered(field: u32, id: u32) -> Message {
+        let mut out = Message::new();
+        if id != 0 {
+            out.number(field, u64::from(id));
+        }
+        out
+    }
+
+    fn item_for(
+        value: &crate::resources::Value,
+        compiled: &crate::resources::Compiled,
+        named: &str,
+    ) -> Result<Message, Diagnostic> {
+        use crate::resources::Value;
+        let mut item = Message::new();
+        match value {
+            Value::Text(text) => {
+                let mut held = Message::new();
+                held.text(STRING_VALUE, text);
+                item.message(ITEM_STRING, &held);
+            }
+            Value::File(path) => {
+                let mut held = Message::new();
+                held.text(FILE_PATH, path);
+                held.number(FILE_TYPE, FILE_TYPE_PNG);
+                item.message(ITEM_FILE, &held);
+            }
+            Value::Color(argb) => {
+                let mut held = Message::new();
+                held.number(PRIMITIVE_COLOUR_ARGB8, u64::from(*argb));
+                item.message(ITEM_PRIMITIVE, &held);
+            }
+            Value::Integer(number) => {
+                let mut held = Message::new();
+                held.number(PRIMITIVE_INT_DECIMAL, *number as u32 as u64);
+                item.message(ITEM_PRIMITIVE, &held);
+            }
+            Value::Bool(flag) => {
+                let mut held = Message::new();
+                held.number(PRIMITIVE_BOOLEAN, u64::from(*flag));
+                item.message(ITEM_PRIMITIVE, &held);
+            }
+            Value::Dimension { milli, unit } => {
+                let packed = crate::arsc::encode_dimension(*milli, *unit)?;
+                let mut held = Message::new();
+                held.number(PRIMITIVE_DIMENSION, u64::from(packed));
+                item.message(ITEM_PRIMITIVE, &held);
+            }
+            Value::Reference(reference) => {
+                if reference.is_platform() {
+                    return Err(fail(
+                        "EN020",
+                        "A reference to a platform resource cannot be written into a bundle.",
+                    )
+                    .with_context(format!("Reference: {reference}"))
+                    .with_context(format!("In: {named}")));
+                }
+                let id = compiled
+                    .id(reference.kind, &reference.name)
+                    .ok_or_else(|| {
+                        fail(
+                            "EN021",
+                            "A reference names a resource this table does not hold.",
+                        )
+                        .with_context(format!("Reference: {reference}"))
+                        .with_context(format!("In: {named}"))
+                    })?;
+                let mut held = Message::new();
+                held.number(REFERENCE_ID, u64::from(id.raw()));
+                item.message(ITEM_REFERENCE, &held);
+            }
+            Value::Empty => {
+                let mut held = Message::new();
+                held.number(PRIMITIVE_INT_DECIMAL, 0);
+                item.message(ITEM_PRIMITIVE, &held);
+            }
+        }
+        Ok(item)
+    }
+
+    pub fn encode_resources(
+        named: &str,
+        compiled: &crate::resources::Compiled,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let mut package = Message::new();
+        package.message(
+            PACKAGE_ID,
+            &numbered(IDENTIFIER, u32::from(compiled.package_id())),
+        );
+        package.text(PACKAGE_NAME, named);
+
+        for kind in crate::resources::Kind::ALL {
+            let names: Vec<&str> = compiled
+                .assignments()
+                .iter()
+                .filter(|(entry_kind, _, _)| entry_kind == kind)
+                .map(|(_, name, _)| name.as_str())
+                .collect();
+            if names.is_empty() {
+                continue;
+            }
+            let type_id = compiled
+                .assignments()
+                .iter()
+                .find(|(entry_kind, _, _)| entry_kind == kind)
+                .map(|(_, _, id)| u32::from(id.type_index()))
+                .unwrap_or(0);
+
+            let mut written = Message::new();
+            written.message(IDENTIFIER, &numbered(IDENTIFIER, type_id));
+            written.text(TYPE_NAME, kind.as_str());
+
+            for (index, name) in names.iter().enumerate() {
+                let mut entry = Message::new();
+                entry.message(IDENTIFIER, &numbered(IDENTIFIER, index as u32));
+                entry.text(ENTRY_NAME, name);
+
+                for held in compiled
+                    .entries()
+                    .iter()
+                    .filter(|held| held.kind == *kind && held.name == *name)
+                {
+                    let mut config = Message::new();
+                    let density = crate::arsc::density_value(held.config.density);
+                    if density != 0 {
+                        config.number(CONFIG_DENSITY, u64::from(density));
+                    }
+                    let _ = CONFIG_LOCALE;
+
+                    let mut value = Message::new();
+                    value.message(
+                        VALUE_ITEM,
+                        &item_for(
+                            &held.value,
+                            compiled,
+                            &format!("{}/{}", kind.as_str(), name),
+                        )?,
+                    );
+
+                    let mut config_value = Message::new();
+                    config_value.message(CONFIG_VALUE_CONFIG, &config);
+                    config_value.message(CONFIG_VALUE_VALUE, &value);
+                    entry.message(ENTRY_CONFIG_VALUE, &config_value);
+                }
+
+                written.message(TYPE_ENTRY, &entry);
+            }
+
+            package.message(PACKAGE_TYPE, &written);
+        }
+
+        let mut table = Message::new();
+        table.message(TABLE_PACKAGE, &package);
+        Ok(table.finish())
+    }
+
     #[derive(Clone, Debug)]
     pub struct Outcome {
         pub bundle: Vec<u8>,
         pub entries: usize,
         pub carries_code: bool,
+        pub carries_image: bool,
     }
 
     impl Outcome {
@@ -15014,7 +15215,7 @@ pub mod bundle {
             w.field_u64("bytes", self.bundle.len() as u64);
             w.field_u64("entries", self.entries as u64);
             w.field_bool("carriesCode", self.carries_code);
-            w.field_bool("carriesImage", false);
+            w.field_bool("carriesImage", self.carries_image);
             w.field_bool("signed", false);
             w.field_str(
                 "note",
@@ -15027,32 +15228,41 @@ pub mod bundle {
 
     pub fn write(project: &crate::builder::Project) -> Result<Outcome, Diagnostic> {
         let mut sink = crate::diag::Sink::new();
-        let root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut sink)
-            .ok_or_else(|| fail("EN002", "The manifest could not be read."))?;
-
-        let report = crate::guard::inspect_manifest(&root);
-        if report.verdict() == crate::guard::Verdict::Refused {
-            let mut refusal = fail(
-                "EN003",
-                "The project does not meet the security policy, so no bundle was produced.",
-            );
-            for finding in &report.findings {
-                refusal = refusal.with_context(format!(
-                    "{}: {} {}",
-                    finding.code, finding.what, finding.remedy
-                ));
+        let prepared = crate::builder::prepare(project, &mut sink).map_err(|error| {
+            if error.code == "EB010" {
+                let mut refusal = fail(
+                    "EN003",
+                    "The project does not meet the security policy, so no bundle was produced.",
+                );
+                for line in &error.context {
+                    refusal = refusal.with_context(line.clone());
+                }
+                refusal.with_suggestion(
+                    "Each line above names what is wrong and what to change. A bundle is \
+                     produced only when none of them is left.",
+                )
+            } else {
+                error
             }
-            return Err(refusal.with_suggestion(
-                "Each line above names what is wrong and what to change. A bundle is produced \
-                 only when none of them is left.",
-            ));
-        }
+        })?;
 
-        let manifest = encode_manifest(&root)?;
+        let manifest = encode_manifest(&prepared.root)?;
 
         let mut archive = crate::archive::Builder::new();
         archive.add(CONFIG_ENTRY, encode_config())?;
         archive.add(MANIFEST_ENTRY, manifest)?;
+
+        let carries_image = match (&prepared.compiled, &project.icon) {
+            (Some(table), Some(png)) => {
+                archive.add(RESOURCES_ENTRY, encode_resources(&prepared.package, table)?)?;
+                archive.add(
+                    format!("{RES_PREFIX}{}", crate::builder::ICON_ENTRY),
+                    png.clone(),
+                )?;
+                true
+            }
+            _ => false,
+        };
 
         let carries_code = !project.code.is_empty();
         if carries_code {
@@ -15076,6 +15286,7 @@ pub mod bundle {
             bundle: archive.finish()?,
             entries,
             carries_code,
+            carries_image,
         })
     }
 }
@@ -16213,12 +16424,14 @@ pub mod builder {
         assemble(project, key, &certificate_der, sink)
     }
 
-    pub fn assemble(
-        project: &Project,
-        key: &rsa::PrivateKey,
-        certificate_der: &[u8],
-        sink: &mut Sink,
-    ) -> Result<Outcome, Diagnostic> {
+    pub struct Prepared {
+        pub root: crate::xml::Element,
+        pub compiled: Option<crate::resources::Compiled>,
+        pub package: String,
+        pub guard: guard::Report,
+    }
+
+    pub fn prepare(project: &Project, sink: &mut Sink) -> Result<Prepared, Diagnostic> {
         let mut root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", sink)
             .ok_or_else(|| fail("EB001", "The manifest could not be read."))?;
 
@@ -16233,26 +16446,50 @@ pub mod builder {
         let report = guard::inspect_manifest(&root);
         if report.verdict() == guard::Verdict::Refused {
             guard::emit(&report, sink);
-            return Err(fail(
+            let mut refusal = fail(
                 "EB010",
-                "The project does not meet the security policy, so no package was produced.",
-            )
-            .with_context(format!("Findings: {}", report.findings.len()))
-            .with_suggestion(
+                "The project does not meet the security policy, so nothing was produced.",
+            );
+            for finding in &report.findings {
+                refusal = refusal.with_context(format!(
+                    "{}: {} {}",
+                    finding.code, finding.what, finding.remedy
+                ));
+            }
+            return Err(refusal.with_suggestion(
                 "Every finding above names what is wrong and what to change. A package is \
                  produced only when none of them is left.",
             ));
         }
+
+        let package = package_name(&root);
+        Ok(Prepared {
+            root,
+            compiled,
+            package,
+            guard: report,
+        })
+    }
+
+    pub fn assemble(
+        project: &Project,
+        key: &rsa::PrivateKey,
+        certificate_der: &[u8],
+        sink: &mut Sink,
+    ) -> Result<Outcome, Diagnostic> {
+        let Prepared {
+            root,
+            compiled,
+            package: named,
+            guard: report,
+        } = prepare(project, sink)?;
 
         let manifest = crate::axml::encode(&root)?;
 
         let mut archive = ArchiveBuilder::for_android();
         archive.add("AndroidManifest.xml", manifest)?;
         if let (Some(table), Some(png)) = (&compiled, &project.icon) {
-            archive.add(
-                TABLE_ENTRY,
-                crate::arsc::write(&package_name(&root), table)?,
-            )?;
+            archive.add(TABLE_ENTRY, crate::arsc::write(&named, table)?)?;
             archive.add(ICON_ENTRY, png.clone())?;
         }
         if !project.code.is_empty() {
@@ -17469,8 +17706,8 @@ pub mod ffi {
                     w.field_str(
                         "note",
                         "The image is stored with the project and becomes the launcher icon of \
-                         the package built from it. A bundle does not carry it yet, because \
-                         that needs the resource table in its protobuf form.",
+                         both the package and the bundle built from it. One image serves every \
+                         screen; there is no density scaling here.",
                     );
                 }
                 Err(error) => write_failure(&mut w, "stored", &error),
@@ -22565,7 +22802,25 @@ mod tests {
             version_code: 3,
             ..super::scaffold::Spec::default()
         };
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 8);
+            }
+        }
+        let picture = files
+            .into_iter()
+            .find(|file| super::image::read_png_file(file.to_str().unwrap_or_default()).is_ok());
+
         let mut project = super::builder::from_manifest(&spec.manifest()).unwrap();
+        project.icon = picture.as_ref().map(|path| std::fs::read(path).unwrap());
         project.files = vec![
             (
                 "lib/arm64-v8a/libomni_core.so".to_string(),
@@ -22578,7 +22833,8 @@ mod tests {
         ];
         let outcome = super::bundle::write(&project).expect("a compliant project must bundle");
         assert!(outcome.carries_code);
-        assert_eq!(outcome.entries, 5);
+        assert_eq!(outcome.carries_image, project.icon.is_some());
+        assert_eq!(outcome.entries, if outcome.carries_image { 7 } else { 5 });
 
         let directory = temp_directory("omni-bundle");
         let path = directory.join("omni.aab");
@@ -22699,6 +22955,20 @@ mod tests {
         let names = String::from_utf8_lossy(&listed.stdout).to_string();
         assert!(names.contains("lib/arm64-v8a/libomni_core.so"), "{names}");
         assert!(names.contains("notes.txt"), "{names}");
+
+        if outcome.carries_image {
+            assert!(names.contains("resources.arsc"), "{names}");
+            let badging = std::process::Command::new(&aapt2)
+                .args(["dump", "badging", universal.to_str().unwrap()])
+                .output()
+                .unwrap();
+            let reported = String::from_utf8_lossy(&badging.stdout).to_string();
+            assert!(badging.status.success(), "{reported}");
+            assert!(
+                reported.contains("ic_launcher"),
+                "bundletool must carry the icon through into the package it builds:\n{reported}"
+            );
+        }
 
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(

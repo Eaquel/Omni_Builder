@@ -72,5 +72,5 @@
     <string name="omni_settings_watch">Wache</string>
     <string name="omni_settings_watch_note">Solange Android es zulässt, läuft alle fünfzehn Minuten und bei jedem Start eine Prüfung. Sie sieht, wenn dieses Paket auf einem gerooteten Gerät auf der Festplatte ersetzt wird. Sie sieht keinen Angreifer, der die Prüfung selbst entfernt hat, und sie läuft nicht, wenn Android die Anwendung angehalten hat.</string>
     <string name="omni_action_bundle">AAB BAUEN</string>
-    <string name="omni_bundle_note">Ein Bundle trägt keine Ressourcen und wird hier nicht signiert. Google Play signiert die Pakete, die daraus entstehen.</string>
+    <string name="omni_bundle_note">Ein Bundle trägt das Manifest, den Code, die Ressourcen und das Startsymbol und wird hier nicht signiert. Google Play signiert die Pakete, die daraus entstehen.</string>
 </resources>

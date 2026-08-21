@@ -72,5 +72,5 @@
     <string name="omni_settings_watch">Vigilância</string>
     <string name="omni_settings_watch_note">Enquanto o Android permitir, é executada uma verificação a cada quinze minutos e em cada arranque. Consegue ver este pacote a ser substituído no disco num aparelho com root. Não consegue ver um atacante que tenha removido a própria verificação, e não é executada quando o Android parou a aplicação.</string>
     <string name="omni_action_bundle">CONSTRUIR AAB</string>
-    <string name="omni_bundle_note">Um pacote de aplicação não leva recursos e não é assinado aqui. A Google Play assina os pacotes que gera a partir dele.</string>
+    <string name="omni_bundle_note">Um pacote de aplicação leva o manifesto, o código, os recursos e o ícone, e não é assinado aqui. A Google Play assina os pacotes que gera a partir dele.</string>
 </resources>
