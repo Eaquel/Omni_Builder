@@ -1221,11 +1221,22 @@ class BuilderActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        val before = standing
-        standing = examine()
-        if (standing != before) {
-            render()
+        if (Sentry.refused(this)) {
+            if (standing != "TAMPERED") {
+                standing = "TAMPERED"
+                render()
+            }
+            return
         }
+        Thread {
+            val found = runCatching { Sentry.check(this) }.getOrDefault("UNKNOWN")
+            runOnUiThread {
+                if (!isFinishing && found != standing) {
+                    standing = found
+                    render()
+                }
+            }
+        }.start()
     }
 
     private fun examine(): String {
