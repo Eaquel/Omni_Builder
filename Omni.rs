@@ -18789,6 +18789,18 @@ pub mod builder {
             if let Ok(key) = rsa::parse_pkcs8(&stored) {
                 return Ok((key, true));
             }
+            return Err(fail(
+                "EB021",
+                "A file is where that signing key belongs, and it is not a key this build \
+                 can open unaided.",
+            )
+            .with_context(format!("Path: {path}"))
+            .with_context(format!("Size: {} bytes", stored.len()))
+            .with_suggestion(
+                "A key sealed under a password is opened with that password, not without \
+                 one. Nothing here writes over it: every application signed with the key \
+                 it replaced could no longer be updated.",
+            ));
         }
 
         let key = rsa::generate(2048)?;
@@ -27299,6 +27311,61 @@ mod tests {
         let removed = call_ffi(|| unsafe { super::ffi::omni_delete_key(path_c.as_ptr()) });
         assert!(removed.contains("\"removed\":true"), "{removed}");
         assert!(super::keystore::list(keys.to_str().unwrap()).is_empty());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_build_without_a_password_never_writes_over_a_sealed_key() {
+        let directory = temp_directory("omni-key-kept");
+        let keys = directory.join("Keys");
+        let path =
+            super::keystore::path_for(keys.to_str().unwrap(), super::keystore::DEFAULT_ALIAS);
+        super::keystore::create(
+            keys.to_str().unwrap(),
+            &super::keystore::Request::default(),
+            super::keystore::DEFAULT_PASSWORD,
+            1_787_000_000,
+        )
+        .unwrap();
+        let sealed = std::fs::read(&path).unwrap();
+
+        let error = super::builder::signing_key(&path)
+            .expect_err("a sealed key is not a key this path may open");
+        assert_eq!(error.code, "EB021");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            sealed,
+            "the key on disk is the key that was there before"
+        );
+
+        let root = directory.join("Kept");
+        super::scaffold::create(root.to_str().unwrap(), &super::scaffold::Spec::default()).unwrap();
+        let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+        let package_c =
+            std::ffi::CString::new(directory.join("kept.apk").to_str().unwrap()).unwrap();
+        let bundle_c =
+            std::ffi::CString::new(directory.join("kept.aab").to_str().unwrap()).unwrap();
+        let path_c = std::ffi::CString::new(path.clone()).unwrap();
+
+        let refused = call_ffi(|| unsafe {
+            super::ffi::omni_build_all(
+                root_c.as_ptr(),
+                package_c.as_ptr(),
+                bundle_c.as_ptr(),
+                path_c.as_ptr(),
+                std::ptr::null(),
+            )
+        });
+        assert!(is_structurally_valid(&refused), "{refused}");
+        assert!(refused.contains("\"built\":false"), "{refused}");
+        assert!(refused.contains("EB021"), "{refused}");
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            sealed,
+            "a build asked for without the password leaves the key alone"
+        );
+        assert!(super::keystore::describe(&path).is_ok());
 
         std::fs::remove_dir_all(&directory).ok();
     }

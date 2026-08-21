@@ -82,6 +82,7 @@
     <string name="omni_build_title">Сборка</string>
     <string name="omni_build_no_key">Сначала выберите ключ подписи.</string>
     <string name="omni_build_password">Пароль ключа</string>
+    <string name="omni_build_needs_password">Сначала введите пароль ключа.</string>
     <string name="omni_build_shared_password">Общий ключ открывается паролем %1$s. Он записан в этом приложении: это способ начать, а не секрет.</string>
     <string name="omni_build_your_password">Пароль, который вы выбрали при создании этого ключа.</string>
     <string name="omni_build_both_note">Одно нажатие пишет оба: подписанный пакет для установки и bundle для загрузки. Сначала работает политика безопасности, и если она отказывает, не пишется ничего.</string>

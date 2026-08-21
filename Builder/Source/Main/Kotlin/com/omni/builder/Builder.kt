@@ -2718,6 +2718,10 @@ class BuilderActivity : Activity() {
             results.addView(notice(getString(R.string.omni_build_no_key), palette.warning))
             return
         }
+        if (readSecret(buildPasswordView).isEmpty()) {
+            results.addView(notice(getString(R.string.omni_build_needs_password), palette.warning))
+            return
+        }
 
         val name = File(root).name
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())

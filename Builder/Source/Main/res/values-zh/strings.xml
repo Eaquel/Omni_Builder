@@ -82,6 +82,7 @@
     <string name="omni_build_title">构建</string>
     <string name="omni_build_no_key">请先选择一个签名密钥。</string>
     <string name="omni_build_password">密钥密码</string>
+    <string name="omni_build_needs_password">请先输入密钥密码。</string>
     <string name="omni_build_shared_password">共享密钥用 %1$s 打开。它写在这个应用里：是让你上手的起点，不是秘密。</string>
     <string name="omni_build_your_password">你创建这个密钥时选的密码。</string>
     <string name="omni_build_both_note">按一次两个都写：可安装的已签名安装包，以及可上传的应用包。安全策略先跑，若它拒绝，两个都不会写出。</string>

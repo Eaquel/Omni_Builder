@@ -82,6 +82,7 @@
     <string name="omni_build_title">Bauen</string>
     <string name="omni_build_no_key">Wähle zuerst einen Signaturschlüssel.</string>
     <string name="omni_build_password">Schlüsselpasswort</string>
+    <string name="omni_build_needs_password">Gib zuerst das Schlüsselpasswort ein.</string>
     <string name="omni_build_shared_password">Der geteilte Schlüssel öffnet mit %1$s. Es steht in dieser Anwendung, ist also ein Anfang und kein Geheimnis.</string>
     <string name="omni_build_your_password">Das Passwort, das du beim Erzeugen dieses Schlüssels gewählt hast.</string>
     <string name="omni_build_both_note">Ein Druck schreibt beides: ein signiertes Paket zum Installieren und ein Bundle zum Hochladen. Zuerst läuft die Sicherheitsrichtlinie; lehnt sie ab, wird keines geschrieben.</string>

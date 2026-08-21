@@ -82,6 +82,7 @@
     <string name="omni_build_title">Costruisci</string>
     <string name="omni_build_no_key">Scegli prima una chiave di firma.</string>
     <string name="omni_build_password">Password della chiave</string>
+    <string name="omni_build_needs_password">Scrivi prima la password della chiave.</string>
     <string name="omni_build_shared_password">La chiave condivisa si apre con %1$s. È scritta in questa applicazione: è un punto di partenza, non un segreto.</string>
     <string name="omni_build_your_password">La password che hai scelto quando hai creato questa chiave.</string>
     <string name="omni_build_both_note">Una pressione scrive entrambi: un pacchetto firmato da installare e un bundle da caricare. La politica di sicurezza viene eseguita prima, e se rifiuta non viene scritto nessuno dei due.</string>

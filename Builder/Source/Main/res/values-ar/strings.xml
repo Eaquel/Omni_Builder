@@ -82,6 +82,7 @@
     <string name="omni_build_title">البناء</string>
     <string name="omni_build_no_key">اختر مفتاح توقيع أولًا.</string>
     <string name="omni_build_password">كلمة سر المفتاح</string>
+    <string name="omni_build_needs_password">اكتب كلمة سر المفتاح أولًا.</string>
     <string name="omni_build_shared_password">يُفتح المفتاح المشترك بـ %1$s. وهي مكتوبة في هذا التطبيق: بداية للعمل، لا سر.</string>
     <string name="omni_build_your_password">كلمة السر التي اخترتها عند إنشاء هذا المفتاح.</string>
     <string name="omni_build_both_note">ضغطة واحدة تكتب الاثنين: حزمة موقَّعة للتثبيت وحزمة تطبيق للرفع. تعمل سياسة الأمان أولًا، وإن رفضت لا يُكتب أي منهما.</string>

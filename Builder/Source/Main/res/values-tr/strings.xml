@@ -82,6 +82,7 @@
     <string name="omni_build_title">Derle</string>
     <string name="omni_build_no_key">Önce bir imza anahtarı seç.</string>
     <string name="omni_build_password">Anahtar parolası</string>
+    <string name="omni_build_needs_password">Önce anahtar parolasını yaz.</string>
     <string name="omni_build_shared_password">Ortak anahtar %1$s ile açılır. Bu uygulamanın içinde yazılıdır; başlangıç kolaylığıdır, sır değildir.</string>
     <string name="omni_build_your_password">Bu anahtarı oluştururken seçtiğin parola.</string>
     <string name="omni_build_both_note">Tek dokunuş ikisini de yazar: kurulacak imzalı bir paket ve yüklenecek bir paket demeti. Önce güvenlik ilkesi çalışır; reddederse hiçbiri yazılmaz.</string>

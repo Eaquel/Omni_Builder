@@ -82,6 +82,7 @@
     <string name="omni_build_title">Construire</string>
     <string name="omni_build_no_key">Choisis d\'abord une clé de signature.</string>
     <string name="omni_build_password">Mot de passe de la clé</string>
+    <string name="omni_build_needs_password">Saisis d\'abord le mot de passe de la clé.</string>
     <string name="omni_build_shared_password">La clé partagée s\'ouvre avec %1$s. Il est écrit dans cette application : c\'est un point de départ, pas un secret.</string>
     <string name="omni_build_your_password">Le mot de passe que tu as choisi en créant cette clé.</string>
     <string name="omni_build_both_note">Une pression écrit les deux : un paquet signé à installer et un bundle à téléverser. La politique de sécurité passe d\'abord, et si elle refuse aucun n\'est écrit.</string>

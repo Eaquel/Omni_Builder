@@ -82,6 +82,7 @@
     <string name="omni_build_title">Build</string>
     <string name="omni_build_no_key">Choose a signing key first.</string>
     <string name="omni_build_password">Key password</string>
+    <string name="omni_build_needs_password">Type the key password first.</string>
     <string name="omni_build_shared_password">The shared key opens with %1$s. It is written in this application, so it is a way to get started and not a secret.</string>
     <string name="omni_build_your_password">The password you chose when you made this key.</string>
     <string name="omni_build_both_note">One press writes both: a signed package to install, and a bundle to upload. The security policy runs first, and neither is written if it refuses.</string>
