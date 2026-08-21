@@ -2206,11 +2206,12 @@ class BuilderActivity : Activity() {
         if (key == null) {
             signing.addView(quiet(getString(R.string.omni_build_no_key)))
         } else {
+            val shared = key.alias == DEFAULT_KEY_ALIAS
             signing.addView(
                 keyValue(
                     key.alias,
                     key.subject,
-                    if (key.alias == DEFAULT_KEY_ALIAS) {
+                    if (shared) {
                         getString(R.string.omni_keys_shared)
                     } else {
                         getString(R.string.omni_keys_yours)
@@ -2218,12 +2219,15 @@ class BuilderActivity : Activity() {
                     palette.accent,
                 )
             )
-            val secret = secret(getString(R.string.omni_build_password))
+            val secret = secret(
+                getString(R.string.omni_build_password),
+                if (shared) DEFAULT_KEY_PASSWORD else "",
+            )
             buildPasswordView = secret.second
             signing.addView(secret.first)
             signing.addView(
                 quiet(
-                    if (key.alias == DEFAULT_KEY_ALIAS) {
+                    if (shared) {
                         getString(R.string.omni_build_shared_password, DEFAULT_KEY_PASSWORD)
                     } else {
                         getString(R.string.omni_build_your_password)
@@ -3233,8 +3237,8 @@ class BuilderActivity : Activity() {
         return holder
     }
 
-    private fun secret(label: String): Pair<View, EditText> {
-        val (holder, editor) = input(label, "")
+    private fun secret(label: String, initial: String = ""): Pair<View, EditText> {
+        val (holder, editor) = input(label, initial)
         editor.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         editor.typeface = Typeface.MONOSPACE
         return holder to editor
