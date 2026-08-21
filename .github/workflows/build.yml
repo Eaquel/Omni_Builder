@@ -208,12 +208,14 @@ jobs:
       - name: Run every check that needs the Android build
         run: ./Builder_Test.py --strict release core bridge installable reproducible
 
-      - name: Report what the release artifact is
+      - name: Report what the release artifacts are
         run: |
           set -euo pipefail
           apk=$(ls Builder/build/outputs/apk/release/*.apk)
-          echo "Release artifact: $(basename "$apk")"
+          aab=$(ls Builder/build/outputs/bundle/release/*.aab)
+          echo "Release artifacts: $(basename "$apk") and $(basename "$aab")"
           echo "SHA-256: $(sha256sum "$apk" | cut -d' ' -f1)"
+          echo "SHA-256: $(sha256sum "$aab" | cut -d' ' -f1)"
           "$ANDROID_HOME/build-tools/$OMNI_BUILD_TOOLS_VERSION/apksigner" verify \
             --print-certs "$apk" || {
               echo
@@ -221,7 +223,7 @@ jobs:
               echo "Add the OMNI_KEYSTORE_* repository secrets to get a signed one."
             }
 
-      - name: Publish the release APK
+      - name: Publish the package and the bundle
         uses: actions/upload-artifact@v5
         with:
           name: omni-builder-release

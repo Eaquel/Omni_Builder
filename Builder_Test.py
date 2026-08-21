@@ -330,26 +330,39 @@ def check_bridge() -> str:
 
 
 def check_reproducible() -> str:
-    """The release package is the same bytes across a clean rebuild."""
+    """The package and the bundle are the same bytes across a clean rebuild.
+
+    Both are rebuilt, not only the package: this check runs last, so whatever
+    it leaves behind is what gets published, and a run that rebuilt only the
+    package would quietly drop the bundle.
+    """
     if os.environ.get("OMNI_SKIP_REPRODUCIBLE"):
         raise Skip("asked to skip the rebuild")
     import hashlib
 
-    def digest() -> str:
-        made = sorted(ROOT.glob("Builder/build/outputs/apk/release/*.apk"))
+    def digest(pattern: str, what: str) -> str:
+        made = sorted(ROOT.glob(pattern))
         if not made:
-            raise AssertionError("no release package to weigh")
+            raise AssertionError(f"no {what} to weigh")
         return hashlib.sha256(made[0].read_bytes()).hexdigest()
 
-    gradle(":Builder:assembleRelease")
-    first = digest()
+    both = (":Builder:assembleRelease", ":Builder:bundleRelease")
+    weighed = (
+        ("Builder/build/outputs/apk/release/*.apk", "release package"),
+        ("Builder/build/outputs/bundle/release/*.aab", "bundle"),
+    )
+
+    gradle(*both)
+    first = [digest(pattern, what) for pattern, what in weighed]
     gradle("clean")
     run(["cargo", "clean"])
-    gradle(":Builder:assembleRelease")
-    second = digest()
-    if first != second:
-        raise AssertionError(f"the release package is not reproducible\n{first}\n{second}")
-    return f"identical across a clean rebuild, {first[:16]}"
+    gradle(*both)
+    second = [digest(pattern, what) for pattern, what in weighed]
+
+    for (_, what), before, after in zip(weighed, first, second):
+        if before != after:
+            raise AssertionError(f"the {what} is not reproducible\n{before}\n{after}")
+    return f"package and bundle identical across a clean rebuild, {first[0][:16]}"
 
 
 def check_installable() -> str:
