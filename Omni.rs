@@ -26137,7 +26137,7 @@ mod tests {
             "android:versionName(0x0101021c)=\"1.0.0\"",
             "android:minSdkVersion(0x0101020c)=28",
             "android:targetSdkVersion(0x01010270)=36",
-            "android:label(0x01010001)=@0x7f",
+            "android:label(0x01010001)=@0x7f020000",
             "android:allowBackup(0x01010280)=false",
             "android:extractNativeLibs(0x010104ea)=false",
             "E: activity",
