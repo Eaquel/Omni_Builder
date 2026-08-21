@@ -136,11 +136,35 @@ jobs:
 
       - name: Run the Core test suite
         # A conformance test that skips reports success while checking nothing.
-        # This makes a missing apksigner fail the job instead (see find_apksigner
-        # in Omni.rs).
+        # Each guard below makes a missing tool fail the job instead.
         env:
           OMNI_REQUIRE_APKSIGNER: "1"
+          OMNI_REQUIRE_AXML_CONFORMANCE: "1"
+          OMNI_REQUIRE_IMAGE_CONFORMANCE: "1"
         run: cargo test --locked
+
+      - name: Confirm every language carries every string
+        run: |
+          set -euo pipefail
+          # A missing translation falls back to English silently, so the screen
+          # would come out half in one language and half in another with nothing
+          # reporting it. Section 46: the interface has no hardcoded text, and
+          # that is only worth anything if every locale is complete.
+          base=Builder/Source/Main/res
+          keys=$(grep -o 'name="[^"]*"' "$base/values/strings.xml" | sort)
+          count=$(echo "$keys" | wc -l)
+          languages=0
+          for folder in "$base"/values-*; do
+            here=$(grep -o 'name="[^"]*"' "$folder/strings.xml" | sort)
+            if [ "$keys" != "$here" ]; then
+              echo "$folder does not carry the same strings as values/"
+              diff <(echo "$keys") <(echo "$here") || true
+              exit 1
+            fi
+            languages=$((languages + 1))
+          done
+          echo "$count strings in $((languages + 1)) languages"
+          test "$languages" -ge 9
 
       - name: Confirm the Core carries no third-party dependency
         run: |
@@ -343,14 +367,24 @@ jobs:
             so="$work/lib/$abi/libomni_builder.so"
             test -f "$so" || { echo "missing native library for $abi"; exit 1; }
 
-            # The six JNI entry points and JNI_OnLoad, and nothing else. If the
+            # Every JNI entry point the Kotlin declares, JNI_OnLoad, and
+            # nothing else. A declared external fun with no entry point behind
+            # it is an UnsatisfiedLinkError the first time a person taps the
+            # button, and nothing else in this pipeline would catch it. If the
             # Core's C ABI ever appears here, --exclude-libs has stopped working
             # and the shared object is exposing more than it should.
-            exported=$("$nm" -D --defined-only "$so" | wc -l)
-            echo "$abi: $exported exported symbols"
-            test "$exported" -eq 7
+            "$nm" -D --defined-only "$so" | awk '{print $3}' | sort > "$work/exported.txt"
 
-            "$nm" -D --defined-only "$so" | grep -q Java_com_omni_builder_Builder_nativeStateReport
+            grep -o 'external fun native[A-Za-z]*' \
+              Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt \
+              | sed 's/external fun /Java_com_omni_builder_Builder_/' > "$work/declared.txt"
+            echo JNI_OnLoad >> "$work/declared.txt"
+            sort -o "$work/declared.txt" "$work/declared.txt"
+
+            echo "$abi: $(wc -l < "$work/exported.txt") exported, \
+              $(wc -l < "$work/declared.txt") declared"
+            diff "$work/declared.txt" "$work/exported.txt"
+
             ! "$nm" -D --defined-only "$so" | grep -q omni_state_report
           done
 

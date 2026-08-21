@@ -2,26 +2,73 @@
 <resources>
     <string name="omni_app_name">Omni_Builder</string>
     <string name="omni_bullet">\u2022 %1$s</string>
-
-    <string name="omni_form_identity">Identity</string>
+    <string name="omni_tab_projects">PROJECTS</string>
+    <string name="omni_tab_settings">SETTINGS</string>
+    <string name="omni_projects_title">Projects</string>
+    <string name="omni_projects_none">No project yet.</string>
+    <string name="omni_projects_new">NEW PROJECT</string>
+    <string name="omni_projects_open">OPEN</string>
+    <string name="omni_keys_title">Signing keys</string>
+    <string name="omni_keys_none">No signing key yet. A package is signed with a key you make here.</string>
+    <string name="omni_keys_new">NEW KEY</string>
+    <string name="omni_keys_in_use">IN USE</string>
+    <string name="omni_keys_expires">Expires</string>
+    <string name="omni_keys_fingerprint">Fingerprint</string>
+    <string name="omni_keys_use">USE</string>
     <string name="omni_form_package">Package name</string>
     <string name="omni_form_label">Application name</string>
+    <string name="omni_form_version_name">Version name</string>
+    <string name="omni_form_version_code">Version code</string>
+    <string name="omni_form_min_sdk">Oldest Android</string>
+    <string name="omni_form_target_sdk">Newest Android</string>
     <string name="omni_form_architecture">Architecture</string>
-    <string name="omni_form_platform">Oldest Android</string>
     <string name="omni_form_languages">Languages</string>
-    <string name="omni_form_no_compiler">Folders are created for what you pick. No compiler
-        exists yet, so the code in them is not compiled.</string>
-
-    <string name="omni_action_create">CREATE PROJECT</string>
+    <string name="omni_form_image">Application image</string>
+    <string name="omni_form_image_choose">CHOOSE IMAGE</string>
+    <string name="omni_form_image_none">No image chosen.</string>
+    <string name="omni_form_no_compiler">Folders are created for what you pick. No compiler exists yet, so the code in them is not compiled.</string>
+    <string name="omni_key_alias">Key name</string>
+    <string name="omni_key_common_name">Your name</string>
+    <string name="omni_key_organisation">Organisation</string>
+    <string name="omni_key_country">Country code</string>
+    <string name="omni_key_validity">Valid for, in days</string>
+    <string name="omni_key_size">Key size</string>
+    <string name="omni_key_password">Password</string>
+    <string name="omni_key_password_again">Password again</string>
+    <string name="omni_key_password_mismatch">The two passwords are not the same.</string>
+    <string name="omni_key_password_warning">Nothing here can recover this key if the password is lost, and every application signed with it would stop being updatable.</string>
+    <string name="omni_action_create">CREATE</string>
     <string name="omni_action_build">BUILD APK</string>
-
+    <string name="omni_action_save">SAVE</string>
+    <string name="omni_action_delete">DELETE</string>
+    <string name="omni_action_back">BACK</string>
+    <string name="omni_action_cancel">CANCEL</string>
+    <string name="omni_action_new_file">NEW FILE</string>
+    <string name="omni_action_new_folder">NEW FOLDER</string>
+    <string name="omni_action_open">OPEN</string>
+    <string name="omni_editor_title">Files</string>
+    <string name="omni_editor_saved">Saved %1$s</string>
+    <string name="omni_editor_name_prompt">Name, inside the project</string>
     <string name="omni_created">PROJECT CREATED</string>
     <string name="omni_refused">NO PACKAGE PRODUCED</string>
     <string name="omni_result_contents">Contents</string>
     <string name="omni_result_signature">Signature</string>
     <string name="omni_result_policy">Security policy</string>
+    <string name="omni_result_signed_by">Signed by</string>
     <string name="omni_integrity_unknown">Integrity could not be checked.</string>
-
-    <string name="omni_storage_rationale">Android 9 needs the storage permission to write logs
-        into Documents. Nothing else uses it.</string>
+    <string name="omni_integrity_refused_title">THIS APPLICATION WILL NOT OPEN</string>
+    <string name="omni_integrity_refused_body">The signature on this package is not the one it was built with, so it has been repackaged by someone else. Install it again from where you first got it.</string>
+    <string name="omni_integrity_checked">Checked at every start and every return to the screen.</string>
+    <string name="omni_settings_language">Language</string>
+    <string name="omni_settings_language_note">The screen is drawn again when you choose one.</string>
+    <string name="omni_settings_core">Core</string>
+    <string name="omni_settings_integrity">Integrity</string>
+    <string name="omni_settings_logs">Log</string>
+    <string name="omni_settings_unfinished">Not finished yet</string>
+    <string name="omni_storage_rationale">Android 9 needs the storage permission to write logs into Documents. Nothing else uses it.</string>
+    <string name="omni_build_no_key">Choose a signing key first.</string>
+    <string name="omni_build_password">Key password</string>
+    <string name="omni_working">Working...</string>
+    <string name="omni_settings_watch">Watch</string>
+    <string name="omni_settings_watch_note">A check runs every fifteen minutes while Android allows it, and at every start. It can see this package being replaced on disk on a rooted device. It cannot see an attacker who removed the check itself, and it does not run when Android has stopped the application.</string>
 </resources>

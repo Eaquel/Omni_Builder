@@ -30,6 +30,20 @@ char *omni_delete_key(const char *path);
 
 char *omni_check_key(const char *path, const char *password);
 
+char *omni_list_projects(const char *directory);
+
+char *omni_project_tree(const char *root);
+
+char *omni_read_file(const char *root, const char *relative);
+
+char *omni_write_file(const char *root, const char *relative, const char *contents);
+
+char *omni_new_folder(const char *root, const char *relative);
+
+char *omni_remove_path(const char *root, const char *relative);
+
+char *omni_set_icon(const char *root, const char *source);
+
 void omni_string_free(char *value);
 
 }

@@ -363,6 +363,97 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeVerifySelf(
                                                             : expected_text.c_str()));
 }
 
+bool TwoPaths(JNIEnv *env, jstring first, jstring second, std::string *first_text,
+              std::string *second_text, const char *what) {
+  if (first == nullptr || second == nullptr ||
+      !JavaStringToUtf8(env, first, first_text) ||
+      !JavaStringToUtf8(env, second, second_text)) {
+    ThrowJava(env, kIllegalState, what);
+    return false;
+  }
+  return true;
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListProjects(
+    JNIEnv *env, jobject , jstring directory) {
+  std::string directory_text;
+  if (directory == nullptr || !JavaStringToUtf8(env, directory, &directory_text)) {
+    ThrowJava(env, kIllegalState, "Listing projects needs a folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_list_projects(directory_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Reading a project needs its folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_project_tree(root_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeReadFile(
+    JNIEnv *env, jobject , jstring root, jstring relative) {
+  std::string root_text;
+  std::string relative_text;
+  if (!TwoPaths(env, root, relative, &root_text, &relative_text,
+                "Reading a file needs a project and a path.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_read_file(root_text.c_str(), relative_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeWriteFile(
+    JNIEnv *env, jobject , jstring root, jstring relative, jstring contents) {
+  std::string root_text;
+  std::string relative_text;
+  std::string contents_text;
+  if (!TwoPaths(env, root, relative, &root_text, &relative_text,
+                "Saving a file needs a project and a path.")) {
+    return nullptr;
+  }
+  if (contents != nullptr && !JavaStringToUtf8(env, contents, &contents_text)) {
+    return nullptr;
+  }
+  return HandBack(env, omni_write_file(root_text.c_str(), relative_text.c_str(),
+                                       contents_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(
+    JNIEnv *env, jobject , jstring root, jstring relative) {
+  std::string root_text;
+  std::string relative_text;
+  if (!TwoPaths(env, root, relative, &root_text, &relative_text,
+                "Making a folder needs a project and a path.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_new_folder(root_text.c_str(), relative_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRemovePath(
+    JNIEnv *env, jobject , jstring root, jstring relative) {
+  std::string root_text;
+  std::string relative_text;
+  if (!TwoPaths(env, root, relative, &root_text, &relative_text,
+                "Removing something needs a project and a path.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_remove_path(root_text.c_str(), relative_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSetIcon(
+    JNIEnv *env, jobject , jstring root, jstring source) {
+  std::string root_text;
+  std::string source_text;
+  if (!TwoPaths(env, root, source, &root_text, &source_text,
+                "An application image needs a project and a file.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_set_icon(root_text.c_str(), source_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(
     JNIEnv *env, jobject , jstring observed_environment) {
   if (observed_environment == nullptr) {
