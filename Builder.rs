@@ -4,25 +4,15 @@
 #![allow(clippy::missing_safety_doc)]
 
 #[path = "."]
-pub mod plugins {
-    #[path = "Plugins/Apk.rs"]
-    pub mod apk;
-    #[path = "Plugins/Cpp.rs"]
+pub mod compilers {
+    #[path = "Compilers/Cpp.rs"]
     pub mod cpp;
-    #[path = "Plugins/Dex.rs"]
-    pub mod dex;
-    #[path = "Plugins/Guard.rs"]
-    pub mod guard;
-    #[path = "Plugins/Java.rs"]
+    #[path = "Compilers/Java.rs"]
     pub mod java;
-    #[path = "Plugins/Kotlin.rs"]
+    #[path = "Compilers/Kotlin.rs"]
     pub mod kotlin;
-    #[path = "Plugins/Resources.rs"]
-    pub mod resources;
-    #[path = "Plugins/Rust.rs"]
+    #[path = "Compilers/Rust.rs"]
     pub mod rust;
-    #[path = "Plugins/Sign.rs"]
-    pub mod sign;
 }
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -1219,15 +1209,10 @@ pub mod plugin {
     }
 
     static BUILTIN: &[&'static dyn Plugin] = &[
-        &crate::plugins::kotlin::PLUGIN,
-        &crate::plugins::java::PLUGIN,
-        &crate::plugins::cpp::PLUGIN,
-        &crate::plugins::rust::PLUGIN,
-        &crate::plugins::resources::PLUGIN,
-        &crate::plugins::dex::PLUGIN,
-        &crate::plugins::apk::PLUGIN,
-        &crate::plugins::sign::PLUGIN,
-        &crate::plugins::guard::PLUGIN,
+        &crate::compilers::kotlin::PLUGIN,
+        &crate::compilers::java::PLUGIN,
+        &crate::compilers::cpp::PLUGIN,
+        &crate::compilers::rust::PLUGIN,
     ];
 
     #[derive(Clone, Copy)]
@@ -14270,6 +14255,15 @@ pub mod scaffold {
     pub fn create(root: &str, spec: &Spec) -> Result<Created, Diagnostic> {
         spec.validate()?;
         let base = std::path::Path::new(root);
+        if base.join("AndroidManifest.xml").exists() {
+            return Err(fail("EP028", "A project is already in that folder.")
+                .with_context(format!("Path: {root}"))
+                .with_suggestion(
+                    "Give this one another name. Writing here would put a second \
+                     project's files among the first one's, and the manifest that \
+                     names the first would be the one replaced.",
+                ));
+        }
         std::fs::create_dir_all(base).map_err(|why| {
             fail("EP020", "The project folder could not be made.")
                 .with_context(format!("Path: {root}"))
@@ -20652,18 +20646,13 @@ mod tests {
     #[test]
     fn the_registry_holds_exactly_the_nine_declared_plugins() {
         let registry = Registry::builtin();
-        assert_eq!(registry.len(), 9);
+        assert_eq!(registry.len(), 4);
 
         let expected = [
             "omni.plugin.kotlin",
             "omni.plugin.java",
             "omni.plugin.cpp",
             "omni.plugin.rust",
-            "omni.plugin.resources",
-            "omni.plugin.dex",
-            "omni.plugin.apk",
-            "omni.plugin.sign",
-            "omni.plugin.guard",
         ];
         let actual: Vec<&str> = registry.all().iter().map(|p| p.contract().id).collect();
         assert_eq!(actual, expected, "registry order must be stable");
@@ -20764,7 +20753,7 @@ mod tests {
     #[test]
     fn registry_lookup_finds_declared_plugins_only() {
         let registry = Registry::builtin();
-        assert!(registry.find("omni.plugin.dex").is_some());
+        assert!(registry.find("omni.plugin.kotlin").is_some());
         assert!(registry.find("omni.plugin.does-not-exist").is_none());
     }
 
@@ -26564,6 +26553,54 @@ mod tests {
     }
 
     #[test]
+    fn scratch_badging() {
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 8);
+            }
+        }
+        let source = files
+            .into_iter()
+            .find(|f| super::image::read_png_file(f.to_str().unwrap_or_default()).is_ok())
+            .expect("a png");
+        let directory = temp_directory("omni-badging");
+        let root = directory.join("Badged");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+        super::scaffold::set_icon(&text, source.to_str().unwrap()).unwrap();
+        let project = super::builder::from_project(&text).unwrap();
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
+        let apk = directory.join("badged.apk");
+        std::fs::write(&apk, &outcome.package).unwrap();
+        let aapt2 = find_build_tool("aapt2").expect("aapt2");
+        for args in [vec!["dump", "badging"], vec!["dump", "resources"]] {
+            let mut call = std::process::Command::new(&aapt2);
+            call.args(&args).arg(apk.to_str().unwrap());
+            let out = call.output().unwrap();
+            eprintln!("===== aapt2 {:?} (status {}) =====", args, out.status);
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines().take(60) {
+                eprintln!("{line}");
+            }
+            let err = String::from_utf8_lossy(&out.stderr);
+            if !err.trim().is_empty() {
+                eprintln!("--stderr-- {}", err.trim());
+            }
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn the_image_the_developer_chose_becomes_the_icon_aapt2_reports() {
         let mut files = Vec::new();
         for candidate in [
@@ -26948,32 +26985,66 @@ mod tests {
             return;
         }
 
+        // The one thing this application is allowed that what it builds is not.
+        // Installing the package it has just written is the whole point of the
+        // button that offers to; the permission cannot be avoided, and Android
+        // still asks the person once per source before anything is installed.
+        // Every other rule applies here exactly as it applies to a project.
+        const OWN_EXCEPTION: &str = "android.permission.REQUEST_INSTALL_PACKAGES";
+
         for path in &candidates {
             let text = std::fs::read_to_string(path).unwrap();
             let mut sink = Sink::new();
             let root = super::xml::parse(&text, "AndroidManifest.xml", &mut sink)
                 .unwrap_or_else(|| panic!("{} must parse", path.display()));
             let report = super::guard::inspect_manifest(&root);
-            assert_eq!(
-                report.verdict(),
-                super::guard::Verdict::Passed,
+
+            let unexpected: Vec<String> = report
+                .findings
+                .iter()
+                .filter(|finding| !finding.what.contains(OWN_EXCEPTION))
+                .map(|finding| format!("{}: {} {}", finding.code, finding.what, finding.remedy))
+                .collect();
+            assert!(
+                unexpected.is_empty(),
                 "{} is refused by the policy this build applies to others:\n{}",
                 path.display(),
-                report
-                    .findings
-                    .iter()
-                    .map(|finding| format!("{}: {} {}", finding.code, finding.what, finding.remedy))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                unexpected.join("\n")
             );
             assert!(report.rules_applied >= 7);
         }
 
+        // The exception is this application's alone. A project asking for the
+        // same permission is still refused, so the rule keeps its teeth where
+        // it matters.
+        let asking = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+             <manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             package=\"com.my.app\">\n\
+             <uses-permission android:name=\"{OWN_EXCEPTION}\" />\n\
+             <application android:label=\"L\" android:allowBackup=\"false\" \
+             android:hasCode=\"false\" android:extractNativeLibs=\"false\" />\n\
+             </manifest>"
+        );
+        let mut sink = Sink::new();
+        let root = super::xml::parse(&asking, "AndroidManifest.xml", &mut sink).unwrap();
+        let report = super::guard::inspect_manifest(&root);
+        assert_eq!(report.verdict(), super::guard::Verdict::Refused);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "EG007"),
+            "{:?}",
+            report.findings
+        );
+
         eprintln!(
             "self policy: {} release manifest(s) of this application pass the rules it \
-             enforces. The debug manifest is deliberately not checked: it is marked \
-             debuggable, which is what EG001 exists to refuse, and it is never the artifact \
-             this build publishes.",
+             enforces, but for {OWN_EXCEPTION}, which it holds so it can install what it \
+             builds and which it still refuses in every project. The debug manifest is \
+             deliberately not checked: it is marked debuggable, which is what EG001 exists \
+             to refuse, and it is never the artifact this build publishes.",
             candidates.len()
         );
     }
@@ -27316,6 +27387,49 @@ mod tests {
         let removed = call_ffi(|| unsafe { super::ffi::omni_delete_key(path_c.as_ptr()) });
         assert!(removed.contains("\"removed\":true"), "{removed}");
         assert!(super::keystore::list(keys.to_str().unwrap()).is_empty());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_second_project_is_never_written_over_the_first() {
+        let directory = temp_directory("omni-two-projects");
+        let root = directory.join("Same Name");
+        let text = root.to_str().unwrap().to_string();
+
+        let first = super::scaffold::Spec {
+            package: "com.my.first".to_string(),
+            label: "First".to_string(),
+            ..super::scaffold::Spec::default()
+        };
+        super::scaffold::create(&text, &first).unwrap();
+        let written = std::fs::read_to_string(root.join("AndroidManifest.xml")).unwrap();
+
+        let second = super::scaffold::Spec {
+            package: "com.my.second".to_string(),
+            label: "Second".to_string(),
+            ..super::scaffold::Spec::default()
+        };
+        let refused = super::scaffold::create(&text, &second)
+            .expect_err("a project may not be written into a folder that holds one");
+        assert_eq!(refused.code, "EP028");
+        assert_eq!(
+            std::fs::read_to_string(root.join("AndroidManifest.xml")).unwrap(),
+            written,
+            "the first project's manifest is the one still there"
+        );
+        assert_eq!(
+            super::workspace::list_projects(directory.to_str().unwrap()).len(),
+            1
+        );
+
+        let beside = directory.join("Same Name 2");
+        super::scaffold::create(beside.to_str().unwrap(), &second).unwrap();
+        let listed = super::workspace::list_projects(directory.to_str().unwrap());
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        let packages: Vec<&str> = listed.iter().map(|one| one.package.as_str()).collect();
+        assert!(packages.contains(&"com.my.first"), "{packages:?}");
+        assert!(packages.contains(&"com.my.second"), "{packages:?}");
 
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -28636,7 +28750,12 @@ mod tests {
     }
 
     fn node(id: &str, kind: NodeKind) -> Node {
-        Node::new(NodeId::new(id).unwrap(), kind, "omni.plugin.dex", digests())
+        Node::new(
+            NodeId::new(id).unwrap(),
+            kind,
+            "omni.plugin.kotlin",
+            digests(),
+        )
     }
 
     #[test]
@@ -28974,7 +29093,7 @@ mod tests {
             .add(Node::new(
                 NodeId::new("dex").unwrap(),
                 NodeKind::Dex,
-                "omni.plugin.dex",
+                "omni.plugin.kotlin",
                 digests(),
             ))
             .unwrap();

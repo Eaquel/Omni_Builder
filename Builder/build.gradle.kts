@@ -122,8 +122,8 @@ val cargoTasks = omniAbis.map { (abi, triple) ->
 
         inputs.file(coreDirectory.resolve("Cargo.toml"))
         inputs.file(coreDirectory.resolve("Cargo.lock"))
-        inputs.file(coreDirectory.resolve("Omni.rs"))
-        inputs.dir(coreDirectory.resolve("Plugins"))
+        inputs.file(coreDirectory.resolve("Builder.rs"))
+        inputs.dir(coreDirectory.resolve("Compilers"))
         outputs.file(archivePath)
 
         doFirst {
@@ -271,7 +271,7 @@ tasks.register("verifyCmakeToolchain") {
                 "     https://github.com/Kitware/CMake/releases/download/v$pinned/" +
                 "cmake-$pinned-linux-x86_64.tar.gz\n" +
                 "  2. Verify its SHA-256 against the checksum recorded in the\n" +
-                "     toolchain lock in Omni.rs. Do not skip this step.\n" +
+                "     toolchain lock in Builder.rs. Do not skip this step.\n" +
                 "  3. Extract it, and copy a `ninja` binary into its bin directory;\n" +
                 "     the Kitware archive does not ship one.\n" +
                 "  4. Add `cmake.dir=<that directory>` to local.properties."
@@ -370,7 +370,7 @@ androidComponents {
                             "  Delivered by AGP 9.3.0       : $actual\n" +
                             "  AGP 9.3.0 exposes no supported way to select the Kotlin\n" +
                             "  version. This gap is unresolved and is recorded in the\n" +
-                            "  Core's toolchain lock in Omni.rs. It is reported, never\n" +
+                            "  Core's toolchain lock in Builder.rs. It is reported, never\n" +
                             "  silently accepted.\n"
                     )
                 }

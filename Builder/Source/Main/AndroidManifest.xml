@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <uses-permission
-        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
+    <!--
+      This is the one permission the security policy refuses in what this
+      engine builds, and the one this application holds. Installing the
+      package it has just built is what it is for; without this, the button
+      that offers to do so cannot do anything at all. Android still asks the
+      person once, per source, before any install proceeds. Nothing this
+      engine produces is given the permission: the policy refuses it there,
+      and a test holds it to that.
+    -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:name=".BuilderApplication"

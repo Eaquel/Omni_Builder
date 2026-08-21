@@ -1,24 +1,28 @@
 package com.omni.builder
 
-import android.Manifest
 import android.animation.LayoutTransition
 import android.app.Activity
+import android.app.AlertDialog
 import android.app.Application
 import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
 import android.app.job.JobService
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.ContentProvider
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
+import android.content.res.Resources
 import android.database.Cursor
 import android.database.MatrixCursor
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
@@ -35,8 +39,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
-import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -44,6 +48,7 @@ import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowInsets
@@ -52,7 +57,7 @@ import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.widget.EditText
 import android.widget.FrameLayout
-import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -76,22 +81,6 @@ enum class LogLevel {
     ERROR,
 }
 
-sealed interface LogDestination {
-    data class Published(val location: String) : LogDestination
-
-    data class Pending(val location: String) : LogDestination
-
-    data class PrivateOnly(val location: String, val reason: String) : LogDestination
-}
-
-data class LogCopy(
-    val label: String,
-    val location: String,
-    val error: String?,
-) {
-    val succeeded: Boolean get() = error == null
-}
-
 object OmniLog {
 
     const val DIRECTORY_NAME: String = "Omni_Builder"
@@ -106,19 +95,6 @@ object OmniLog {
 
     private val lock = Any()
     private val session = StringBuilder(8 * 1024)
-
-    private val publisher = java.util.concurrent.Executors.newSingleThreadExecutor { runnable ->
-        Thread(runnable, "omni-log-publisher").apply { isDaemon = true }
-    }
-
-    @Volatile
-    private var lastPublished: LogDestination? = null
-
-    @Volatile
-    private var copies: List<LogCopy> = emptyList()
-
-    @Volatile
-    private var publishListener: ((LogDestination) -> Unit)? = null
 
     @Volatile
     private var context: Context? = null
@@ -161,18 +137,12 @@ object OmniLog {
         }
     }
 
-    fun flushSession(): LogDestination {
+    fun flushSession(): String {
         val started = System.nanoTime()
-        val destination = write(SESSION_FILE, sessionDocument(), append = false)
-
+        val where = write(SESSION_FILE, sessionDocument(), append = false)
         val elapsedMilliseconds = (System.nanoTime() - started) / 1_000_000
-        event(
-            LogLevel.TRACE,
-            "log",
-            "Session written in ${elapsedMilliseconds} ms; " +
-                describeDestination(destination),
-        )
-        return destination
+        event(LogLevel.TRACE, "log", "Session written in $elapsedMilliseconds ms to $where")
+        return where
     }
 
     fun recordCrash(thread: Thread, error: Throwable) {
@@ -215,20 +185,12 @@ object OmniLog {
         }.getOrNull()
     }
 
-    fun describeDestination(destination: LogDestination): String = when (destination) {
-        is LogDestination.Published -> destination.location
-        is LogDestination.Pending -> "${destination.location} (publishing to Documents)"
-        is LogDestination.PrivateOnly ->
-            "${destination.location} (shared storage unavailable: ${destination.reason})"
-    }
+    /** Everything this run has recorded, newest last, for the screen that shows it. */
+    fun transcript(): String = synchronized(lock) { session.toString() }
 
-    fun lastPublishOutcome(): LogDestination? = lastPublished
-
-    fun lastCopies(): List<LogCopy> = copies
-
-    fun setPublishListener(listener: ((LogDestination) -> Unit)?) {
-        publishListener = listener
-        lastPublished?.let { outcome -> listener?.invoke(outcome) }
+    fun clearTranscript() {
+        synchronized(lock) { session.setLength(0) }
+        event(LogLevel.INFO, "log", "The log was cleared from the screen.")
     }
 
     private fun describeEnvironment(context: Context): String {
@@ -246,57 +208,30 @@ object OmniLog {
 
     private fun privateFile(name: String): File? = context?.let { File(it.filesDir, name) }
 
-    private sealed interface PrivateWrite {
-        data class Ok(val path: String) : PrivateWrite
+    /**
+     * The log is written into this application's own storage and nowhere else.
+     * It used to be copied out into shared Documents as well, which put files on
+     * the device that nobody asked for; the screen in Settings shows the same
+     * text and copies it where you want it.
+     */
+    private fun write(name: String, text: String, append: Boolean): String =
+        writePrivate(name, text, append)
 
-        data class Failed(val destination: LogDestination) : PrivateWrite
-    }
+    private fun writeBlocking(name: String, text: String, append: Boolean): String =
+        writePrivate(name, text, append)
 
-    private fun write(name: String, text: String, append: Boolean): LogDestination =
-        when (val written = writePrivate(name, text, append)) {
-            is PrivateWrite.Failed -> written.destination
-            is PrivateWrite.Ok -> {
-                publisher.execute {
-                    val outcome = publishNow(name, written.path)
-                    lastPublished = outcome
-                    if (outcome is LogDestination.PrivateOnly) {
-                        event(
-                            LogLevel.WARN,
-                            "log",
-                            "Publishing $name to Documents failed: ${outcome.reason}. " +
-                                "The private copy at ${outcome.location} is complete.",
-                        )
-                    }
-                    publishListener?.invoke(outcome)
-                }
-                LogDestination.Pending(written.path)
-            }
-        }
+    private fun Exception.describe(): String =
+        "${javaClass.simpleName}: ${message ?: "no detail"}"
 
-    private fun writeBlocking(name: String, text: String, append: Boolean): LogDestination =
-        when (val written = writePrivate(name, text, append)) {
-            is PrivateWrite.Failed -> written.destination
-            is PrivateWrite.Ok -> publishNow(name, written.path).also {
-                lastPublished = it
-                publishListener?.invoke(it)
-            }
-        }
-
-    private fun writePrivate(name: String, text: String, append: Boolean): PrivateWrite {
-        val target = privateFile(name)
-            ?: return PrivateWrite.Failed(
-                LogDestination.PrivateOnly("(not started)", "no application context")
-            )
-
+    private fun writePrivate(name: String, text: String, append: Boolean): String {
+        val target = privateFile(name) ?: return "(not started)"
         return try {
             FileOutputStream(target, append).use { it.write(text.toByteArray(Charsets.UTF_8)) }
             trim(target)
-            PrivateWrite.Ok(target.absolutePath)
+            target.absolutePath
         } catch (failure: Exception) {
-            Log.e(TAG, "The private log copy could not be written.", failure)
-            PrivateWrite.Failed(
-                LogDestination.PrivateOnly("(unwritable)", failure.describe())
-            )
+            Log.e(TAG, "The log could not be written.", failure)
+            "(unwritable: ${failure.describe()})"
         }
     }
 
@@ -311,270 +246,13 @@ object OmniLog {
         }
     }
 
-    private fun publishNow(name: String, privatePath: String): LogDestination {
-        val target = privateFile(name)
-            ?: return LogDestination.PrivateOnly(privatePath, "no application context")
-
-        val bytes = try {
-            target.readBytes()
-        } catch (failure: Exception) {
-            return LogDestination.PrivateOnly(privatePath, failure.describe())
-        }
-
-        val attempts = mutableListOf(
-            LogCopy("Application storage", privatePath, null),
-            publishToApplicationExternal(name, bytes),
-            publishToSharedDocuments(name, bytes),
-        )
-        copies = attempts
-
-        val shared = attempts.last()
-        if (shared.succeeded) {
-            return LogDestination.Published(shared.location)
-        }
-        val external = attempts[1]
-        if (external.succeeded) {
-            return LogDestination.Published(external.location)
-        }
-        return LogDestination.PrivateOnly(
-            privatePath,
-            shared.error ?: external.error ?: "unknown",
-        )
-    }
-
-    private fun publishToApplicationExternal(name: String, bytes: ByteArray): LogCopy {
-        val label = "Shared storage"
-        val context = context ?: return LogCopy(label, "(not started)", "no application context")
-
-        return try {
-            val root = context.getExternalFilesDir(null)
-                ?: return LogCopy(label, "(unavailable)", "external storage is not mounted")
-            val directory = File(root, DIRECTORY_NAME)
-            if (!directory.isDirectory && !directory.mkdirs()) {
-                return LogCopy(label, directory.absolutePath, "the directory could not be created")
-            }
-            val file = File(directory, name)
-            FileOutputStream(file, false).use { stream ->
-                stream.write(bytes)
-                stream.flush()
-            }
-            if (file.length() != bytes.size.toLong()) {
-                return LogCopy(
-                    label,
-                    file.absolutePath,
-                    "wrote ${bytes.size} bytes but the file holds ${file.length()}",
-                )
-            }
-            LogCopy(label, file.absolutePath, null)
-        } catch (failure: Exception) {
-            LogCopy(label, "(failed)", failure.describe())
-        }
-    }
-
-    private fun publishToSharedDocuments(name: String, bytes: ByteArray): LogCopy {
-        val label = "Documents"
-        val context = context ?: return LogCopy(label, "(not started)", "no application context")
-        val location = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME/$name"
-
-        return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                publishThroughMediaStore(context, name, bytes)
-            } else {
-                publishThroughLegacyStorage(context, name, bytes)
-            }
-            LogCopy(label, location, null)
-        } catch (failure: Exception) {
-            LogCopy(label, location, failure.describe())
-        }
-    }
-
-    private fun Exception.describe(): String {
-        val detail = message?.takeIf { it.isNotBlank() }
-        return if (detail == null) javaClass.simpleName else "${javaClass.simpleName}: $detail"
-    }
-
-    private fun publishThroughMediaStore(context: Context, name: String, bytes: ByteArray) {
-        val resolver = context.contentResolver
-        val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        val relativePath = "${Environment.DIRECTORY_DOCUMENTS}/$DIRECTORY_NAME"
-        val absolutePath = expectedAbsolutePath(name)
-        val tried = StringBuilder()
-
-        findByData(resolver, collection, absolutePath)?.let { existing ->
-            clearPendingAndTrashed(resolver, existing)
-            writeTruncating(resolver, existing, bytes)
-            return
-        }
-        tried.append("no row holds $absolutePath")
-
-        findByName(resolver, collection, relativePath, name)?.let { existing ->
-            clearPendingAndTrashed(resolver, existing)
-            writeTruncating(resolver, existing, bytes)
-            return
-        }
-        tried.append("; no row named $name under $relativePath")
-
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
-            put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
-        }
-
-        val created = try {
-            resolver.insert(collection, values)
-        } catch (refused: Exception) {
-            tried.append("; insert refused: ${refused.describe()}")
-
-            val removed = try {
-                resolver.delete(
-                    collection,
-                    "${dataColumn()}=?",
-                    arrayOf(absolutePath),
-                )
-            } catch (denied: Exception) {
-                tried.append("; delete refused: ${denied.describe()}")
-                -1
-            }
-            tried.append("; deleted $removed row(s)")
-
-            if (removed <= 0) {
-                throw IOException("$tried")
-            }
-            try {
-                resolver.insert(collection, values)
-            } catch (again: Exception) {
-                throw IOException("$tried; insert refused again: ${again.describe()}")
-            }
-        } ?: throw IOException("MediaStore refused to create the entry ($tried)")
-
-        writeTruncating(resolver, created, bytes)
-    }
-
-    @Suppress("DEPRECATION")
-    private fun expectedAbsolutePath(name: String): String {
-        val documents =
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-        return File(File(documents, DIRECTORY_NAME), name).absolutePath
-    }
-
-    @Suppress("DEPRECATION")
-    private fun dataColumn(): String = MediaStore.MediaColumns.DATA
-
-    private fun queryIncludingHidden(
-        resolver: android.content.ContentResolver,
-        collection: Uri,
-        selection: String,
-        arguments: Array<String>,
-    ): Uri? = runCatching {
-        val projection = arrayOf(MediaStore.MediaColumns._ID)
-        val cursor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val query = Bundle().apply {
-                putString(android.content.ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
-                putStringArray(
-                    android.content.ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
-                    arguments,
-                )
-                putInt(MediaStore.QUERY_ARG_MATCH_PENDING, MediaStore.MATCH_INCLUDE)
-                putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE)
-            }
-            resolver.query(collection, projection, query, null)
-        } else {
-            resolver.query(collection, projection, selection, arguments, null)
-        }
-        cursor?.use {
-            if (it.moveToFirst()) ContentUris.withAppendedId(collection, it.getLong(0)) else null
-        }
-    }.getOrNull()
-
-    private fun findByData(
-        resolver: android.content.ContentResolver,
-        collection: Uri,
-        absolutePath: String,
-    ): Uri? = queryIncludingHidden(
-        resolver,
-        collection,
-        "${dataColumn()}=?",
-        arrayOf(absolutePath),
-    )
-
-    private fun findByName(
-        resolver: android.content.ContentResolver,
-        collection: Uri,
-        relativePath: String,
-        name: String,
-    ): Uri? = queryIncludingHidden(
-        resolver,
-        collection,
-        "${MediaStore.MediaColumns.DISPLAY_NAME}=? AND " +
-            "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
-        arrayOf(name, "$relativePath%"),
-    )
-
-    private fun clearPendingAndTrashed(
-        resolver: android.content.ContentResolver,
-        uri: Uri,
-    ) {
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.IS_PENDING, 0)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                put(MediaStore.MediaColumns.IS_TRASHED, 0)
-            }
-        }
-        runCatching { resolver.update(uri, values, null, null) }
-    }
-
-    private fun writeTruncating(
-        resolver: android.content.ContentResolver,
-        uri: Uri,
-        bytes: ByteArray,
-    ) {
-        val descriptor = resolver.openFileDescriptor(uri, "rwt")
-            ?: throw IOException("MediaStore returned no descriptor")
-
-        android.os.ParcelFileDescriptor.AutoCloseOutputStream(descriptor).use { stream ->
-            stream.write(bytes)
-            stream.flush()
-        }
-
-        val stored = runCatching {
-            resolver.query(uri, arrayOf(MediaStore.MediaColumns.SIZE), null, null, null)
-                ?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else -1L }
-                ?: -1L
-        }.getOrDefault(-1L)
-
-        if (stored > 0 && stored != bytes.size.toLong()) {
-            throw IOException("stored $stored bytes of ${bytes.size}")
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun publishThroughLegacyStorage(context: Context, name: String, bytes: ByteArray) {
-        if (context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            throw IOException("the storage permission has not been granted")
-        }
-
-        val documents = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
-        val directory = File(documents, DIRECTORY_NAME)
-        if (!directory.isDirectory && !directory.mkdirs()) {
-            throw IOException("could not create ${directory.absolutePath}")
-        }
-
-        FileOutputStream(File(directory, name), false).use { stream ->
-            stream.write(bytes)
-            stream.flush()
-        }
-    }
 }
 
 class BuilderApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         OmniLog.install(this)
-        if (Preferences.watching(this)) {
-            Sentry.arm(this)
-        }
+        Sentry.arm(this)
     }
 }
 
@@ -1269,11 +947,6 @@ object Preferences {
     private const val LANGUAGE = "language"
     private const val THEME = "theme"
     private const val SIGNING_KEY = "signing_key"
-    private const val WATCH = "watch"
-    private const val SHARE_LOG = "share_log"
-    private const val ABI = "abi"
-    private const val MIN_SDK = "min_sdk"
-    private const val TARGET_SDK = "target_sdk"
 
     val LANGUAGES: List<Pair<String, String>> = listOf(
         "en" to "English",
@@ -1310,35 +983,6 @@ object Preferences {
         store(context).edit().putString(SIGNING_KEY, path).apply()
     }
 
-    fun watching(context: Context): Boolean = store(context).getBoolean(WATCH, true)
-
-    fun setWatching(context: Context, on: Boolean) {
-        store(context).edit().putBoolean(WATCH, on).apply()
-    }
-
-    fun sharingLog(context: Context): Boolean = store(context).getBoolean(SHARE_LOG, true)
-
-    fun setSharingLog(context: Context, on: Boolean) {
-        store(context).edit().putBoolean(SHARE_LOG, on).apply()
-    }
-
-    fun abi(context: Context): Int = store(context).getInt(ABI, 2)
-
-    fun setAbi(context: Context, index: Int) {
-        store(context).edit().putInt(ABI, index).apply()
-    }
-
-    fun minSdk(context: Context): Int = store(context).getInt(MIN_SDK, 28)
-
-    fun setMinSdk(context: Context, level: Int) {
-        store(context).edit().putInt(MIN_SDK, level).apply()
-    }
-
-    fun targetSdk(context: Context): Int = store(context).getInt(TARGET_SDK, 36)
-
-    fun setTargetSdk(context: Context, level: Int) {
-        store(context).edit().putInt(TARGET_SDK, level).apply()
-    }
 }
 
 class AuroraView(context: Context, private var palette: Palette) : View(context) {
@@ -1431,6 +1075,57 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
     }
 }
 
+/** Lays its children out left to right, starting a new line when one will not fit. */
+class FlowLayout(
+    context: Context,
+    private val betweenX: Int,
+    private val betweenY: Int,
+) : ViewGroup(context) {
+
+    private fun measureRows(width: Int, place: Boolean): Int {
+        val limit = width - paddingLeft - paddingRight
+        var x = paddingLeft
+        var y = paddingTop
+        var tallest = 0
+        for (index in 0 until childCount) {
+            val child = getChildAt(index)
+            if (child.visibility == GONE) {
+                continue
+            }
+            if (x > paddingLeft && x - paddingLeft + child.measuredWidth > limit) {
+                x = paddingLeft
+                y += tallest + betweenY
+                tallest = 0
+            }
+            if (place) {
+                child.layout(x, y, x + child.measuredWidth, y + child.measuredHeight)
+            }
+            x += child.measuredWidth + betweenX
+            tallest = maxOf(tallest, child.measuredHeight)
+        }
+        return y + tallest + paddingBottom
+    }
+
+    override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+        val width = MeasureSpec.getSize(widthSpec)
+        val room = MeasureSpec.makeMeasureSpec(
+            (width - paddingLeft - paddingRight).coerceAtLeast(0),
+            MeasureSpec.AT_MOST,
+        )
+        for (index in 0 until childCount) {
+            val child = getChildAt(index)
+            if (child.visibility != GONE) {
+                child.measure(room, MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED))
+            }
+        }
+        setMeasuredDimension(width, measureRows(width, false))
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        measureRows(right - left, true)
+    }
+}
+
 private enum class Tab { PROJECTS, FILES, BUILD, TRASH, SETTINGS }
 
 private sealed interface Screen {
@@ -1449,6 +1144,10 @@ private sealed interface Screen {
     }
 
     data class Editor(val root: String, val path: String) : Screen {
+        override val tab = Tab.FILES
+    }
+
+    data class Picture(val root: String, val path: String) : Screen {
         override val tab = Tab.FILES
     }
 
@@ -1475,7 +1174,6 @@ private sealed interface Screen {
 class BuilderActivity : Activity() {
 
     private companion object {
-        const val STORAGE_PERMISSION_REQUEST = 1
         const val IMAGE_REQUEST = 2
         const val ENTER_MILLIS = 260L
         const val LEAVE_MILLIS = 140L
@@ -1507,6 +1205,15 @@ class BuilderActivity : Activity() {
             "cpp" to "C++",
             "rust" to "Rust",
         )
+        const val LARGEST_ICON_EDGE = 512
+        const val PROJECT_RES = "Res"
+        const val PROJECT_ICON = "Icon.png"
+        const val FOLDER_MARK = "\u25B8"
+        const val FILE_MARK = "\u2022"
+        const val MENU_MARK = "\u22EE"
+
+        val PICTURE_SUFFIXES = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+
         val KEY_SIZES = listOf(2048, 3072, 4096)
         val VALIDITY_YEARS = listOf(1, 5, 10, 25, 100)
     }
@@ -1532,6 +1239,8 @@ class BuilderActivity : Activity() {
     private val formLanguages = linkedSetOf("kotlin")
     private val formLocales = Preferences.LANGUAGES.mapTo(linkedSetOf()) { it.first }
     private var formImage: String? = null
+    private var imageForProject: String? = null
+    private var held: String? = null
 
     private var keyAlias = DEFAULT_KEY_ALIAS
     private var keyCommonName = DEFAULT_KEY_COMMON_NAME
@@ -1544,11 +1253,10 @@ class BuilderActivity : Activity() {
     private var buildPasswordView: EditText? = null
 
     private var editorText = ""
-    private var newPathView: EditText? = null
-    private var renameFromView: EditText? = null
-    private var renameToView: EditText? = null
 
     override fun attachBaseContext(base: Context) {
+        // Nothing chosen means the language the phone is set to, which is what
+        // the base context already carries.
         val tag = Preferences.language(base)
         super.attachBaseContext(if (tag.isEmpty()) base else localised(base, tag))
     }
@@ -1564,13 +1272,8 @@ class BuilderActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
-        requestLegacyStoragePermissionIfNeeded()
 
         palette = Preferences.palette(this)
-        formAbi = Preferences.abi(this)
-        formMinSdk = Preferences.minSdk(this)
-        formTargetSdk = Preferences.targetSdk(this)
-
         aurora = AuroraView(this, palette)
         content = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1731,7 +1434,6 @@ class BuilderActivity : Activity() {
     }
 
     override fun onDestroy() {
-        OmniLog.setPublishListener(null)
         OmniLog.flushSession()
         super.onDestroy()
     }
@@ -1789,6 +1491,7 @@ class BuilderActivity : Activity() {
             is Screen.NewProject -> renderNewProject()
             is Screen.Files -> renderFiles(here.root, here.folder)
             is Screen.Editor -> renderEditor(here.root, here.path)
+            is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
             is Screen.Trash -> renderTrash()
             is Screen.Settings -> renderSettings()
@@ -1818,6 +1521,7 @@ class BuilderActivity : Activity() {
             is Screen.Projects -> super.onBackPressed()
             is Screen.NewProject -> go(Screen.Projects)
             is Screen.Editor -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
+            is Screen.Picture -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Files ->
                 if (here.folder.isEmpty()) {
                     go(Screen.Projects)
@@ -2005,7 +1709,9 @@ class BuilderActivity : Activity() {
         content.addView(label(getString(R.string.omni_form_image)))
         val picture = card()
         picture.addView(quiet(formImage?.let { File(it).name } ?: getString(R.string.omni_form_image_none)))
-        picture.addView(subtle(getString(R.string.omni_form_image_choose), palette.accent) { chooseImage() })
+        picture.addView(subtle(getString(R.string.omni_form_image_choose), palette.accent) {
+            chooseImage(null)
+        })
         content.addView(picture)
         content.addView(quiet(getString(R.string.omni_form_image_note)))
 
@@ -2018,16 +1724,57 @@ class BuilderActivity : Activity() {
     private fun renderFiles(root: String, folder: String) {
         val summary = summaryOf(root)
         content.addView(heading(summary?.label?.ifEmpty { null } ?: File(root).name))
-        summary?.let {
-            content.addView(
-                quiet(
-                    "${it.packageName}  ·  ${it.versionName} (${it.versionCode})  ·  " +
-                        "API ${it.minSdk}–${it.targetSdk}"
-                )
-            )
-        }
 
-        content.addView(label(getString(R.string.omni_files_here)))
+        val identity = card()
+        val face = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(1), 0, gap(1))
+            isClickable = true
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { chooseImage(root) }
+        }
+        face.addView(
+            thumbnail(File(root, "${'$'}{PROJECT_RES}/${'$'}{PROJECT_ICON}").absolutePath, gap(12)),
+            LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginEnd = gap(3) },
+        )
+        face.addView(
+            LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(
+                    TextView(context).apply {
+                        text = getString(R.string.omni_form_image)
+                        setTextColor(palette.foreground)
+                        setTypeface(Typeface.DEFAULT_BOLD)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    }
+                )
+                addView(
+                    TextView(context).apply {
+                        text = summary?.let {
+                            "${'$'}{it.packageName}  ·  ${'$'}{it.versionName}  ·  " +
+                                "API ${'$'}{it.minSdk}–${'$'}{it.targetSdk}"
+                        } ?: getString(R.string.omni_form_image_choose)
+                        setTextColor(palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        setLineSpacing(gap(1).toFloat(), 1f)
+                    }
+                )
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+        face.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_action_change)
+                setTextColor(palette.accent)
+                setTypeface(Typeface.DEFAULT_BOLD)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                letterSpacing = 0.08f
+            }
+        )
+        identity.addView(face)
+        content.addView(identity)
+
         content.addView(breadcrumb(root, folder))
 
         val entries = runCatching {
@@ -2045,86 +1792,295 @@ class BuilderActivity : Activity() {
             if (index > 0) {
                 tree.addView(rule(), MATCH_PARENT, 1)
             }
-            val name = entry.path.substringAfterLast('/')
-            val held = entries.count { it.path.startsWith("${entry.path}/") }
-            tree.addView(
-                row(
-                    if (entry.folder) "$name/" else name,
-                    if (entry.folder) {
-                        getString(R.string.omni_files_holds, held)
-                    } else {
-                        size(entry.bytes)
-                    },
-                    if (entry.folder) getString(R.string.omni_action_open) else "",
-                    palette.accent,
+            tree.addView(fileRow(root, folder, entry, entries))
+        }
+        content.addView(tree)
+
+        val making = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, gap(1), 0, gap(1))
+        }
+        making.addView(
+            subtle(getString(R.string.omni_action_new_file), palette.accent) {
+                askForName(getString(R.string.omni_action_new_file), "") { name ->
+                    act(Builder.nativeWriteFile(root, joined(folder, name), ""), "saved")
+                }
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
+        )
+        making.addView(
+            subtle(getString(R.string.omni_action_new_folder), palette.accent) {
+                askForName(getString(R.string.omni_action_new_folder), "") { name ->
+                    act(Builder.nativeNewFolder(root, joined(folder, name)), "made")
+                }
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+        )
+        content.addView(making)
+
+        held?.let { moving ->
+            content.addView(
+                primary(
+                    getString(R.string.omni_files_paste, moving.substringAfterLast('/'))
                 ) {
-                    if (entry.folder) {
-                        go(Screen.Files(root, entry.path))
-                    } else {
-                        editorText = ""
-                        go(Screen.Editor(root, entry.path))
-                    }
+                    val target = joined(folder, moving.substringAfterLast('/'))
+                    held = null
+                    act(Builder.nativeRenamePath(root, moving, target), "moved")
                 }
             )
-            tree.addView(
-                subtle(getString(R.string.omni_action_delete), palette.error) {
-                    act(Builder.nativeRemovePath(root, entry.path, trashFolder()), "removed")
+            content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
+                held = null
+                render(false)
+            })
+        }
+
+        content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
+        content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    private fun joined(folder: String, name: String): String =
+        if (folder.isEmpty()) name else "${'$'}folder/${'$'}name"
+
+    private fun looksLikeAPicture(path: String): Boolean {
+        val lower = path.lowercase(Locale.US)
+        return PICTURE_SUFFIXES.any { lower.endsWith(it) }
+    }
+
+    /** Decodes a picture small enough to sit in a row, or hands back a plain tile. */
+    private fun thumbnail(path: String, edge: Int): View {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeFile(path, bounds) }
+        if (bounds.outWidth > 0 && bounds.outHeight > 0) {
+            val options = BitmapFactory.Options()
+            var step = 1
+            while (bounds.outWidth / (step * 2) >= edge && bounds.outHeight / (step * 2) >= edge) {
+                step *= 2
+            }
+            options.inSampleSize = step
+            val decoded = runCatching { BitmapFactory.decodeFile(path, options) }.getOrNull()
+            if (decoded != null) {
+                return ImageView(this).apply {
+                    setImageBitmap(decoded)
+                    scaleType = ImageView.ScaleType.FIT_CENTER
+                    background = pill(palette.raised, gap(2).toFloat())
+                    setPadding(gap(1))
+                }
+            }
+        }
+        return View(this).apply { background = pill(palette.raised, gap(2).toFloat()) }
+    }
+
+    private fun fileRow(
+        root: String,
+        folder: String,
+        entry: FileEntry,
+        all: List<FileEntry>,
+    ): View {
+        val name = entry.path.substringAfterLast('/')
+        val absolute = File(root, entry.path).absolutePath
+        val picture = !entry.folder && looksLikeAPicture(entry.path)
+        val inside = all.count { it.path.startsWith("${'$'}{entry.path}/") }
+
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(2), 0, gap(2))
+            isClickable = true
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { openEntry(root, entry) }
+            setOnLongClickListener {
+                showActions(root, folder, entry)
+                true
+            }
+
+            addView(
+                if (picture) {
+                    thumbnail(absolute, gap(9))
+                } else {
+                    TextView(context).apply {
+                        text = if (entry.folder) FOLDER_MARK else FILE_MARK
+                        setTextColor(if (entry.folder) palette.accent else palette.muted)
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+                        gravity = Gravity.CENTER
+                        background = pill(palette.raised, gap(2).toFloat())
+                    }
+                },
+                LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
+            )
+
+            addView(
+                LinearLayout(context).apply {
+                    orientation = LinearLayout.VERTICAL
+                    addView(
+                        TextView(context).apply {
+                            text = name
+                            setTextColor(
+                                if (entry.path == held) palette.warning else palette.foreground
+                            )
+                            setTypeface(Typeface.DEFAULT_BOLD)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                        }
+                    )
+                    addView(
+                        TextView(context).apply {
+                            text = when {
+                                entry.path == held -> getString(R.string.omni_files_holding)
+                                entry.folder -> getString(R.string.omni_files_holds, inside)
+                                else -> size(entry.bytes)
+                            }
+                            setTextColor(palette.muted)
+                            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                        }
+                    )
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+            )
+
+            addView(
+                TextView(context).apply {
+                    text = MENU_MARK
+                    setTextColor(palette.muted)
+                    setTypeface(Typeface.DEFAULT_BOLD)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+                    gravity = Gravity.CENTER
+                    isClickable = true
+                    background = touchable(
+                        pill(Color.TRANSPARENT, gap(5).toFloat()),
+                        palette.accent,
+                    )
+                    setOnClickListener { showActions(root, folder, entry) }
+                    layoutParams = LinearLayout.LayoutParams(gap(10), gap(10))
                 }
             )
         }
-        content.addView(tree)
-        content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
 
-        content.addView(label(getString(R.string.omni_files_make)))
-        val making = card()
-        val prompt = input(getString(R.string.omni_editor_name_prompt), "")
-        newPathView = prompt.second
-        making.addView(prompt.first)
-        making.addView(row(
-            getString(R.string.omni_action_new_file),
-            getString(R.string.omni_files_into, folderName(folder)),
-            "",
-            palette.accent,
-        ) {
-            named(folder)?.let { path ->
-                act(Builder.nativeWriteFile(root, path, ""), "saved")
+    private fun openEntry(root: String, entry: FileEntry) {
+        when {
+            entry.folder -> go(Screen.Files(root, entry.path))
+            looksLikeAPicture(entry.path) -> go(Screen.Picture(root, entry.path))
+            else -> {
+                editorText = ""
+                go(Screen.Editor(root, entry.path))
             }
-        })
-        making.addView(rule(), MATCH_PARENT, 1)
-        making.addView(row(
-            getString(R.string.omni_action_new_folder),
-            getString(R.string.omni_files_into, folderName(folder)),
-            "",
-            palette.accent,
-        ) {
-            named(folder)?.let { path ->
-                act(Builder.nativeNewFolder(root, path), "made")
-            }
-        })
-        content.addView(making)
+        }
+    }
 
-        content.addView(label(getString(R.string.omni_files_move)))
-        val moving = card()
-        val from = input(getString(R.string.omni_files_move_from), "")
-        val to = input(getString(R.string.omni_files_move_to), "")
-        renameFromView = from.second
-        renameToView = to.second
-        moving.addView(from.first)
-        moving.addView(to.first)
-        moving.addView(subtle(getString(R.string.omni_action_move), palette.accent) {
-            val source = renameFromView?.text?.toString().orEmpty().trim()
-            val target = renameToView?.text?.toString().orEmpty().trim()
-            if (source.isEmpty() || target.isEmpty()) {
-                results.removeAllViews()
-                results.addView(notice(getString(R.string.omni_files_move_needs), palette.warning))
+    private fun showActions(root: String, folder: String, entry: FileEntry) {
+        val name = entry.path.substringAfterLast('/')
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+
+        actions.add(getString(R.string.omni_action_open) to { openEntry(root, entry) })
+        actions.add(
+            getString(R.string.omni_action_rename) to {
+                askForName(getString(R.string.omni_action_rename), name) { chosen ->
+                    act(
+                        Builder.nativeRenamePath(root, entry.path, joined(folder, chosen)),
+                        "moved",
+                    )
+                }
+            }
+        )
+        actions.add(
+            getString(R.string.omni_action_move) to {
+                held = entry.path
+                render(false)
+                results.addView(
+                    notice(getString(R.string.omni_files_held, name), palette.accent)
+                )
+            }
+        )
+        if (!entry.folder) {
+            actions.add(
+                getString(R.string.omni_action_share) to {
+                    shareOutside(File(root, entry.path))
+                }
+            )
+        }
+        actions.add(
+            getString(R.string.omni_action_delete) to {
+                act(Builder.nativeRemovePath(root, entry.path, trashFolder()), "removed")
+            }
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle(if (entry.folder) "${'$'}name/" else name)
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
+            .show()
+    }
+
+    private fun askForName(title: String, initial: String, onChosen: (String) -> Unit) {
+        val editor = EditText(this).apply {
+            setText(initial)
+            setSelection(initial.length)
+            isSingleLine = true
+            setTextColor(palette.foreground)
+            setPadding(gap(4), gap(3), gap(4), gap(3))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(editor)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val chosen = editor.text.toString().trim()
+                if (chosen.isEmpty()) {
+                    results.removeAllViews()
+                    results.addView(
+                        notice(getString(R.string.omni_files_needs_name), palette.warning)
+                    )
+                } else {
+                    onChosen(chosen)
+                }
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        editor.requestFocus()
+    }
+
+    private fun renderPicture(root: String, path: String) {
+        content.addView(heading(path.substringAfterLast('/')))
+        content.addView(quiet(path))
+
+        val file = File(root, path)
+        val sheet = card()
+        sheet.addView(
+            thumbnail(file.absolutePath, gap(64)),
+            LinearLayout.LayoutParams(MATCH_PARENT, gap(64)).apply {
+                topMargin = gap(2)
+                bottomMargin = gap(2)
+            },
+        )
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching { BitmapFactory.decodeFile(file.absolutePath, bounds) }
+        sheet.addView(
+            keyValue(
+                getString(R.string.omni_picture_size),
+                if (bounds.outWidth > 0) "${'$'}{bounds.outWidth} × ${'$'}{bounds.outHeight}" else "",
+                size(file.length()),
+                palette.muted,
+            )
+        )
+        content.addView(sheet)
+
+        content.addView(subtle(getString(R.string.omni_action_share), palette.accent) {
+            shareOutside(file)
+        })
+        content.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
+            results.removeAllViews()
+            val thrown = runCatching {
+                JSONObject(Builder.nativeRemovePath(root, path, trashFolder()))
+            }.getOrNull()
+            if (thrown != null && thrown.optBoolean("removed", false)) {
+                go(Screen.Files(root, path.substringBeforeLast('/', "")))
             } else {
-                act(Builder.nativeRenamePath(root, source, target), "moved")
+                thrown?.let { showRefusal(Refusal.parse(it), results) }
             }
         })
-        content.addView(moving)
-        content.addView(quiet(getString(R.string.omni_files_move_note)))
-
-        content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
+        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+            go(Screen.Files(root, path.substringBeforeLast('/', "")))
+        })
     }
 
     private fun renderEditor(root: String, path: String) {
@@ -2256,14 +2212,16 @@ class BuilderActivity : Activity() {
             if (index > 0) {
                 shelf.addView(rule(), MATCH_PARENT, 1)
             }
+            val file = File(one.path)
             shelf.addView(
-                row(
+                keyValue(
                     one.name,
                     "${size(one.bytes)}  ·  ${moment(one.writtenAt)}",
                     if (one.bundle) "AAB" else "APK",
                     if (one.bundle) palette.muted else palette.ok,
-                ) { offer(File(one.path)) }
+                )
             )
+            actionsFor(file, shelf)
             shelf.addView(
                 subtle(getString(R.string.omni_action_delete), palette.error) {
                     act(Builder.nativeTrashSend(trashFolder(), one.path), "removed")
@@ -2422,16 +2380,6 @@ class BuilderActivity : Activity() {
         SigningKey.list(Builder.nativeListKeys(keysFolder().absolutePath))
     }.getOrDefault(emptyList())
 
-    private fun named(folder: String): String? {
-        val name = newPathView?.text?.toString().orEmpty().trim()
-        if (name.isEmpty()) {
-            results.removeAllViews()
-            results.addView(notice(getString(R.string.omni_files_needs_name), palette.warning))
-            return null
-        }
-        return if (folder.isEmpty()) name else "$folder/$name"
-    }
-
     private fun folderName(folder: String): String =
         folder.substringAfterLast('/').ifEmpty { getString(R.string.omni_files_root) }
 
@@ -2481,7 +2429,7 @@ class BuilderActivity : Activity() {
 
     private fun renderSettings() {
         content.addView(heading(getString(R.string.omni_settings_language)))
-        val current = Preferences.language(this)
+        val current = Preferences.language(this).ifEmpty { deviceLanguage() }
         content.addView(
             chips(
                 Preferences.LANGUAGES.map { it.second },
@@ -2502,47 +2450,6 @@ class BuilderActivity : Activity() {
                 recreate()
             }
         )
-
-        content.addView(heading(getString(R.string.omni_settings_defaults)))
-        val defaults = card()
-        defaults.addView(label(getString(R.string.omni_form_architecture)))
-        defaults.addView(
-            chips(ABI_CHOICES.map { it.first }, { it == Preferences.abi(this) }) { index ->
-                Preferences.setAbi(this, index)
-                formAbi = index
-            }
-        )
-        defaults.addView(label(getString(R.string.omni_form_min_sdk)))
-        defaults.addView(
-            chips(
-                ANDROID_RELEASES.map { it.second },
-                { ANDROID_RELEASES[it].first == Preferences.minSdk(this) },
-            ) { index ->
-                val level = ANDROID_RELEASES[index].first
-                Preferences.setMinSdk(this, level)
-                formMinSdk = level
-                if (Preferences.targetSdk(this) < level) {
-                    Preferences.setTargetSdk(this, level)
-                    formTargetSdk = level
-                }
-            }
-        )
-        defaults.addView(label(getString(R.string.omni_form_target_sdk)))
-        defaults.addView(
-            chips(
-                ANDROID_RELEASES.map { it.second },
-                { ANDROID_RELEASES[it].first == Preferences.targetSdk(this) },
-            ) { index ->
-                val level = ANDROID_RELEASES[index].first
-                Preferences.setTargetSdk(this, level)
-                formTargetSdk = level
-                if (Preferences.minSdk(this) > level) {
-                    Preferences.setMinSdk(this, level)
-                    formMinSdk = level
-                }
-            }
-        )
-        content.addView(defaults)
 
         content.addView(heading(getString(R.string.omni_keys_title)))
         val chosen = Preferences.signingKey(this)
@@ -2565,16 +2472,65 @@ class BuilderActivity : Activity() {
         })
         content.addView(signing)
 
-        content.addView(heading(getString(R.string.omni_settings_watch)))
-        val watching = card()
-        watching.addView(
-            toggle(getString(R.string.omni_settings_watch), Preferences.watching(this)) { on ->
-                Preferences.setWatching(this, on)
-                if (on) Sentry.arm(this) else Sentry.disarm(this)
-                render(false)
+        content.addView(heading(getString(R.string.omni_settings_logs)))
+        val transcript = OmniLog.transcript().trimEnd()
+        val logging = card()
+        logging.addView(
+            EditText(this).apply {
+                setText(
+                    transcript.ifEmpty { getString(R.string.omni_settings_logs_empty) }
+                )
+                setTextColor(palette.foreground)
+                setBackgroundColor(Color.TRANSPARENT)
+                setTypeface(Typeface.MONOSPACE)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                gravity = Gravity.TOP or Gravity.START
+                setHorizontallyScrolling(false)
+                isFocusable = true
+                setTextIsSelectable(true)
+                keyListener = null
+                minLines = 6
+                maxLines = 18
+                setPadding(gap(2))
             }
         )
-        watching.addView(
+        content.addView(logging)
+
+        val logActions = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+        logActions.addView(
+            subtle(getString(R.string.omni_action_copy), palette.accent) {
+                val clipboard = getSystemService(ClipboardManager::class.java)
+                clipboard?.setPrimaryClip(
+                    ClipData.newPlainText(getString(R.string.omni_settings_logs), transcript)
+                )
+                results.removeAllViews()
+                results.addView(notice(getString(R.string.omni_settings_logs_copied), palette.ok))
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
+        )
+        logActions.addView(
+            subtle(getString(R.string.omni_action_clear), palette.muted) {
+                OmniLog.clearTranscript()
+                render(false)
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+        )
+        content.addView(logActions)
+        content.addView(quiet(getString(R.string.omni_settings_logs_note)))
+
+        content.addView(heading(getString(R.string.omni_settings_about)))
+        val about = card()
+        about.addView(
+            keyValue(
+                getString(R.string.omni_app_name),
+                getString(R.string.omni_about_developer),
+                versionShown(),
+                palette.accent,
+            )
+        )
+        about.addView(
             keyValue(
                 getString(R.string.omni_settings_integrity),
                 Sentry.lastChecked(this).takeIf { it > 0L }?.let {
@@ -2588,53 +2544,31 @@ class BuilderActivity : Activity() {
                 },
             )
         )
-        content.addView(watching)
-        content.addView(quiet(getString(R.string.omni_settings_watch_note)))
-
-        content.addView(heading(getString(R.string.omni_settings_logs)))
-        val logging = card()
-        logging.addView(
-            toggle(getString(R.string.omni_settings_logs), Preferences.sharingLog(this)) { on ->
-                Preferences.setSharingLog(this, on)
-                render(false)
-            }
-        )
-        if (Preferences.sharingLog(this)) {
-            OmniLog.lastCopies().forEach { copy ->
-                logging.addView(
-                    keyValue(
-                        copy.label,
-                        copy.error ?: copy.location,
-                        if (copy.succeeded) "OK" else "—",
-                        if (copy.succeeded) palette.ok else palette.warning,
-                    )
-                )
-            }
-        }
-        content.addView(logging)
-
-        content.addView(heading(getString(R.string.omni_settings_about)))
-        val state = runCatching {
-            CoreState.parse(Builder.nativeStateReport(Builder.observedEnvironment(this)))
-        }.getOrNull()
-        val about = card()
-        if (state == null) {
-            about.addView(quiet(getString(R.string.omni_integrity_unknown)))
-        } else {
-            about.addView(keyValue(getString(R.string.omni_settings_core), state.status, state.version, palette.accent))
-            about.addView(
-                keyValue(
-                    getString(R.string.omni_settings_toolchain),
-                    "",
-                    "${state.toolchainVerified}/${state.toolchainTotal}",
-                    if (state.toolchainVerified == state.toolchainTotal) palette.ok else palette.warning,
-                )
-            )
-            about.addView(
-                keyValue(getString(R.string.omni_settings_abi), "", state.abiVersion.toString(), palette.muted)
-            )
-        }
         content.addView(about)
+        content.addView(body(getString(R.string.omni_about_how)))
+        content.addView(quiet(getString(R.string.omni_about_watch)))
+    }
+
+    private fun versionShown(): String = runCatching {
+        val about = packageManager.getPackageInfo(packageName, 0)
+        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            about.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            about.versionCode.toLong()
+        }
+        "${'$'}{about.versionName} (${'$'}code)"
+    }.getOrDefault("")
+
+    private fun deviceLanguage(): String {
+        val spoken = Resources.getSystem().configuration.locales
+        for (index in 0 until spoken.size()) {
+            val tag = spoken.get(index).language
+            if (Preferences.LANGUAGES.any { it.first == tag }) {
+                return tag
+            }
+        }
+        return BASE_LOCALE
     }
 
     private fun spec() = ProjectSpec(
@@ -2649,9 +2583,25 @@ class BuilderActivity : Activity() {
         locales = (formLocales + BASE_LOCALE).toList(),
     )
 
+    private fun freeFolder(named: String): File {
+        val parent = projectsFolder()
+        val safe = named.trim()
+            .map { if (it.isLetterOrDigit() || it == ' ' || it == '_' || it == '-') it else '_' }
+            .joinToString("")
+            .trim()
+            .ifEmpty { "Project" }
+        var candidate = File(parent, safe)
+        var next = 2
+        while (candidate.exists()) {
+            candidate = File(parent, "$safe $next")
+            next += 1
+        }
+        return candidate
+    }
+
     private fun createProject() {
         results.removeAllViews()
-        val root = File(projectsFolder(), formLabel.trim().ifEmpty { "Project" })
+        val root = freeFolder(formLabel)
         val image = formImage
         working({ Builder.nativeCreateProject(root.absolutePath, spec().encode()) }) finished@{ answer ->
             val outcome = runCatching { CreateOutcome.parse(answer) }.getOrElse {
@@ -2817,41 +2767,75 @@ class BuilderActivity : Activity() {
                 )
             )
             results.addView(facts)
-            outcome.path?.let { offer(File(it)) }
+            outcome.path?.let { actionsFor(File(it), results) }
         }
     }
 
-    private fun offer(file: File) {
+    /** The URI the installer and any chooser read the file through. */
+    private fun handleFor(file: File): Pair<Uri, String> {
+        val uri = PackageProvider.uriFor(this, file)
+        val type = contentResolver.getType(uri) ?: PackageProvider.BUNDLE_TYPE
+        return uri to type
+    }
+
+    private fun shareOutside(file: File) {
         if (!file.isFile) {
             return
         }
-        val uri = PackageProvider.uriFor(this, file)
-        val type = contentResolver.getType(uri) ?: PackageProvider.BUNDLE_TYPE
-        val installable = type == PackageProvider.PACKAGE_TYPE
+        val (uri, type) = handleFor(file)
+        val sending = Intent(Intent.ACTION_SEND)
+            .setType(type)
+            .putExtra(Intent.EXTRA_STREAM, uri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        hand(
+            Intent.createChooser(sending, file.name)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        )
+    }
 
-        if (installable) {
-            results.addView(primary(getString(R.string.omni_action_install)) {
-                hand(
-                    Intent(Intent.ACTION_VIEW)
-                        .setDataAndType(uri, type)
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /**
+     * Hands the package to Android's installer. Android will not let any
+     * application do this until the person has allowed installs from it, so
+     * when that has not happened yet the button opens the screen where it is
+     * allowed rather than doing nothing at all.
+     */
+    private fun installPackage(file: File) {
+        if (!file.isFile) {
+            return
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_install_allow), palette.warning))
+            hand(
+                Intent(
+                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:${'$'}packageName"),
                 )
+            )
+            return
+        }
+        val (uri, type) = handleFor(file)
+        hand(
+            Intent(Intent.ACTION_VIEW)
+                .setDataAndType(uri, type)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        )
+    }
+
+    /** The install and share actions for one built file, stacked under its row. */
+    private fun actionsFor(file: File, into: LinearLayout) {
+        val installable = file.name.endsWith(".apk")
+        if (installable) {
+            into.addView(primary(getString(R.string.omni_action_install)) {
+                installPackage(file)
             })
         }
-        results.addView(subtle(getString(R.string.omni_action_share), palette.accent) {
-            val sending = Intent(Intent.ACTION_SEND)
-                .setType(type)
-                .putExtra(Intent.EXTRA_STREAM, uri)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            hand(
-                Intent.createChooser(sending, file.name)
-                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            )
+        into.addView(subtle(getString(R.string.omni_action_share), palette.accent) {
+            shareOutside(file)
         })
-        if (installable) {
-            results.addView(quiet(getString(R.string.omni_install_note)))
-        }
     }
 
     private fun hand(intent: Intent) {
@@ -2861,13 +2845,19 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun chooseImage() {
+    private fun chooseImage(forProject: String?) {
+        imageForProject = forProject
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "image/png"
+            type = "image/*"
+            putExtra(
+                Intent.EXTRA_MIME_TYPES,
+                arrayOf("image/png", "image/jpeg", "image/webp", "image/heif", "image/*"),
+            )
         }
         runCatching { startActivityForResult(intent, IMAGE_REQUEST) }
             .onFailure {
+                results.removeAllViews()
                 results.addView(
                     notice(
                         it.message ?: getString(R.string.omni_form_image_none),
@@ -2877,21 +2867,103 @@ class BuilderActivity : Activity() {
             }
     }
 
+    /**
+     * Reads whatever picture the person picked with Android's own decoders, so a
+     * photograph is as welcome as a drawing, and writes it back out as a square
+     * PNG no larger than the biggest launcher icon any screen asks for. A camera
+     * photograph is tens of megabytes; what the project keeps is a few hundred
+     * kilobytes of exactly the pixels an icon can use.
+     */
+    private fun stageImage(uri: Uri): File? {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        runCatching {
+            contentResolver.openInputStream(uri).use { BitmapFactory.decodeStream(it, null, bounds) }
+        }.getOrNull()
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return null
+        }
+
+        val options = BitmapFactory.Options()
+        var step = 1
+        while (
+            bounds.outWidth / (step * 2) >= LARGEST_ICON_EDGE &&
+            bounds.outHeight / (step * 2) >= LARGEST_ICON_EDGE
+        ) {
+            step *= 2
+        }
+        options.inSampleSize = step
+        options.inPreferredConfig = Bitmap.Config.ARGB_8888
+
+        val decoded = runCatching {
+            contentResolver.openInputStream(uri).use { BitmapFactory.decodeStream(it, null, options) }
+        }.getOrNull() ?: return null
+
+        val edge = minOf(decoded.width, decoded.height)
+        val square = runCatching {
+            Bitmap.createBitmap(
+                decoded,
+                (decoded.width - edge) / 2,
+                (decoded.height - edge) / 2,
+                edge,
+                edge,
+            )
+        }.getOrDefault(decoded)
+        val wanted = minOf(edge, LARGEST_ICON_EDGE)
+        val scaled = if (square.width == wanted) {
+            square
+        } else {
+            Bitmap.createScaledBitmap(square, wanted, wanted, true)
+        }
+
+        val staged = File(cacheDir, "chosen_image.png")
+        val written = runCatching {
+            FileOutputStream(staged).use { sink ->
+                scaled.compress(Bitmap.CompressFormat.PNG, 100, sink)
+            }
+        }.getOrDefault(false)
+
+        if (scaled !== square) scaled.recycle()
+        if (square !== decoded) square.recycle()
+        decoded.recycle()
+
+        return if (written && staged.isFile) staged else null
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != IMAGE_REQUEST || resultCode != RESULT_OK) {
             return
         }
         val uri = data?.data ?: return
-        val staged = File(cacheDir, "chosen_image.png")
-        formImage = runCatching {
-            contentResolver.openInputStream(uri).use { source ->
-                requireNotNull(source)
-                FileOutputStream(staged).use { sink -> source.copyTo(sink) }
+        val root = imageForProject
+        imageForProject = null
+
+        val staged = stageImage(uri)
+        if (staged == null) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_form_image_unreadable), palette.error))
+            return
+        }
+        if (root == null) {
+            formImage = staged.absolutePath
+            render(false)
+            return
+        }
+        applyImage(root, staged.absolutePath)
+    }
+
+    private fun applyImage(root: String, source: String) {
+        results.removeAllViews()
+        working({ Builder.nativeSetIcon(root, source) }) finished@{ answer ->
+            val stored = runCatching { JSONObject(answer) }.getOrNull()
+            if (stored == null || !stored.optBoolean("stored", false)) {
+                stored?.let { showRefusal(Refusal.parse(it), results) }
+                return@finished
             }
-            staged.absolutePath
-        }.getOrNull()
-        render(false)
+            OmniLog.event(LogLevel.INFO, "project", "Image set for $root")
+            render(false)
+            results.addView(notice(getString(R.string.omni_form_image_set), palette.ok))
+        }
     }
 
     private fun working(work: () -> String, finished: (String) -> Unit) {
@@ -2941,20 +3013,6 @@ class BuilderActivity : Activity() {
         val chars = CharArray(editable.length)
         editable.getChars(0, editable.length, chars, 0)
         return chars
-    }
-
-    private fun requestLegacyStoragePermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            return
-        }
-        if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(
-                arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
-                STORAGE_PERMISSION_REQUEST,
-            )
-        }
     }
 
     private fun gap(units: Int): Int =
@@ -3175,30 +3233,6 @@ class BuilderActivity : Activity() {
             }
         }
 
-    private fun toggle(title: String, on: Boolean, onChange: (Boolean) -> Unit) =
-        LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, gap(2), 0, gap(2))
-            isClickable = true
-            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
-            setOnClickListener { onChange(!on) }
-            addView(
-                TextView(context).apply {
-                    text = title
-                    setTextColor(palette.foreground)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-            )
-            addView(
-                View(context).apply {
-                    background = pill(if (on) palette.ok else palette.divider, gap(2).toFloat())
-                    layoutParams = LinearLayout.LayoutParams(gap(10), gap(5))
-                }
-            )
-        }
-
     private fun input(label: String, initial: String): Pair<View, EditText> {
         val holder = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -3249,13 +3283,8 @@ class BuilderActivity : Activity() {
         selected: (Int) -> Boolean,
         onPick: (Int) -> Unit,
     ): View {
-        val holder = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+        val holder = FlowLayout(this, gap(2), gap(2)).apply {
             setPadding(0, gap(1), 0, gap(1))
-        }
-        val scroller = HorizontalScrollView(this).apply {
-            isHorizontalScrollBarEnabled = false
-            clipToPadding = false
         }
         val views = mutableListOf<TextView>()
 
@@ -3276,6 +3305,7 @@ class BuilderActivity : Activity() {
                 setTypeface(Typeface.DEFAULT_BOLD)
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setPadding(gap(4), gap(2), gap(4), gap(2))
+                maxLines = 1
                 isClickable = true
                 setOnClickListener {
                     onPick(index)
@@ -3284,16 +3314,12 @@ class BuilderActivity : Activity() {
                         animate().scaleX(1f).scaleY(1f).setDuration(110L).start()
                     }.start()
                 }
-                layoutParams = LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
-                    marginEnd = gap(2)
-                }
             }
             views.add(chip)
             holder.addView(chip)
         }
         repaint()
-        scroller.addView(holder)
-        return scroller
+        return holder
     }
 
     private fun View.setPadding(all: Int) = setPadding(all, all, all, all)

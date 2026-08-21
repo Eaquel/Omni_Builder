@@ -17,9 +17,9 @@ val omniPinnedVersions = mapOf(
 
 tasks.register("verifyToolchainLock") {
     group = "verification"
-    description = "Checks that the Gradle pins match the toolchain lock in Omni.rs."
+    description = "Checks that the Gradle pins match the toolchain lock in Builder.rs."
 
-    val coreSource = layout.projectDirectory.file("Omni.rs").asFile
+    val coreSource = layout.projectDirectory.file("Builder.rs").asFile
     val pinned = omniPinnedVersions
     inputs.file(coreSource)
 
@@ -54,6 +54,6 @@ tasks.register("verifyToolchainLock") {
             )
         }
 
-        logger.lifecycle("Toolchain lock verified: ${pinned.size} pins agree with Omni.rs.")
+        logger.lifecycle("Toolchain lock verified: ${pinned.size} pins agree with Builder.rs.")
     }
 }

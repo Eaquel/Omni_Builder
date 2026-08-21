@@ -12,3 +12,5 @@
 *.p12
 *.pem
 *.key
+
+/Tests/
