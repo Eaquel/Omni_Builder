@@ -16480,18 +16480,23 @@ pub mod trash {
             expires_at: now + HELD_SECONDS,
         };
 
-        shift(source, &held.join(PAYLOAD)).map_err(|why| {
-            let _ = std::fs::remove_dir_all(&held);
-            fail("ET007", "That could not be moved to the trash.")
-                .with_context(format!("Path: {path}"))
-                .with_context(format!("Reason: {why}"))
-        })?;
         std::fs::write(held.join(RECORD_FILE), record(&entry)).map_err(|why| {
+            let _ = std::fs::remove_dir_all(&held);
             fail(
                 "ET008",
                 "The note saying where it came from could not be written.",
             )
             .with_context(format!("Reason: {why}"))
+            .with_suggestion(
+                "Nothing has been moved. Without that note there would be no way to put \
+                 it back, so it stays where it is.",
+            )
+        })?;
+        shift(source, &held.join(PAYLOAD)).map_err(|why| {
+            let _ = std::fs::remove_dir_all(&held);
+            fail("ET007", "That could not be moved to the trash.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
         })?;
         Ok(entry)
     }
