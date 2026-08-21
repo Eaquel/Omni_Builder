@@ -261,17 +261,20 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCreateProject(
   return HandBack(env, omni_create_project(root_text.c_str(), spec_text.c_str()));
 }
 
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildProject(
-    JNIEnv *env, jobject , jstring root, jstring output_path, jstring key_path,
-    jcharArray key_password) {
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildAll(
+    JNIEnv *env, jobject , jstring root, jstring package_path,
+    jstring bundle_path, jstring key_path, jcharArray key_password) {
   std::string root_text;
-  std::string path_text;
+  std::string package_text;
+  std::string bundle_text;
   std::string key_text;
-  if (root == nullptr || output_path == nullptr || key_path == nullptr ||
-      !JavaStringToUtf8(env, root, &root_text) ||
-      !JavaStringToUtf8(env, output_path, &path_text) ||
+  if (root == nullptr || package_path == nullptr || bundle_path == nullptr ||
+      key_path == nullptr || !JavaStringToUtf8(env, root, &root_text) ||
+      !JavaStringToUtf8(env, package_path, &package_text) ||
+      !JavaStringToUtf8(env, bundle_path, &bundle_text) ||
       !JavaStringToUtf8(env, key_path, &key_text)) {
-    ThrowJava(env, kIllegalState, "A build needs a project, an output and a key.");
+    ThrowJava(env, kIllegalState,
+              "A build needs a project, a package, a bundle and a key.");
     return nullptr;
   }
 
@@ -281,11 +284,21 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildProject(
     return nullptr;
   }
 
-  return HandBack(env, omni_build_project(root_text.c_str(), path_text.c_str(),
-                                          key_text.c_str(),
-                                          key_password == nullptr
-                                              ? nullptr
-                                              : password.c_str()));
+  return HandBack(env, omni_build_all(root_text.c_str(), package_text.c_str(),
+                                      bundle_text.c_str(), key_text.c_str(),
+                                      key_password == nullptr
+                                          ? nullptr
+                                          : password.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDefaultKey(
+    JNIEnv *env, jobject , jstring directory) {
+  std::string directory_text;
+  if (directory == nullptr || !JavaStringToUtf8(env, directory, &directory_text)) {
+    ThrowJava(env, kIllegalState, "The shared signing key needs a folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_default_key(directory_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCreateKey(
@@ -433,14 +446,102 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeNewFolder(
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRemovePath(
-    JNIEnv *env, jobject , jstring root, jstring relative) {
+    JNIEnv *env, jobject , jstring root, jstring relative, jstring trash_root) {
   std::string root_text;
   std::string relative_text;
+  std::string trash_text;
   if (!TwoPaths(env, root, relative, &root_text, &relative_text,
-                "Removing something needs a project and a path.")) {
+                "Removing something needs a project, a path and a trash.")) {
     return nullptr;
   }
-  return HandBack(env, omni_remove_path(root_text.c_str(), relative_text.c_str()));
+  if (trash_root == nullptr || !JavaStringToUtf8(env, trash_root, &trash_text)) {
+    ThrowJava(env, kIllegalState,
+              "Removing something needs a project, a path and a trash.");
+    return nullptr;
+  }
+  return HandBack(env, omni_remove_path(root_text.c_str(), relative_text.c_str(),
+                                        trash_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRenamePath(
+    JNIEnv *env, jobject , jstring root, jstring from, jstring to) {
+  std::string root_text;
+  std::string from_text;
+  std::string to_text;
+  if (!TwoPaths(env, root, from, &root_text, &from_text,
+                "Moving something needs a project and two paths.")) {
+    return nullptr;
+  }
+  if (to == nullptr || !JavaStringToUtf8(env, to, &to_text)) {
+    ThrowJava(env, kIllegalState,
+              "Moving something needs a project and two paths.");
+    return nullptr;
+  }
+  return HandBack(env, omni_rename_path(root_text.c_str(), from_text.c_str(),
+                                        to_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListBuilt(
+    JNIEnv *env, jobject , jstring directory) {
+  std::string directory_text;
+  if (directory == nullptr || !JavaStringToUtf8(env, directory, &directory_text)) {
+    ThrowJava(env, kIllegalState, "Listing what was built needs a folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_list_built(directory_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashSend(
+    JNIEnv *env, jobject , jstring trash_root, jstring path) {
+  std::string trash_text;
+  std::string path_text;
+  if (!TwoPaths(env, trash_root, path, &trash_text, &path_text,
+                "Deleting something needs a trash and a path.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_trash_send(trash_text.c_str(), path_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashList(
+    JNIEnv *env, jobject , jstring trash_root) {
+  std::string trash_text;
+  if (trash_root == nullptr || !JavaStringToUtf8(env, trash_root, &trash_text)) {
+    ThrowJava(env, kIllegalState, "Listing the trash needs its folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_trash_list(trash_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashRestore(
+    JNIEnv *env, jobject , jstring trash_root, jstring id) {
+  std::string trash_text;
+  std::string id_text;
+  if (!TwoPaths(env, trash_root, id, &trash_text, &id_text,
+                "Putting something back needs a trash and a name.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_trash_restore(trash_text.c_str(), id_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashPurge(
+    JNIEnv *env, jobject , jstring trash_root, jstring id) {
+  std::string trash_text;
+  std::string id_text;
+  if (!TwoPaths(env, trash_root, id, &trash_text, &id_text,
+                "Removing something for good needs a trash and a name.")) {
+    return nullptr;
+  }
+  return HandBack(env, omni_trash_purge(trash_text.c_str(), id_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeTrashEmpty(
+    JNIEnv *env, jobject , jstring trash_root) {
+  std::string trash_text;
+  if (trash_root == nullptr || !JavaStringToUtf8(env, trash_root, &trash_text)) {
+    ThrowJava(env, kIllegalState, "Emptying the trash needs its folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_trash_empty(trash_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSetIcon(
@@ -452,17 +553,6 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSetIcon(
     return nullptr;
   }
   return HandBack(env, omni_set_icon(root_text.c_str(), source_text.c_str()));
-}
-
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBundleProject(
-    JNIEnv *env, jobject , jstring root, jstring output_path) {
-  std::string root_text;
-  std::string path_text;
-  if (!TwoPaths(env, root, output_path, &root_text, &path_text,
-                "A bundle needs a project and an output.")) {
-    return nullptr;
-  }
-  return HandBack(env, omni_bundle_project(root_text.c_str(), path_text.c_str()));
 }
 
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(

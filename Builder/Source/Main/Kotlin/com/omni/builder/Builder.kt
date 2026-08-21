@@ -46,6 +46,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+import android.view.WindowInsets
+import android.view.WindowInsetsController
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.widget.EditText
@@ -655,8 +657,12 @@ class PackageProvider : ContentProvider() {
     companion object {
         const val PACKAGE_TYPE: String = "application/vnd.android.package-archive"
         const val BUNDLE_TYPE: String = "application/octet-stream"
+        const val FOLDER: String = "Built"
 
         fun authority(context: Context): String = "${context.packageName}.packages"
+
+        fun folder(context: Context): File =
+            File(context.getExternalFilesDir(null) ?: context.filesDir, FOLDER)
 
         fun uriFor(context: Context, file: File): Uri = Uri.Builder()
             .scheme("content")
@@ -673,7 +679,7 @@ class PackageProvider : ContentProvider() {
         if (name.isEmpty() || name.contains('/') || name.contains('\\') || name.contains("..")) {
             return null
         }
-        val root = here.getExternalFilesDir(null) ?: here.filesDir
+        val root = folder(here)
         val file = File(root, name)
         val inside = runCatching {
             file.canonicalPath == File(root.canonicalPath, name).canonicalPath
@@ -784,9 +790,10 @@ object Builder {
 
     external fun nativeCreateProject(root: String, spec: String): String
 
-    external fun nativeBuildProject(
+    external fun nativeBuildAll(
         root: String,
-        outputPath: String,
+        packagePath: String,
+        bundlePath: String,
         keyPath: String,
         keyPassword: CharArray?,
     ): String
@@ -794,6 +801,8 @@ object Builder {
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
     external fun nativeCreateKey(directory: String, spec: String, keyPassword: CharArray): String
+
+    external fun nativeDefaultKey(directory: String): String
 
     external fun nativeListKeys(directory: String): String
 
@@ -811,11 +820,23 @@ object Builder {
 
     external fun nativeNewFolder(root: String, relative: String): String
 
-    external fun nativeRemovePath(root: String, relative: String): String
+    external fun nativeRemovePath(root: String, relative: String, trashRoot: String): String
+
+    external fun nativeRenamePath(root: String, from: String, to: String): String
+
+    external fun nativeListBuilt(directory: String): String
+
+    external fun nativeTrashSend(trashRoot: String, path: String): String
+
+    external fun nativeTrashList(trashRoot: String): String
+
+    external fun nativeTrashRestore(trashRoot: String, id: String): String
+
+    external fun nativeTrashPurge(trashRoot: String, id: String): String
+
+    external fun nativeTrashEmpty(trashRoot: String): String
 
     external fun nativeSetIcon(root: String, source: String): String
-
-    external fun nativeBundleProject(root: String, outputPath: String): String
 
     fun observedEnvironment(context: Context): String {
         val info = context.applicationInfo
@@ -850,6 +871,7 @@ data class ProjectSpec(
     val minSdk: Int,
     val targetSdk: Int,
     val languages: List<String>,
+    val locales: List<String>,
 ) {
     fun encode(): String = buildString {
         append("package=").append(packageName).append(';')
@@ -859,7 +881,8 @@ data class ProjectSpec(
         append("abis=").append(abis.joinToString(",")).append(';')
         append("minSdk=").append(minSdk).append(';')
         append("targetSdk=").append(targetSdk).append(';')
-        append("languages=").append(languages.joinToString(","))
+        append("languages=").append(languages.joinToString(",")).append(';')
+        append("locales=").append(locales.joinToString(","))
     }
 }
 
@@ -868,7 +891,7 @@ data class KeySpec(
     val commonName: String,
     val organisation: String,
     val country: String,
-    val validityDays: Int,
+    val validityYears: Int,
     val bits: Int,
 ) {
     fun encode(): String = buildString {
@@ -876,8 +899,59 @@ data class KeySpec(
         append("commonName=").append(commonName).append(';')
         append("organisation=").append(organisation).append(';')
         append("country=").append(country).append(';')
-        append("validityDays=").append(validityDays).append(';')
+        append("validityYears=").append(validityYears).append(';')
         append("bits=").append(bits)
+    }
+}
+
+data class Built(
+    val name: String,
+    val path: String,
+    val bytes: Long,
+    val writtenAt: Long,
+    val bundle: Boolean,
+) {
+    companion object {
+        fun list(document: String): List<Built> {
+            val array = JSONObject(document).optJSONArray("built") ?: return emptyList()
+            return (0 until array.length()).map { index ->
+                val item = array.getJSONObject(index)
+                Built(
+                    name = item.getString("name"),
+                    path = item.getString("path"),
+                    bytes = item.optLong("bytes"),
+                    writtenAt = item.optLong("writtenAt"),
+                    bundle = item.optBoolean("bundle", false),
+                )
+            }
+        }
+    }
+}
+
+data class Trashed(
+    val id: String,
+    val name: String,
+    val origin: String,
+    val folder: Boolean,
+    val bytes: Long,
+    val secondsLeft: Long,
+    val restorable: Boolean,
+) {
+    companion object {
+        fun parse(item: JSONObject) = Trashed(
+            id = item.getString("id"),
+            name = item.getString("name"),
+            origin = item.optString("origin"),
+            folder = item.optBoolean("folder", false),
+            bytes = item.optLong("bytes"),
+            secondsLeft = item.optLong("secondsLeft"),
+            restorable = item.optBoolean("restorable", false),
+        )
+
+        fun list(document: String): List<Trashed> {
+            val array = JSONObject(document).optJSONArray("trashed") ?: return emptyList()
+            return (0 until array.length()).map { parse(array.getJSONObject(it)) }
+        }
     }
 }
 
@@ -1023,6 +1097,9 @@ data class BuildOutcome(
     val error: String?,
     val developerKey: Boolean,
     val signedBy: String?,
+    val bundlePath: String?,
+    val bundleBytes: Long,
+    val locales: Long,
 ) {
     companion object {
         fun parse(document: String): BuildOutcome {
@@ -1056,6 +1133,9 @@ data class BuildOutcome(
                 error = root.optString("error").ifEmpty { null },
                 developerKey = root.optBoolean("developerKey", false),
                 signedBy = root.optJSONObject("signedBy")?.optString("subject")?.ifEmpty { null },
+                bundlePath = root.optString("bundlePath").ifEmpty { null },
+                bundleBytes = root.optJSONObject("bundle")?.optLong("bytes") ?: 0L,
+                locales = root.optLong("locales"),
             )
         }
     }
@@ -1351,18 +1431,46 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
     }
 }
 
+private enum class Tab { PROJECTS, FILES, BUILD, TRASH, SETTINGS }
+
 private sealed interface Screen {
-    data object Projects : Screen
+    val tab: Tab
 
-    data object NewProject : Screen
+    data object Projects : Screen {
+        override val tab = Tab.PROJECTS
+    }
 
-    data object NewKey : Screen
+    data object NewProject : Screen {
+        override val tab = Tab.PROJECTS
+    }
 
-    data class Open(val root: String) : Screen
+    data class Files(val root: String, val folder: String) : Screen {
+        override val tab = Tab.FILES
+    }
 
-    data class Editor(val root: String, val path: String) : Screen
+    data class Editor(val root: String, val path: String) : Screen {
+        override val tab = Tab.FILES
+    }
 
-    data object Settings : Screen
+    data class Build(val root: String) : Screen {
+        override val tab = Tab.BUILD
+    }
+
+    data object Trash : Screen {
+        override val tab = Tab.TRASH
+    }
+
+    data object Settings : Screen {
+        override val tab = Tab.SETTINGS
+    }
+
+    data object Keys : Screen {
+        override val tab = Tab.SETTINGS
+    }
+
+    data object NewKey : Screen {
+        override val tab = Tab.SETTINGS
+    }
 }
 class BuilderActivity : Activity() {
 
@@ -1372,6 +1480,17 @@ class BuilderActivity : Activity() {
         const val ENTER_MILLIS = 260L
         const val LEAVE_MILLIS = 140L
         const val RISE_DP = 18
+
+        const val DEFAULT_PACKAGE = "com.my.app"
+        const val DEFAULT_LABEL = "My App"
+        const val BASE_LOCALE = "en"
+
+        const val DEFAULT_KEY_ALIAS = "My_Key"
+        const val DEFAULT_KEY_COMMON_NAME = "Builder"
+        const val DEFAULT_KEY_ORGANISATION = "My_App"
+        const val DEFAULT_KEY_COUNTRY = "EN"
+        const val DEFAULT_KEY_YEARS = 10
+        const val DEFAULT_KEY_PASSWORD = "My_App_Builder"
 
         val ABI_CHOICES = listOf(
             "32" to listOf("armeabi-v7a"),
@@ -1389,42 +1508,45 @@ class BuilderActivity : Activity() {
             "rust" to "Rust",
         )
         val KEY_SIZES = listOf(2048, 3072, 4096)
-        const val DEFAULT_VALIDITY_DAYS = 10950
+        val VALIDITY_YEARS = listOf(1, 5, 10, 25, 100)
     }
 
     private lateinit var palette: Palette
     private lateinit var aurora: AuroraView
-    private lateinit var tabStrip: LinearLayout
-    private lateinit var indicator: View
+    private lateinit var bar: LinearLayout
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var results: LinearLayout
 
     private var screen: Screen = Screen.Projects
     private var standing = "UNKNOWN"
+    private var openProject: String? = null
 
-    private var formPackage = "com.tr.yt"
-    private var formLabel = "My App"
+    private var formPackage = DEFAULT_PACKAGE
+    private var formLabel = DEFAULT_LABEL
     private var formVersionName = "1.0.0"
     private var formVersionCode = "1"
     private var formAbi = 2
     private var formMinSdk = 28
     private var formTargetSdk = 36
     private val formLanguages = linkedSetOf("kotlin")
+    private val formLocales = Preferences.LANGUAGES.mapTo(linkedSetOf()) { it.first }
     private var formImage: String? = null
 
-    private var keyAlias = "release"
-    private var keyCommonName = ""
-    private var keyOrganisation = "Omni"
-    private var keyCountry = "TR"
-    private var keyValidity = DEFAULT_VALIDITY_DAYS.toString()
-    private var keyBits = 0
+    private var keyAlias = DEFAULT_KEY_ALIAS
+    private var keyCommonName = DEFAULT_KEY_COMMON_NAME
+    private var keyOrganisation = DEFAULT_KEY_ORGANISATION
+    private var keyCountry = DEFAULT_KEY_COUNTRY
+    private var keyYears = VALIDITY_YEARS.indexOf(DEFAULT_KEY_YEARS)
+    private var keyBits = KEY_SIZES.indexOf(4096)
     private var keyPasswordView: EditText? = null
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
 
     private var editorText = ""
     private var newPathView: EditText? = null
+    private var renameFromView: EditText? = null
+    private var renameToView: EditText? = null
 
     override fun attachBaseContext(base: Context) {
         val tag = Preferences.language(base)
@@ -1465,27 +1587,18 @@ class BuilderActivity : Activity() {
             addView(content, MATCH_PARENT, WRAP_CONTENT)
         }
 
-        indicator = View(this).apply {
-            background = pill(palette.accent, gap(1).toFloat())
-        }
-        tabStrip = LinearLayout(this).apply {
+        bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(gap(4), gap(2), gap(4), 0)
+            background = sheet(palette.surface, palette.divider)
+            layoutTransition = LayoutTransition()
         }
 
-        val header = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            addView(tabStrip, MATCH_PARENT, WRAP_CONTENT)
-            addView(indicator, LinearLayout.LayoutParams(gap(8), gap(1)).apply {
-                topMargin = gap(1)
-            })
-            addView(rule(), MATCH_PARENT, 1)
-        }
-
+        val roof = View(this)
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            addView(header, MATCH_PARENT, WRAP_CONTENT)
+            addView(roof, LinearLayout.LayoutParams(MATCH_PARENT, 0))
             addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
 
         val stack = FrameLayout(this).apply {
@@ -1494,9 +1607,100 @@ class BuilderActivity : Activity() {
             addView(shell, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
         setContentView(stack)
+        fitAroundTheSystemBars(stack, roof)
+        hideTheNavigationBar()
 
         standing = examine()
+        provisionSharedKey()
         render(false)
+    }
+
+    private fun hideTheNavigationBar() {
+        val pale = Color.luminance(palette.background) > 0.5f
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                @Suppress("DEPRECATION")
+                window.setDecorFitsSystemWindows(false)
+            }
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.navigationBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.setSystemBarsAppearance(
+                    if (pale) WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS else 0,
+                    WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS,
+                )
+            }
+            return
+        }
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or
+                if (pale) View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR else 0
+    }
+
+    private fun fitAroundTheSystemBars(stack: View, roof: View) {
+        stack.setOnApplyWindowInsetsListener { _, insets ->
+            val top: Int
+            val bottom: Int
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val around = insets.getInsets(
+                    WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()
+                )
+                top = around.top
+                bottom = insets.getInsets(WindowInsets.Type.navigationBars()).bottom
+            } else {
+                @Suppress("DEPRECATION")
+                top = insets.systemWindowInsetTop
+                @Suppress("DEPRECATION")
+                bottom = insets.systemWindowInsetBottom
+            }
+            val above = roof.layoutParams as LinearLayout.LayoutParams
+            if (above.height != top) {
+                above.height = top
+                roof.layoutParams = above
+            }
+            bar.setPadding(gap(2), gap(2), gap(2), gap(2) + bottom)
+            insets
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            hideTheNavigationBar()
+        }
+    }
+
+    private fun provisionSharedKey() {
+        if (Preferences.signingKey(this).isNotEmpty()) {
+            return
+        }
+        val folder = keysFolder().absolutePath
+        Thread {
+            val answer = runCatching { Builder.nativeDefaultKey(folder) }.getOrNull()
+            val key = answer
+                ?.let { runCatching { JSONObject(it) }.getOrNull() }
+                ?.takeIf { it.optBoolean("ready", false) }
+                ?.optJSONObject("key")
+                ?: return@Thread
+            runOnUiThread {
+                if (isFinishing) {
+                    return@runOnUiThread
+                }
+                Preferences.setSigningKey(this, key.optString("path"))
+                OmniLog.event(
+                    LogLevel.INFO,
+                    "keystore",
+                    "Shared key ${key.optString("alias")} ready, ${key.optString("fingerprint")}",
+                )
+                render(false)
+            }
+        }.start()
     }
 
     override fun onResume() {
@@ -1567,8 +1771,8 @@ class BuilderActivity : Activity() {
         }
 
         if (standing == "TAMPERED") {
-            tabStrip.removeAllViews()
-            indicator.visibility = View.GONE
+            bar.removeAllViews()
+            bar.visibility = View.GONE
             content.addView(notice(getString(R.string.omni_integrity_refused_title), palette.error))
             content.addView(body(getString(R.string.omni_integrity_refused_body)))
             content.addView(quiet(getString(R.string.omni_integrity_checked)))
@@ -1577,16 +1781,19 @@ class BuilderActivity : Activity() {
             return
         }
 
-        indicator.visibility = View.VISIBLE
-        drawTabs()
+        bar.visibility = View.VISIBLE
+        drawBar()
 
         when (val here = screen) {
             is Screen.Projects -> renderProjects()
             is Screen.NewProject -> renderNewProject()
-            is Screen.NewKey -> renderNewKey()
-            is Screen.Open -> renderProject(here.root)
+            is Screen.Files -> renderFiles(here.root, here.folder)
             is Screen.Editor -> renderEditor(here.root, here.path)
+            is Screen.Build -> renderBuild(here.root)
+            is Screen.Trash -> renderTrash()
             is Screen.Settings -> renderSettings()
+            is Screen.Keys -> renderKeys()
+            is Screen.NewKey -> renderNewKey()
         }
         content.addView(results)
 
@@ -1609,49 +1816,94 @@ class BuilderActivity : Activity() {
     override fun onBackPressed() {
         when (val here = screen) {
             is Screen.Projects -> super.onBackPressed()
-            is Screen.Editor -> go(Screen.Open(here.root))
-            is Screen.Open -> go(Screen.Projects)
+            is Screen.NewProject -> go(Screen.Projects)
+            is Screen.Editor -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
+            is Screen.Files ->
+                if (here.folder.isEmpty()) {
+                    go(Screen.Projects)
+                } else {
+                    go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
+                }
+            is Screen.Build -> go(Screen.Files(here.root, ""))
+            is Screen.Keys -> go(Screen.Settings)
+            is Screen.NewKey -> go(Screen.Keys)
             else -> go(Screen.Projects)
         }
     }
 
-    private fun onSettings() = screen is Screen.Settings
-
-    private fun drawTabs() {
-        tabStrip.removeAllViews()
-        val labels = listOf(
-            getString(R.string.omni_tab_projects) to (Screen.Projects as Screen),
-            getString(R.string.omni_tab_settings) to (Screen.Settings as Screen),
-        )
-        labels.forEachIndexed { index, (label, destination) ->
-            val active = (index == 1) == onSettings()
-            tabStrip.addView(
-                TextView(this).apply {
-                    text = label
-                    setTextColor(if (active) palette.foreground else palette.muted)
-                    setTypeface(Typeface.DEFAULT_BOLD)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-                    letterSpacing = 0.08f
-                    setPadding(0, gap(2), gap(6), gap(2))
-                    isClickable = true
-                    setOnClickListener { go(destination) }
-                }
-            )
+    private fun destination(tab: Tab): Screen {
+        val root = openProject
+        return when (tab) {
+            Tab.PROJECTS -> Screen.Projects
+            Tab.FILES -> root?.let { Screen.Files(it, "") } ?: Screen.Projects
+            Tab.BUILD -> root?.let { Screen.Build(it) } ?: Screen.Projects
+            Tab.TRASH -> Screen.Trash
+            Tab.SETTINGS -> Screen.Settings
         }
-        tabStrip.post {
-            val target = tabStrip.getChildAt(if (onSettings()) 1 else 0) ?: return@post
-            val params = indicator.layoutParams as LinearLayout.LayoutParams
-            params.width = target.width - gap(6)
-            indicator.layoutParams = params
-            indicator.animate()
-                .translationX(target.left.toFloat())
-                .setDuration(ENTER_MILLIS)
-                .setInterpolator(DecelerateInterpolator())
-                .start()
+    }
+
+    private fun drawBar() {
+        bar.removeAllViews()
+        val labels = mapOf(
+            Tab.PROJECTS to R.string.omni_tab_projects,
+            Tab.FILES to R.string.omni_tab_files,
+            Tab.BUILD to R.string.omni_tab_build,
+            Tab.TRASH to R.string.omni_tab_trash,
+            Tab.SETTINGS to R.string.omni_tab_settings,
+        )
+        for (tab in Tab.entries) {
+            val active = screen.tab == tab
+            val reachable = tab != Tab.FILES && tab != Tab.BUILD || openProject != null
+            bar.addView(
+                TextView(this).apply {
+                    text = getString(labels.getValue(tab))
+                    setTextColor(
+                        when {
+                            active -> palette.background
+                            reachable -> palette.foreground
+                            else -> palette.muted
+                        }
+                    )
+                    setTypeface(Typeface.DEFAULT_BOLD)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    letterSpacing = 0.04f
+                    gravity = Gravity.CENTER
+                    maxLines = 1
+                    setPadding(gap(1), gap(3), gap(1), gap(3))
+                    background = touchable(
+                        pill(if (active) palette.accent else Color.TRANSPARENT, gap(3).toFloat()),
+                        palette.accent,
+                    )
+                    isClickable = true
+                    setOnClickListener {
+                        if (reachable) {
+                            go(destination(tab))
+                        } else {
+                            go(Screen.Projects)
+                            results.addView(
+                                notice(getString(R.string.omni_no_project_open), palette.warning)
+                            )
+                        }
+                    }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    marginStart = gap(1) / 2
+                    marginEnd = gap(1) / 2
+                },
+            )
         }
     }
 
     private fun projectsFolder() = File(getExternalFilesDir(null) ?: filesDir, "Projects")
+
+    private fun builtFolder() = PackageProvider.folder(this).also { it.mkdirs() }
+
+    private fun trashFolder() = File(getExternalFilesDir(null) ?: filesDir, "Trash").absolutePath
+
+    private fun openHere(root: String) {
+        openProject = root
+        go(Screen.Files(root, ""))
+    }
 
     private fun keysFolder() = File(filesDir, "Keys")
 
@@ -1670,53 +1922,26 @@ class BuilderActivity : Activity() {
             if (index > 0) {
                 card.addView(rule(), MATCH_PARENT, 1)
             }
+            val open = project.root == openProject
             card.addView(
                 row(
                     project.label.ifEmpty { project.name },
                     "${project.packageName}  ·  ${project.versionName}  ·  " +
-                        "API ${project.minSdk}–${project.targetSdk}",
-                    project.files.toString(),
-                ) { go(Screen.Open(project.root)) }
+                        "API ${project.minSdk}–${project.targetSdk}  ·  " +
+                        getString(R.string.omni_projects_files, project.files),
+                    if (open) getString(R.string.omni_projects_open_now) else "",
+                    palette.ok,
+                ) { openHere(project.root) }
+            )
+            card.addView(
+                subtle(getString(R.string.omni_action_delete), palette.error) {
+                    deleteProject(project)
+                }
             )
         }
         content.addView(card)
         content.addView(primary(getString(R.string.omni_projects_new)) { go(Screen.NewProject) })
-
-        content.addView(heading(getString(R.string.omni_keys_title)))
-        val keys = runCatching {
-            SigningKey.list(Builder.nativeListKeys(keysFolder().absolutePath))
-        }.getOrDefault(emptyList())
-        val chosen = Preferences.signingKey(this)
-
-        val vault = card()
-        if (keys.isEmpty()) {
-            vault.addView(quiet(getString(R.string.omni_keys_none)))
-        }
-        keys.forEachIndexed { index, key ->
-            if (index > 0) {
-                vault.addView(rule(), MATCH_PARENT, 1)
-            }
-            val inUse = key.path == chosen
-            vault.addView(
-                row(
-                    key.alias,
-                    "${key.subject}\n${getString(R.string.omni_keys_expires)} ${key.expires}  ·  " +
-                        "${key.bits}\n${key.fingerprint}",
-                    if (inUse) getString(R.string.omni_keys_in_use) else getString(R.string.omni_keys_use),
-                    if (inUse) palette.ok else palette.accent,
-                ) {
-                    Preferences.setSigningKey(this, key.path)
-                    render(false)
-                }
-            )
-            vault.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
-                runCatching { Builder.nativeDeleteKey(key.path) }
-                if (inUse) Preferences.setSigningKey(this, "")
-                render(false)
-            })
-        }
-        content.addView(vault)
-        content.addView(primary(getString(R.string.omni_keys_new)) { go(Screen.NewKey) })
+        content.addView(quiet(getString(R.string.omni_projects_note)))
     }
 
     private fun renderNewProject() {
@@ -1764,11 +1989,25 @@ class BuilderActivity : Activity() {
         )
         content.addView(quiet(getString(R.string.omni_form_no_compiler)))
 
+        content.addView(label(getString(R.string.omni_form_locales)))
+        content.addView(
+            chips(
+                Preferences.LANGUAGES.map { it.second },
+                { formLocales.contains(Preferences.LANGUAGES[it].first) },
+            ) { index ->
+                val tag = Preferences.LANGUAGES[index].first
+                if (!formLocales.remove(tag)) formLocales.add(tag)
+                if (formLocales.isEmpty()) formLocales.add(BASE_LOCALE)
+            }
+        )
+        content.addView(quiet(getString(R.string.omni_form_locales_note)))
+
         content.addView(label(getString(R.string.omni_form_image)))
         val picture = card()
         picture.addView(quiet(formImage?.let { File(it).name } ?: getString(R.string.omni_form_image_none)))
         picture.addView(subtle(getString(R.string.omni_form_image_choose), palette.accent) { chooseImage() })
         content.addView(picture)
+        content.addView(quiet(getString(R.string.omni_form_image_note)))
 
         content.addView(primary(getString(R.string.omni_action_create)) { createProject() })
         content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
@@ -1776,118 +2015,124 @@ class BuilderActivity : Activity() {
         })
     }
 
-    private fun renderNewKey() {
-        content.addView(heading(getString(R.string.omni_keys_new)))
-
-        val who = card()
-        who.addView(field(getString(R.string.omni_key_alias), keyAlias) { keyAlias = it })
-        who.addView(field(getString(R.string.omni_key_common_name), keyCommonName) { keyCommonName = it })
-        who.addView(
-            field(getString(R.string.omni_key_organisation), keyOrganisation) { keyOrganisation = it }
-        )
-        who.addView(field(getString(R.string.omni_key_country), keyCountry) { keyCountry = it })
-        who.addView(field(getString(R.string.omni_key_validity), keyValidity) { keyValidity = it })
-        content.addView(who)
-
-        content.addView(label(getString(R.string.omni_key_size)))
-        content.addView(chips(KEY_SIZES.map { it.toString() }, { it == keyBits }) { keyBits = it })
-
-        val secrets = card()
-        val first = secret(getString(R.string.omni_key_password))
-        val again = secret(getString(R.string.omni_key_password_again))
-        keyPasswordView = first.second
-        keyPasswordAgainView = again.second
-        secrets.addView(first.first)
-        secrets.addView(again.first)
-        content.addView(secrets)
-        content.addView(warning(getString(R.string.omni_key_password_warning)))
-
-        content.addView(primary(getString(R.string.omni_action_create)) { createKey() })
-        content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
-            go(Screen.Projects)
-        })
-    }
-
-    private fun renderProject(root: String) {
-        val summary = runCatching {
-            ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
-                .firstOrNull { it.root == root }
-        }.getOrNull()
-
+    private fun renderFiles(root: String, folder: String) {
+        val summary = summaryOf(root)
         content.addView(heading(summary?.label?.ifEmpty { null } ?: File(root).name))
         summary?.let {
             content.addView(
-                quiet("${it.packageName}  ·  ${it.versionName} (${it.versionCode})  ·  API ${it.minSdk}–${it.targetSdk}")
+                quiet(
+                    "${it.packageName}  ·  ${it.versionName} (${it.versionCode})  ·  " +
+                        "API ${it.minSdk}–${it.targetSdk}"
+                )
             )
         }
 
-        val chosen = Preferences.signingKey(this)
-        val output = card()
-        if (chosen.isEmpty()) {
-            output.addView(quiet(getString(R.string.omni_build_no_key)))
-        } else {
-            output.addView(quiet(File(chosen).name))
-            val secret = secret(getString(R.string.omni_build_password))
-            buildPasswordView = secret.second
-            output.addView(secret.first)
-        }
-        content.addView(output)
+        content.addView(label(getString(R.string.omni_files_here)))
+        content.addView(breadcrumb(root, folder))
 
-        if (chosen.isNotEmpty()) {
-            content.addView(primary(getString(R.string.omni_action_build)) { buildProject(root, chosen) })
-        }
-        content.addView(subtle(getString(R.string.omni_action_bundle), palette.accent) {
-            bundleProject(root)
-        })
-        content.addView(quiet(getString(R.string.omni_bundle_note)))
-
-        content.addView(heading(getString(R.string.omni_editor_title)))
         val entries = runCatching {
             FileEntry.list(Builder.nativeProjectTree(root))
         }.getOrDefault(emptyList())
+        val here = entries
+            .filter { it.path.substringBeforeLast('/', "") == folder }
+            .sortedWith(compareBy({ !it.folder }, { it.path.lowercase(Locale.getDefault()) }))
 
         val tree = card()
-        entries.forEachIndexed { index, entry ->
+        if (here.isEmpty()) {
+            tree.addView(quiet(getString(R.string.omni_files_empty)))
+        }
+        here.forEachIndexed { index, entry ->
             if (index > 0) {
                 tree.addView(rule(), MATCH_PARENT, 1)
             }
+            val name = entry.path.substringAfterLast('/')
+            val held = entries.count { it.path.startsWith("${entry.path}/") }
             tree.addView(
                 row(
-                    entry.path,
-                    "",
-                    if (entry.folder) "•" else entry.bytes.toString(),
-                    if (entry.folder) palette.muted else palette.accent,
+                    if (entry.folder) "$name/" else name,
+                    if (entry.folder) {
+                        getString(R.string.omni_files_holds, held)
+                    } else {
+                        size(entry.bytes)
+                    },
+                    if (entry.folder) getString(R.string.omni_action_open) else "",
+                    palette.accent,
                 ) {
-                    if (!entry.folder) {
+                    if (entry.folder) {
+                        go(Screen.Files(root, entry.path))
+                    } else {
                         editorText = ""
                         go(Screen.Editor(root, entry.path))
                     }
                 }
             )
+            tree.addView(
+                subtle(getString(R.string.omni_action_delete), palette.error) {
+                    results.removeAllViews()
+                    report(
+                        Builder.nativeRemovePath(root, entry.path, trashFolder()),
+                        "removed",
+                    )
+                    render(false)
+                }
+            )
         }
         content.addView(tree)
+        content.addView(quiet(getString(R.string.omni_trash_note)))
 
+        content.addView(label(getString(R.string.omni_files_make)))
         val making = card()
         val prompt = input(getString(R.string.omni_editor_name_prompt), "")
         newPathView = prompt.second
         making.addView(prompt.first)
-        making.addView(subtle(getString(R.string.omni_action_new_file), palette.accent) {
-            newPathView?.text?.toString().orEmpty().takeIf { it.isNotEmpty() }?.let { path ->
+        making.addView(row(
+            getString(R.string.omni_action_new_file),
+            getString(R.string.omni_files_into, folderName(folder)),
+            "",
+            palette.accent,
+        ) {
+            named(folder)?.let { path ->
                 report(Builder.nativeWriteFile(root, path, ""), "saved")
                 render(false)
             }
         })
-        making.addView(subtle(getString(R.string.omni_action_new_folder), palette.accent) {
-            newPathView?.text?.toString().orEmpty().takeIf { it.isNotEmpty() }?.let { path ->
+        making.addView(rule(), MATCH_PARENT, 1)
+        making.addView(row(
+            getString(R.string.omni_action_new_folder),
+            getString(R.string.omni_files_into, folderName(folder)),
+            "",
+            palette.accent,
+        ) {
+            named(folder)?.let { path ->
                 report(Builder.nativeNewFolder(root, path), "made")
                 render(false)
             }
         })
         content.addView(making)
 
-        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-            go(Screen.Projects)
+        content.addView(label(getString(R.string.omni_files_move)))
+        val moving = card()
+        val from = input(getString(R.string.omni_files_move_from), "")
+        val to = input(getString(R.string.omni_files_move_to), "")
+        renameFromView = from.second
+        renameToView = to.second
+        moving.addView(from.first)
+        moving.addView(to.first)
+        moving.addView(subtle(getString(R.string.omni_action_move), palette.accent) {
+            val source = renameFromView?.text?.toString().orEmpty().trim()
+            val target = renameToView?.text?.toString().orEmpty().trim()
+            if (source.isEmpty() || target.isEmpty()) {
+                results.removeAllViews()
+                results.addView(notice(getString(R.string.omni_files_move_needs), palette.warning))
+            } else {
+                report(Builder.nativeRenamePath(root, source, target), "moved")
+                render(false)
+            }
         })
+        content.addView(moving)
+        content.addView(quiet(getString(R.string.omni_files_move_note)))
+
+        content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
     }
 
     private fun renderEditor(root: String, path: String) {
@@ -1898,7 +2143,7 @@ class BuilderActivity : Activity() {
         if (answer == null || !answer.optBoolean("read", false)) {
             answer?.let { showRefusal(Refusal.parse(it), content) }
             content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-                go(Screen.Open(root))
+                go(Screen.Files(root, path.substringBeforeLast('/', "")))
             })
             return
         }
@@ -1938,12 +2183,310 @@ class BuilderActivity : Activity() {
             }
         })
         content.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
-            report(Builder.nativeRemovePath(root, path), "removed")
-            go(Screen.Open(root))
+            results.removeAllViews()
+            val thrown = runCatching {
+                JSONObject(Builder.nativeRemovePath(root, path, trashFolder()))
+            }.getOrNull()
+            if (thrown != null && thrown.optBoolean("removed", false)) {
+                go(Screen.Files(root, path.substringBeforeLast('/', "")))
+            } else {
+                thrown?.let { showRefusal(Refusal.parse(it), results) }
+            }
         })
+        content.addView(quiet(getString(R.string.omni_trash_note)))
         content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-            go(Screen.Open(root))
+            go(Screen.Files(root, path.substringBeforeLast('/', "")))
         })
+    }
+
+    private fun renderBuild(root: String) {
+        val summary = summaryOf(root)
+        content.addView(heading(getString(R.string.omni_build_title)))
+        content.addView(
+            quiet(summary?.label?.ifEmpty { null } ?: File(root).name)
+        )
+
+        val chosen = Preferences.signingKey(this)
+        val keys = keysHere()
+        val key = keys.firstOrNull { it.path == chosen }
+
+        val signing = card()
+        if (key == null) {
+            signing.addView(quiet(getString(R.string.omni_build_no_key)))
+        } else {
+            signing.addView(
+                keyValue(
+                    key.alias,
+                    key.subject,
+                    if (key.alias == DEFAULT_KEY_ALIAS) {
+                        getString(R.string.omni_keys_shared)
+                    } else {
+                        getString(R.string.omni_keys_yours)
+                    },
+                    palette.accent,
+                )
+            )
+            val secret = secret(getString(R.string.omni_build_password))
+            buildPasswordView = secret.second
+            signing.addView(secret.first)
+            signing.addView(
+                quiet(
+                    if (key.alias == DEFAULT_KEY_ALIAS) {
+                        getString(R.string.omni_build_shared_password, DEFAULT_KEY_PASSWORD)
+                    } else {
+                        getString(R.string.omni_build_your_password)
+                    }
+                )
+            )
+        }
+        signing.addView(subtle(getString(R.string.omni_keys_title), palette.accent) {
+            go(Screen.Keys)
+        })
+        content.addView(signing)
+
+        content.addView(primary(getString(R.string.omni_action_build_both)) { buildProject(root) })
+        content.addView(quiet(getString(R.string.omni_build_both_note)))
+
+        content.addView(heading(getString(R.string.omni_built_title)))
+        val made = runCatching {
+            Built.list(Builder.nativeListBuilt(builtFolder().absolutePath))
+        }.getOrDefault(emptyList())
+
+        val shelf = card()
+        if (made.isEmpty()) {
+            shelf.addView(quiet(getString(R.string.omni_built_none)))
+        }
+        made.forEachIndexed { index, one ->
+            if (index > 0) {
+                shelf.addView(rule(), MATCH_PARENT, 1)
+            }
+            shelf.addView(
+                row(
+                    one.name,
+                    "${size(one.bytes)}  ·  ${moment(one.writtenAt)}",
+                    if (one.bundle) "AAB" else "APK",
+                    if (one.bundle) palette.muted else palette.ok,
+                ) { offer(File(one.path)) }
+            )
+            shelf.addView(
+                subtle(getString(R.string.omni_action_delete), palette.error) {
+                    results.removeAllViews()
+                    report(Builder.nativeTrashSend(trashFolder(), one.path), "removed")
+                    render(false)
+                }
+            )
+        }
+        content.addView(shelf)
+        content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    private fun renderTrash() {
+        content.addView(heading(getString(R.string.omni_trash_title)))
+
+        val held = runCatching {
+            Trashed.list(Builder.nativeTrashList(trashFolder()))
+        }.getOrDefault(emptyList())
+
+        val card = card()
+        if (held.isEmpty()) {
+            card.addView(quiet(getString(R.string.omni_trash_none)))
+        }
+        held.forEachIndexed { index, one ->
+            if (index > 0) {
+                card.addView(rule(), MATCH_PARENT, 1)
+            }
+            card.addView(
+                keyValue(
+                    if (one.folder) "${one.name}/" else one.name,
+                    "${one.origin}\n${size(one.bytes)}",
+                    left(one.secondsLeft),
+                    if (one.secondsLeft < 3600) palette.warning else palette.muted,
+                )
+            )
+            card.addView(
+                row(
+                    getString(R.string.omni_action_restore),
+                    if (one.restorable) {
+                        ""
+                    } else {
+                        getString(R.string.omni_trash_taken)
+                    },
+                    "",
+                    palette.ok,
+                ) {
+                    results.removeAllViews()
+                    report(Builder.nativeTrashRestore(trashFolder(), one.id), "restored")
+                    render(false)
+                }
+            )
+            card.addView(
+                subtle(getString(R.string.omni_action_purge), palette.error) {
+                    results.removeAllViews()
+                    report(Builder.nativeTrashPurge(trashFolder(), one.id), "purged")
+                    render(false)
+                }
+            )
+        }
+        content.addView(card)
+        content.addView(quiet(getString(R.string.omni_trash_how)))
+
+        if (held.isNotEmpty()) {
+            content.addView(subtle(getString(R.string.omni_action_empty), palette.error) {
+                results.removeAllViews()
+                runCatching { Builder.nativeTrashEmpty(trashFolder()) }
+                render(false)
+            })
+        }
+    }
+
+    private fun renderKeys() {
+        content.addView(heading(getString(R.string.omni_keys_title)))
+
+        val keys = keysHere()
+        val chosen = Preferences.signingKey(this)
+
+        val vault = card()
+        if (keys.isEmpty()) {
+            vault.addView(quiet(getString(R.string.omni_keys_none)))
+        }
+        keys.forEachIndexed { index, key ->
+            if (index > 0) {
+                vault.addView(rule(), MATCH_PARENT, 1)
+            }
+            val inUse = key.path == chosen
+            val shared = key.alias == DEFAULT_KEY_ALIAS
+            vault.addView(
+                row(
+                    key.alias,
+                    "${key.subject}\n${getString(R.string.omni_keys_expires)} ${key.expires}  ·  " +
+                        "${key.bits}\n${key.fingerprint}",
+                    if (inUse) getString(R.string.omni_keys_in_use) else getString(R.string.omni_keys_use),
+                    if (inUse) palette.ok else palette.accent,
+                ) {
+                    Preferences.setSigningKey(this, key.path)
+                    render(false)
+                }
+            )
+            if (shared) {
+                vault.addView(quiet(getString(R.string.omni_keys_shared_note, DEFAULT_KEY_PASSWORD)))
+            } else {
+                vault.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
+                    runCatching { Builder.nativeDeleteKey(key.path) }
+                    if (inUse) Preferences.setSigningKey(this, "")
+                    render(false)
+                })
+            }
+        }
+        content.addView(vault)
+        content.addView(primary(getString(R.string.omni_keys_new)) { go(Screen.NewKey) })
+        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+            go(Screen.Settings)
+        })
+    }
+
+    private fun renderNewKey() {
+        content.addView(heading(getString(R.string.omni_keys_new)))
+
+        val who = card()
+        who.addView(field(getString(R.string.omni_key_alias), keyAlias) { keyAlias = it })
+        who.addView(field(getString(R.string.omni_key_common_name), keyCommonName) { keyCommonName = it })
+        who.addView(
+            field(getString(R.string.omni_key_organisation), keyOrganisation) { keyOrganisation = it }
+        )
+        who.addView(field(getString(R.string.omni_key_country), keyCountry) { keyCountry = it })
+        content.addView(who)
+
+        content.addView(label(getString(R.string.omni_key_validity)))
+        content.addView(
+            chips(
+                VALIDITY_YEARS.map { getString(R.string.omni_key_years, it) },
+                { it == keyYears },
+            ) { keyYears = it }
+        )
+
+        content.addView(label(getString(R.string.omni_key_size)))
+        content.addView(chips(KEY_SIZES.map { it.toString() }, { it == keyBits }) { keyBits = it })
+
+        val secrets = card()
+        val first = secret(getString(R.string.omni_key_password))
+        val again = secret(getString(R.string.omni_key_password_again))
+        keyPasswordView = first.second
+        keyPasswordAgainView = again.second
+        secrets.addView(first.first)
+        secrets.addView(again.first)
+        content.addView(secrets)
+        content.addView(warning(getString(R.string.omni_key_password_warning)))
+
+        content.addView(primary(getString(R.string.omni_action_create)) { createKey() })
+        content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
+            go(Screen.Keys)
+        })
+    }
+
+    private fun summaryOf(root: String): ProjectSummary? = runCatching {
+        ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
+            .firstOrNull { it.root == root }
+    }.getOrNull()
+
+    private fun keysHere(): List<SigningKey> = runCatching {
+        SigningKey.list(Builder.nativeListKeys(keysFolder().absolutePath))
+    }.getOrDefault(emptyList())
+
+    private fun named(folder: String): String? {
+        val name = newPathView?.text?.toString().orEmpty().trim()
+        if (name.isEmpty()) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_files_needs_name), palette.warning))
+            return null
+        }
+        return if (folder.isEmpty()) name else "$folder/$name"
+    }
+
+    private fun folderName(folder: String): String =
+        folder.substringAfterLast('/').ifEmpty { getString(R.string.omni_files_root) }
+
+    private fun breadcrumb(root: String, folder: String): View {
+        val steps = mutableListOf(getString(R.string.omni_files_root) to "")
+        var walked = ""
+        for (step in folder.split('/').filter { it.isNotEmpty() }) {
+            walked = if (walked.isEmpty()) step else "$walked/$step"
+            steps.add(step to walked)
+        }
+        return chips(steps.map { it.first }, { it == steps.lastIndex }) { index ->
+            go(Screen.Files(root, steps[index].second))
+        }
+    }
+
+    private fun size(bytes: Long): String = when {
+        bytes >= 1_048_576L -> getString(R.string.omni_size_mb, bytes / 1_048_576L)
+        bytes >= 1_024L -> getString(R.string.omni_size_kb, bytes / 1_024L)
+        else -> getString(R.string.omni_size_b, bytes)
+    }
+
+    private fun left(seconds: Long): String = when {
+        seconds >= 3600L -> getString(R.string.omni_left_hours, seconds / 3600L)
+        seconds >= 60L -> getString(R.string.omni_left_minutes, seconds / 60L)
+        else -> getString(R.string.omni_left_seconds, seconds)
+    }
+
+    private fun moment(epochSeconds: Long): String =
+        SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.US).format(Date(epochSeconds * 1000L))
+
+    private fun deleteProject(project: ProjectSummary) {
+        results.removeAllViews()
+        val thrown = runCatching {
+            JSONObject(Builder.nativeTrashSend(trashFolder(), project.root))
+        }.getOrNull()
+        if (thrown == null || !thrown.optBoolean("removed", false)) {
+            thrown?.let { showRefusal(Refusal.parse(it), results) }
+            return
+        }
+        if (openProject == project.root) {
+            openProject = null
+        }
+        OmniLog.event(LogLevel.INFO, "project", "Deleted ${project.root}")
+        render(false)
+        results.addView(notice(getString(R.string.omni_trash_sent, project.name), palette.ok))
     }
 
     private fun renderSettings() {
@@ -2010,6 +2553,27 @@ class BuilderActivity : Activity() {
             }
         )
         content.addView(defaults)
+
+        content.addView(heading(getString(R.string.omni_keys_title)))
+        val chosen = Preferences.signingKey(this)
+        val key = keysHere().firstOrNull { it.path == chosen }
+        val signing = card()
+        signing.addView(
+            keyValue(
+                key?.alias ?: getString(R.string.omni_keys_none),
+                key?.subject.orEmpty(),
+                when {
+                    key == null -> ""
+                    key.alias == DEFAULT_KEY_ALIAS -> getString(R.string.omni_keys_shared)
+                    else -> getString(R.string.omni_keys_yours)
+                },
+                if (key == null) palette.warning else palette.accent,
+            )
+        )
+        signing.addView(subtle(getString(R.string.omni_keys_manage), palette.accent) {
+            go(Screen.Keys)
+        })
+        content.addView(signing)
 
         content.addView(heading(getString(R.string.omni_settings_watch)))
         val watching = card()
@@ -2092,6 +2656,7 @@ class BuilderActivity : Activity() {
         minSdk = formMinSdk,
         targetSdk = formTargetSdk,
         languages = formLanguages.toList(),
+        locales = (formLocales + BASE_LOCALE).toList(),
     )
 
     private fun createProject() {
@@ -2118,7 +2683,7 @@ class BuilderActivity : Activity() {
                 }
             }
             formImage = null
-            go(Screen.Open(root.absolutePath))
+            openHere(root.absolutePath)
         }
     }
 
@@ -2139,7 +2704,7 @@ class BuilderActivity : Activity() {
             commonName = keyCommonName.trim(),
             organisation = keyOrganisation.trim(),
             country = keyCountry.trim().uppercase(Locale.US),
-            validityDays = keyValidity.trim().toIntOrNull() ?: 0,
+            validityYears = VALIDITY_YEARS[keyYears],
             bits = KEY_SIZES[keyBits],
         )
         val folder = keysFolder().absolutePath
@@ -2156,20 +2721,31 @@ class BuilderActivity : Activity() {
             val made = SigningKey.parse(root.getJSONObject("key"))
             OmniLog.event(LogLevel.INFO, "keystore", "Key ${made.alias} created, ${made.fingerprint}")
             Preferences.setSigningKey(this, made.path)
-            go(Screen.Projects)
+            go(Screen.Keys)
         }
     }
 
-    private fun buildProject(root: String, keyPath: String) {
+    private fun buildProject(root: String) {
         results.removeAllViews()
+        val keyPath = Preferences.signingKey(this)
+        if (keyPath.isEmpty()) {
+            results.addView(notice(getString(R.string.omni_build_no_key), palette.warning))
+            return
+        }
+
+        val name = File(root).name
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val here = builtFolder()
+        val apk = File(here, "$name-$stamp.apk")
+        val aab = File(here, "$name-$stamp.aab")
         val password = readSecret(buildPasswordView)
-        val destination = File(getExternalFilesDir(null) ?: filesDir, "${File(root).name}.apk")
         val started = System.nanoTime()
 
         working({
-            Builder.nativeBuildProject(
+            Builder.nativeBuildAll(
                 root,
-                destination.absolutePath,
+                apk.absolutePath,
+                aab.absolutePath,
                 keyPath,
                 if (password.isEmpty()) null else password,
             )
@@ -2189,14 +2765,44 @@ class BuilderActivity : Activity() {
                 return@finished
             }
 
-            OmniLog.event(LogLevel.INFO, "build", "Built ${outcome.bytes} bytes in $elapsed ms")
-            results.addView(notice("${outcome.bytes}  ·  $elapsed ms", palette.ok))
+            OmniLog.event(
+                LogLevel.INFO,
+                "build",
+                "Built ${outcome.bytes} bytes and bundled ${outcome.bundleBytes} in $elapsed ms",
+            )
+            results.addView(
+                notice(getString(R.string.omni_build_done, elapsed), palette.ok)
+            )
             val facts = card()
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_result_package),
+                    apk.name,
+                    size(outcome.bytes),
+                    palette.ok,
+                )
+            )
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_result_bundle),
+                    aab.name,
+                    size(outcome.bundleBytes),
+                    palette.ok,
+                )
+            )
             facts.addView(
                 keyValue(
                     getString(R.string.omni_result_contents),
                     if (outcome.carriesCode) "AndroidManifest.xml + classes.dex" else "AndroidManifest.xml",
                     outcome.entries.toString(),
+                    palette.muted,
+                )
+            )
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_result_languages),
+                    "",
+                    outcome.locales.toString(),
                     palette.muted,
                 )
             )
@@ -2218,23 +2824,6 @@ class BuilderActivity : Activity() {
             )
             results.addView(facts)
             outcome.path?.let { offer(File(it)) }
-        }
-    }
-
-    private fun bundleProject(root: String) {
-        results.removeAllViews()
-        val destination = File(getExternalFilesDir(null) ?: filesDir, "${File(root).name}.aab")
-        working({ Builder.nativeBundleProject(root, destination.absolutePath) }) finished@{ answer ->
-            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
-            if (!document.optBoolean("bundled", false)) {
-                results.addView(notice(getString(R.string.omni_refused), palette.error))
-                showRefusal(Refusal.parse(document), results)
-                return@finished
-            }
-            val made = document.optJSONObject("bundle")
-            OmniLog.event(LogLevel.INFO, "bundle", "Bundled ${made?.optLong("bytes")} bytes")
-            results.addView(notice("${made?.optLong("bytes")}", palette.ok))
-            offer(File(document.optString("path")))
         }
     }
 

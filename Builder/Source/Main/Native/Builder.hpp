@@ -15,14 +15,17 @@ char *omni_state_report(const char *observed_environment);
 
 char *omni_create_project(const char *root, const char *spec);
 
-char *omni_build_project(const char *root, const char *output_path,
-                         const char *key_path, const char *key_password);
+char *omni_build_all(const char *root, const char *package_path,
+                     const char *bundle_path, const char *key_path,
+                     const char *key_password);
 
 char *omni_verify_self(const char *package_path,
                        const char *expected_certificate);
 
 char *omni_create_key(const char *directory, const char *spec,
                       const char *password);
+
+char *omni_default_key(const char *directory);
 
 char *omni_list_keys(const char *directory);
 
@@ -40,11 +43,24 @@ char *omni_write_file(const char *root, const char *relative, const char *conten
 
 char *omni_new_folder(const char *root, const char *relative);
 
-char *omni_remove_path(const char *root, const char *relative);
+char *omni_remove_path(const char *root, const char *relative,
+                       const char *trash_root);
+
+char *omni_rename_path(const char *root, const char *from, const char *to);
+
+char *omni_list_built(const char *directory);
+
+char *omni_trash_send(const char *trash_root, const char *path);
+
+char *omni_trash_list(const char *trash_root);
+
+char *omni_trash_restore(const char *trash_root, const char *id);
+
+char *omni_trash_purge(const char *trash_root, const char *id);
+
+char *omni_trash_empty(const char *trash_root);
 
 char *omni_set_icon(const char *root, const char *source);
-
-char *omni_bundle_project(const char *root, const char *output_path);
 
 void omni_string_free(char *value);
 

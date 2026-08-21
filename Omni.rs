@@ -211,8 +211,9 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
                   The binary table is written and aapt2 reads every type, name \
                   and value back out of it.",
         missing: &[
-            "Only density qualifiers are modelled; a locale directory is refused, so a \
-             package this build makes cannot carry a translated name.",
+            "Density and language are the qualifiers modelled. A region, a screen size, an \
+             orientation or a platform version in a folder name is refused rather than \
+             treated as the default, which would put the wrong file on every device.",
             "Styles can be referred to but not declared, and a reference to a platform \
              resource is refused because the platform's own table is not read.",
             "The table carries one package and no overlays, libraries or staged aliases.",
@@ -253,11 +254,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Project scaffold",
         status: Status::Partial,
         directive_section: 46,
-        summary: "A project is a manifest at the root and one folder per chosen language, with a starter file in each. Package name, application name, architectures, platform range and languages are validated before anything is written.",
+        summary: "A project is a manifest at the root, one folder per chosen language with a starter file in each, and a resource folder holding a launcher-icon folder per density and a values folder per locale. The application's name lives in those values folders and the manifest points at it, so it is translated rather than fixed. Package name, application name, architectures, platform range, languages and locales are validated before anything is written.",
         missing: &[
             "The architecture choice is recorded and shown but nothing acts on it, because no native compiler exists to produce a library for it.",
             "A starter file is written once and never regenerated; the project belongs to whoever edits it.",
-            "No resources, no assets and no dependency declarations.",
+            "The name is the only string scaffolded. Nothing else in a project is translated, and there are no assets or dependency declarations.",
         ],
     },
     Subsystem {
@@ -275,11 +276,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Build engine",
         status: Status::Partial,
         directive_section: 23,
-        summary: "A project becomes a signed package with nothing borrowed: the security policy runs first, then the manifest is encoded, the archive written, a key generated, a certificate written, and the package signed. apksigner verifies the result.",
+        summary: "A project becomes a signed package and a bundle with nothing borrowed: the security policy runs first, then the resource table is compiled from the project's launcher icons and values folders, the manifest encoded against it, the archive written and compressed, a certificate written, and the package signed. apksigner verifies the result and aapt2 reads the table back.",
         missing: &[
             "No compiler. The dex a package carries holds a class and a constructor the engine emits itself; nothing compiles a method body, so an activity built here does nothing.",
-            "No resource table, so a manifest may not name a resource.",
-            "No resource table, so an icon, a theme or a translated label cannot be carried.",
+            "The table carries the launcher icons and what the values folders declare. A layout, a style or a drawable a project writes itself is not compiled into it.",
+            "The architectures a project names reach the manifest and nothing else, because nothing here produces a native library to place under them.",
         ],
     },
     Subsystem {
@@ -352,8 +353,9 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Developer keystore",
         status: Status::Partial,
         directive_section: 25,
-        summary: "A signing key the developer makes, named, dated and sealed under their own password as PBES2 (PBKDF2-HMAC-SHA256 at 210000 iterations, AES-256-CBC). OpenSSL opens what this writes and refuses the wrong password. Listing a key needs no password; the certificate inside is checked against the key before either is used.",
+        summary: "A signing key the developer makes, named, dated and sealed under their own password as PBES2 (PBKDF2-HMAC-SHA256 at 210000 iterations, AES-256-CBC). OpenSSL opens what this writes and refuses the wrong password. Listing a key needs no password; the certificate inside is checked against the key before either is used. A shared 4096-bit key is written once on first use so a package can be built without making one first.",
         missing: &[
+            "The shared key's password is a constant in this source, so it protects that key from nobody. It exists to get a first package built; anything published belongs under a key the developer made and only they know the password to.",
             "The password protects the file and nothing more: the key is in ordinary memory while a package is signed, and Android's hardware-backed keystore is not used.",
             "No import and no export: a key made elsewhere cannot be brought in, and one made here cannot be taken out.",
             "A sealed file carries no authentication tag, so a wrong password is told apart from a damaged file only by what comes out of the decryption.",
@@ -406,11 +408,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Project workspace",
         status: Status::Partial,
         directive_section: 46,
-        summary: "Lists the projects on the device, walks a project's folders within bounds, and reads and writes its text files through the same path rules the virtual filesystem uses, so an edit cannot leave the project folder.",
+        summary: "Lists the projects on the device, walks a project's folders within bounds, reads and writes its text files, and moves and deletes what is in them through the same path rules the virtual filesystem uses, so nothing an edit does leaves the project folder. What is deleted goes to a trash that holds it for a day, with the path it came from written beside it, and is put back only where nothing has taken its place.",
         missing: &[
             "Text files only, UTF-8 only, and up to four megabytes: anything else is refused rather than risked.",
             "No undo, no history and no concurrent-edit detection: the last save wins.",
-            "Nothing watches the folder, so a change made by another application is seen only when the list is read again.",
+            "Nothing watches the folder, so a change made by another application is seen only when the list is read again. The trash is swept when it is listed, not on a timer, so what expired while the application was closed goes at the next look.",
         ],
     },
     Subsystem {
@@ -6699,14 +6701,61 @@ pub mod resources {
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
+    pub struct Locale(Option<[u8; 2]>);
+
+    impl Locale {
+        pub const ANY: Locale = Locale(None);
+
+        pub fn parse(value: &str) -> Option<Locale> {
+            let bytes = value.as_bytes();
+            if bytes.len() != 2 || !bytes.iter().all(|byte| byte.is_ascii_lowercase()) {
+                return None;
+            }
+            Some(Locale(Some([bytes[0], bytes[1]])))
+        }
+
+        pub fn language(self) -> Option<[u8; 2]> {
+            self.0
+        }
+
+        pub fn is_any(self) -> bool {
+            self.0.is_none()
+        }
+
+        pub fn as_str(&self) -> &str {
+            match &self.0 {
+                Some(letters) => core::str::from_utf8(letters).unwrap_or("??"),
+                None => "any",
+            }
+        }
+    }
+
+    impl core::fmt::Display for Locale {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(self.as_str())
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
     pub struct Config {
+        pub locale: Locale,
         pub density: Density,
     }
 
     impl Config {
         pub const DEFAULT: Config = Config {
+            locale: Locale::ANY,
             density: Density::Default,
         };
+
+        pub fn for_locale(locale: Locale) -> Config {
+            Config {
+                locale,
+                ..Config::DEFAULT
+            }
+        }
+
+        pub const VALUES_DIRECTORY: &'static str = "values";
 
         pub fn parse_directory(name: &str) -> Result<(Kind, Config), String> {
             let mut parts = name.split('-');
@@ -6716,11 +6765,38 @@ pub mod resources {
             let Some(kind) = Kind::parse(kind_name) else {
                 return Err(format!("'{kind_name}' is not a resource type."));
             };
+            Ok((kind, Config::parse_qualifiers(name, parts)?))
+        }
 
+        pub fn parse_values_directory(name: &str) -> Result<Config, String> {
+            let mut parts = name.split('-');
+            if parts.next() != Some(Config::VALUES_DIRECTORY) {
+                return Err(format!(
+                    "'{name}' does not name a values folder; one is called '{}' \
+                     with the qualifiers after it.",
+                    Config::VALUES_DIRECTORY
+                ));
+            }
+            Config::parse_qualifiers(name, parts)
+        }
+
+        fn parse_qualifiers<'a>(
+            name: &str,
+            qualifiers: impl Iterator<Item = &'a str>,
+        ) -> Result<Config, String> {
             let mut config = Config::DEFAULT;
-            for qualifier in parts {
-                match Density::parse(qualifier) {
-                    Some(density) => config.density = density,
+            for qualifier in qualifiers {
+                if let Some(density) = Density::parse(qualifier) {
+                    config.density = density;
+                    continue;
+                }
+                match Locale::parse(qualifier) {
+                    Some(locale) if config.locale.is_any() => config.locale = locale,
+                    Some(_) => {
+                        return Err(format!(
+                            "'{name}' names two languages, and a folder carries one."
+                        ))
+                    }
                     None => {
                         return Err(format!(
                             "'{qualifier}' is a qualifier this build does not model."
@@ -6728,13 +6804,18 @@ pub mod resources {
                     }
                 }
             }
-            Ok((kind, config))
+            Ok(config)
         }
     }
 
     impl core::fmt::Display for Config {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            f.write_str(self.density.as_str())
+            match (self.locale.is_any(), self.density) {
+                (true, Density::Default) => f.write_str("default"),
+                (true, density) => f.write_str(density.as_str()),
+                (false, Density::Default) => f.write_str(self.locale.as_str()),
+                (false, density) => write!(f, "{}-{}", self.locale.as_str(), density.as_str()),
+            }
         }
     }
 
@@ -6948,6 +7029,16 @@ pub mod resources {
         }
 
         pub fn read_values(&mut self, text: &str, origin: &str, sink: &mut Sink) -> bool {
+            self.read_values_for(text, origin, Config::DEFAULT, sink)
+        }
+
+        pub fn read_values_for(
+            &mut self,
+            text: &str,
+            origin: &str,
+            config: Config,
+            sink: &mut Sink,
+        ) -> bool {
             let Some(root) = xml::parse(text, origin, sink) else {
                 return false;
             };
@@ -6970,12 +7061,18 @@ pub mod resources {
 
             let mut ok = true;
             for child in &root.children {
-                ok &= self.read_entry(child, origin, sink);
+                ok &= self.read_entry(child, origin, config, sink);
             }
             ok
         }
 
-        fn read_entry(&mut self, element: &Element, origin: &str, sink: &mut Sink) -> bool {
+        fn read_entry(
+            &mut self,
+            element: &Element,
+            origin: &str,
+            config: Config,
+            sink: &mut Sink,
+        ) -> bool {
             let Some(kind) = Kind::parse(&element.name) else {
                 sink.emit(
                     self.problem(
@@ -7071,7 +7168,7 @@ pub mod resources {
                 Entry {
                     kind,
                     name: name.to_string(),
-                    config: Config::DEFAULT,
+                    config,
                     value,
                     origin: origin.to_string(),
                     position: element.position,
@@ -13768,8 +13865,28 @@ pub mod scaffold {
         ("rust", "Rust"),
     ];
 
+    pub const LOCALES: &[(&str, &str)] = &[
+        ("en", "English"),
+        ("tr", "Türkçe"),
+        ("de", "Deutsch"),
+        ("es", "Español"),
+        ("fr", "Français"),
+        ("it", "Italiano"),
+        ("pt", "Português"),
+        ("ru", "Русский"),
+        ("ar", "العربية"),
+        ("zh", "中文"),
+    ];
+
+    pub const BASE_LOCALE: &str = "en";
+
+    pub const LABEL_RESOURCE: &str = "app_name";
+
     pub const OLDEST_SUPPORTED: u32 = 28;
     pub const NEWEST_SUPPORTED: u32 = 36;
+
+    pub const DEFAULT_PACKAGE: &str = "com.my.app";
+    pub const DEFAULT_LABEL: &str = "My App";
 
     pub const FIRST_VERSION_NAME: &str = "1.0.0";
     pub const FIRST_VERSION_CODE: u32 = 1;
@@ -13794,6 +13911,7 @@ pub mod scaffold {
         pub min_sdk: u32,
         pub target_sdk: u32,
         pub languages: Vec<String>,
+        pub locales: Vec<String>,
         pub version_name: String,
         pub version_code: u32,
     }
@@ -13801,12 +13919,13 @@ pub mod scaffold {
     impl Default for Spec {
         fn default() -> Spec {
             Spec {
-                package: "com.tr.yt".to_string(),
-                label: "My App".to_string(),
+                package: DEFAULT_PACKAGE.to_string(),
+                label: DEFAULT_LABEL.to_string(),
                 abis: vec![ARM32.to_string(), ARM64.to_string()],
                 min_sdk: OLDEST_SUPPORTED,
                 target_sdk: NEWEST_SUPPORTED,
                 languages: vec!["kotlin".to_string()],
+                locales: LOCALES.iter().map(|(tag, _)| (*tag).to_string()).collect(),
                 version_name: FIRST_VERSION_NAME.to_string(),
                 version_code: FIRST_VERSION_CODE,
             }
@@ -13847,6 +13966,7 @@ pub mod scaffold {
             let mut spec = Spec::default();
             spec.languages.clear();
             spec.abis.clear();
+            let mut locales_named = false;
 
             for entry in text.split(';').filter(|part| !part.trim().is_empty()) {
                 let Some((key, value)) = entry.split_once('=') else {
@@ -13903,6 +14023,31 @@ pub mod scaffold {
                             spec.languages.push(language);
                         }
                     }
+                    "locales" => {
+                        if !locales_named {
+                            spec.locales.clear();
+                            locales_named = true;
+                        }
+                        for locale in value.split(',').filter(|l| !l.trim().is_empty()) {
+                            let locale = locale.trim().to_ascii_lowercase();
+                            if !LOCALES.iter().any(|(known, _)| *known == locale) {
+                                return Err(fail(
+                                    "EP006",
+                                    "A locale is not one this build writes a folder for.",
+                                )
+                                .with_context(format!("Value: {locale:?}"))
+                                .with_context(format!(
+                                    "Known: {}",
+                                    LOCALES
+                                        .iter()
+                                        .map(|(tag, _)| *tag)
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                )));
+                            }
+                            spec.locales.push(locale);
+                        }
+                    }
                     other => {
                         return Err(fail("EP005", "A setting is not one this build knows.")
                             .with_context(format!("Setting: {other:?}")))
@@ -13953,6 +14098,18 @@ pub mod scaffold {
             if self.languages.is_empty() {
                 return Err(fail("EP013", "No language was chosen."));
             }
+            if !self.locales.iter().any(|tag| tag == BASE_LOCALE) {
+                return Err(
+                    fail("EP019", "The locale a device falls back to was not chosen.")
+                        .with_context(format!("Chosen: {}", self.locales.join(", ")))
+                        .with_suggestion(format!(
+                            "Every other locale is a translation of {BASE_LOCALE}. A device whose \
+                     language is none of the chosen ones reads that folder, so leaving it \
+                     out would ship an application with no name on most of the world's \
+                     phones.",
+                        )),
+                );
+            }
             if self.min_sdk < OLDEST_SUPPORTED {
                 return Err(fail(
                     "EP014",
@@ -13997,8 +14154,8 @@ pub mod scaffold {
                 self.min_sdk, self.target_sdk
             ));
             out.push_str(&format!(
-                "    <application android:label=\"{}\" android:allowBackup=\"false\"\n",
-                escape_xml(&self.label)
+                "    <application android:label=\"@string/{LABEL_RESOURCE}\" \
+                 android:allowBackup=\"false\"\n"
             ));
             out.push_str("        android:extractNativeLibs=\"false\">\n");
             out.push_str(&format!(
@@ -14036,7 +14193,19 @@ pub mod scaffold {
                 w.element_str(language);
             }
             w.end_array();
+            w.begin_array(Some("locales"));
+            for locale in &self.locales {
+                w.element_str(locale);
+            }
+            w.end_array();
             w.end_object();
+        }
+
+        pub fn values_files(&self) -> Vec<(String, String)> {
+            self.locales
+                .iter()
+                .map(|locale| (values_folder(locale), strings_file(&self.label)))
+                .collect()
         }
     }
 
@@ -14147,11 +14316,60 @@ pub mod scaffold {
         })?;
         folders.push(RES_FOLDER.to_string());
 
+        for (folder, _) in crate::image::LAUNCHER_SIZES {
+            let inside = format!("{RES_FOLDER}/{folder}");
+            std::fs::create_dir_all(base.join(&inside)).map_err(|why| {
+                fail("EP025", "A launcher icon folder could not be made.")
+                    .with_context(format!("Folder: {inside}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            folders.push(inside);
+        }
+
+        for (folder, text) in spec.values_files() {
+            let inside = format!("{RES_FOLDER}/{folder}");
+            std::fs::create_dir_all(base.join(&inside)).map_err(|why| {
+                fail("EP026", "A language folder could not be made.")
+                    .with_context(format!("Folder: {inside}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            folders.push(inside.clone());
+
+            let path = format!("{inside}/{STRINGS_FILE}");
+            let full = base.join(&path);
+            if !full.exists() {
+                std::fs::write(&full, text).map_err(|why| {
+                    fail("EP027", "A language file could not be written.")
+                        .with_context(format!("File: {path}"))
+                        .with_context(format!("Reason: {why}"))
+                })?;
+            }
+            files.push(path);
+        }
+
         Ok(Created {
             root: root.to_string(),
             folders,
             files,
         })
+    }
+
+    pub const STRINGS_FILE: &str = "strings.xml";
+
+    pub fn values_folder(locale: &str) -> String {
+        if locale == BASE_LOCALE {
+            "values".to_string()
+        } else {
+            format!("values-{locale}")
+        }
+    }
+
+    pub fn strings_file(label: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n    \
+             <string name=\"{LABEL_RESOURCE}\">{}</string>\n</resources>\n",
+            escape_xml(label)
+        )
     }
 
     pub const RES_FOLDER: &str = "Res";
@@ -14184,7 +14402,92 @@ pub mod scaffold {
                 .with_context(format!("Path: {}", icon_path(root)))
                 .with_context(format!("Reason: {why}"))
         })?;
+
+        for made in crate::image::launcher_set(&bytes)? {
+            let folder = format!(
+                "{}/{RES_FOLDER}/{}",
+                root.trim_end_matches('/'),
+                made.folder
+            );
+            std::fs::create_dir_all(&folder).map_err(|why| {
+                fail("EP044", "A launcher icon folder could not be made.")
+                    .with_context(format!("Path: {folder}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            let path = format!("{folder}/{}.png", made.name);
+            std::fs::write(&path, &made.bytes).map_err(|why| {
+                fail("EP045", "A launcher icon could not be written.")
+                    .with_context(format!("Path: {path}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+        }
         Ok(png)
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Supplied {
+        pub folder: String,
+        pub name: String,
+        pub bytes: Vec<u8>,
+    }
+
+    pub fn launcher_files(root: &str) -> Vec<Supplied> {
+        let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
+        let mut found = Vec::new();
+        for (folder, _) in crate::image::LAUNCHER_SIZES {
+            for name in [crate::builder::ICON_NAME, crate::builder::ROUND_ICON_NAME] {
+                let path = format!("{base}/{folder}/{name}.png");
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                if crate::image::read_png(&bytes).is_err() {
+                    continue;
+                }
+                found.push(Supplied {
+                    folder: (*folder).to_string(),
+                    name: name.to_string(),
+                    bytes,
+                });
+            }
+        }
+        found
+    }
+
+    pub fn values_files(root: &str) -> Vec<(String, String)> {
+        let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
+        let mut found = Vec::new();
+        for (locale, _) in LOCALES {
+            let folder = values_folder(locale);
+            let path = format!("{base}/{folder}/{STRINGS_FILE}");
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                found.push((folder, text));
+            }
+        }
+        found
+    }
+
+    pub fn label_of(root: &str, declared: &str) -> String {
+        let Some(name) = declared.strip_prefix("@string/") else {
+            return declared.to_string();
+        };
+        let path = format!(
+            "{}/{RES_FOLDER}/{}/{STRINGS_FILE}",
+            root.trim_end_matches('/'),
+            values_folder(BASE_LOCALE)
+        );
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return declared.to_string();
+        };
+        let mut sink = crate::diag::Sink::new();
+        let Some(parsed) = crate::xml::parse(&text, &path, &mut sink) else {
+            return declared.to_string();
+        };
+        parsed
+            .children
+            .iter()
+            .find(|child| child.name == "string" && child.attribute("name") == Some(name))
+            .map(|child| child.text.clone())
+            .unwrap_or_else(|| declared.to_string())
     }
 
     pub fn read_icon(root: &str) -> Option<crate::image::Png> {
@@ -15973,6 +16276,337 @@ pub mod image {
     }
 }
 
+pub mod trash {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    pub const FOLDER: &str = "Trash";
+    pub const HELD_SECONDS: i64 = 24 * 60 * 60;
+    pub const RECORD_FILE: &str = "Origin";
+    pub const PAYLOAD: &str = "Item";
+    pub const MAX_ENTRIES: usize = 2_000;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.trash",
+            message,
+        )
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Entry {
+        pub id: String,
+        pub name: String,
+        pub origin: String,
+        pub folder: bool,
+        pub bytes: u64,
+        pub deleted_at: i64,
+        pub expires_at: i64,
+    }
+
+    impl Entry {
+        pub fn seconds_left(&self, now: i64) -> i64 {
+            (self.expires_at - now).max(0)
+        }
+
+        pub fn write_json(&self, w: &mut Writer, now: i64) {
+            w.begin_object(None);
+            w.field_str("id", &self.id);
+            w.field_str("name", &self.name);
+            w.field_str("origin", &self.origin);
+            w.field_bool("folder", self.folder);
+            w.field_u64("bytes", self.bytes);
+            w.field_u64("deletedAt", self.deleted_at.max(0) as u64);
+            w.field_u64("expiresAt", self.expires_at.max(0) as u64);
+            w.field_u64("secondsLeft", self.seconds_left(now) as u64);
+            w.field_bool("restorable", !std::path::Path::new(&self.origin).exists());
+            w.end_object();
+        }
+    }
+
+    fn weigh(path: &std::path::Path) -> u64 {
+        let Ok(data) = std::fs::metadata(path) else {
+            return 0;
+        };
+        if data.is_file() {
+            return data.len();
+        }
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|entry| weigh(&entry.path()))
+            .sum::<u64>()
+    }
+
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        if from.is_dir() {
+            std::fs::create_dir_all(to)?;
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+            }
+            return Ok(());
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(from, to).map(|_| ())
+    }
+
+    fn remove_tree(path: &std::path::Path) -> std::io::Result<()> {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)
+        } else {
+            std::fs::remove_file(path)
+        }
+    }
+
+    pub fn shift(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+        if std::fs::rename(from, to).is_ok() {
+            return Ok(());
+        }
+        copy_tree(from, to)?;
+        remove_tree(from)
+    }
+
+    fn record(entry: &Entry) -> String {
+        format!(
+            "name={}\norigin={}\nfolder={}\nbytes={}\ndeleted={}\n",
+            entry.name, entry.origin, entry.folder, entry.bytes, entry.deleted_at
+        )
+    }
+
+    fn read_record(root: &str, id: &str) -> Option<Entry> {
+        let held = std::path::Path::new(root).join(id);
+        let text = std::fs::read_to_string(held.join(RECORD_FILE)).ok()?;
+        let mut entry = Entry {
+            id: id.to_string(),
+            name: String::new(),
+            origin: String::new(),
+            folder: false,
+            bytes: 0,
+            deleted_at: 0,
+            expires_at: 0,
+        };
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            match key {
+                "name" => entry.name = value.to_string(),
+                "origin" => entry.origin = value.to_string(),
+                "folder" => entry.folder = value == "true",
+                "bytes" => entry.bytes = value.parse().unwrap_or(0),
+                "deleted" => entry.deleted_at = value.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+        if entry.name.is_empty() || !held.join(PAYLOAD).exists() {
+            return None;
+        }
+        entry.expires_at = entry.deleted_at + HELD_SECONDS;
+        Some(entry)
+    }
+
+    fn identifier(root: &std::path::Path, now: i64) -> Result<String, Diagnostic> {
+        for attempt in 0..10_000u32 {
+            let id = format!("{:012}-{attempt:04}", now.max(0));
+            if !root.join(&id).exists() {
+                return Ok(id);
+            }
+        }
+        Err(fail(
+            "ET004",
+            "The trash already holds every name this second could take.",
+        ))
+    }
+
+    pub fn send(root: &str, path: &str, now: i64) -> Result<Entry, Diagnostic> {
+        let source = std::path::Path::new(path);
+        if !source.exists() {
+            return Err(fail("ET001", "That is not here to be deleted.")
+                .with_context(format!("Path: {path}")));
+        }
+        let name = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                fail("ET002", "That path does not end in a name.")
+                    .with_context(format!("Path: {path}"))
+            })?
+            .to_string();
+
+        let base = std::path::Path::new(root);
+        std::fs::create_dir_all(base).map_err(|why| {
+            fail("ET003", "The trash folder could not be made.")
+                .with_context(format!("Path: {root}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        if list(root, now).len() >= MAX_ENTRIES {
+            return Err(
+                fail("ET005", "The trash holds as much as this build keeps.")
+                    .with_context(format!("Held: {MAX_ENTRIES}"))
+                    .with_suggestion(
+                        "Empty it, or restore what is worth keeping. Nothing is removed to \
+                     make room, because that would delete the oldest thing without asking.",
+                    ),
+            );
+        }
+
+        let id = identifier(base, now)?;
+        let held = base.join(&id);
+        std::fs::create_dir_all(&held).map_err(|why| {
+            fail("ET006", "A place in the trash could not be made.")
+                .with_context(format!("Reason: {why}"))
+        })?;
+
+        let entry = Entry {
+            id: id.clone(),
+            name,
+            origin: source
+                .canonicalize()
+                .unwrap_or_else(|_| source.to_path_buf())
+                .to_string_lossy()
+                .to_string(),
+            folder: source.is_dir(),
+            bytes: weigh(source),
+            deleted_at: now,
+            expires_at: now + HELD_SECONDS,
+        };
+
+        shift(source, &held.join(PAYLOAD)).map_err(|why| {
+            let _ = std::fs::remove_dir_all(&held);
+            fail("ET007", "That could not be moved to the trash.")
+                .with_context(format!("Path: {path}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        std::fs::write(held.join(RECORD_FILE), record(&entry)).map_err(|why| {
+            fail(
+                "ET008",
+                "The note saying where it came from could not be written.",
+            )
+            .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(entry)
+    }
+
+    pub fn list(root: &str, now: i64) -> Vec<Entry> {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return Vec::new();
+        };
+        let mut ids: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().to_str().map(|name| name.to_string()))
+            .collect();
+        ids.sort();
+        ids.reverse();
+        ids.iter()
+            .filter_map(|id| read_record(root, id))
+            .filter(|entry| entry.expires_at > now)
+            .collect()
+    }
+
+    pub fn restore(root: &str, id: &str, now: i64) -> Result<Entry, Diagnostic> {
+        let entry = read_record(root, id).ok_or_else(|| {
+            fail("ET010", "The trash does not hold that.")
+                .with_context(format!("Named: {id}"))
+                .with_suggestion(
+                    "It was emptied, or the day it is held for has passed. Nothing here \
+                     keeps a copy after that.",
+                )
+        })?;
+        if entry.expires_at <= now {
+            return Err(fail("ET011", "That was held for its day and is gone.")
+                .with_context(format!("Deleted at: {}", entry.deleted_at)));
+        }
+        let back = std::path::Path::new(&entry.origin);
+        if back.exists() {
+            return Err(fail(
+                "ET012",
+                "Something is already where that came from, so it is not put back.",
+            )
+            .with_context(format!("Path: {}", entry.origin))
+            .with_suggestion(
+                "Move or rename what is there first. Restoring over it would delete a \
+                 file the trash was never asked to hold.",
+            ));
+        }
+        if let Some(parent) = back.parent() {
+            std::fs::create_dir_all(parent).map_err(|why| {
+                fail("ET013", "The folder it came from could not be made again.")
+                    .with_context(format!("Reason: {why}"))
+            })?;
+        }
+        let held = std::path::Path::new(root).join(id);
+        shift(&held.join(PAYLOAD), back).map_err(|why| {
+            fail("ET014", "That could not be put back.")
+                .with_context(format!("Path: {}", entry.origin))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        std::fs::remove_dir_all(&held).ok();
+        Ok(entry)
+    }
+
+    pub fn purge(root: &str, id: &str) -> Result<(), Diagnostic> {
+        let held = std::path::Path::new(root).join(id);
+        if !held.is_dir() {
+            return Err(
+                fail("ET020", "The trash does not hold that.").with_context(format!("Named: {id}"))
+            );
+        }
+        std::fs::remove_dir_all(&held).map_err(|why| {
+            fail("ET021", "That could not be removed from the trash.")
+                .with_context(format!("Reason: {why}"))
+        })
+    }
+
+    pub fn sweep(root: &str, now: i64) -> usize {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        let mut swept = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(id) = entry.file_name().to_str().map(|name| name.to_string()) else {
+                continue;
+            };
+            let held = read_record(root, &id);
+            let gone = match held {
+                Some(held) => held.expires_at <= now,
+                None => true,
+            };
+            if gone && std::fs::remove_dir_all(&path).is_ok() {
+                swept += 1;
+            }
+        }
+        swept
+    }
+
+    pub fn empty(root: &str) -> usize {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return 0;
+        };
+        let mut emptied = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() && std::fs::remove_dir_all(&path).is_ok() {
+                emptied += 1;
+            }
+        }
+        emptied
+    }
+}
+
 pub mod workspace {
     use crate::diag::{Diagnostic, Severity};
     use crate::json::Writer;
@@ -16089,7 +16723,10 @@ pub mod workspace {
             name,
             root: root.to_string(),
             package: parsed.attribute("package").unwrap_or_default().to_string(),
-            label: attribute(&parsed, &["application"], "android:label"),
+            label: crate::scaffold::label_of(
+                root,
+                &attribute(&parsed, &["application"], "android:label"),
+            ),
             version_name: parsed
                 .attribute("android:versionName")
                 .unwrap_or_default()
@@ -16257,7 +16894,12 @@ pub mod workspace {
         })
     }
 
-    pub fn remove(root: &str, relative: &str) -> Result<(), Diagnostic> {
+    pub fn remove(
+        root: &str,
+        relative: &str,
+        trash_root: &str,
+        now: i64,
+    ) -> Result<crate::trash::Entry, Diagnostic> {
         if relative == "AndroidManifest.xml" {
             return Err(fail("EW140", "The manifest is what makes this a project.")
                 .with_suggestion(
@@ -16266,16 +16908,116 @@ pub mod workspace {
                 ));
         }
         let path = inside(root, relative)?;
-        let outcome = if path.is_dir() {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        outcome.map_err(|why| {
-            fail("EW141", "That could not be removed.")
-                .with_context(format!("Path: {relative}"))
+        if !path.exists() {
+            return Err(fail("EW141", "That is not in the project.")
+                .with_context(format!("Path: {relative}")));
+        }
+        crate::trash::send(trash_root, &path.to_string_lossy(), now)
+    }
+
+    pub fn rename(root: &str, from: &str, to: &str) -> Result<String, Diagnostic> {
+        if from == "AndroidManifest.xml" || to == "AndroidManifest.xml" {
+            return Err(fail("EW150", "The manifest is what makes this a project.")
+                .with_suggestion(
+                    "It is found by its name, so moving it or putting something else \
+                     there would leave a folder nothing here recognises as a project.",
+                ));
+        }
+        let source = inside(root, from)?;
+        let target = inside(root, to)?;
+        if !source.exists() {
+            return Err(
+                fail("EW151", "That is not in the project.").with_context(format!("Path: {from}"))
+            );
+        }
+        if target.exists() {
+            return Err(fail("EW152", "Something is already at that name.")
+                .with_context(format!("Path: {to}"))
+                .with_suggestion(
+                    "Choose another name. Moving over it would delete what is there \
+                     without asking.",
+                ));
+        }
+        if target.starts_with(&source) {
+            return Err(fail("EW153", "A folder cannot be moved inside itself.")
+                .with_context(format!("From: {from}"))
+                .with_context(format!("To: {to}")));
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|why| {
+                fail("EW154", "The folder for the new name could not be made.")
+                    .with_context(format!("Reason: {why}"))
+            })?;
+        }
+        crate::trash::shift(&source, &target).map_err(|why| {
+            fail("EW155", "That could not be moved.")
+                .with_context(format!("From: {from}"))
+                .with_context(format!("To: {to}"))
                 .with_context(format!("Reason: {why}"))
-        })
+        })?;
+        Ok(to.to_string())
+    }
+
+    pub const PACKAGE_SUFFIX: &str = "apk";
+    pub const BUNDLE_SUFFIX: &str = "aab";
+
+    #[derive(Clone, Debug)]
+    pub struct Built {
+        pub name: String,
+        pub path: String,
+        pub bytes: u64,
+        pub written_at: i64,
+        pub bundle: bool,
+    }
+
+    impl Built {
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("name", &self.name);
+            w.field_str("path", &self.path);
+            w.field_u64("bytes", self.bytes);
+            w.field_u64("writtenAt", self.written_at.max(0) as u64);
+            w.field_bool("bundle", self.bundle);
+            w.end_object();
+        }
+    }
+
+    pub fn list_built(directory: &str) -> Vec<Built> {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut found: Vec<Built> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter_map(|path| {
+                let suffix = path.extension().and_then(|value| value.to_str())?;
+                if suffix != PACKAGE_SUFFIX && suffix != BUNDLE_SUFFIX {
+                    return None;
+                }
+                let data = std::fs::metadata(&path).ok()?;
+                let written_at = data
+                    .modified()
+                    .ok()
+                    .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|elapsed| elapsed.as_secs() as i64)
+                    .unwrap_or(0);
+                Some(Built {
+                    name: path.file_name()?.to_str()?.to_string(),
+                    path: path.to_str()?.to_string(),
+                    bytes: data.len(),
+                    written_at,
+                    bundle: suffix == BUNDLE_SUFFIX,
+                })
+            })
+            .collect();
+        found.sort_by(|left, right| {
+            right
+                .written_at
+                .cmp(&left.written_at)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        found
     }
 }
 
@@ -16681,7 +17423,9 @@ pub mod bundle {
                     if density != 0 {
                         config.number(CONFIG_DENSITY, u64::from(density));
                     }
-                    let _ = CONFIG_LOCALE;
+                    if !held.config.locale.is_any() {
+                        config.text(CONFIG_LOCALE, held.config.locale.as_str());
+                    }
 
                     let mut value = Message::new();
                     value.message(
@@ -16770,7 +17514,7 @@ pub mod bundle {
                 for (name, bytes) in &made.files {
                     archive.add(format!("{RES_PREFIX}{name}"), bytes.clone())?;
                 }
-                true
+                !made.files.is_empty()
             }
             None => false,
         };
@@ -16833,6 +17577,7 @@ pub mod arsc {
 
     const NO_ENTRY: u32 = 0xffff_ffff;
     const BOOLEAN_TRUE: u32 = 0xffff_ffff;
+    const CONFIG_LOCALE: u32 = 0x0004;
     const CONFIG_DENSITY: u32 = 0x0100;
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -16962,6 +17707,9 @@ pub mod arsc {
     fn encode_config(config: Config) -> Vec<u8> {
         let mut out = vec![0u8; CONFIG_BYTES];
         out[0..4].copy_from_slice(&(CONFIG_BYTES as u32).to_le_bytes());
+        if let Some(language) = config.locale.language() {
+            out[8..10].copy_from_slice(&language);
+        }
         out[14..16].copy_from_slice(&density_value(config.density).to_le_bytes());
         out
     }
@@ -17068,14 +17816,20 @@ pub mod arsc {
 
             let mut spec_flags = vec![0u32; names.len()];
             for (index, name) in names.iter().enumerate() {
-                let held = compiled
+                let held: Vec<Config> = compiled
                     .entries()
                     .iter()
                     .filter(|entry| entry.kind == *kind && entry.name == *name)
-                    .count();
-                if held > 1 {
-                    spec_flags[index] = CONFIG_DENSITY;
+                    .map(|entry| entry.config)
+                    .collect();
+                let mut flags = 0u32;
+                if held.iter().any(|one| one.density != held[0].density) {
+                    flags |= CONFIG_DENSITY;
                 }
+                if held.iter().any(|one| one.locale != held[0].locale) {
+                    flags |= CONFIG_LOCALE;
+                }
+                spec_flags[index] = flags;
             }
 
             let spec_size = TYPE_SPEC_HEADER_BYTES + names.len() * 4;
@@ -17193,6 +17947,16 @@ pub mod keystore {
     pub const LONGEST_ALIAS: usize = 64;
     pub const MAX_CONTAINER_BYTES: usize = 1 << 20;
     const SECONDS_PER_DAY: i64 = 86_400;
+    pub const DAYS_PER_YEAR: u32 = 365;
+    pub const LONGEST_VALIDITY_YEARS: u32 = LONGEST_VALIDITY_DAYS / DAYS_PER_YEAR;
+
+    pub const DEFAULT_ALIAS: &str = "My_Key";
+    pub const DEFAULT_COMMON_NAME: &str = "Builder";
+    pub const DEFAULT_ORGANISATION: &str = "My_App";
+    pub const DEFAULT_COUNTRY: &str = "EN";
+    pub const DEFAULT_VALIDITY_YEARS: u32 = 10;
+    pub const DEFAULT_BITS: u32 = LARGEST_KEY_BITS;
+    pub const DEFAULT_PASSWORD: &str = "My_App_Builder";
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
@@ -17217,12 +17981,12 @@ pub mod keystore {
     impl Default for Request {
         fn default() -> Request {
             Request {
-                alias: String::new(),
-                common_name: String::new(),
-                organisation: String::new(),
-                country: String::new(),
-                validity_days: PLAY_STORE_VALIDITY_DAYS,
-                bits: SMALLEST_KEY_BITS,
+                alias: DEFAULT_ALIAS.to_string(),
+                common_name: DEFAULT_COMMON_NAME.to_string(),
+                organisation: DEFAULT_ORGANISATION.to_string(),
+                country: DEFAULT_COUNTRY.to_string(),
+                validity_days: DEFAULT_VALIDITY_YEARS * DAYS_PER_YEAR,
+                bits: DEFAULT_BITS,
             }
         }
     }
@@ -17255,6 +18019,18 @@ pub mod keystore {
                                 .with_context(format!("Value: {value:?}"))
                         })?
                     }
+                    "validityYears" => {
+                        let years: u32 = value.parse().map_err(|_| {
+                            fail("EY002", "The validity period is not a number of years.")
+                                .with_context(format!("Value: {value:?}"))
+                        })?;
+                        request.validity_days =
+                            years.checked_mul(DAYS_PER_YEAR).ok_or_else(|| {
+                                fail("EY004", "That many years is not a period a date can hold.")
+                                    .with_context(format!("Value: {years}"))
+                                    .with_context(format!("Longest: {LONGEST_VALIDITY_YEARS}"))
+                            })?;
+                    }
                     "bits" => {
                         request.bits = value.parse().map_err(|_| {
                             fail("EY002", "The key size is not a number of bits.")
@@ -17266,7 +18042,7 @@ pub mod keystore {
                             .with_context(format!("Setting: {other:?}"))
                             .with_suggestion(
                                 "Known settings: alias, commonName, organisation, country, \
-                                 validityDays, bits.",
+                                 validityDays, validityYears, bits.",
                             ))
                     }
                 }
@@ -17559,6 +18335,39 @@ pub mod keystore {
         record_from(&alias, path, certificate)
     }
 
+    pub fn is_default(path: &str) -> bool {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name == format!("{DEFAULT_ALIAS}.{EXTENSION}"))
+    }
+
+    pub fn ensure_default(directory: &str, now_seconds: i64) -> Result<(Record, bool), Diagnostic> {
+        let path = path_for(directory, DEFAULT_ALIAS);
+        if let Ok(held) = describe(&path) {
+            return Ok((held, false));
+        }
+        if std::path::Path::new(&path).exists() {
+            return Err(fail(
+                "EY070",
+                "A file is where the shared key belongs, and it is not a key this build wrote.",
+            )
+            .with_context(format!("Path: {path}"))
+            .with_suggestion(
+                "Move it aside. Overwriting it would throw away whatever it holds, and \
+                 every application signed with the key it replaced could no longer be \
+                 updated.",
+            ));
+        }
+        let made = create(
+            directory,
+            &Request::default(),
+            DEFAULT_PASSWORD,
+            now_seconds,
+        )?;
+        Ok((made, true))
+    }
+
     pub fn list(directory: &str) -> Vec<Record> {
         let mut found = Vec::new();
         let Ok(entries) = std::fs::read_dir(directory) else {
@@ -17669,6 +18478,8 @@ pub mod builder {
         pub references: Vec<crate::dexwrite::MethodRef>,
         pub identity: Identity,
         pub icon: Option<Vec<u8>>,
+        pub launcher: Vec<crate::scaffold::Supplied>,
+        pub values: Vec<(String, String)>,
     }
 
     pub struct Icons {
@@ -17680,19 +18491,36 @@ pub mod builder {
         format!("res/{folder}/{name}.png")
     }
 
-    fn compile_resources(project: &Project, sink: &mut Sink) -> Result<Option<Icons>, Diagnostic> {
+    fn launcher_icons(project: &Project) -> Result<Vec<crate::scaffold::Supplied>, Diagnostic> {
+        if !project.launcher.is_empty() {
+            return Ok(project.launcher.clone());
+        }
         let Some(source) = &project.icon else {
-            return Ok(None);
+            return Ok(Vec::new());
         };
+        Ok(crate::image::launcher_set(source)?
+            .into_iter()
+            .map(|made| crate::scaffold::Supplied {
+                folder: made.folder.to_string(),
+                name: made.name.to_string(),
+                bytes: made.bytes,
+            })
+            .collect())
+    }
 
-        let set = crate::image::launcher_set(source)?;
+    fn compile_resources(project: &Project, sink: &mut Sink) -> Result<Option<Icons>, Diagnostic> {
+        let set = launcher_icons(project)?;
+        if set.is_empty() && project.values.is_empty() {
+            return Ok(None);
+        }
+
         let mut table =
             crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
         let mut files = Vec::with_capacity(set.len());
 
         for made in &set {
-            let entry = entry_for(made.folder, made.name);
-            if !table.read_file(made.folder, &format!("{}.png", made.name), &entry, sink) {
+            let entry = entry_for(&made.folder, &made.name);
+            if !table.read_file(&made.folder, &format!("{}.png", made.name), &entry, sink) {
                 return Err(fail(
                     "EB040",
                     "The application image could not be given an identifier.",
@@ -17700,6 +18528,25 @@ pub mod builder {
                 .with_context(format!("Entry: {entry}")));
             }
             files.push((entry, made.bytes.clone()));
+        }
+
+        for (folder, text) in &project.values {
+            let origin = format!("{}/{}", folder, crate::scaffold::STRINGS_FILE);
+            let config =
+                crate::resources::Config::parse_values_directory(folder).map_err(|why| {
+                    fail("EB043", "A resource folder is not one this build reads.")
+                        .with_context(format!("Folder: {folder}"))
+                        .with_context(format!("Reported: {why}"))
+                })?;
+            if !table.read_values_for(text, &origin, config, sink) {
+                return Err(fail("EB044", "A language file could not be read.")
+                    .with_context(format!("File: {origin}"))
+                    .with_suggestion(
+                        "The diagnostics above name the line. Every language folder is \
+                         read, so a mistake in one stops the build rather than shipping \
+                         an application that is missing its words on those devices.",
+                    ));
+            }
         }
 
         let compiled = table
@@ -17732,8 +18579,9 @@ pub mod builder {
                     .with_context(format!("Attribute: {}", attribute.name))
                     .with_context(format!("Value: {}", attribute.value))
                     .with_suggestion(
-                        "This build writes a resource table for the application image and \
-                             nothing else yet. Any other name has no identifier to resolve to.",
+                        "The table this build writes holds the launcher icons and what the \
+                             project's own values folders declare. A name that is in neither \
+                             has no identifier to resolve to.",
                     )
                 })?;
             attribute.value = format!("@0x{:08x}", resolved.raw());
@@ -17815,6 +18663,8 @@ pub mod builder {
             }],
             identity: Identity::default(),
             icon: None,
+            launcher: Vec::new(),
+            values: Vec::new(),
         }
     }
 
@@ -17914,7 +18764,24 @@ pub mod builder {
             }],
             identity: Identity::default(),
             icon: None,
+            launcher: Vec::new(),
+            values: Vec::new(),
         })
+    }
+
+    pub fn from_spec(spec: &crate::scaffold::Spec) -> Result<Project, Diagnostic> {
+        let mut project = from_manifest(&spec.manifest())?;
+        project.values = spec.values_files();
+        Ok(project)
+    }
+
+    pub fn from_project(root: &str) -> Result<Project, Diagnostic> {
+        let manifest = crate::scaffold::read_manifest(root)?;
+        let mut project = from_manifest(&manifest)?;
+        project.icon = crate::scaffold::icon_bytes(root);
+        project.launcher = crate::scaffold::launcher_files(root);
+        project.values = crate::scaffold::values_files(root);
+        Ok(project)
     }
 
     pub fn signing_key(path: &str) -> Result<(rsa::PrivateKey, bool), Diagnostic> {
@@ -18835,9 +19702,7 @@ pub mod ffi {
             let mut sink = crate::diag::Sink::new();
             let now = now_seconds();
 
-            let outcome = crate::scaffold::read_manifest(&root).and_then(|manifest| {
-                let mut project = crate::builder::from_manifest(&manifest)?;
-                project.icon = crate::scaffold::icon_bytes(&root);
+            let outcome = crate::builder::from_project(&root).and_then(|project| {
                 w.field_bool("carriesImage", project.icon.is_some());
                 if password.is_empty() {
                     let (key, reused) = crate::builder::signing_key(&key_path)?;
@@ -18888,8 +19753,7 @@ pub mod ffi {
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
 
-            let outcome = crate::scaffold::read_manifest(&root)
-                .and_then(|manifest| crate::builder::from_manifest(&manifest))
+            let outcome = crate::builder::from_project(&root)
                 .and_then(|project| crate::bundle::write(&project));
 
             match outcome {
@@ -18973,6 +19837,103 @@ pub mod ffi {
                 }
                 Err(error) => write_failure(&mut w, "created", &error),
             }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_default_key(directory: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(directory) = text_from(directory) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::keystore::ensure_default(&directory, now_seconds()) {
+                Ok((record, made)) => {
+                    w.field_bool("ready", true);
+                    w.field_bool("created", made);
+                    record.write_json_field(&mut w, "key");
+                }
+                Err(error) => write_failure(&mut w, "ready", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_build_all(
+        root: *const c_char,
+        package_path: *const c_char,
+        bundle_path: *const c_char,
+        key_path: *const c_char,
+        key_password: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(package_path), Some(bundle_path), Some(key_path)) = (
+                text_from(root),
+                text_from(package_path),
+                text_from(bundle_path),
+                text_from(key_path),
+            ) else {
+                return std::ptr::null_mut();
+            };
+            let password = text_from(key_password).unwrap_or_default();
+
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+
+            let mut sink = crate::diag::Sink::new();
+            let now = now_seconds();
+
+            let outcome = crate::builder::from_project(&root).and_then(|project| {
+                w.field_bool("carriesImage", project.icon.is_some());
+                w.field_u64("locales", project.values.len() as u64);
+                let package = if password.is_empty() {
+                    let (key, reused) = crate::builder::signing_key(&key_path)?;
+                    w.field_bool("reusedKey", reused);
+                    w.field_bool("developerKey", false);
+                    crate::builder::build(&project, &key, now, &mut sink)?
+                } else {
+                    let opened = crate::keystore::unlock(&key_path, &password)?;
+                    w.field_bool("reusedKey", true);
+                    w.field_bool("developerKey", true);
+                    opened.record.write_json_field(&mut w, "signedBy");
+                    crate::builder::assemble(&project, &opened.key, &opened.certificate, &mut sink)?
+                };
+                let bundle = crate::bundle::write(&project)?;
+                Ok((package, bundle))
+            });
+
+            match outcome {
+                Ok((package, bundle)) => {
+                    match std::fs::write(&package_path, &package.package)
+                        .and_then(|()| std::fs::write(&bundle_path, &bundle.bundle))
+                    {
+                        Ok(()) => {
+                            w.field_bool("built", true);
+                            w.field_str("path", &package_path);
+                            w.field_str("bundlePath", &bundle_path);
+                            package.write_json(&mut w, "package");
+                            bundle.write_json(&mut w, "bundle");
+                        }
+                        Err(why) => {
+                            w.field_bool("built", false);
+                            w.field_str(
+                                "error",
+                                &format!("what was built could not be written: {why}"),
+                            );
+                        }
+                    }
+                }
+                Err(error) => write_failure(&mut w, "built", &error),
+            }
+
+            sink.write_json(&mut w, "diagnostics");
             w.end_object();
             hand_back(w)
         });
@@ -19177,20 +20138,192 @@ pub mod ffi {
     pub unsafe extern "C" fn omni_remove_path(
         root: *const c_char,
         relative: *const c_char,
+        trash_root: *const c_char,
     ) -> *mut c_char {
         let result = catch_unwind(|| {
-            let (Some(root), Some(relative)) = (text_from(root), text_from(relative)) else {
+            let (Some(root), Some(relative), Some(trash_root)) =
+                (text_from(root), text_from(relative), text_from(trash_root))
+            else {
+                return std::ptr::null_mut();
+            };
+            let now = now_seconds();
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::remove(&root, &relative, &trash_root, now) {
+                Ok(entry) => {
+                    w.field_bool("removed", true);
+                    w.field_str("path", &relative);
+                    w.begin_array(Some("trashed"));
+                    entry.write_json(&mut w, now);
+                    w.end_array();
+                }
+                Err(error) => write_failure(&mut w, "removed", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_rename_path(
+        root: *const c_char,
+        from: *const c_char,
+        to: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(from), Some(to)) =
+                (text_from(root), text_from(from), text_from(to))
+            else {
                 return std::ptr::null_mut();
             };
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
-            match crate::workspace::remove(&root, &relative) {
-                Ok(()) => {
+            match crate::workspace::rename(&root, &from, &to) {
+                Ok(path) => {
+                    w.field_bool("moved", true);
+                    w.field_str("from", &from);
+                    w.field_str("path", &path);
+                }
+                Err(error) => write_failure(&mut w, "moved", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_list_built(directory: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(directory) = text_from(directory) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_str("directory", &directory);
+            w.begin_array(Some("built"));
+            for made in crate::workspace::list_built(&directory) {
+                made.write_json(&mut w);
+            }
+            w.end_array();
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_trash_send(
+        trash_root: *const c_char,
+        path: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(trash_root), Some(path)) = (text_from(trash_root), text_from(path)) else {
+                return std::ptr::null_mut();
+            };
+            let now = now_seconds();
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::trash::send(&trash_root, &path, now) {
+                Ok(entry) => {
                     w.field_bool("removed", true);
-                    w.field_str("path", &relative);
+                    w.begin_array(Some("trashed"));
+                    entry.write_json(&mut w, now);
+                    w.end_array();
                 }
                 Err(error) => write_failure(&mut w, "removed", &error),
             }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_trash_list(trash_root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(trash_root) = text_from(trash_root) else {
+                return std::ptr::null_mut();
+            };
+            let now = now_seconds();
+            let swept = crate::trash::sweep(&trash_root, now);
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_str("directory", &trash_root);
+            w.field_u64("heldSeconds", crate::trash::HELD_SECONDS as u64);
+            w.field_u64("swept", swept as u64);
+            w.begin_array(Some("trashed"));
+            for entry in crate::trash::list(&trash_root, now) {
+                entry.write_json(&mut w, now);
+            }
+            w.end_array();
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_trash_restore(
+        trash_root: *const c_char,
+        id: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(trash_root), Some(id)) = (text_from(trash_root), text_from(id)) else {
+                return std::ptr::null_mut();
+            };
+            let now = now_seconds();
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::trash::restore(&trash_root, &id, now) {
+                Ok(entry) => {
+                    w.field_bool("restored", true);
+                    w.field_str("path", &entry.origin);
+                    w.field_str("name", &entry.name);
+                }
+                Err(error) => write_failure(&mut w, "restored", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_trash_purge(
+        trash_root: *const c_char,
+        id: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(trash_root), Some(id)) = (text_from(trash_root), text_from(id)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::trash::purge(&trash_root, &id) {
+                Ok(()) => {
+                    w.field_bool("purged", true);
+                    w.field_str("id", &id);
+                }
+                Err(error) => write_failure(&mut w, "purged", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_trash_empty(trash_root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(trash_root) = text_from(trash_root) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_bool("emptied", true);
+            w.field_u64("removed", crate::trash::empty(&trash_root) as u64);
             w.end_object();
             hand_back(w)
         });
@@ -20852,12 +21985,23 @@ mod tests {
     fn a_qualifier_this_build_does_not_model_is_refused() {
         let mut table = ResourceTable::new();
         let mut sink = Sink::new();
-        assert!(!table.read_file("drawable-tr", "a.png", "res/drawable-tr/a.png", &mut sink));
+        assert!(!table.read_file(
+            "drawable-land",
+            "a.png",
+            "res/drawable-land/a.png",
+            &mut sink
+        ));
         let error = sink.entries().iter().find(|d| d.code == "E9010").unwrap();
         assert!(
             error.message.contains("does not model"),
             "{}",
             error.message
+        );
+
+        let mut sink = Sink::new();
+        assert!(
+            table.read_file("drawable-tr", "a.png", "res/drawable-tr/a.png", &mut sink),
+            "a language is a qualifier this build does model"
         );
 
         let mut sink = Sink::new();
@@ -23203,6 +24347,8 @@ mod tests {
             references: Vec::new(),
             identity: super::builder::Identity::default(),
             icon: None,
+            launcher: Vec::new(),
+            values: Vec::new(),
         }
     }
 
@@ -23649,6 +24795,8 @@ mod tests {
                 references: Vec::new(),
                 identity: super::builder::Identity::default(),
                 icon: None,
+                launcher: Vec::new(),
+                values: Vec::new(),
             };
             let mut sink = Sink::new();
             let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
@@ -23896,10 +25044,25 @@ mod tests {
 
         let manifest = std::fs::read_to_string(root.join("AndroidManifest.xml")).unwrap();
         assert!(manifest.contains("package=\"com.tr.yt\""), "{manifest}");
-        assert!(manifest.contains("android:label=\"My App\""), "{manifest}");
+        assert!(
+            manifest.contains(&format!(
+                "android:label=\"@string/{}\"",
+                super::scaffold::LABEL_RESOURCE
+            )),
+            "{manifest}"
+        );
         assert!(
             manifest.contains("android:minSdkVersion=\"28\""),
             "{manifest}"
+        );
+
+        let base = root
+            .join(super::scaffold::RES_FOLDER)
+            .join(super::scaffold::values_folder(super::scaffold::BASE_LOCALE))
+            .join(super::scaffold::STRINGS_FILE);
+        assert!(
+            std::fs::read_to_string(&base).unwrap().contains("My App"),
+            "the name the manifest points at is in the folder a device falls back to"
         );
 
         std::fs::remove_dir_all(&directory).ok();
@@ -24537,8 +25700,11 @@ mod tests {
 
         let listed = super::workspace::list_projects(directory.to_str().unwrap());
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].package, "com.tr.yt");
-        assert_eq!(listed[0].label, "My App");
+        assert_eq!(listed[0].package, super::scaffold::DEFAULT_PACKAGE);
+        assert_eq!(
+            listed[0].label, "My App",
+            "the manifest points at a string resource, and the listing resolves it"
+        );
         assert_eq!(listed[0].version_name, "1.0.0");
         assert_eq!(listed[0].version_code, 1);
         assert_eq!(listed[0].min_sdk, 28);
@@ -24554,7 +25720,10 @@ mod tests {
             .any(|entry| entry.path == "Kotlin" && entry.folder));
 
         let manifest = super::workspace::read_text(&text, "AndroidManifest.xml").unwrap();
-        assert!(manifest.contains("com.tr.yt"));
+        assert!(
+            manifest.contains(super::scaffold::DEFAULT_PACKAGE),
+            "{manifest}"
+        );
 
         super::workspace::create_folder(&text, "Kotlin/com/tr/yt").unwrap();
         super::workspace::write_text(&text, "Kotlin/com/tr/yt/Screen.kt", "class Screen\n")
@@ -24589,14 +25758,106 @@ mod tests {
             "EW113"
         );
 
+        let bin = directory.join("Trash").to_str().unwrap().to_string();
+        let now = 1_787_000_000;
         assert_eq!(
-            super::workspace::remove(&text, "AndroidManifest.xml")
+            super::workspace::remove(&text, "AndroidManifest.xml", &bin, now)
                 .unwrap_err()
                 .code,
             "EW140"
         );
-        super::workspace::remove(&text, "Kotlin/Binary.bin").unwrap();
+        let thrown = super::workspace::remove(&text, "Kotlin/Binary.bin", &bin, now).unwrap();
         assert!(!root.join("Kotlin/Binary.bin").exists());
+        assert_eq!(thrown.name, "Binary.bin");
+        assert_eq!(thrown.bytes, 4);
+
+        super::workspace::rename(&text, "Kotlin/MainActivity.kt", "Kotlin/Screen.kt").unwrap();
+        assert!(!root.join("Kotlin/MainActivity.kt").exists());
+        assert!(root.join("Kotlin/Screen.kt").is_file());
+        assert_eq!(
+            super::workspace::rename(&text, "Kotlin/Screen.kt", "AndroidManifest.xml")
+                .unwrap_err()
+                .code,
+            "EW150"
+        );
+        assert_eq!(
+            super::workspace::rename(&text, "Kotlin", "Kotlin/Inside")
+                .unwrap_err()
+                .code,
+            "EW153"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn what_is_deleted_waits_a_day_in_the_trash_and_can_be_put_back() {
+        let directory = temp_directory("omni-trash");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+        let bin = directory
+            .join(super::trash::FOLDER)
+            .to_str()
+            .unwrap()
+            .to_string();
+        let now = 1_787_000_000;
+
+        super::workspace::write_text(&text, "Kotlin/Gone.kt", "class Gone\n").unwrap();
+        let thrown = super::workspace::remove(&text, "Kotlin/Gone.kt", &bin, now).unwrap();
+        assert!(!root.join("Kotlin/Gone.kt").exists(), "it left the project");
+        assert_eq!(
+            thrown.expires_at - thrown.deleted_at,
+            super::trash::HELD_SECONDS,
+            "it is held for a day"
+        );
+
+        let held = super::trash::list(&bin, now);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].name, "Gone.kt");
+        assert_eq!(held[0].seconds_left(now), super::trash::HELD_SECONDS);
+
+        super::trash::restore(&bin, &thrown.id, now).unwrap();
+        assert_eq!(
+            super::workspace::read_text(&text, "Kotlin/Gone.kt").unwrap(),
+            "class Gone\n",
+            "what came back is what went in"
+        );
+        assert!(super::trash::list(&bin, now).is_empty());
+
+        let again = super::workspace::remove(&text, "Kotlin/Gone.kt", &bin, now).unwrap();
+        super::workspace::write_text(&text, "Kotlin/Gone.kt", "written since\n").unwrap();
+        assert_eq!(
+            super::trash::restore(&bin, &again.id, now)
+                .unwrap_err()
+                .code,
+            "ET012",
+            "restoring never writes over what is there now"
+        );
+
+        let a_day_later = now + super::trash::HELD_SECONDS;
+        assert!(
+            super::trash::list(&bin, a_day_later).is_empty(),
+            "a day on, the trash no longer offers it"
+        );
+        assert_eq!(
+            super::trash::restore(&bin, &again.id, a_day_later)
+                .unwrap_err()
+                .code,
+            "ET011"
+        );
+        assert_eq!(super::trash::sweep(&bin, a_day_later), 1);
+        assert!(!std::path::Path::new(&bin).join(&again.id).exists());
+
+        let folder = super::workspace::remove(&text, "Kotlin", &bin, now).unwrap();
+        assert!(folder.folder, "a folder goes to the trash whole");
+        assert!(!root.join("Kotlin").exists());
+        super::trash::restore(&bin, &folder.id, now).unwrap();
+        assert!(root.join("Kotlin").is_dir());
+
+        super::workspace::remove(&text, "Kotlin", &bin, now).unwrap();
+        assert_eq!(super::trash::empty(&bin), 1);
+        assert!(super::trash::list(&bin, now).is_empty());
 
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -24650,8 +25911,7 @@ mod tests {
 
         let key = super::rsa::generate(2048).unwrap();
         let mut sink = Sink::new();
-        let project =
-            super::builder::from_manifest(&super::scaffold::read_manifest(&text).unwrap()).unwrap();
+        let project = super::builder::from_project(&text).unwrap();
         let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
         let archive = archive::read(&outcome.package, &mut sink).unwrap();
         assert!(
@@ -24762,7 +26022,7 @@ mod tests {
             .into_iter()
             .find(|file| super::image::read_png_file(file.to_str().unwrap_or_default()).is_ok());
 
-        let mut project = super::builder::from_manifest(&spec.manifest()).unwrap();
+        let mut project = super::builder::from_spec(&spec).unwrap();
         project.icon = picture.as_ref().map(|path| std::fs::read(path).unwrap());
         project.files = vec![
             (
@@ -24877,7 +26137,7 @@ mod tests {
             "android:versionName(0x0101021c)=\"1.0.0\"",
             "android:minSdkVersion(0x0101020c)=28",
             "android:targetSdkVersion(0x01010270)=36",
-            "android:label(0x01010001)=\"Bundled\"",
+            "android:label(0x01010001)=@0x7f",
             "android:allowBackup(0x01010280)=false",
             "android:extractNativeLibs(0x010104ea)=false",
             "E: activity",
@@ -25197,6 +26457,96 @@ mod tests {
     }
 
     #[test]
+    fn the_name_a_project_carries_is_translated_in_every_language_it_chose() {
+        let directory = temp_directory("omni-locales");
+        let root = directory.join("Spoken");
+        let text = root.to_str().unwrap().to_string();
+        let spec = super::scaffold::Spec {
+            package: "com.my.app".to_string(),
+            label: "Spoken".to_string(),
+            locales: vec![
+                super::scaffold::BASE_LOCALE.to_string(),
+                "tr".to_string(),
+                "de".to_string(),
+            ],
+            ..super::scaffold::Spec::default()
+        };
+        super::scaffold::create(&text, &spec).unwrap();
+
+        let translations = [("tr", "Konuşulan"), ("de", "Gesprochen")];
+        for (locale, translated) in translations {
+            super::workspace::write_text(
+                &text,
+                &format!(
+                    "{}/{}/{}",
+                    super::scaffold::RES_FOLDER,
+                    super::scaffold::values_folder(locale),
+                    super::scaffold::STRINGS_FILE
+                ),
+                &super::scaffold::strings_file(translated),
+            )
+            .unwrap();
+        }
+
+        let project = super::builder::from_project(&text).unwrap();
+        assert_eq!(
+            project.values.len(),
+            3,
+            "the base folder and one per translation are read back"
+        );
+
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
+            .expect("a translated project must build");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
+            );
+            eprintln!("locales: aapt2 is not available here");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        };
+
+        let package = directory.join("spoken.apk");
+        std::fs::write(&package, &outcome.package).unwrap();
+        let dumped = std::process::Command::new(&aapt2)
+            .args(["dump", "resources", package.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let listing = String::from_utf8_lossy(&dumped.stdout).to_string();
+        assert!(dumped.status.success(), "{listing}");
+
+        assert!(
+            listing.contains("string/app_name"),
+            "the name is a string resource in the table aapt2 read\n{listing}"
+        );
+        assert!(
+            listing.contains("\"Spoken\""),
+            "the folder a device falls back to carries the untranslated name\n{listing}"
+        );
+        for (locale, translated) in translations {
+            assert!(
+                listing.contains(&format!("({locale})")),
+                "aapt2 must report a {locale} configuration\n{listing}"
+            );
+            assert!(
+                listing.contains(&format!("\"{translated}\"")),
+                "aapt2 must report {translated:?}\n{listing}"
+            );
+        }
+
+        eprintln!(
+            "locales: aapt2 reports the name in {} languages from the table this build wrote",
+            translations.len() + 1
+        );
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn the_image_the_developer_chose_becomes_the_icon_aapt2_reports() {
         let mut files = Vec::new();
         for candidate in [
@@ -25225,10 +26575,13 @@ mod tests {
         super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
         super::scaffold::set_icon(&text, source.to_str().unwrap()).unwrap();
 
-        let mut project =
-            super::builder::from_manifest(&super::scaffold::read_manifest(&text).unwrap()).unwrap();
-        project.icon = super::scaffold::icon_bytes(&text);
+        let project = super::builder::from_project(&text).unwrap();
         assert!(project.icon.is_some(), "the stored image must be read back");
+        assert_eq!(
+            project.launcher.len(),
+            super::image::LAUNCHER_SIZES.len() * 2,
+            "choosing the image wrote the launcher icons into the project's own folders"
+        );
 
         let key = super::rsa::generate(2048).unwrap();
         let mut sink = Sink::new();
@@ -25486,9 +26839,7 @@ mod tests {
         super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
         super::scaffold::set_icon(&text, source.to_str().unwrap()).unwrap();
 
-        let mut project =
-            super::builder::from_manifest(&super::scaffold::read_manifest(&text).unwrap()).unwrap();
-        project.icon = super::scaffold::icon_bytes(&text);
+        let project = super::builder::from_project(&text).unwrap();
         let key = super::rsa::generate(2048).unwrap();
         let mut sink = Sink::new();
         let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
@@ -25612,8 +26963,9 @@ mod tests {
 
     #[test]
     fn a_name_with_xml_in_it_survives_the_manifest_intact() {
+        let chosen = "Ali & <Veli> \"Co\"";
         let spec = super::scaffold::Spec {
-            label: "Ali & <Veli> \"Co\"".to_string(),
+            label: chosen.to_string(),
             version_name: "1.0.0".to_string(),
             version_code: 7,
             ..super::scaffold::Spec::default()
@@ -25633,8 +26985,29 @@ mod tests {
             .unwrap();
         assert_eq!(
             application.attribute("android:label").unwrap(),
-            "Ali & <Veli> \"Co\""
+            format!("@string/{}", super::scaffold::LABEL_RESOURCE),
+            "the name lives in the values folders now, so the manifest points at it"
         );
+
+        let mut table = ResourceTable::new();
+        let mut sink = Sink::new();
+        for (folder, body) in spec.values_files() {
+            let config = super::resources::Config::parse_values_directory(&folder).unwrap();
+            assert!(
+                table.read_values_for(&body, &folder, config, &mut sink),
+                "{:?}",
+                sink.entries()
+            );
+        }
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        for entry in table.entries() {
+            assert_eq!(
+                entry.value,
+                super::resources::Value::Text(chosen.to_string()),
+                "the markup in the name survives the escaping in {}",
+                entry.config
+            );
+        }
     }
 
     #[test]
@@ -25648,7 +27021,7 @@ mod tests {
         };
         let key = super::rsa::generate(2048).unwrap();
         let mut sink = Sink::new();
-        let project = super::builder::from_manifest(&spec.manifest()).unwrap();
+        let project = super::builder::from_spec(&spec).unwrap();
         let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
 
@@ -25734,12 +27107,29 @@ mod tests {
             min_sdk: 28,
             target_sdk: 36,
             languages: vec!["rust".to_string()],
+            locales: vec![super::scaffold::BASE_LOCALE.to_string(), "tr".to_string()],
             ..super::scaffold::Spec::default()
         };
         let made = super::scaffold::create(root.to_str().unwrap(), &spec).unwrap();
-        assert_eq!(made.folders, vec!["Rust", "Res"]);
+        assert_eq!(
+            made.folders,
+            vec![
+                "Rust",
+                "Res",
+                "Res/mipmap-mdpi",
+                "Res/mipmap-hdpi",
+                "Res/mipmap-xhdpi",
+                "Res/mipmap-xxhdpi",
+                "Res/mipmap-xxxhdpi",
+                "Res/values",
+                "Res/values-tr",
+            ],
+            "one folder per language chosen, one per density the launcher asks for, and \
+             one per locale chosen"
+        );
         assert!(!root.join("Kotlin").exists());
         assert!(!root.join("Native").exists());
+        assert!(!root.join("Res/values-de").exists());
         std::fs::remove_dir_all(&directory).ok();
     }
 
@@ -25909,6 +27299,109 @@ mod tests {
         let removed = call_ffi(|| unsafe { super::ffi::omni_delete_key(path_c.as_ptr()) });
         assert!(removed.contains("\"removed\":true"), "{removed}");
         assert!(super::keystore::list(keys.to_str().unwrap()).is_empty());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_shared_key_is_made_once_and_signs_the_package_and_the_bundle_together() {
+        let directory = temp_directory("omni-shared-key");
+        let keys = directory.join("Keys");
+        let root = directory.join("Together");
+        super::scaffold::create(root.to_str().unwrap(), &super::scaffold::Spec::default()).unwrap();
+
+        let keys_c = std::ffi::CString::new(keys.to_str().unwrap()).unwrap();
+        let first = call_ffi(|| unsafe { super::ffi::omni_default_key(keys_c.as_ptr()) });
+        assert!(is_structurally_valid(&first), "{first}");
+        assert!(first.contains("\"ready\":true"), "{first}");
+        assert!(first.contains("\"created\":true"), "{first}");
+        assert!(
+            first.contains(&format!("CN={}", super::keystore::DEFAULT_COMMON_NAME)),
+            "{first}"
+        );
+        assert!(
+            first.contains(&format!("O={}", super::keystore::DEFAULT_ORGANISATION)),
+            "{first}"
+        );
+        assert!(
+            first.contains(&format!("C={}", super::keystore::DEFAULT_COUNTRY)),
+            "{first}"
+        );
+        assert!(
+            first.contains(&format!("\"bits\":{}", super::keystore::DEFAULT_BITS)),
+            "{first}"
+        );
+        assert!(
+            !first.contains(super::keystore::DEFAULT_PASSWORD),
+            "an answer must never echo a password: {first}"
+        );
+
+        let again = call_ffi(|| unsafe { super::ffi::omni_default_key(keys_c.as_ptr()) });
+        assert!(again.contains("\"ready\":true"), "{again}");
+        assert!(
+            again.contains("\"created\":false"),
+            "the shared key is made once and reused after that: {again}"
+        );
+        assert_eq!(super::keystore::list(keys.to_str().unwrap()).len(), 1);
+
+        let path =
+            super::keystore::path_for(keys.to_str().unwrap(), super::keystore::DEFAULT_ALIAS);
+        assert!(super::keystore::is_default(&path));
+
+        let package = directory.join("together.apk");
+        let bundle = directory.join("together.aab");
+        let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
+        let package_c = std::ffi::CString::new(package.to_str().unwrap()).unwrap();
+        let bundle_c = std::ffi::CString::new(bundle.to_str().unwrap()).unwrap();
+        let path_c = std::ffi::CString::new(path.clone()).unwrap();
+        let password_c = std::ffi::CString::new(super::keystore::DEFAULT_PASSWORD).unwrap();
+
+        let built = call_ffi(|| unsafe {
+            super::ffi::omni_build_all(
+                root_c.as_ptr(),
+                package_c.as_ptr(),
+                bundle_c.as_ptr(),
+                path_c.as_ptr(),
+                password_c.as_ptr(),
+            )
+        });
+        assert!(is_structurally_valid(&built), "{built}");
+        assert!(built.contains("\"built\":true"), "{built}");
+        assert!(built.contains("\"developerKey\":true"), "{built}");
+        assert!(
+            built.contains(&format!("\"locales\":{}", super::scaffold::LOCALES.len())),
+            "one action carries every language folder the project holds: {built}"
+        );
+        assert!(
+            !built.contains(super::keystore::DEFAULT_PASSWORD),
+            "a build answer must never echo a password: {built}"
+        );
+
+        let bytes = std::fs::read(&package).unwrap();
+        let mut sink = Sink::new();
+        let read = archive::read(&bytes, &mut sink).unwrap();
+        let report = signing::examine(
+            &bytes,
+            read.central_directory_offset(),
+            read.end_record_offset(),
+            &mut sink,
+        );
+        assert!(report.schemes.contains(&"v2"), "{:?}", report.schemes);
+        assert!(report.signers[0].certificates[0]
+            .subject
+            .contains(&format!("CN={}", super::keystore::DEFAULT_COMMON_NAME)));
+
+        let bundled = std::fs::read(&bundle).unwrap();
+        let read = archive::read(&bundled, &mut Sink::new()).unwrap();
+        assert!(
+            read.entry(super::bundle::MANIFEST_ENTRY).is_some(),
+            "the bundle the same action wrote holds its manifest"
+        );
+
+        let listed = super::workspace::list_built(directory.to_str().unwrap());
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert!(listed.iter().any(|made| made.bundle));
+        assert!(listed.iter().any(|made| !made.bundle));
 
         std::fs::remove_dir_all(&directory).ok();
     }
