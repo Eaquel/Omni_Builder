@@ -297,11 +297,15 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         status: Status::Partial,
         directive_section: 22,
         summary: "Values files parsed and validated, identifiers assigned from \
-                  sorted order, references resolved and reference loops refused.",
+                  sorted order, references resolved and reference loops refused. \
+                  The binary table is written and aapt2 reads every type, name \
+                  and value back out of it.",
         missing: &[
-            "No binary resource table is written; that belongs with packaging.",
-            "Only density qualifiers are modelled; a locale directory is refused.",
-            "Styles can be referred to but not declared.",
+            "Only density qualifiers are modelled; a locale directory is refused, so a \
+             package this build makes cannot carry a translated name.",
+            "Styles can be referred to but not declared, and a reference to a platform \
+             resource is refused because the platform's own table is not read.",
+            "The table carries one package and no overlays, libraries or staged aliases.",
             "Nothing reads resource files through the virtual filesystem yet.",
         ],
     },
@@ -454,7 +458,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 22,
         summary: "Writes an Android App Bundle: a protobuf writer, the manifest in aapt2 proto form with the platform identifier and typed value on every attribute, BundleConfig, and the archive around them. bundletool builds and signs a universal package from what this writes, and aapt2 reads that package back attribute for attribute.",
         missing: &[
-            "No resource table, so a bundle carries no resources and a manifest that names one by reference is refused rather than guessed at.",
+            "The resource table is written for a package but not for a bundle: that needs the same table in its protobuf form, so a bundle carries no resources and no launcher icon.",
             "One module, base, and no configuration splits: no density, language or architecture splits, and no asset packs or feature modules.",
             "The bundle is not signed. Play signs what it generates, and bundletool signs what it generates for testing, so nothing here needs to; JAR signing is not implemented either way.",
         ],
@@ -467,7 +471,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &[
             "It reads the structure, not the pixels: there is no inflate, so nothing here can resize an image or write one.",
             "PNG only. No JPEG, no WebP and no vector drawable.",
-            "An image chosen for a project is stored with it. It does not reach the package, because android:icon is a resource reference and no resource table is written.",
+            "It reads a PNG for a project's launcher icon and nothing else: there is no density scaling, so one image serves every screen.",
         ],
     },
     Subsystem {
@@ -7500,7 +7504,7 @@ pub mod resources {
             w.field_str("packageId", &format!("0x{:02x}", self.package_id));
             w.field_u64("resources", self.entries.len() as u64);
             w.field_u64("identifiers", self.assignments.len() as u64);
-            w.field_bool("binaryTableWritten", false);
+            w.field_bool("binaryTableWritten", true);
             w.begin_array(Some("detail"));
             for (kind, name, id) in &self.assignments {
                 w.begin_object(None);
@@ -12818,11 +12822,13 @@ pub mod axml {
             }
             return Err(fail(
                 "EA021",
-                "A resource reference by name needs a resource table, which this build does not write.",
+                "A resource reference by name is resolved before it reaches this writer.",
             )
             .with_context(format!("Value: {raw}"))
             .with_suggestion(
-                "Write the numeric form, for example @0x7f060000, until the resource table is implemented.",
+                "The build engine turns a name into its identifier against the project's own \
+                 table and hands the numeric form here, for example @0x7f060000. A name that \
+                 arrives unresolved has no table behind it.",
             ));
         }
 
@@ -14175,6 +14181,12 @@ pub mod scaffold {
         crate::image::read_png_file(&icon_path(root)).ok()
     }
 
+    pub fn icon_bytes(root: &str) -> Option<Vec<u8>> {
+        let bytes = std::fs::read(icon_path(root)).ok()?;
+        crate::image::read_png(&bytes).ok()?;
+        Some(bytes)
+    }
+
     pub fn read_manifest(root: &str) -> Result<String, Diagnostic> {
         let path = std::path::Path::new(root).join("AndroidManifest.xml");
         std::fs::read_to_string(&path).map_err(|why| {
@@ -15002,6 +15014,7 @@ pub mod bundle {
             w.field_u64("bytes", self.bundle.len() as u64);
             w.field_u64("entries", self.entries as u64);
             w.field_bool("carriesCode", self.carries_code);
+            w.field_bool("carriesImage", false);
             w.field_bool("signed", false);
             w.field_str(
                 "note",
@@ -15064,6 +15077,378 @@ pub mod bundle {
             entries,
             carries_code,
         })
+    }
+}
+
+pub mod arsc {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::resources::{Compiled, Config, Density, Kind, Unit, Value};
+    use crate::FailureClass;
+
+    pub const RES_STRING_POOL: u16 = 0x0001;
+    pub const RES_TABLE: u16 = 0x0002;
+    pub const RES_TABLE_PACKAGE: u16 = 0x0200;
+    pub const RES_TABLE_TYPE: u16 = 0x0201;
+    pub const RES_TABLE_TYPE_SPEC: u16 = 0x0202;
+
+    pub const TABLE_HEADER_BYTES: usize = 12;
+    pub const PACKAGE_HEADER_BYTES: usize = 288;
+    pub const TYPE_HEADER_BYTES: usize = 84;
+    pub const TYPE_SPEC_HEADER_BYTES: usize = 16;
+    pub const POOL_HEADER_BYTES: usize = 28;
+    pub const CONFIG_BYTES: usize = 64;
+    pub const ENTRY_BYTES: usize = 16;
+    pub const PACKAGE_NAME_UNITS: usize = 128;
+
+    pub const MAX_STRINGS: usize = 65_535;
+
+    const TYPE_REFERENCE: u8 = 0x01;
+    const TYPE_STRING: u8 = 0x03;
+    const TYPE_DIMENSION: u8 = 0x05;
+    const TYPE_INT_DEC: u8 = 0x10;
+    const TYPE_INT_BOOLEAN: u8 = 0x12;
+    const TYPE_INT_COLOR_ARGB8: u8 = 0x1c;
+
+    const NO_ENTRY: u32 = 0xffff_ffff;
+    const BOOLEAN_TRUE: u32 = 0xffff_ffff;
+    const CONFIG_DENSITY: u32 = 0x0100;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.arsc",
+            message,
+        )
+    }
+
+    fn unit_index(unit: Unit) -> u32 {
+        match unit {
+            Unit::Px => 0,
+            Unit::Dp => 1,
+            Unit::Sp => 2,
+            Unit::Pt => 3,
+            Unit::In => 4,
+            Unit::Mm => 5,
+        }
+    }
+
+    pub fn density_value(density: Density) -> u16 {
+        match density {
+            Density::Default => 0,
+            Density::Low => 120,
+            Density::Medium => 160,
+            Density::High => 240,
+            Density::ExtraHigh => 320,
+            Density::ExtraExtraHigh => 480,
+            Density::ExtraExtraExtraHigh => 640,
+            Density::None => 0xffff,
+            Density::Any => 0xfffe,
+        }
+    }
+
+    pub fn encode_dimension(milli: i64, unit: Unit) -> Result<u32, Diagnostic> {
+        let index = unit_index(unit);
+        for (radix, shift) in [(0u32, 0u32), (1, 7), (2, 15), (3, 23)] {
+            let widened = i128::from(milli) * (1i128 << shift);
+            if widened % 1000 != 0 {
+                continue;
+            }
+            let scaled = widened / 1000;
+            if (-0x0080_0000..=0x007f_ffff).contains(&scaled) {
+                let mantissa = (scaled as i32) & 0x00ff_ffff;
+                return Ok(((mantissa as u32) << 8) | (radix << 4) | index);
+            }
+        }
+        Err(fail(
+            "EZ001",
+            "A dimension cannot be written in the format's fixed point.",
+        )
+        .with_context(format!("Value: {}/1000 {}", milli, unit.as_str()))
+        .with_suggestion(
+            "The format carries a 24 bit mantissa with one of four radix points. \
+                 A value that fits none of them would be written as a different number \
+                 than the one written down, so it is refused instead.",
+        ))
+    }
+
+    #[derive(Default)]
+    struct Pool {
+        strings: Vec<String>,
+    }
+
+    impl Pool {
+        fn intern(&mut self, text: &str) -> u32 {
+            if let Some(index) = self.strings.iter().position(|held| held == text) {
+                return index as u32;
+            }
+            self.strings.push(text.to_string());
+            (self.strings.len() - 1) as u32
+        }
+
+        fn encode(&self) -> Result<Vec<u8>, Diagnostic> {
+            let count = self.strings.len();
+            if count > MAX_STRINGS {
+                return Err(fail(
+                    "EZ002",
+                    "The table holds more strings than the format allows.",
+                )
+                .with_context(format!("Strings: {count}"))
+                .with_context(format!("Limit: {MAX_STRINGS}")));
+            }
+
+            let mut offsets: Vec<u32> = Vec::with_capacity(count);
+            let mut data: Vec<u8> = Vec::new();
+            for text in &self.strings {
+                offsets.push(data.len() as u32);
+                let units: Vec<u16> = text.encode_utf16().collect();
+                if units.len() > 0x7fff {
+                    return Err(fail("EZ003", "A string is longer than the format allows.")
+                        .with_context(format!("Units: {}", units.len())));
+                }
+                data.extend_from_slice(&(units.len() as u16).to_le_bytes());
+                for unit in units {
+                    data.extend_from_slice(&unit.to_le_bytes());
+                }
+                data.extend_from_slice(&0u16.to_le_bytes());
+            }
+            while !data.len().is_multiple_of(4) {
+                data.push(0);
+            }
+
+            let strings_start = POOL_HEADER_BYTES + count * 4;
+            let total = strings_start + data.len();
+
+            let mut out = Vec::with_capacity(total);
+            out.extend_from_slice(&RES_STRING_POOL.to_le_bytes());
+            out.extend_from_slice(&(POOL_HEADER_BYTES as u16).to_le_bytes());
+            out.extend_from_slice(&(total as u32).to_le_bytes());
+            out.extend_from_slice(&(count as u32).to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&(strings_start as u32).to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes());
+            for offset in offsets {
+                out.extend_from_slice(&offset.to_le_bytes());
+            }
+            out.extend_from_slice(&data);
+            Ok(out)
+        }
+    }
+
+    fn encode_config(config: Config) -> Vec<u8> {
+        let mut out = vec![0u8; CONFIG_BYTES];
+        out[0..4].copy_from_slice(&(CONFIG_BYTES as u32).to_le_bytes());
+        out[14..16].copy_from_slice(&density_value(config.density).to_le_bytes());
+        out
+    }
+
+    fn resolve(
+        value: &Value,
+        compiled: &Compiled,
+        pool: &mut Pool,
+        where_from: &str,
+    ) -> Result<(u8, u32), Diagnostic> {
+        match value {
+            Value::Text(text) => Ok((TYPE_STRING, pool.intern(text))),
+            Value::File(path) => Ok((TYPE_STRING, pool.intern(path))),
+            Value::Color(argb) => Ok((TYPE_INT_COLOR_ARGB8, *argb)),
+            Value::Integer(number) => Ok((TYPE_INT_DEC, *number as u32)),
+            Value::Bool(flag) => Ok((TYPE_INT_BOOLEAN, if *flag { BOOLEAN_TRUE } else { 0 })),
+            Value::Dimension { milli, unit } => {
+                Ok((TYPE_DIMENSION, encode_dimension(*milli, *unit)?))
+            }
+            Value::Reference(reference) => {
+                if reference.is_platform() {
+                    return Err(fail(
+                        "EZ010",
+                        "A reference to a platform resource cannot be written yet.",
+                    )
+                    .with_context(format!("Reference: {reference}"))
+                    .with_context(format!("In: {where_from}"))
+                    .with_suggestion(
+                        "Resolving one needs the platform's own table, which this build \
+                         does not read.",
+                    ));
+                }
+                let id = compiled
+                    .id(reference.kind, &reference.name)
+                    .ok_or_else(|| {
+                        fail(
+                            "EZ011",
+                            "A reference names a resource this table does not hold.",
+                        )
+                        .with_context(format!("Reference: {reference}"))
+                        .with_context(format!("In: {where_from}"))
+                    })?;
+                Ok((TYPE_REFERENCE, id.raw()))
+            }
+            Value::Empty => Ok((TYPE_INT_DEC, 0)),
+        }
+    }
+
+    pub fn write(package: &str, compiled: &Compiled) -> Result<Vec<u8>, Diagnostic> {
+        if package.is_empty() || package.encode_utf16().count() >= PACKAGE_NAME_UNITS {
+            return Err(
+                fail("EZ020", "The package name does not fit the table header.")
+                    .with_context(format!("Name: {package:?}"))
+                    .with_context(format!("Room: {} characters", PACKAGE_NAME_UNITS - 1)),
+            );
+        }
+
+        let mut values = Pool::default();
+        let mut types = Pool::default();
+        let mut keys = Pool::default();
+
+        let mut kinds: Vec<Kind> = Vec::new();
+        for kind in Kind::ALL {
+            if compiled
+                .assignments()
+                .iter()
+                .any(|(entry_kind, _, _)| entry_kind == kind)
+            {
+                kinds.push(*kind);
+                types.intern(kind.as_str());
+            }
+        }
+        if kinds.is_empty() {
+            return Err(fail("EZ021", "The project declares no resource to write."));
+        }
+
+        for (_, name, _) in compiled.assignments() {
+            keys.intern(name);
+        }
+
+        let mut body: Vec<u8> = Vec::new();
+        for kind in &kinds {
+            let names: Vec<&str> = compiled
+                .assignments()
+                .iter()
+                .filter(|(entry_kind, _, _)| entry_kind == kind)
+                .map(|(_, name, _)| name.as_str())
+                .collect();
+            let type_id = compiled
+                .assignments()
+                .iter()
+                .find(|(entry_kind, _, _)| entry_kind == kind)
+                .map(|(_, _, id)| id.type_index())
+                .unwrap_or(0);
+
+            let mut configs: Vec<Config> = compiled
+                .entries()
+                .iter()
+                .filter(|entry| entry.kind == *kind)
+                .map(|entry| entry.config)
+                .collect();
+            configs.sort();
+            configs.dedup();
+
+            let mut spec_flags = vec![0u32; names.len()];
+            for (index, name) in names.iter().enumerate() {
+                let held = compiled
+                    .entries()
+                    .iter()
+                    .filter(|entry| entry.kind == *kind && entry.name == *name)
+                    .count();
+                if held > 1 {
+                    spec_flags[index] = CONFIG_DENSITY;
+                }
+            }
+
+            let spec_size = TYPE_SPEC_HEADER_BYTES + names.len() * 4;
+            body.extend_from_slice(&RES_TABLE_TYPE_SPEC.to_le_bytes());
+            body.extend_from_slice(&(TYPE_SPEC_HEADER_BYTES as u16).to_le_bytes());
+            body.extend_from_slice(&(spec_size as u32).to_le_bytes());
+            body.push(type_id);
+            body.push(0);
+            body.extend_from_slice(&(configs.len() as u16).to_le_bytes());
+            body.extend_from_slice(&(names.len() as u32).to_le_bytes());
+            for flags in &spec_flags {
+                body.extend_from_slice(&flags.to_le_bytes());
+            }
+
+            for config in &configs {
+                let entries_start = TYPE_HEADER_BYTES + names.len() * 4;
+                let mut offsets: Vec<u32> = Vec::with_capacity(names.len());
+                let mut written: Vec<u8> = Vec::new();
+
+                for name in &names {
+                    let Some(entry) = compiled.entries().iter().find(|entry| {
+                        entry.kind == *kind && entry.name == *name && entry.config == *config
+                    }) else {
+                        offsets.push(NO_ENTRY);
+                        continue;
+                    };
+                    let (data_type, data) = resolve(
+                        &entry.value,
+                        compiled,
+                        &mut values,
+                        &format!("{}/{}", kind.as_str(), name),
+                    )?;
+                    offsets.push(written.len() as u32);
+                    written.extend_from_slice(&8u16.to_le_bytes());
+                    written.extend_from_slice(&0u16.to_le_bytes());
+                    written.extend_from_slice(&keys.intern(name).to_le_bytes());
+                    written.extend_from_slice(&8u16.to_le_bytes());
+                    written.push(0);
+                    written.push(data_type);
+                    written.extend_from_slice(&data.to_le_bytes());
+                }
+
+                let total = entries_start + written.len();
+                body.extend_from_slice(&RES_TABLE_TYPE.to_le_bytes());
+                body.extend_from_slice(&(TYPE_HEADER_BYTES as u16).to_le_bytes());
+                body.extend_from_slice(&(total as u32).to_le_bytes());
+                body.push(type_id);
+                body.push(0);
+                body.extend_from_slice(&0u16.to_le_bytes());
+                body.extend_from_slice(&(names.len() as u32).to_le_bytes());
+                body.extend_from_slice(&(entries_start as u32).to_le_bytes());
+                body.extend_from_slice(&encode_config(*config));
+                for offset in &offsets {
+                    body.extend_from_slice(&offset.to_le_bytes());
+                }
+                body.extend_from_slice(&written);
+            }
+        }
+
+        let type_pool = types.encode()?;
+        let key_pool = keys.encode()?;
+        let value_pool = values.encode()?;
+
+        let type_strings = PACKAGE_HEADER_BYTES;
+        let key_strings = type_strings + type_pool.len();
+        let package_size = key_strings + key_pool.len() + body.len();
+
+        let mut out = Vec::with_capacity(TABLE_HEADER_BYTES + value_pool.len() + package_size);
+        out.extend_from_slice(&RES_TABLE.to_le_bytes());
+        out.extend_from_slice(&(TABLE_HEADER_BYTES as u16).to_le_bytes());
+        out.extend_from_slice(
+            &((TABLE_HEADER_BYTES + value_pool.len() + package_size) as u32).to_le_bytes(),
+        );
+        out.extend_from_slice(&1u32.to_le_bytes());
+        out.extend_from_slice(&value_pool);
+
+        out.extend_from_slice(&RES_TABLE_PACKAGE.to_le_bytes());
+        out.extend_from_slice(&(PACKAGE_HEADER_BYTES as u16).to_le_bytes());
+        out.extend_from_slice(&(package_size as u32).to_le_bytes());
+        out.extend_from_slice(&u32::from(compiled.package_id()).to_le_bytes());
+        let mut name_units: Vec<u16> = package.encode_utf16().collect();
+        name_units.resize(PACKAGE_NAME_UNITS, 0);
+        for unit in &name_units {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
+        out.extend_from_slice(&(type_strings as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&(key_strings as u32).to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        out.extend_from_slice(&type_pool);
+        out.extend_from_slice(&key_pool);
+        out.extend_from_slice(&body);
+
+        Ok(out)
     }
 }
 
@@ -15550,6 +15935,10 @@ pub mod builder {
         }
     }
 
+    pub const ICON_NAME: &str = "ic_launcher";
+    pub const ICON_ENTRY: &str = "res/mipmap/ic_launcher.png";
+    pub const TABLE_ENTRY: &str = "resources.arsc";
+
     #[derive(Clone, Debug)]
     pub struct Project {
         pub manifest: String,
@@ -15557,6 +15946,91 @@ pub mod builder {
         pub code: Vec<crate::dexwrite::Class>,
         pub references: Vec<crate::dexwrite::MethodRef>,
         pub identity: Identity,
+        pub icon: Option<Vec<u8>>,
+    }
+
+    fn compile_resources(
+        project: &Project,
+        sink: &mut Sink,
+    ) -> Result<Option<crate::resources::Compiled>, Diagnostic> {
+        if project.icon.is_none() {
+            return Ok(None);
+        }
+        let mut table =
+            crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
+        if !table.read_file("mipmap", "ic_launcher.png", ICON_ENTRY, sink) {
+            return Err(fail(
+                "EB040",
+                "The application image could not be given an identifier.",
+            ));
+        }
+        table
+            .compile(sink)
+            .map(Some)
+            .ok_or_else(|| fail("EB041", "The resource table could not be built."))
+    }
+
+    fn resolve_references(
+        element: &mut crate::xml::Element,
+        compiled: Option<&crate::resources::Compiled>,
+    ) -> Result<(), Diagnostic> {
+        for attribute in &mut element.attributes {
+            let Some(rest) = attribute.value.strip_prefix('@') else {
+                continue;
+            };
+            if rest.starts_with("0x") || rest.starts_with("0X") {
+                continue;
+            }
+            let Some(reference) = crate::resources::Reference::parse(&attribute.value) else {
+                continue;
+            };
+            let resolved = compiled
+                .and_then(|table| table.id(reference.kind, &reference.name))
+                .ok_or_else(|| {
+                    fail(
+                        "EB042",
+                        "The manifest names a resource this project does not hold.",
+                    )
+                    .with_context(format!("Attribute: {}", attribute.name))
+                    .with_context(format!("Value: {}", attribute.value))
+                    .with_suggestion(
+                        "This build writes a resource table for the application image and \
+                             nothing else yet. Any other name has no identifier to resolve to.",
+                    )
+                })?;
+            attribute.value = format!("@0x{:08x}", resolved.raw());
+        }
+        for child in &mut element.children {
+            resolve_references(child, compiled)?;
+        }
+        Ok(())
+    }
+
+    fn package_name(root: &crate::xml::Element) -> String {
+        root.attribute("package").unwrap_or_default().to_string()
+    }
+
+    fn set_icon(root: &mut crate::xml::Element, value: &str) {
+        let Some(application) = root
+            .children
+            .iter_mut()
+            .find(|child| child.name == "application")
+        else {
+            return;
+        };
+        if let Some(existing) = application
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.name == "android:icon")
+        {
+            existing.value = value.to_string();
+            return;
+        }
+        application.attributes.push(crate::xml::Attribute {
+            name: "android:icon".to_string(),
+            value: value.to_string(),
+            position: application.position,
+        });
     }
 
     pub fn starter(package: &str, label: &str) -> Project {
@@ -15602,6 +16076,7 @@ pub mod builder {
                 parameters: Vec::new(),
             }],
             identity: Identity::default(),
+            icon: None,
         }
     }
 
@@ -15700,6 +16175,7 @@ pub mod builder {
                 parameters: Vec::new(),
             }],
             identity: Identity::default(),
+            icon: None,
         })
     }
 
@@ -15743,8 +16219,16 @@ pub mod builder {
         certificate_der: &[u8],
         sink: &mut Sink,
     ) -> Result<Outcome, Diagnostic> {
-        let root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", sink)
+        let mut root = crate::xml::parse(&project.manifest, "AndroidManifest.xml", sink)
             .ok_or_else(|| fail("EB001", "The manifest could not be read."))?;
+
+        let compiled = compile_resources(project, sink)?;
+        if let Some(table) = &compiled {
+            if let Some(id) = table.id(crate::resources::Kind::Mipmap, ICON_NAME) {
+                set_icon(&mut root, &format!("@0x{:08x}", id.raw()));
+            }
+        }
+        resolve_references(&mut root, compiled.as_ref())?;
 
         let report = guard::inspect_manifest(&root);
         if report.verdict() == guard::Verdict::Refused {
@@ -15764,6 +16248,13 @@ pub mod builder {
 
         let mut archive = ArchiveBuilder::for_android();
         archive.add("AndroidManifest.xml", manifest)?;
+        if let (Some(table), Some(png)) = (&compiled, &project.icon) {
+            archive.add(
+                TABLE_ENTRY,
+                crate::arsc::write(&package_name(&root), table)?,
+            )?;
+            archive.add(ICON_ENTRY, png.clone())?;
+        }
         if !project.code.is_empty() {
             let classes = crate::dexwrite::write(&project.code, &project.references)?;
             archive.add("classes.dex", classes)?;
@@ -16597,7 +17088,9 @@ pub mod ffi {
             let now = now_seconds();
 
             let outcome = crate::scaffold::read_manifest(&root).and_then(|manifest| {
-                let project = crate::builder::from_manifest(&manifest)?;
+                let mut project = crate::builder::from_manifest(&manifest)?;
+                project.icon = crate::scaffold::icon_bytes(&root);
+                w.field_bool("carriesImage", project.icon.is_some());
                 if password.is_empty() {
                     let (key, reused) = crate::builder::signing_key(&key_path)?;
                     w.field_bool("reusedKey", reused);
@@ -16972,12 +17465,12 @@ pub mod ffi {
                     w.field_bool("stored", true);
                     w.field_str("path", &crate::scaffold::icon_path(&root));
                     png.write_json(&mut w, "image");
-                    w.field_bool("appliedToPackage", false);
+                    w.field_bool("appliedToPackage", true);
                     w.field_str(
                         "note",
-                        "The image is stored with the project. It is not in the package yet, \
-                         because android:icon is a resource reference and this build does not \
-                         write a resource table.",
+                        "The image is stored with the project and becomes the launcher icon of \
+                         the package built from it. A bundle does not carry it yet, because \
+                         that needs the resource table in its protobuf form.",
                     );
                 }
                 Err(error) => write_failure(&mut w, "stored", &error),
@@ -18669,7 +19162,7 @@ mod tests {
 
         assert!(is_structurally_valid(&document), "{document}");
         assert!(document.contains("\"packageId\":\"0x7f\""));
-        assert!(document.contains("\"binaryTableWritten\":false"));
+        assert!(document.contains("\"binaryTableWritten\":true"));
         assert!(document.contains("0x7f010000"));
     }
 
@@ -21013,6 +21506,7 @@ mod tests {
             code: Vec::new(),
             references: Vec::new(),
             identity: super::builder::Identity::default(),
+            icon: None,
         }
     }
 
@@ -21458,6 +21952,7 @@ mod tests {
                 code: Vec::new(),
                 references: Vec::new(),
                 identity: super::builder::Identity::default(),
+                icon: None,
             };
             let mut sink = Sink::new();
             let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
@@ -22312,6 +22807,384 @@ mod tests {
         assert_eq!(
             outer.as_bytes(),
             &[0x12, 0x09, 0x0a, 0x07, b't', b'e', b's', b't', b'i', b'n', b'g']
+        );
+    }
+
+    #[test]
+    fn dimensions_are_written_in_the_fixed_point_the_format_defines() {
+        use super::arsc::encode_dimension;
+        use super::resources::Unit;
+
+        assert_eq!(encode_dimension(1_000, Unit::Dp).unwrap(), 0x0000_0101);
+        assert_eq!(encode_dimension(4_000, Unit::Dp).unwrap(), 0x0000_0401);
+        assert_eq!(encode_dimension(12_000, Unit::Dp).unwrap(), 0x0000_0c01);
+        assert_eq!(encode_dimension(16_000, Unit::Dp).unwrap(), 0x0000_1001);
+        assert_eq!(encode_dimension(14_000, Unit::Sp).unwrap(), 0x0000_0e02);
+        assert_eq!(encode_dimension(16_000, Unit::Sp).unwrap(), 0x0000_1002);
+        assert_eq!(encode_dimension(0, Unit::Px).unwrap(), 0x0000_0000);
+
+        let half = encode_dimension(1_500, Unit::Dp).unwrap();
+        assert_eq!(half & 0xf0, 0x10, "1.5dp needs the 16p7 radix");
+        assert_eq!(half & 0x0f, 0x01);
+        assert_eq!(half >> 8, 192, "1.5 at 16p7 is 192");
+
+        assert_eq!(
+            encode_dimension(40_000_000_000, Unit::Dp)
+                .expect_err("a dimension larger than the mantissa must be refused")
+                .code,
+            "EZ001"
+        );
+    }
+
+    fn table_for_test() -> super::resources::Compiled {
+        let mut sink = Sink::new();
+        let mut table = super::resources::Table::for_package(0x7f);
+        assert!(table.read_values(
+            concat!(
+                "<resources>",
+                "<string name=\"app_name\">Omni Made</string>",
+                "<string name=\"greeting\">Hello</string>",
+                "<color name=\"accent\">#ff6cb6ff</color>",
+                "<dimen name=\"gap\">12dp</dimen>",
+                "<bool name=\"ready\">true</bool>",
+                "<integer name=\"tries\">3</integer>",
+                "</resources>",
+            ),
+            "values/values.xml",
+            &mut sink,
+        ));
+        assert!(table.read_file(
+            "mipmap",
+            "ic_launcher.png",
+            "res/mipmap/ic_launcher.png",
+            &mut sink
+        ));
+        assert!(table.read_file(
+            "mipmap-xxhdpi",
+            "ic_launcher.png",
+            "res/mipmap-xxhdpi/ic_launcher.png",
+            &mut sink,
+        ));
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        table.compile(&mut sink).expect("the table must compile")
+    }
+
+    #[test]
+    fn the_resource_table_this_build_writes_is_the_one_aapt2_reads() {
+        let compiled = table_for_test();
+        let table = super::arsc::write("com.tr.yt", &compiled).expect("the table must be written");
+
+        assert_eq!(&table[..2], &super::arsc::RES_TABLE.to_le_bytes());
+        assert_eq!(
+            u32::from_le_bytes([table[4], table[5], table[6], table[7]]) as usize,
+            table.len(),
+            "the table header must state the whole size"
+        );
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing, so the resource \
+                 table this build wrote was never read by anything but itself"
+            );
+            eprintln!("resource table: aapt2 is not available here");
+            return;
+        };
+
+        let mut sink = Sink::new();
+        let root = super::xml::parse(
+            concat!(
+                "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ",
+                "package=\"com.tr.yt\" android:versionCode=\"1\" android:versionName=\"1.0.0\">",
+                "<uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />",
+                "<application android:label=\"X\" android:allowBackup=\"false\" />",
+                "</manifest>",
+            ),
+            "AndroidManifest.xml",
+            &mut sink,
+        )
+        .unwrap();
+
+        let mut builder = ArchiveBuilder::for_android();
+        builder
+            .add("AndroidManifest.xml", super::axml::encode(&root).unwrap())
+            .unwrap();
+        builder.add("resources.arsc", table.clone()).unwrap();
+        builder
+            .add("res/mipmap/ic_launcher.png", b"not a real image".to_vec())
+            .unwrap();
+        builder
+            .add("res/mipmap-xxhdpi/ic_launcher.png", b"nor is this".to_vec())
+            .unwrap();
+        let apk = builder.finish().unwrap();
+
+        let directory = temp_directory("omni-arsc");
+        let path = directory.join("table.apk");
+        std::fs::write(&path, &apk).unwrap();
+
+        let dumped = std::process::Command::new(&aapt2)
+            .args(["dump", "resources", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&dumped.stdout),
+            String::from_utf8_lossy(&dumped.stderr)
+        );
+        assert!(
+            dumped.status.success(),
+            "aapt2 refused the table this build wrote:\n{text}"
+        );
+
+        for expected in [
+            "Package name=com.tr.yt id=7f",
+            "type bool id=01",
+            "type color id=02",
+            "type dimen id=03",
+            "type integer id=04",
+            "type mipmap id=05",
+            "type string id=06",
+            "resource 0x7f010000 bool/ready",
+            "resource 0x7f020000 color/accent",
+            "resource 0x7f030000 dimen/gap",
+            "resource 0x7f040000 integer/tries",
+            "resource 0x7f050000 mipmap/ic_launcher",
+            "resource 0x7f060000 string/app_name",
+            "resource 0x7f060001 string/greeting",
+            "Omni Made",
+            "Hello",
+            "res/mipmap/ic_launcher.png",
+            "res/mipmap-xxhdpi/ic_launcher.png",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+        }
+
+        let badging = std::process::Command::new(&aapt2)
+            .args(["dump", "badging", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            badging.status.success(),
+            "{}",
+            String::from_utf8_lossy(&badging.stderr)
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "resource table: {} bytes, {} identifiers, aapt2 read every one of them back",
+            table.len(),
+            compiled.assignments().len()
+        );
+    }
+
+    #[test]
+    fn the_image_the_developer_chose_becomes_the_icon_aapt2_reports() {
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 8);
+            }
+        }
+        let Some(source) = files
+            .into_iter()
+            .find(|file| super::image::read_png_file(file.to_str().unwrap_or_default()).is_ok())
+        else {
+            eprintln!("icon: no PNG file is available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-icon-package");
+        let root = directory.join("Pictured");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+        super::scaffold::set_icon(&text, source.to_str().unwrap()).unwrap();
+
+        let mut project =
+            super::builder::from_manifest(&super::scaffold::read_manifest(&text).unwrap()).unwrap();
+        project.icon = super::scaffold::icon_bytes(&text);
+        assert!(project.icon.is_some(), "the stored image must be read back");
+
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
+            .expect("a project with an image must build");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let mut own = Sink::new();
+        let archive = archive::read(&outcome.package, &mut own).expect("it must read back");
+        for wanted in [
+            "AndroidManifest.xml",
+            super::builder::TABLE_ENTRY,
+            super::builder::ICON_ENTRY,
+            "classes.dex",
+        ] {
+            assert!(
+                archive.entries().iter().any(|entry| entry.name == wanted),
+                "the package must carry {wanted}"
+            );
+        }
+        assert_eq!(
+            archive
+                .stored_bytes(
+                    &outcome.package,
+                    archive.entry(super::builder::ICON_ENTRY).unwrap()
+                )
+                .unwrap(),
+            std::fs::read(&source).unwrap().as_slice(),
+            "the image in the package must be the one the developer chose"
+        );
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 is missing"
+            );
+            eprintln!("icon: aapt2 is not available here");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        };
+
+        let path = directory.join("pictured.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+
+        let badging = std::process::Command::new(&aapt2)
+            .args(["dump", "badging", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        let report = format!(
+            "{}{}",
+            String::from_utf8_lossy(&badging.stdout),
+            String::from_utf8_lossy(&badging.stderr)
+        );
+        assert!(badging.status.success(), "{report}");
+        assert!(
+            report.contains("application-icon-160:'res/mipmap/ic_launcher.png'")
+                || report.contains("icon='res/mipmap/ic_launcher.png'"),
+            "aapt2 must report the icon this build placed:\n{report}"
+        );
+
+        let tree = std::process::Command::new(&aapt2)
+            .args([
+                "dump",
+                "xmltree",
+                path.to_str().unwrap(),
+                "--file",
+                "AndroidManifest.xml",
+            ])
+            .output()
+            .unwrap();
+        let manifest = String::from_utf8_lossy(&tree.stdout).to_string();
+        assert!(tree.status.success(), "{manifest}");
+        assert!(
+            manifest.contains("android:icon(0x01010002)=@0x7f010000"),
+            "the manifest must point at the identifier the table assigned:\n{manifest}"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "icon: {} bytes of PNG placed at {} and reported by aapt2 as the application icon",
+            project.icon.as_ref().map(|png| png.len()).unwrap_or(0),
+            super::builder::ICON_ENTRY
+        );
+    }
+
+    #[test]
+    fn the_resource_table_sits_where_the_installer_needs_it() {
+        let mut files = Vec::new();
+        for candidate in [
+            std::env::var("ANDROID_HOME").ok(),
+            Some("/usr/share/icons".to_string()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let path = std::path::PathBuf::from(candidate);
+            if path.is_dir() {
+                gather_png_files(&path, &mut files, 8);
+            }
+        }
+        let Some(source) = files
+            .into_iter()
+            .find(|file| super::image::read_png_file(file.to_str().unwrap_or_default()).is_ok())
+        else {
+            eprintln!("alignment: no PNG file is available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-arsc-align");
+        let root = directory.join("Aligned");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+        super::scaffold::set_icon(&text, source.to_str().unwrap()).unwrap();
+
+        let mut project =
+            super::builder::from_manifest(&super::scaffold::read_manifest(&text).unwrap()).unwrap();
+        project.icon = super::scaffold::icon_bytes(&text);
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink).unwrap();
+
+        let mut own = Sink::new();
+        let archive = archive::read(&outcome.package, &mut own).unwrap();
+        let table = archive
+            .entry(super::builder::TABLE_ENTRY)
+            .expect("the table must be in the package");
+        assert_eq!(
+            table.compression,
+            archive::Compression::Stored,
+            "Android reads resources.arsc in place, so it may not be compressed"
+        );
+        assert!(
+            table.is_aligned_to(4),
+            "Android maps resources.arsc directly, so it must start on a four byte boundary"
+        );
+
+        let path = directory.join("aligned.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+        if let Some(zipalign) = find_build_tool("zipalign") {
+            let checked = std::process::Command::new(&zipalign)
+                .args(["-c", "-v", "4", path.to_str().unwrap()])
+                .output()
+                .unwrap();
+            assert!(
+                checked.status.success(),
+                "zipalign refused it:\n{}{}",
+                String::from_utf8_lossy(&checked.stdout),
+                String::from_utf8_lossy(&checked.stderr)
+            );
+            eprintln!("alignment: zipalign agrees the package is aligned at four bytes");
+        }
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_manifest_that_names_a_resource_this_build_has_no_table_for_is_refused() {
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let mut project = super::builder::starter("com.tr.yt", "Named");
+        project.manifest = project.manifest.replace(
+            "android:label=\"Named\"",
+            "android:label=\"@string/app_name\"",
+        );
+
+        let refused = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
+            .expect_err("a name with no identifier behind it must be refused");
+        assert_eq!(refused.code, "EB042");
+        assert!(
+            refused
+                .context
+                .iter()
+                .any(|line| line.contains("@string/app_name")),
+            "{:?}",
+            refused.context
         );
     }
 
