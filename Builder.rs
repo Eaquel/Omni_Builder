@@ -1249,6 +1249,906 @@ pub mod plugin {
     }
 }
 
+/// What a compiler is asked, and what it promises back.
+///
+/// Everything a compiler does here goes through five steps, in order, each one
+/// able to refuse:
+///
+///   probe        which compiler is this, is it usable here, and does it
+///                promise the same bytes twice
+///   plan         given these sources and this configuration, what will be
+///                built and what will it be called -- worked out without
+///                building anything
+///   compile      do it, inside a budget, able to be told to stop
+///   diagnostics  what it found, structured, whether it worked or not
+///   artifacts    what came out, checked, or nothing at all
+///
+/// The last word is the one that matters most. A compiler that fails halfway
+/// has produced files, and those files look exactly like the ones a compiler
+/// that succeeded produces. Publishing them is how a build starts lying: the
+/// next step reads half an object, or the cache remembers a key for something
+/// that was never finished. So nothing a compiler makes goes into the store
+/// while it is running. It offers what it produced, the offers are held, and
+/// only a compilation that ran to the end commits them -- and even then each
+/// one is read back out of the store and checked against what went in before
+/// any of it is called an artifact.
+///
+/// The invariant underneath all of it:
+///
+///   the same canonical source, the same dependencies, the same compiler and
+///   toolchain identity, and the same configuration produce the same artifact
+///   digest.
+///
+/// Everything in the plan key exists to make that true, and `Reproducibility`
+/// exists because it is not true of every compiler and a compiler that cannot
+/// promise it has to say so rather than be assumed.
+pub mod compiler {
+    use crate::cache;
+    use crate::caps::{Capability, Decision, Policy};
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::hash::{sha256, Digest};
+    use crate::json::Writer;
+    use crate::plugin::Contract;
+    use crate::store::Store;
+    use crate::FailureClass;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    fn fail(origin: &str, code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            origin,
+            message,
+        )
+    }
+
+    /// The only machines anything built here is meant to run on.
+    ///
+    /// Four, and no more. Every one of them is an Android device or an
+    /// emulator; there is no host build and no desktop target, because nothing
+    /// here is for a desktop. Narrowing this is what makes the back end
+    /// tractable: one object format, one linker convention, one set of
+    /// calling conventions per width.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub enum Abi {
+        Arm64V8a,
+        ArmeabiV7a,
+        X86,
+        X86_64,
+    }
+
+    impl Abi {
+        pub const ALL: &'static [Abi] = &[Abi::Arm64V8a, Abi::ArmeabiV7a, Abi::X86, Abi::X86_64];
+
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Abi::Arm64V8a => "arm64-v8a",
+                Abi::ArmeabiV7a => "armeabi-v7a",
+                Abi::X86 => "x86",
+                Abi::X86_64 => "x86_64",
+            }
+        }
+
+        /// What a Rust or Clang toolchain calls the same machine.
+        pub const fn triple(self) -> &'static str {
+            match self {
+                Abi::Arm64V8a => "aarch64-linux-android",
+                Abi::ArmeabiV7a => "armv7-linux-androideabi",
+                Abi::X86 => "i686-linux-android",
+                Abi::X86_64 => "x86_64-linux-android",
+            }
+        }
+
+        pub const fn is_64_bit(self) -> bool {
+            matches!(self, Abi::Arm64V8a | Abi::X86_64)
+        }
+
+        pub fn parse(value: &str) -> Option<Abi> {
+            Abi::ALL.iter().copied().find(|abi| abi.as_str() == value)
+        }
+    }
+
+    /// The oldest and newest Android anything built here targets.
+    ///
+    /// Nine to seventeen, which is API 28 to 36. Below that is a platform
+    /// nothing here supports; above it is one nothing here has seen.
+    pub const OLDEST_API: u32 = 28;
+    pub const NEWEST_API: u32 = 36;
+
+    pub const fn api_is_supported(level: u32) -> bool {
+        level >= OLDEST_API && level <= NEWEST_API
+    }
+
+    /// Exactly which compiler this is.
+    ///
+    /// Not "Kotlin" but this Kotlin, this version, aimed at this machine, with
+    /// whatever else about it changes what comes out. The digest over all of it
+    /// goes into the plan key, so upgrading a compiler invalidates what the old
+    /// one built rather than quietly serving it.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Identity {
+        pub language: String,
+        pub compiler: String,
+        pub version: String,
+        pub target: String,
+        /// Anything else that decides what comes out: a sysroot, a standard
+        /// library, a linker. Sorted and length-prefixed like everything else.
+        pub components: Vec<(String, String)>,
+    }
+
+    impl Identity {
+        pub fn new(
+            language: impl Into<String>,
+            compiler: impl Into<String>,
+            version: impl Into<String>,
+            target: impl Into<String>,
+        ) -> Identity {
+            Identity {
+                language: language.into(),
+                compiler: compiler.into(),
+                version: version.into(),
+                target: target.into(),
+                components: Vec::new(),
+            }
+        }
+
+        pub fn with(mut self, name: impl Into<String>, value: impl Into<String>) -> Identity {
+            self.components.push((name.into(), value.into()));
+            self
+        }
+
+        pub fn canonical(&self) -> crate::canonical::Record {
+            let components: Vec<(String, Vec<u8>)> = self
+                .components
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_bytes().to_vec()))
+                .collect();
+            let mut record = crate::canonical::Record::new();
+            record
+                .text("language", &self.language)
+                .text("compiler", &self.compiler)
+                .text("version", &self.version)
+                .text("target", &self.target)
+                .table("components", &components);
+            record
+        }
+
+        pub fn digest(&self) -> Digest {
+            self.canonical().to_digest()
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("language", &self.language);
+            w.field_str("compiler", &self.compiler);
+            w.field_str("version", &self.version);
+            w.field_str("target", &self.target);
+            w.begin_array(Some("components"));
+            for (name, value) in &self.components {
+                w.begin_object(None);
+                w.field_str("name", name);
+                w.field_str("value", value);
+                w.end_object();
+            }
+            w.end_array();
+            w.field_str("digest", &self.digest().to_hex());
+            w.end_object();
+        }
+    }
+
+    /// Whether a compiler promises the same bytes for the same inputs.
+    ///
+    /// This is asked rather than assumed, because it is not true of every
+    /// compiler and the ones it is not true of do not announce it. A build that
+    /// treats a compiler as reproducible when it is not gets cache hits that
+    /// are wrong, and finds out much later.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub enum Reproducibility {
+        /// Same inputs, same bytes, always.
+        Always,
+        /// Same inputs, same bytes, as long as these are pinned. A compiler
+        /// that embeds a path or a timestamp unless told not to says so here.
+        Given(Vec<String>),
+        /// Not known to be. Anything this produces is used once and not
+        /// remembered as standing for its inputs.
+        Unknown,
+    }
+
+    impl Reproducibility {
+        pub const fn may_be_cached(&self) -> bool {
+            !matches!(self, Reproducibility::Unknown)
+        }
+
+        pub fn as_str(&self) -> &'static str {
+            match self {
+                Reproducibility::Always => "ALWAYS",
+                Reproducibility::Given(_) => "GIVEN",
+                Reproducibility::Unknown => "UNKNOWN",
+            }
+        }
+    }
+
+    /// One thing to be compiled, as the compiler sees it.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Source {
+        pub path: String,
+        pub digest: Digest,
+        pub bytes: u64,
+    }
+
+    impl Source {
+        pub fn of(path: impl Into<String>, content: &[u8]) -> Source {
+            Source {
+                path: path.into(),
+                digest: sha256(content),
+                bytes: content.len() as u64,
+            }
+        }
+    }
+
+    /// What is being asked for.
+    ///
+    /// Everything in here reaches the plan key, so two requests that differ
+    /// anywhere are two different compilations and neither is served for the
+    /// other.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Request {
+        pub sources: Vec<Source>,
+        /// What this compilation was given, by digest. Not what produced them.
+        pub dependencies: Vec<Digest>,
+        pub abi: Abi,
+        pub api_level: u32,
+        pub optimise: bool,
+        pub debug_info: bool,
+        pub options: Vec<(String, String)>,
+    }
+
+    impl Request {
+        pub fn new(abi: Abi, api_level: u32) -> Request {
+            Request {
+                sources: Vec::new(),
+                dependencies: Vec::new(),
+                abi,
+                api_level,
+                optimise: true,
+                debug_info: false,
+                options: Vec::new(),
+            }
+        }
+
+        pub fn with_source(mut self, source: Source) -> Request {
+            self.sources.push(source);
+            self
+        }
+
+        /// The sources, in a fixed order, so that handing them over in another
+        /// order is the same compilation.
+        pub fn ordered_sources(&self) -> Vec<Source> {
+            let mut sorted = self.sources.clone();
+            sorted.sort_by(|left, right| {
+                left.path
+                    .cmp(&right.path)
+                    .then_with(|| left.digest.cmp(&right.digest))
+            });
+            sorted
+        }
+
+        pub fn canonical(&self) -> crate::canonical::Record {
+            let sources: Vec<Vec<u8>> = self
+                .ordered_sources()
+                .iter()
+                .map(|source| {
+                    let mut one = crate::canonical::Record::new();
+                    one.text("path", &source.path)
+                        .digest("digest", source.digest);
+                    one.encode()
+                })
+                .collect();
+
+            let dependencies: Vec<Vec<u8>> = {
+                let mut sorted: Vec<Digest> = self.dependencies.clone();
+                sorted.sort();
+                sorted.dedup();
+                sorted
+                    .iter()
+                    .map(|digest| digest.as_bytes().to_vec())
+                    .collect()
+            };
+
+            let options: Vec<(String, Vec<u8>)> = self
+                .options
+                .iter()
+                .map(|(name, value)| (name.clone(), value.as_bytes().to_vec()))
+                .collect();
+
+            let mut record = crate::canonical::Record::new();
+            record
+                .sequence("sources", &sources)
+                .set("dependencies", &dependencies)
+                .text("abi", self.abi.as_str())
+                .number("api", u64::from(self.api_level))
+                .flag("optimise", self.optimise)
+                .flag("debugInfo", self.debug_info)
+                .table("options", &options);
+            record
+        }
+    }
+
+    /// What was found when the compiler was asked whether it could work here.
+    #[derive(Clone, Debug)]
+    pub struct Probe {
+        pub identity: Option<Identity>,
+        pub reproducibility: Reproducibility,
+        /// Why not, when there is no identity. A compiler that is simply not
+        /// installed is not a failure of the build; it is a fact about the
+        /// machine, and it is said plainly.
+        pub unavailable: Option<Diagnostic>,
+    }
+
+    impl Probe {
+        pub fn usable(identity: Identity, reproducibility: Reproducibility) -> Probe {
+            Probe {
+                identity: Some(identity),
+                reproducibility,
+                unavailable: None,
+            }
+        }
+
+        pub fn unavailable(why: Diagnostic) -> Probe {
+            Probe {
+                identity: None,
+                reproducibility: Reproducibility::Unknown,
+                unavailable: Some(why),
+            }
+        }
+
+        pub fn is_usable(&self) -> bool {
+            self.identity.is_some()
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_bool("usable", self.is_usable());
+            w.field_str("reproducibility", self.reproducibility.as_str());
+            if let Reproducibility::Given(conditions) = &self.reproducibility {
+                w.begin_array(Some("reproducibleGiven"));
+                for condition in conditions {
+                    w.element_str(condition);
+                }
+                w.end_array();
+            }
+            match &self.identity {
+                Some(identity) => identity.write_json(w, "identity"),
+                None => {
+                    if let Some(why) = &self.unavailable {
+                        w.field_str("unavailable", &why.message);
+                    }
+                }
+            }
+            w.end_object();
+        }
+    }
+
+    /// What a compiler will produce, said before it produces it.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Expected {
+        pub name: String,
+        pub kind: Kind,
+    }
+
+    /// What kind of thing came out.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+    pub enum Kind {
+        JvmClass,
+        Dex,
+        Object,
+        SharedObject,
+        StaticLibrary,
+        Resource,
+        Metadata,
+    }
+
+    impl Kind {
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Kind::JvmClass => "jvm.class",
+                Kind::Dex => "dex",
+                Kind::Object => "native.object",
+                Kind::SharedObject => "native.shared",
+                Kind::StaticLibrary => "native.static",
+                Kind::Resource => "resource",
+                Kind::Metadata => "metadata",
+            }
+        }
+    }
+
+    /// What will be done, worked out without doing it.
+    ///
+    /// The key is the invariant. Two plans with one key are the same
+    /// compilation and either may stand for the other; two that differ anywhere
+    /// have different keys and neither does.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Plan {
+        pub key: cache::Key,
+        pub identity: Identity,
+        pub expected: Vec<Expected>,
+        pub reproducibility: Reproducibility,
+    }
+
+    impl Plan {
+        /// The key for a request compiled by this identity.
+        ///
+        /// This is the one place the invariant is decided, so it is the one
+        /// place it can be got wrong. Everything that changes what comes out is
+        /// in here and nothing that does not is.
+        pub fn key_for(identity: &Identity, request: &Request) -> cache::Key {
+            let mut record = crate::canonical::Record::new();
+            record
+                .record("identity", &identity.canonical())
+                .record("request", &request.canonical());
+            cache::Key::from_digest(record.to_digest())
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("key", &self.key.to_hex());
+            w.field_str("reproducibility", self.reproducibility.as_str());
+            self.identity.write_json(w, "identity");
+            w.begin_array(Some("expected"));
+            for one in &self.expected {
+                w.begin_object(None);
+                w.field_str("name", &one.name);
+                w.field_str("kind", one.kind.as_str());
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// How much a compilation may spend, and how it is told to stop.
+    ///
+    /// A build on a phone shares the machine with everything the person is
+    /// actually doing. A compiler with no limit is not thorough; it is a
+    /// compiler that will be killed by the system at a moment nobody chose,
+    /// leaving whatever it had written behind.
+    #[derive(Clone, Debug)]
+    pub struct Budget {
+        pub seconds: u64,
+        pub output_bytes: u64,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl Budget {
+        pub fn of(seconds: u64, output_bytes: u64) -> Budget {
+            Budget {
+                seconds,
+                output_bytes,
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        /// A handle that can stop this compilation from another thread.
+        pub fn stopper(&self) -> Stopper {
+            Stopper {
+                flag: Arc::clone(&self.cancelled),
+            }
+        }
+
+        pub fn is_cancelled(&self) -> bool {
+            self.cancelled.load(Ordering::Relaxed)
+        }
+    }
+
+    impl Default for Budget {
+        fn default() -> Budget {
+            Budget::of(300, 512 * 1024 * 1024)
+        }
+    }
+
+    /// Asks a compilation to stop.
+    ///
+    /// Asking twice is asking once, and asking after it has finished is
+    /// nothing at all.
+    #[derive(Clone, Debug)]
+    pub struct Stopper {
+        flag: Arc<AtomicBool>,
+    }
+
+    impl Stopper {
+        pub fn stop(&self) {
+            self.flag.store(true, Ordering::Relaxed);
+        }
+
+        pub fn is_stopped(&self) -> bool {
+            self.flag.load(Ordering::Relaxed)
+        }
+    }
+
+    /// One thing a compilation produced, in the store and checked.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Produced {
+        pub name: String,
+        pub kind: Kind,
+        pub digest: Digest,
+        pub bytes: u64,
+    }
+
+    /// What a compilation came to.
+    #[derive(Clone, Debug)]
+    pub struct Compiled {
+        pub key: cache::Key,
+        pub identity: Identity,
+        pub produced: Vec<Produced>,
+        pub reproducibility: Reproducibility,
+    }
+
+    impl Compiled {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("key", &self.key.to_hex());
+            w.field_str("reproducibility", self.reproducibility.as_str());
+            self.identity.write_json(w, "identity");
+            w.begin_array(Some("produced"));
+            for one in &self.produced {
+                w.begin_object(None);
+                w.field_str("name", &one.name);
+                w.field_str("kind", one.kind.as_str());
+                w.field_str("digest", &one.digest.to_hex());
+                w.field_u64("bytes", one.bytes);
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// A compilation while it is happening.
+    ///
+    /// Everything a compiler produces is offered here and held. Nothing reaches
+    /// the store until [`Session::commit`], and commit happens only for a
+    /// compilation that ran to the end. A compiler that fails, is cancelled, or
+    /// runs past its budget drops the session, and what it had made goes with
+    /// it -- which is the point. Half a compilation looks exactly like a whole
+    /// one from the outside, and the only moment anybody can tell the
+    /// difference is this one.
+    pub struct Session<'a> {
+        origin: &'static str,
+        store: &'a Store,
+        policy: &'a mut Policy,
+        diagnostics: &'a mut Sink,
+        budget: Budget,
+        started: std::time::Instant,
+        offered: Vec<(String, Kind, Vec<u8>)>,
+        spent: u64,
+    }
+
+    impl<'a> Session<'a> {
+        pub fn new(
+            origin: &'static str,
+            store: &'a Store,
+            policy: &'a mut Policy,
+            diagnostics: &'a mut Sink,
+            budget: Budget,
+        ) -> Session<'a> {
+            Session {
+                origin,
+                store,
+                policy,
+                diagnostics,
+                budget,
+                started: std::time::Instant::now(),
+                offered: Vec::new(),
+                spent: 0,
+            }
+        }
+
+        pub fn store(&self) -> &Store {
+            self.store
+        }
+
+        pub fn budget(&self) -> &Budget {
+            &self.budget
+        }
+
+        /// Asks for a capability the contract declared. A compiler that asks
+        /// for one it did not declare is refused by the policy, not by
+        /// politeness.
+        pub fn require(&mut self, capability: Capability) -> Decision {
+            self.policy.request(self.origin, capability)
+        }
+
+        pub fn report(&mut self, diagnostic: Diagnostic) {
+            self.diagnostics.emit(diagnostic);
+        }
+
+        /// Whether to carry on.
+        ///
+        /// Called between units of work. A compiler that never calls this
+        /// cannot be stopped and cannot be held to a budget, which is why the
+        /// contract says to call it and a test checks that each one does.
+        pub fn carry_on(&self) -> Result<(), Diagnostic> {
+            if self.budget.is_cancelled() {
+                return Err(Diagnostic::new(
+                    "EX001",
+                    Severity::Warning,
+                    FailureClass::UserError,
+                    self.origin,
+                    "The compilation was stopped.",
+                )
+                .with_suggestion(
+                    "Nothing it had produced was published, so nothing downstream can \
+                     read half of it.",
+                ));
+            }
+            let spent = self.started.elapsed().as_secs();
+            if spent > self.budget.seconds {
+                return Err(fail(
+                    self.origin,
+                    "EX002",
+                    "The compilation ran past the time it was given.",
+                )
+                .with_context(format!("Spent: {spent} seconds"))
+                .with_context(format!("Allowed: {} seconds", self.budget.seconds))
+                .with_suggestion(
+                    "Nothing it had produced was published. A build on a device shares \
+                     that device with whatever the person is actually doing.",
+                ));
+            }
+            Ok(())
+        }
+
+        /// Offers something the compilation produced.
+        ///
+        /// It is held, not stored. Two offers under one name are a mistake in
+        /// the compiler and are refused here rather than silently keeping one
+        /// of them.
+        pub fn offer(
+            &mut self,
+            name: impl Into<String>,
+            kind: Kind,
+            bytes: Vec<u8>,
+        ) -> Result<(), Diagnostic> {
+            self.carry_on()?;
+            let name = name.into();
+            if self.offered.iter().any(|(held, _, _)| *held == name) {
+                return Err(fail(
+                    self.origin,
+                    "EX003",
+                    "One compilation offered two things under one name.",
+                )
+                .with_context(format!("Name: {name}")));
+            }
+            self.spent += bytes.len() as u64;
+            if self.spent > self.budget.output_bytes {
+                return Err(fail(
+                    self.origin,
+                    "EX004",
+                    "The compilation produced more than it was allowed to.",
+                )
+                .with_context(format!("Produced: {} bytes", self.spent))
+                .with_context(format!("Allowed: {} bytes", self.budget.output_bytes)));
+            }
+            self.offered.push((name, kind, bytes));
+            Ok(())
+        }
+
+        pub fn offered(&self) -> usize {
+            self.offered.len()
+        }
+
+        /// Puts everything the compilation offered into the store, and checks
+        /// every one of it on the way out.
+        ///
+        /// Storing and then reading back is not paranoia about the store, which
+        /// checks itself. It is the last place a compiler that offered bytes it
+        /// did not mean can be caught, and it is cheap next to having compiled
+        /// them.
+        pub fn commit(self, plan: &Plan) -> Result<Compiled, Diagnostic> {
+            if plan.expected.len() != self.offered.len() {
+                return Err(fail(
+                    self.origin,
+                    "EX005",
+                    "The compilation did not produce what it planned to.",
+                )
+                .with_context(format!("Planned: {} outputs", plan.expected.len()))
+                .with_context(format!("Produced: {} outputs", self.offered.len()))
+                .with_suggestion(
+                    "A plan is a promise about what will exist. Nothing is published \
+                     from a compilation that did not keep it.",
+                ));
+            }
+
+            let mut produced = Vec::with_capacity(self.offered.len());
+            for (name, kind, bytes) in &self.offered {
+                let promised = plan.expected.iter().find(|one| one.name == *name);
+                let Some(promised) = promised else {
+                    return Err(fail(
+                        self.origin,
+                        "EX006",
+                        "The compilation produced something it never planned to.",
+                    )
+                    .with_context(format!("Name: {name}")));
+                };
+                if promised.kind != *kind {
+                    return Err(fail(
+                        self.origin,
+                        "EX007",
+                        "The compilation produced something other than what it planned.",
+                    )
+                    .with_context(format!("Name: {name}"))
+                    .with_context(format!("Planned: {}", promised.kind.as_str()))
+                    .with_context(format!("Produced: {}", kind.as_str())));
+                }
+
+                let digest = self.store.put(bytes)?;
+                let back = self.store.get(digest)?;
+                if back != *bytes {
+                    return Err(Diagnostic::new(
+                        "EX008",
+                        Severity::Fatal,
+                        FailureClass::Corruption,
+                        self.origin,
+                        "What was stored is not what was compiled.",
+                    )
+                    .with_context(format!("Name: {name}")));
+                }
+                produced.push(Produced {
+                    name: name.clone(),
+                    kind: *kind,
+                    digest,
+                    bytes: bytes.len() as u64,
+                });
+            }
+
+            produced.sort_by(|left, right| left.name.cmp(&right.name));
+            Ok(Compiled {
+                key: plan.key,
+                identity: plan.identity.clone(),
+                produced,
+                reproducibility: plan.reproducibility.clone(),
+            })
+        }
+    }
+
+    impl std::fmt::Debug for Session<'_> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "Session {{ origin: {}, offered: {} }}",
+                self.origin,
+                self.offered.len()
+            )
+        }
+    }
+
+    /// What every compiler here is.
+    ///
+    /// A compiler never sees the build that called it and never reaches back
+    /// into it. It is handed a request and a session and it answers; everything
+    /// it needs is in front of it. That is what makes one replaceable by
+    /// another and what stops any of them growing a special case for whatever
+    /// happens to be calling.
+    pub trait Compiler: Sync {
+        fn contract(&self) -> &'static Contract;
+
+        /// Which compiler this is, and whether it can work here at all.
+        fn probe(&self) -> Probe;
+
+        /// What would be built, without building it.
+        fn plan(&self, request: &Request) -> Result<Plan, Diagnostic>;
+
+        /// Build it.
+        fn compile(
+            &self,
+            plan: &Plan,
+            request: &Request,
+            session: Session<'_>,
+        ) -> Result<Compiled, Diagnostic>;
+    }
+
+    /// The checks every compiler here has to pass, whatever it compiles.
+    ///
+    /// A contract is only worth what is enforced, and most of these are things
+    /// that would otherwise be true of three compilers and quietly false of the
+    /// fourth. Running one function over all of them is how that stops
+    /// happening.
+    pub fn check_contract(compiler: &dyn Compiler) -> Vec<String> {
+        let contract = compiler.contract();
+        let mut wrong = Vec::new();
+
+        if contract.id.is_empty() || !contract.id.starts_with("omni.plugin.") {
+            wrong.push(format!(
+                "{}: an id must be omni.plugin.something",
+                contract.id
+            ));
+        }
+        for required in contract.required_capabilities {
+            if contract.forbidden_capabilities.contains(required) {
+                wrong.push(format!(
+                    "{}: {} is both required and forbidden",
+                    contract.id,
+                    required.as_str()
+                ));
+            }
+        }
+        if contract.outputs.is_empty() {
+            wrong.push(format!(
+                "{}: a compiler that outputs nothing is not one",
+                contract.id
+            ));
+        }
+        if contract.non_responsibilities.is_empty() {
+            wrong.push(format!(
+                "{}: what a compiler does not do is part of what it is",
+                contract.id
+            ));
+        }
+
+        let probe = compiler.probe();
+        match (&probe.identity, &probe.unavailable) {
+            (Some(_), Some(_)) => wrong.push(format!(
+                "{}: a probe cannot be both usable and unavailable",
+                contract.id
+            )),
+            (None, None) => wrong.push(format!(
+                "{}: a probe that found nothing has to say why",
+                contract.id
+            )),
+            _ => {}
+        }
+        if let Some(identity) = &probe.identity {
+            if identity.version.is_empty() {
+                wrong.push(format!(
+                    "{}: an identity without a version is not one",
+                    contract.id
+                ));
+            }
+            if contract.status.may_produce_artifacts() && identity.language.is_empty() {
+                wrong.push(format!(
+                    "{}: an identity has to name its language",
+                    contract.id
+                ));
+            }
+        }
+
+        // A plan for one request has to be the same plan every time, or the
+        // invariant this whole contract exists for does not hold.
+        let request = Request::new(Abi::Arm64V8a, OLDEST_API)
+            .with_source(Source::of("probe.txt", b"anything at all"));
+        if let (Ok(first), Ok(again)) = (compiler.plan(&request), compiler.plan(&request)) {
+            if first.key != again.key {
+                wrong.push(format!(
+                    "{}: planning the same request twice gave two keys",
+                    contract.id
+                ));
+            }
+            if first.identity.digest() != again.identity.digest() {
+                wrong.push(format!(
+                    "{}: an identity that moves is not one",
+                    contract.id
+                ));
+            }
+        }
+
+        // And two requests that differ have to plan differently.
+        let other = Request::new(Abi::X86_64, OLDEST_API)
+            .with_source(Source::of("probe.txt", b"anything at all"));
+        if let (Ok(first), Ok(second)) = (compiler.plan(&request), compiler.plan(&other)) {
+            if first.key == second.key {
+                wrong.push(format!(
+                    "{}: two machines planned to the same key",
+                    contract.id
+                ));
+            }
+        }
+
+        wrong
+    }
+}
+
 pub mod toolchain {
     use crate::diag::{Diagnostic, Severity, Sink};
     use crate::json::Writer;
@@ -4848,6 +5748,15 @@ pub mod cache {
     pub struct Key(Digest);
 
     impl Key {
+        /// A key over a digest somebody else worked out.
+        ///
+        /// The compiler contract builds its own key over its own canonical
+        /// record, and this is how that becomes the same kind of thing the
+        /// cache holds, without either side reaching into the other.
+        pub fn from_digest(digest: Digest) -> Key {
+            Key(digest)
+        }
+
         pub fn to_hex(self) -> String {
             self.0.to_hex()
         }
@@ -29879,6 +30788,350 @@ mod tests {
 
     fn hex_string(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// A compiler that does whatever a test needs it to, so that the contract
+    /// can be held to its promises without a real one in the way.
+    struct Pretend {
+        outputs: Vec<(String, super::compiler::Kind, Vec<u8>)>,
+        /// What it actually offers, when that is meant to differ from the plan.
+        offers: Option<Vec<(String, super::compiler::Kind, Vec<u8>)>>,
+        stop_after: Option<usize>,
+        stopper: std::sync::Mutex<Option<super::compiler::Stopper>>,
+    }
+
+    static PRETEND_CONTRACT: super::plugin::Contract = super::plugin::Contract {
+        id: "omni.plugin.pretend",
+        display_name: "Pretend",
+        version: super::plugin::Version::new(0, 1, 0),
+        status: super::Status::Experimental,
+        summary: "A compiler that exists so the contract can be tested.",
+        inputs: &["pretend.source"],
+        outputs: &["jvm.class"],
+        required_capabilities: &[super::caps::Capability::TempStorage],
+        forbidden_capabilities: &[super::caps::Capability::Network],
+        non_responsibilities: &["Compiling anything."],
+    };
+
+    impl super::compiler::Compiler for Pretend {
+        fn contract(&self) -> &'static super::plugin::Contract {
+            &PRETEND_CONTRACT
+        }
+
+        fn probe(&self) -> super::compiler::Probe {
+            super::compiler::Probe::usable(
+                super::compiler::Identity::new("pretend", "pretend", "1.0.0", "any"),
+                super::compiler::Reproducibility::Always,
+            )
+        }
+
+        fn plan(
+            &self,
+            request: &super::compiler::Request,
+        ) -> Result<super::compiler::Plan, super::diag::Diagnostic> {
+            let identity = self.probe().identity.unwrap();
+            Ok(super::compiler::Plan {
+                key: super::compiler::Plan::key_for(&identity, request),
+                identity,
+                expected: self
+                    .outputs
+                    .iter()
+                    .map(|(name, kind, _)| super::compiler::Expected {
+                        name: name.clone(),
+                        kind: *kind,
+                    })
+                    .collect(),
+                reproducibility: super::compiler::Reproducibility::Always,
+            })
+        }
+
+        fn compile(
+            &self,
+            plan: &super::compiler::Plan,
+            _request: &super::compiler::Request,
+            mut session: super::compiler::Session<'_>,
+        ) -> Result<super::compiler::Compiled, super::diag::Diagnostic> {
+            let offering = self.offers.as_ref().unwrap_or(&self.outputs);
+            for (index, (name, kind, bytes)) in offering.iter().enumerate() {
+                if self.stop_after == Some(index) {
+                    // Taken out and put back, so the guard is gone before the
+                    // stop happens. Holding a lock across anything else is how
+                    // the first version of this test deadlocked against itself.
+                    let stopper = self.stopper.lock().unwrap().clone();
+                    if let Some(stopper) = stopper {
+                        stopper.stop();
+                    }
+                }
+                session.offer(name.clone(), *kind, bytes.clone())?;
+            }
+            session.commit(plan)
+        }
+    }
+
+    fn pretend(outputs: Vec<(&str, super::compiler::Kind, &[u8])>) -> Pretend {
+        Pretend {
+            outputs: outputs
+                .into_iter()
+                .map(|(name, kind, bytes)| (name.to_string(), kind, bytes.to_vec()))
+                .collect(),
+            offers: None,
+            stop_after: None,
+            stopper: std::sync::Mutex::new(None),
+        }
+    }
+
+    #[test]
+    fn nothing_a_compiler_made_is_published_unless_all_of_it_was() {
+        use super::compiler::{Budget, Compiler, Kind, Request, Session};
+
+        let directory = temp_directory("omni-compiler-contract");
+        let store = super::store::Store::at(directory.to_str().unwrap());
+        let request = Request::new(super::compiler::Abi::Arm64V8a, 28)
+            .with_source(super::compiler::Source::of("A.java", b"class A {}"));
+
+        let session_of = |budget: Budget| {
+            let policy: &'static mut super::caps::Policy =
+                Box::leak(Box::new(super::caps::Policy::new("test")));
+            let sink: &'static mut super::diag::Sink =
+                Box::leak(Box::new(super::diag::Sink::new()));
+            Session::new("omni.plugin.pretend", &store, policy, sink, budget)
+        };
+
+        // A compilation that runs to the end publishes everything, and each one
+        // is read back out of the store and checked before it is called an
+        // artifact.
+        let good = pretend(vec![
+            ("A.class", Kind::JvmClass, b"one"),
+            ("B.class", Kind::JvmClass, b"two"),
+        ]);
+        let plan = good.plan(&request).unwrap();
+        let compiled = good
+            .compile(&plan, &request, session_of(Budget::default()))
+            .expect("a compilation that finishes must publish");
+        assert_eq!(compiled.produced.len(), 2);
+        assert_eq!(compiled.key, plan.key);
+        for one in &compiled.produced {
+            assert!(store.has(one.digest), "{} must be in the store", one.name);
+        }
+        let held_after_success = store.list().len();
+        assert_eq!(held_after_success, 2);
+
+        // A compilation that produces less than it planned publishes nothing.
+        // The half it did produce looks exactly like the half of a compilation
+        // that worked, and this is the only moment anybody can tell.
+        let mut short = pretend(vec![
+            ("A.class", Kind::JvmClass, b"one"),
+            ("B.class", Kind::JvmClass, b"two"),
+        ]);
+        short.offers = Some(vec![(
+            "A.class".to_string(),
+            Kind::JvmClass,
+            b"one".to_vec(),
+        )]);
+        let plan = short.plan(&request).unwrap();
+        let refused = short
+            .compile(&plan, &request, session_of(Budget::default()))
+            .expect_err("a compilation that did not keep its plan must publish nothing");
+        assert_eq!(refused.code, "EX005");
+        assert_eq!(
+            store.list().len(),
+            held_after_success,
+            "nothing new may have reached the store"
+        );
+
+        // Something it never planned to make is refused too, whatever it is.
+        let mut extra = pretend(vec![("A.class", Kind::JvmClass, b"one")]);
+        extra.offers = Some(vec![(
+            "Surprise.class".to_string(),
+            Kind::JvmClass,
+            b"one".to_vec(),
+        )]);
+        let plan = extra.plan(&request).unwrap();
+        assert_eq!(
+            extra
+                .compile(&plan, &request, session_of(Budget::default()))
+                .expect_err("an unplanned output must be refused")
+                .code,
+            "EX006"
+        );
+
+        // And something of the wrong kind, which is how a plan stops being a
+        // promise about what will exist and starts being a wish.
+        let mut wrong = pretend(vec![("A.class", Kind::JvmClass, b"one")]);
+        wrong.offers = Some(vec![("A.class".to_string(), Kind::Dex, b"one".to_vec())]);
+        let plan = wrong.plan(&request).unwrap();
+        assert_eq!(
+            wrong
+                .compile(&plan, &request, session_of(Budget::default()))
+                .expect_err("the wrong kind must be refused")
+                .code,
+            "EX007"
+        );
+
+        // Told to stop, it stops, and nothing it had made is published.
+        let mut cancelled = pretend(vec![
+            ("A.class", Kind::JvmClass, b"one"),
+            ("B.class", Kind::JvmClass, b"two"),
+        ]);
+        cancelled.stop_after = Some(1);
+        let plan = cancelled.plan(&request).unwrap();
+        let budget = Budget::default();
+        *cancelled.stopper.lock().unwrap() = Some(budget.stopper());
+        let stopped = cancelled
+            .compile(&plan, &request, session_of(budget))
+            .expect_err("a compilation that was stopped must publish nothing");
+        assert_eq!(stopped.code, "EX001");
+        assert_eq!(store.list().len(), held_after_success);
+
+        // Past what it was allowed to produce, it is refused. A build on a
+        // device shares that device with whatever the person is doing.
+        let big = pretend(vec![("A.class", Kind::JvmClass, b"more than four bytes")]);
+        let plan = big.plan(&request).unwrap();
+        assert_eq!(
+            big.compile(&plan, &request, session_of(Budget::of(300, 4)))
+                .expect_err("past its budget must be refused")
+                .code,
+            "EX004"
+        );
+        assert_eq!(store.list().len(), held_after_success);
+
+        // Two things under one name is a mistake in the compiler, not a choice
+        // about which one to keep.
+        let mut twice = pretend(vec![
+            ("A.class", Kind::JvmClass, b"one"),
+            ("A.class", Kind::JvmClass, b"two"),
+        ]);
+        twice.offers = Some(vec![
+            ("A.class".to_string(), Kind::JvmClass, b"one".to_vec()),
+            ("A.class".to_string(), Kind::JvmClass, b"two".to_vec()),
+        ]);
+        let plan = twice.plan(&request).unwrap();
+        assert_eq!(
+            twice
+                .compile(&plan, &request, session_of(Budget::default()))
+                .expect_err("one name twice must be refused")
+                .code,
+            "EX003"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "contract: a compilation publishes all of what it planned or none of it, \
+             and every published byte is read back and checked"
+        );
+    }
+
+    #[test]
+    fn the_same_everything_plans_to_the_same_key_and_anything_else_does_not() {
+        use super::compiler::{Abi, Identity, Plan, Request, Source};
+
+        let identity = Identity::new("kotlin", "omni.kotlin", "2.4.10", "aarch64-linux-android");
+        let base = Request::new(Abi::Arm64V8a, 28)
+            .with_source(Source::of("A.kt", b"fun main() {}"))
+            .with_source(Source::of("B.kt", b"fun other() {}"));
+
+        // The invariant, stated: the same canonical source, dependencies,
+        // identity and configuration come to the same key.
+        assert_eq!(
+            Plan::key_for(&identity, &base),
+            Plan::key_for(&identity, &base)
+        );
+
+        // Handing the same sources over in another order is the same
+        // compilation, not a different one.
+        let reordered = Request::new(Abi::Arm64V8a, 28)
+            .with_source(Source::of("B.kt", b"fun other() {}"))
+            .with_source(Source::of("A.kt", b"fun main() {}"));
+        assert_eq!(
+            Plan::key_for(&identity, &base),
+            Plan::key_for(&identity, &reordered),
+            "the order sources were handed over in must not decide anything"
+        );
+
+        // And everything that does change what comes out has to change the key.
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(Plan::key_for(&identity, &base).to_hex());
+
+        let mut changed = base.clone();
+        changed.abi = Abi::X86_64;
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "abi"
+        );
+
+        let mut changed = base.clone();
+        changed.api_level = 36;
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "api"
+        );
+
+        let mut changed = base.clone();
+        changed.optimise = !changed.optimise;
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "optimise"
+        );
+
+        let mut changed = base.clone();
+        changed.debug_info = !changed.debug_info;
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "debug info"
+        );
+
+        let mut changed = base.clone();
+        changed.dependencies.push(super::hash::sha256(b"a library"));
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "dependencies"
+        );
+
+        let mut changed = base.clone();
+        changed
+            .options
+            .push(("jvmTarget".to_string(), "25".to_string()));
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "options"
+        );
+
+        let changed = Request::new(Abi::Arm64V8a, 28)
+            .with_source(Source::of("A.kt", b"fun main() { }"))
+            .with_source(Source::of("B.kt", b"fun other() {}"));
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "source bytes"
+        );
+
+        let changed = Request::new(Abi::Arm64V8a, 28)
+            .with_source(Source::of("Renamed.kt", b"fun main() {}"))
+            .with_source(Source::of("B.kt", b"fun other() {}"));
+        assert!(
+            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
+            "source name"
+        );
+
+        // A different compiler is a different compilation, however identical
+        // everything else is. This is what makes upgrading one invalidate what
+        // the old one built instead of quietly serving it.
+        for moved in [
+            Identity::new("kotlin", "omni.kotlin", "2.4.11", "aarch64-linux-android"),
+            Identity::new("kotlin", "other.kotlin", "2.4.10", "aarch64-linux-android"),
+            Identity::new("java", "omni.kotlin", "2.4.10", "aarch64-linux-android"),
+            Identity::new("kotlin", "omni.kotlin", "2.4.10", "x86_64-linux-android"),
+            identity.clone().with("stdlib", "2.4.10"),
+        ] {
+            assert!(
+                seen.insert(Plan::key_for(&moved, &base).to_hex()),
+                "{moved:?} planned to a key something else already had"
+            );
+        }
+
+        eprintln!(
+            "contract: {} distinct compilations, no two sharing a key",
+            seen.len()
+        );
     }
 
     #[test]
