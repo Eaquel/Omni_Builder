@@ -7448,6 +7448,45 @@ pub mod binary {
             )
         }
 
+        /// Text as a class file holds it.
+        ///
+        /// Not UTF-8, however much it looks like it. A zero is written as two
+        /// bytes so that no string can contain one, and anything outside the
+        /// basic plane is written as the two surrogates it would be in UTF-16
+        /// rather than as one four-byte sequence. A writer that emits real
+        /// UTF-8 produces class files that most things read and some things
+        /// reject, which is the worst of both.
+        pub fn encode(text: &str) -> Vec<u8> {
+            let mut out = Vec::with_capacity(text.len() + 8);
+            for point in text.chars() {
+                let value = point as u32;
+                if value == 0 {
+                    out.extend_from_slice(&[0xc0, 0x80]);
+                } else if value < 0x80 {
+                    out.push(value as u8);
+                } else if value < 0x800 {
+                    out.push(0xc0 | (value >> 6) as u8);
+                    out.push(0x80 | (value & 0x3f) as u8);
+                } else if value < 0x1_0000 {
+                    out.push(0xe0 | (value >> 12) as u8);
+                    out.push(0x80 | ((value >> 6) & 0x3f) as u8);
+                    out.push(0x80 | (value & 0x3f) as u8);
+                } else {
+                    // Written as the surrogate pair, each surrogate in three
+                    // bytes: six in total, where UTF-8 would use four.
+                    let mut units = [0u16; 2];
+                    let pair = point.encode_utf16(&mut units);
+                    for unit in pair {
+                        let unit = u32::from(*unit);
+                        out.push(0xe0 | (unit >> 12) as u8);
+                        out.push(0x80 | ((unit >> 6) & 0x3f) as u8);
+                        out.push(0x80 | (unit & 0x3f) as u8);
+                    }
+                }
+            }
+            out
+        }
+
         pub fn decode(bytes: &[u8]) -> Result<String, Diagnostic> {
             let mut units: Vec<u16> = Vec::with_capacity(bytes.len());
             let mut index = 0usize;
@@ -23294,21 +23333,45 @@ mod tests {
     }
 
     #[test]
-    fn no_plugin_claims_to_be_implemented() {
+    fn a_plugin_that_claims_to_be_implemented_is() {
+        // This used to say that none of them were, and that was true and worth
+        // saying: a registry full of contracts that describe work nobody wrote
+        // is how a project starts believing its own table of contents. Java is
+        // written now, so the claim changes -- but it does not get dropped. A
+        // plugin allowed to publish artifacts has to have a compiler behind it
+        // that keeps the contract, and one that has no compiler has to still
+        // say PLANNED.
+        let implemented: &[(&str, &dyn super::compiler::Compiler)] =
+            &[("omni.plugin.java", &super::compilers::java::COMPILER)];
+
         for plugin in Registry::builtin().all() {
             let contract = plugin.contract();
-            assert_eq!(
-                contract.status,
-                Status::Planned,
-                "{} claims status {}",
-                contract.id,
-                contract.status
-            );
-            assert!(
-                !contract.status.may_produce_artifacts(),
-                "{} must not be allowed to publish artifacts",
-                contract.id
-            );
+            let real = implemented.iter().find(|(id, _)| *id == contract.id);
+            match real {
+                Some((_, compiler)) => {
+                    assert!(
+                        contract.status.may_produce_artifacts(),
+                        "{} is written and must say so",
+                        contract.id
+                    );
+                    let wrong = super::compiler::check_contract(*compiler);
+                    assert!(wrong.is_empty(), "{}: {wrong:?}", contract.id);
+                }
+                None => {
+                    assert_eq!(
+                        contract.status,
+                        Status::Planned,
+                        "{} claims status {} and nothing implements it",
+                        contract.id,
+                        contract.status
+                    );
+                    assert!(
+                        !contract.status.may_produce_artifacts(),
+                        "{} must not be allowed to publish artifacts",
+                        contract.id
+                    );
+                }
+            }
         }
     }
 
@@ -23321,10 +23384,19 @@ mod tests {
                 policy: &mut policy,
                 diagnostics: &mut sink,
             };
+            // Nothing compiles through this surface, whether it is written or
+            // not: it has no request and nowhere to put what comes out. One
+            // that is written says where to go instead; one that is not says it
+            // does not exist. Neither reports success.
             let error = plugin
                 .execute(&mut ctx)
-                .expect_err("a PLANNED plugin must not report success");
-            assert_eq!(error.code, "E0001");
+                .expect_err("nothing compiles through the plugin surface");
+            assert!(
+                error.code == "E0001" || error.code.starts_with("EJ"),
+                "{}: {}",
+                plugin.contract().id,
+                error.code
+            );
             assert_eq!(error.severity, Severity::Error);
             assert_eq!(error.origin, plugin.contract().id);
             assert!(error.suggestion.is_some());
@@ -23581,8 +23653,21 @@ mod tests {
     fn the_state_report_never_claims_self_hosting() {
         let report = super::state_report("");
         assert!(report.contains("\"selfHosted\":false"));
-        assert!(report.contains("\"implemented\":0"));
         assert!(report.contains("Gradle"));
+
+        // What the report says is implemented has to be what the registry says,
+        // not a number somebody typed. It was zero for a long time and is not
+        // any more; the check is that the two agree, which stays true whatever
+        // the number becomes.
+        let counted = Registry::builtin()
+            .all()
+            .iter()
+            .filter(|plugin| plugin.contract().status.may_produce_artifacts())
+            .count();
+        assert!(
+            report.contains(&format!("\"implemented\":{counted}")),
+            "the report and the registry disagree about how much is written"
+        );
     }
 
     #[test]
