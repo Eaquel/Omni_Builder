@@ -299,9 +299,9 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Big integers",
         status: Status::Partial,
         directive_section: 30,
-        summary: "Arbitrary-precision unsigned arithmetic: add, subtract, multiply, Knuth division and modular exponentiation, checked against arbitrary-precision reference values and against native arithmetic on twenty thousand random pairs.",
+        summary: "Arbitrary-precision unsigned arithmetic: add, subtract, multiply, Knuth division and modular exponentiation, checked against arbitrary-precision reference values and against native arithmetic on twenty thousand random pairs. Exponentiation is a ladder: every rung does one multiplication and one squaring whatever the bit was, and which register each lands in is arithmetic on the bit rather than a jump on it.",
         missing: &[
-            "Nothing here is constant-time. Modular exponentiation is square-and-multiply, so its timing depends on the exponent, and a party able to time a signing operation could learn about the private key from it.",
+            "The multiplication under the ladder is not constant-time: how long it takes still depends on the numbers going into it. For a private key the blinding in front of it means those numbers are drawn fresh every time and correlate with nothing; for a public one there is nothing secret to leak. Neither of those is the same as fixing the arithmetic.",
             "No primality testing and no key generation: a key is read, never made.",
             "Schoolbook multiplication only; no Karatsuba and no Montgomery form.",
         ],
@@ -310,11 +310,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "RSA signing",
         status: Status::Partial,
         directive_section: 25,
-        summary: "RFC 8017 RSASSA-PKCS1-v1_5 signing with SHA-256 and SHA-512, over PKCS#1 and PKCS#8 private keys read with the Core's own DER reader. Signatures are byte-identical to the ones OpenSSL produces from the same key.",
+        summary: "RFC 8017 RSASSA-PKCS1-v1_5 signing with SHA-256 and SHA-512, over PKCS#1 and PKCS#8 private keys read with the Core's own DER reader. Signatures are byte-identical to the ones OpenSSL produces from the same key. Nothing signs unblinded: the message is multiplied by a factor drawn fresh for every signature, so the exponentiation runs on a number nobody outside chose, and the private exponent has a multiple of its order added to it, so two signings with one key walk different rungs. Every signature is then verified with the public exponent before it is handed back, which is what catches a fault in the Chinese-remainder halves.",
         missing: &[
             "Signing only. RSASSA-PSS is not implemented and neither is encryption.",
             "No elliptic-curve arithmetic, so an EC key cannot be used.",
-            "Not constant-time; see the big integer entry.",
+            "Blinding and a ladder, not constant-time arithmetic; see the big integer entry. The key also sits in ordinary memory while it is used.",
         ],
     },
     Subsystem {
@@ -11421,14 +11421,35 @@ pub mod bignum {
                 return Ok(Natural::zero());
             }
 
+            // A ladder rather than square-and-multiply. Square-and-multiply
+            // does one operation for a zero bit and two for a one, so the
+            // shape of a private exponent is written in how long a signature
+            // took. Here every rung does exactly one multiplication and one
+            // squaring, and which register each lands in is worked out by
+            // arithmetic on the bit rather than by jumping on it.
+            //
+            // For a bit b, both rungs come to the same pair of statements:
+            //
+            //     rungs[1 - b] = rungs[0] * rungs[1]
+            //     rungs[b]     = rungs[b] * rungs[b]
+            //
+            // which is the ladder written without an `if`.
+            //
+            // What is left is the multiplication itself, whose timing still
+            // depends on the numbers going into it. That is not fixed here and
+            // is not claimed to be; what stands in front of it for a private
+            // key is the blinding in `rsa::exponentiate`, which makes sure the
+            // numbers going in are ones nobody outside chose.
             let base = self.modulus(modulus)?;
-            let mut result = Natural::one();
+            let mut rungs = [Natural::one(), base];
             for index in (0..exponent.bit_len()).rev() {
-                result = result.mul(&result).modulus(modulus)?;
-                if exponent.bit(index) {
-                    result = result.mul(&base).modulus(modulus)?;
-                }
+                let bit = usize::from(exponent.bit(index));
+                let product = rungs[0].mul(&rungs[1]).modulus(modulus)?;
+                let square = rungs[bit].mul(&rungs[bit]).modulus(modulus)?;
+                rungs[1 - bit] = product;
+                rungs[bit] = square;
             }
+            let [result, _] = rungs;
             Ok(result)
         }
     }
@@ -11972,6 +11993,29 @@ pub mod rsa {
             self.modulus.bit_len()
         }
 
+        /// The same key with its Chinese-remainder parts taken away, so that
+        /// signing has to go through the whole private exponent instead.
+        ///
+        /// Both routes have to arrive at the same signature, and they blind
+        /// against different orders to get there. This is how a test walks the
+        /// route a key without those parts would take.
+        #[cfg(test)]
+        pub fn without_crt(&self) -> PrivateKey {
+            let mut copy = self.clone();
+            copy.exponent1 = Natural::zero();
+            copy.exponent2 = Natural::zero();
+            copy.coefficient = Natural::zero();
+            copy
+        }
+
+        /// The same key with nothing to build a blinding factor on.
+        #[cfg(test)]
+        pub fn without_public_exponent(&self) -> PrivateKey {
+            let mut copy = self.clone();
+            copy.public_exponent = Natural::zero();
+            copy
+        }
+
         pub fn modulus_bytes(&self) -> usize {
             self.modulus.byte_len()
         }
@@ -12412,12 +12456,118 @@ pub mod rsa {
         Ok(out)
     }
 
-    fn exponentiate(key: &PrivateKey, message: &Natural) -> Result<Natural, Diagnostic> {
-        if key.exponent1.is_zero() || key.exponent2.is_zero() || key.coefficient.is_zero() {
-            return message.mod_pow(&key.private_exponent, &key.modulus);
+    /// How much random is mixed into a private exponent before it is used.
+    ///
+    /// Sixty-four bits is far more than enough to make two signings with the
+    /// same key take different paths through the ladder, and it costs sixty-four
+    /// more rungs on an exponent thousands of bits long.
+    const EXPONENT_BLINDING_BITS: usize = 64;
+
+    /// A message nobody outside chose, and the number that turns the answer
+    /// back into the one that was wanted.
+    ///
+    /// The arithmetic underneath a signature is not constant-time: how long a
+    /// multiplication takes depends on the numbers going into it. This is what
+    /// stands in front of that. The exponentiation runs on `message * r^e` for
+    /// an `r` drawn fresh each time, so its timing depends on a number the
+    /// person timing it does not know and cannot influence, and cannot be
+    /// correlated with the message they are trying to learn about. Afterwards
+    /// `r` divides back out, because `(m * r^e)^d = m^d * r`.
+    fn blind(
+        message: &Natural,
+        modulus: &Natural,
+        public_exponent: &Natural,
+    ) -> Result<(Natural, Natural), Diagnostic> {
+        let width = modulus.byte_len().max(1);
+        for _ in 0..64 {
+            let drawn = Natural::from_bytes_be(&crate::random::bytes(width)?).modulus(modulus)?;
+            if drawn.compare(&Natural::one()) != Ordering::Greater {
+                continue;
+            }
+            // A draw sharing a factor with the modulus has no inverse. It also
+            // means the modulus has just been factored, which does not happen;
+            // either way the answer is to draw again.
+            let Ok(undo) = drawn.mod_inverse(modulus) else {
+                continue;
+            };
+            let factor = drawn.mod_pow(public_exponent, modulus)?;
+            let blinded = message.mod_mul(&factor, modulus)?;
+            return Ok((blinded, undo));
         }
-        let m1 = message.mod_pow(&key.exponent1, &key.prime1)?;
-        let m2 = message.mod_pow(&key.exponent2, &key.prime2)?;
+        Err(fail(
+            "ER023",
+            "No blinding factor could be drawn for this modulus.",
+        )
+        .with_suggestion(
+            "Nothing is signed unblinded. A signature computed straight from the message \
+             would let anybody who can time it learn about the key.",
+        ))
+    }
+
+    /// A private exponent with a multiple of the order added to it.
+    ///
+    /// `m^(d + k·t) = m^d` whenever `t` is an order the exponent works modulo,
+    /// so this changes nothing about the answer and everything about the path
+    /// taken to it: two signings with one key walk different rungs.
+    ///
+    /// The order has to be the right one for the modulus the exponent is used
+    /// against, and the two cases are not the same. A CRT half runs modulo a
+    /// prime `p`, where the order is `p - 1`. A whole exponent runs modulo
+    /// `n = p·q`, where it is `(p-1)(q-1)` and emphatically not `p - 1`; adding
+    /// a multiple of `p - 1` there would give a different answer, not the same
+    /// one by another route. Where no order is known, the exponent is used as
+    /// it is, because a wrong one is worse than none.
+    fn blind_exponent(exponent: &Natural, order: Option<Natural>) -> Result<Natural, Diagnostic> {
+        let Some(order) = order else {
+            return Ok(exponent.clone());
+        };
+        if order.is_zero() {
+            return Ok(exponent.clone());
+        }
+        let drawn = Natural::from_bytes_be(&crate::random::bytes(EXPONENT_BLINDING_BITS / 8)?);
+        Ok(exponent.add(&drawn.mul(&order)))
+    }
+
+    /// `p - 1`, for a prime that is there.
+    fn order_below(prime: &Natural) -> Option<Natural> {
+        if prime.is_zero() {
+            return None;
+        }
+        prime.sub(&Natural::one()).ok()
+    }
+
+    fn exponentiate(key: &PrivateKey, message: &Natural) -> Result<Natural, Diagnostic> {
+        if key.public_exponent.is_zero() {
+            return Err(fail(
+                "ER024",
+                "A key with no public exponent cannot be signed with.",
+            )
+            .with_suggestion(
+                "The public exponent is what the blinding is built on, and nothing here \
+                 signs without blinding.",
+            ));
+        }
+
+        let (blinded, undo) = blind(message, &key.modulus, &key.public_exponent)?;
+        let raw = exponentiate_blinded(key, &blinded)?;
+        raw.mod_mul(&undo, &key.modulus)
+    }
+
+    fn exponentiate_blinded(key: &PrivateKey, message: &Natural) -> Result<Natural, Diagnostic> {
+        if key.exponent1.is_zero() || key.exponent2.is_zero() || key.coefficient.is_zero() {
+            // Modulo n, so the order is (p-1)(q-1) and it takes both primes.
+            let whole = match (order_below(&key.prime1), order_below(&key.prime2)) {
+                (Some(below_p), Some(below_q)) => Some(below_p.mul(&below_q)),
+                _ => None,
+            };
+            let exponent = blind_exponent(&key.private_exponent, whole)?;
+            return message.mod_pow(&exponent, &key.modulus);
+        }
+        // Each half runs modulo its own prime, so each takes that prime's order.
+        let d1 = blind_exponent(&key.exponent1, order_below(&key.prime1))?;
+        let d2 = blind_exponent(&key.exponent2, order_below(&key.prime2))?;
+        let m1 = message.mod_pow(&d1, &key.prime1)?;
+        let m2 = message.mod_pow(&d2, &key.prime2)?;
         let difference = m1.add(&key.prime1).sub(&m2.modulus(&key.prime1)?)?;
         let h = key.coefficient.mod_mul(&difference, &key.prime1)?;
         Ok(m2.add(&h.mul(&key.prime2)))
@@ -28926,6 +29076,76 @@ mod tests {
 
     fn hex_string(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn a_signature_is_blinded_and_still_comes_out_the_same_bytes_every_time() {
+        // Blinding draws fresh randomness for every signature. If any of it
+        // reached the answer, two signatures over one digest would differ, and
+        // a build would stop being reproducible -- which is a promise this
+        // project makes and a test elsewhere holds it to. So the first thing to
+        // prove is that none of it does.
+        let key = super::rsa::generate(2048).expect("a key must be made");
+        let digest = super::hash::sha256(b"the same thing, signed again and again");
+
+        let first =
+            super::rsa::sign_digest(&key, super::rsa::DigestAlgorithm::Sha256, digest.as_bytes())
+                .expect("the first signature");
+        for round in 0..6 {
+            let again = super::rsa::sign_digest(
+                &key,
+                super::rsa::DigestAlgorithm::Sha256,
+                digest.as_bytes(),
+            )
+            .expect("and every one after");
+            assert_eq!(
+                first, again,
+                "round {round} produced different bytes, so the blinding leaked into the answer"
+            );
+        }
+
+        // And it verifies, which is what says the blinding divided back out
+        // rather than being lost somewhere.
+        super::rsa::verify(
+            key.modulus(),
+            key.public_exponent(),
+            super::rsa::DigestAlgorithm::Sha256,
+            digest.as_bytes(),
+            &first,
+        )
+        .expect("a blinded signature must verify like any other");
+
+        // The same key without its CRT parts takes the other path through the
+        // exponentiation, where the order is (p-1)(q-1) rather than either
+        // prime's. Getting that wrong gives a different answer, not the same
+        // one by another route, so this is where it would show.
+        let plain = key.without_crt();
+        let without_crt = super::rsa::sign_digest(
+            &plain,
+            super::rsa::DigestAlgorithm::Sha256,
+            digest.as_bytes(),
+        )
+        .expect("the whole exponent must sign too");
+        assert_eq!(
+            first, without_crt,
+            "the two routes through the exponentiation must agree"
+        );
+
+        // A key with no public exponent has nothing to build a blinding on, and
+        // nothing here signs unblinded.
+        let blind_less = key.without_public_exponent();
+        assert_eq!(
+            super::rsa::sign_digest(
+                &blind_less,
+                super::rsa::DigestAlgorithm::Sha256,
+                digest.as_bytes()
+            )
+            .expect_err("signing without anything to blind with must be refused")
+            .code,
+            "ER024"
+        );
+
+        eprintln!("rsa: seven signatures over one digest, blinded afresh each time, all identical");
     }
 
     #[test]
