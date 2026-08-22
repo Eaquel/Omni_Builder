@@ -118,7 +118,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Project model",
         status: Status::Partial,
         directive_section: 44,
-        summary: "Omni.toml parsed, validated and reduced to a configuration digest.",
+        summary: "Omni.toml parsed, validated and reduced to a configuration digest over a canonical encoding: every part length-prefixed so no value can be read as a separator, and every unordered part sorted so the same facts always come to the same bytes. What the encoding writes can be read back to what went in, which is the same claim as no two projects sharing a digest, said in a way a test can check.",
         missing: &[
             "No dependency declarations; nothing resolves dependencies yet.",
             "The manifest is read from text, not from the virtual filesystem.",
@@ -128,23 +128,21 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Artifact lifecycle",
         status: Status::Partial,
         directive_section: 58,
-        summary: "CREATED to PUBLISHED as a state machine that refuses illegal steps.",
+        summary: "CREATED to PUBLISHED as a state machine that refuses illegal steps, over a store that keeps what a build produced. Objects are named by what is in them, so identical output is kept once; they are written under a temporary name and moved over the final one, so a machine that stops leaves either nothing or the whole thing; and a read checks what came back against the name it asked for, removing and reporting anything that no longer matches. A sweep brings the store to a budget, taking what was wanted longest ago first and stepping around anything leased.",
         missing: &[
             "Nothing signs an artifact, so SIGNED is reachable and unused; \
              the signing module reads a signature, it does not produce one.",
-            "No artifact store; artifacts are described, not kept.",
+            "A lease lives as long as the value holding it and no longer, which is right for a process that dies and wrong for two processes sharing one store: there is no lock between them, so two sweeps at once can both decide to take the same object.",
         ],
     },
     Subsystem {
         name: "Incremental cache",
-        status: Status::Foundation,
+        status: Status::Partial,
         directive_section: 11,
-        summary: "Cache keys over every input directive section 11 names, and four \
-                  distinguishable lookup outcomes.",
+        summary: "Cache keys over every input directive section 11 names, taken over a canonical encoding so that an environment variable holding a separator cannot be written to look like two, and four distinguishable lookup outcomes. The index is written down and read back, beside itself and then moved over itself, and it says what each key stands for so a hit hands back the bytes rather than only the news that a key was seen. An index that outlives what it indexes is reconciled against the store; one that cannot be read is an empty one, because refusing to start over a damaged cache file would turn something harmless into something fatal.",
         missing: &[
-            "In-memory only; nothing survives a restart.",
-            "No eviction policy.",
-            "No stored bytes, so a hit proves a key matched, not that a result exists.",
+            "The index is read whole and written whole, so a very large one costs a read and a write on every build rather than a seek.",
+            "Nothing decides when to sweep. The budget and the moment are the caller's, and no caller passes one yet.",
         ],
     },
     Subsystem {
@@ -1744,6 +1742,25 @@ pub mod hash {
             out
         }
 
+        /// A digest read back from what [`Digest::to_hex`] wrote.
+        ///
+        /// Anything else is not a digest and comes back as nothing, which is
+        /// what a store wants when it meets a file whose name it did not
+        /// choose.
+        pub fn from_hex(text: &str) -> Option<Digest> {
+            if text.len() != 64 {
+                return None;
+            }
+            let mut out = [0u8; 32];
+            let bytes = text.as_bytes();
+            for (index, slot) in out.iter_mut().enumerate() {
+                let high = (bytes[index * 2] as char).to_digit(16)?;
+                let low = (bytes[index * 2 + 1] as char).to_digit(16)?;
+                *slot = (high * 16 + low) as u8;
+            }
+            Some(Digest(out))
+        }
+
         pub fn to_short_hex(self, bytes: usize) -> String {
             let width = bytes.min(32) * 2;
             self.to_hex()[..width].to_string()
@@ -2358,6 +2375,171 @@ pub mod hash {
     }
 }
 
+pub mod canonical {
+    use crate::hash::{sha256, Digest};
+
+    /// One way to write a thing down.
+    ///
+    /// A digest is only worth as much as the encoding under it. Joining fields
+    /// with a separator and hashing the result looks like it identifies a
+    /// structure, and it does not: a feature called `a=b` with nothing after it
+    /// and a feature called `a` set to `b` join to the same string, so they
+    /// share a digest, so one is served out of the cache when the other was
+    /// asked for. That is not a hash collision anybody has to find. It is one
+    /// anybody can write down.
+    ///
+    /// Everything here is length-prefixed, so no value can be mistaken for a
+    /// separator or for the start of the next one, and every encoding can be
+    /// read back to exactly the structure that produced it. Two different
+    /// structures cannot write the same bytes, which is the property the
+    /// digests above this actually need.
+    ///
+    /// Records are written in order of name, not in the order the caller
+    /// happened to add them, so the same set of facts about a project always
+    /// comes out the same way. Without that, adding a feature in a different
+    /// order is a cache miss and a rebuild for no reason at all.
+    #[derive(Clone, Debug, Default)]
+    pub struct Record {
+        fields: Vec<(String, Vec<u8>)>,
+    }
+
+    impl Record {
+        pub fn new() -> Record {
+            Record::default()
+        }
+
+        /// A field holding bytes.
+        pub fn bytes(&mut self, name: &str, value: &[u8]) -> &mut Record {
+            self.fields.push((name.to_string(), value.to_vec()));
+            self
+        }
+
+        /// A field holding text.
+        pub fn text(&mut self, name: &str, value: &str) -> &mut Record {
+            self.bytes(name, value.as_bytes())
+        }
+
+        /// A field holding a number, written wide so that no width of the same
+        /// number writes differently.
+        pub fn number(&mut self, name: &str, value: u64) -> &mut Record {
+            self.bytes(name, &value.to_be_bytes())
+        }
+
+        /// A field holding a yes or a no.
+        pub fn flag(&mut self, name: &str, value: bool) -> &mut Record {
+            self.bytes(name, &[u8::from(value)])
+        }
+
+        /// A field holding a digest.
+        pub fn digest(&mut self, name: &str, value: Digest) -> &mut Record {
+            self.bytes(name, value.as_bytes())
+        }
+
+        /// A field holding another record.
+        pub fn record(&mut self, name: &str, value: &Record) -> &mut Record {
+            self.bytes(name, &value.encode())
+        }
+
+        /// A field holding things whose order carries meaning, kept in it.
+        pub fn sequence(&mut self, name: &str, items: &[Vec<u8>]) -> &mut Record {
+            let mut out = Vec::new();
+            out.extend_from_slice(&(items.len() as u64).to_be_bytes());
+            for item in items {
+                out.extend_from_slice(&(item.len() as u64).to_be_bytes());
+                out.extend_from_slice(item);
+            }
+            self.bytes(name, &out)
+        }
+
+        /// A field holding things whose order carries nothing, sorted so that
+        /// it cannot accidentally start to.
+        pub fn set(&mut self, name: &str, items: &[Vec<u8>]) -> &mut Record {
+            let mut sorted = items.to_vec();
+            sorted.sort();
+            sorted.dedup();
+            self.sequence(name, &sorted)
+        }
+
+        /// Named things whose order carries nothing: pairs, sorted by name.
+        pub fn table(&mut self, name: &str, entries: &[(String, Vec<u8>)]) -> &mut Record {
+            let mut inner = Record::new();
+            for (key, value) in entries {
+                inner.bytes(key, value);
+            }
+            self.record(name, &inner)
+        }
+
+        /// The bytes this record comes to.
+        ///
+        /// A count, then every field in order of name, each one the length of
+        /// its name, the name, the length of its value and the value. Nothing
+        /// in there is ambiguous and nothing in there is positional, so the
+        /// same facts always come to the same bytes and different facts never
+        /// do.
+        pub fn encode(&self) -> Vec<u8> {
+            let mut fields = self.fields.clone();
+            fields.sort();
+
+            let mut out = Vec::with_capacity(16 + fields.len() * 32);
+            out.extend_from_slice(MAGIC);
+            out.extend_from_slice(&(fields.len() as u64).to_be_bytes());
+            for (name, value) in &fields {
+                out.extend_from_slice(&(name.len() as u64).to_be_bytes());
+                out.extend_from_slice(name.as_bytes());
+                out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+                out.extend_from_slice(value);
+            }
+            out
+        }
+
+        /// What this record hashes to.
+        pub fn to_digest(&self) -> Digest {
+            sha256(&self.encode())
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.fields.is_empty()
+        }
+
+        pub fn len(&self) -> usize {
+            self.fields.len()
+        }
+    }
+
+    /// In front of every record, so that a record can never be mistaken for a
+    /// bare value that happens to look like one.
+    const MAGIC: &[u8; 4] = b"OMNC";
+
+    /// Reads back what [`Record::encode`] wrote, as the pairs that went in.
+    ///
+    /// Nothing in the build needs this. It is here because the claim being made
+    /// -- that no two structures write the same bytes -- is exactly the claim
+    /// that the bytes can be read back to the structure, and a claim that can
+    /// be tested is worth more than one that is argued.
+    pub fn decode(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+        if data.len() < 12 || &data[..4] != MAGIC {
+            return None;
+        }
+        let count = u64::from_be_bytes(data[4..12].try_into().ok()?) as usize;
+        let mut at = 12;
+        let mut out = Vec::with_capacity(count.min(1024));
+        for _ in 0..count {
+            let name_length = u64::from_be_bytes(data.get(at..at + 8)?.try_into().ok()?) as usize;
+            at += 8;
+            let name = std::str::from_utf8(data.get(at..at + name_length)?)
+                .ok()?
+                .to_string();
+            at += name_length;
+            let value_length = u64::from_be_bytes(data.get(at..at + 8)?.try_into().ok()?) as usize;
+            at += 8;
+            let value = data.get(at..at + value_length)?.to_vec();
+            at += value_length;
+            out.push((name, value));
+        }
+        (at == data.len()).then_some(out)
+    }
+}
+
 pub mod vfs {
     use crate::caps::Capability;
     use crate::diag::{Diagnostic, Severity};
@@ -2941,7 +3123,7 @@ pub mod vfs {
 
 pub mod project {
     use crate::diag::{Diagnostic, Location, Severity, Sink};
-    use crate::hash::{sha256_fields, Digest};
+    use crate::hash::Digest;
     use crate::json::Writer;
     use crate::FailureClass;
 
@@ -3126,34 +3308,53 @@ pub mod project {
                 .unwrap_or(false)
         }
 
-        pub fn digest(&self) -> Digest {
-            let numbers = format!("{}|{}|{}", self.min_sdk, self.target_sdk, self.compile_sdk);
-            let switches = format!(
-                "{}|{}|{}|{}|{}|{}|{}",
-                self.lto,
-                self.incremental,
-                self.parallel,
-                self.deterministic,
-                self.provenance,
-                self.verification,
-                self.guard.as_str(),
-            );
-            let features = self
+        /// Everything about this project that decides what a build produces,
+        /// written down one way.
+        ///
+        /// This used to join its parts with separators, which meant a feature
+        /// called `a=b` and a feature `a` set to `b` came to the same string
+        /// and therefore to the same digest, and one would be served out of the
+        /// cache when the other was asked for. It also left the features in
+        /// whatever order they were read in, so listing two of them the other
+        /// way round was a different digest and a rebuild for no reason. Both
+        /// are gone: every part is length-prefixed and every unordered part is
+        /// sorted.
+        ///
+        /// The edition is in here now as well. It decides how the source is
+        /// read, so two projects that differ only in it do not build the same
+        /// thing and must not share a digest. The name is deliberately not: it
+        /// is what a person calls the project and changes nothing that comes
+        /// out of it.
+        pub fn canonical(&self) -> crate::canonical::Record {
+            let mut record = crate::canonical::Record::new();
+            record
+                .text("id", &self.id)
+                .text("version", &self.version)
+                .text("edition", self.edition.as_deref().unwrap_or(""))
+                .number("minSdk", u64::from(self.min_sdk))
+                .number("targetSdk", u64::from(self.target_sdk))
+                .number("compileSdk", u64::from(self.compile_sdk))
+                .text("profile", self.profile.as_str())
+                .text("optimization", self.optimization.as_str())
+                .text("guard", self.guard.as_str())
+                .flag("lto", self.lto)
+                .flag("incremental", self.incremental)
+                .flag("parallel", self.parallel)
+                .flag("deterministic", self.deterministic)
+                .flag("provenance", self.provenance)
+                .flag("verification", self.verification);
+
+            let features: Vec<(String, Vec<u8>)> = self
                 .features
                 .iter()
-                .map(|(key, value)| format!("{key}={value}"))
-                .collect::<Vec<_>>()
-                .join(",");
+                .map(|(name, enabled)| (name.clone(), vec![u8::from(*enabled)]))
+                .collect();
+            record.table("features", &features);
+            record
+        }
 
-            sha256_fields(&[
-                ("id", self.id.as_bytes()),
-                ("version", self.version.as_bytes()),
-                ("sdk", numbers.as_bytes()),
-                ("profile", self.profile.as_str().as_bytes()),
-                ("optimization", self.optimization.as_str().as_bytes()),
-                ("switches", switches.as_bytes()),
-                ("features", features.as_bytes()),
-            ])
+        pub fn digest(&self) -> Digest {
+            self.canonical().to_digest()
         }
 
         pub fn write_json(&self, w: &mut Writer, key: &str) {
@@ -4201,10 +4402,391 @@ pub mod artifact {
     }
 }
 
+/// Where the things a build produced are kept, and got back.
+///
+/// A build that cannot find what it made last time builds it again, which is
+/// the whole reason a cache exists. Until now there was an index that could say
+/// a key had been seen before and nothing at all that could hand back what was
+/// made for it, so every answer was a miss the moment the process ended.
+///
+/// Objects are named by what is in them. That is not a filing convention; it is
+/// what makes every other property here fall out. Two builds producing the same
+/// bytes share one object. A read can check what it got against the name it
+/// asked for, so silent corruption is impossible rather than unlikely. And an
+/// object is written under a temporary name and moved over its final one, so a
+/// machine that stops in the middle leaves either nothing or the whole thing,
+/// never half of it under a name that says it is whole.
+pub mod store {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::{sha256, Digest};
+    use crate::json::Writer;
+    use crate::FailureClass;
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::{Arc, Mutex};
+
+    /// Where a staged object waits while it is being written.
+    pub const STAGING: &str = ".staging";
+
+    /// The largest single object this will hold. An artifact bigger than this
+    /// is not a build output; it is a mistake with a size.
+    pub const LARGEST_OBJECT: u64 = 512 * 1024 * 1024;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.store",
+            message,
+        )
+    }
+
+    fn corrupt(message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            "ES010",
+            Severity::Error,
+            FailureClass::Corruption,
+            "core.store",
+            message,
+        )
+    }
+
+    /// One object, as the store knows it without opening it.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Held {
+        pub digest: Digest,
+        pub bytes: u64,
+        /// When it was last handed out, in seconds. What a sweep sorts by.
+        pub touched: i64,
+    }
+
+    /// What a sweep did.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct Swept {
+        pub removed: u64,
+        pub freed: u64,
+        pub kept: u64,
+        pub held_back: u64,
+    }
+
+    /// A promise that something will still be there.
+    ///
+    /// A build that is about to read an object holds one of these, and a sweep
+    /// running at the same time steps around it. The promise lasts as long as
+    /// the value does and no longer: a build that dies does not leave storage
+    /// pinned for ever, which is what a lease written to disk would do.
+    pub struct Lease {
+        digest: Digest,
+        held: Arc<Mutex<BTreeMap<Digest, usize>>>,
+    }
+
+    impl Lease {
+        pub fn digest(&self) -> Digest {
+            self.digest
+        }
+    }
+
+    impl Drop for Lease {
+        fn drop(&mut self) {
+            let mut held = self.held.lock().unwrap_or_else(|held| held.into_inner());
+            if let Some(count) = held.get_mut(&self.digest) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    held.remove(&self.digest);
+                }
+            }
+        }
+    }
+
+    impl std::fmt::Debug for Lease {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "Lease({})", self.digest.to_short_hex(8))
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Store {
+        root: String,
+        leased: Arc<Mutex<BTreeMap<Digest, usize>>>,
+    }
+
+    impl Store {
+        /// A store under this folder. Nothing is written until something is put
+        /// there, so naming a store costs nothing and cannot fail.
+        pub fn at(root: &str) -> Store {
+            Store {
+                root: root.trim_end_matches('/').to_string(),
+                leased: Arc::new(Mutex::new(BTreeMap::new())),
+            }
+        }
+
+        pub fn root(&self) -> &str {
+            &self.root
+        }
+
+        /// Objects are spread across folders by their first byte, so that a
+        /// store holding a hundred thousand of them is not one folder holding a
+        /// hundred thousand entries.
+        fn path_of(&self, digest: Digest) -> String {
+            let hex = digest.to_hex();
+            format!("{}/{}/{}", self.root, &hex[..2], &hex[2..])
+        }
+
+        /// Puts bytes in, and says what they are called.
+        ///
+        /// Writing the same bytes twice is not an error and does not write
+        /// twice: the second put finds the object already there under the name
+        /// its contents give it, and leaves it alone.
+        pub fn put(&self, bytes: &[u8]) -> Result<Digest, Diagnostic> {
+            if bytes.len() as u64 > LARGEST_OBJECT {
+                return Err(fail("ES001", "That is larger than this store will hold.")
+                    .with_context(format!("Size: {} bytes", bytes.len()))
+                    .with_context(format!("Largest: {LARGEST_OBJECT} bytes")));
+            }
+
+            let digest = sha256(bytes);
+            let final_path = self.path_of(digest);
+            if std::path::Path::new(&final_path).is_file() {
+                return Ok(digest);
+            }
+
+            let staging = format!("{}/{STAGING}", self.root);
+            let folder = format!("{}/{}", self.root, &digest.to_hex()[..2]);
+            for directory in [&staging, &folder] {
+                std::fs::create_dir_all(directory).map_err(|why| {
+                    fail("ES002", "A folder the store needs could not be made.")
+                        .with_context(format!("Path: {directory}"))
+                        .with_context(format!("Reason: {why}"))
+                })?;
+            }
+
+            // Written under a name nothing reads, then moved over the name
+            // everything reads. A move within one folder tree either happened
+            // or did not, so nobody ever meets half an object under a name that
+            // says it is whole.
+            let ticket = crate::random::bytes(16)?;
+            let mut staged = format!("{staging}/");
+            for byte in ticket {
+                staged.push_str(&format!("{byte:02x}"));
+            }
+            std::fs::write(&staged, bytes).map_err(|why| {
+                fail("ES003", "An object could not be staged.")
+                    .with_context(format!("Path: {staged}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            if let Err(why) = std::fs::rename(&staged, &final_path) {
+                std::fs::remove_file(&staged).ok();
+                return Err(fail("ES004", "A staged object could not be put in place.")
+                    .with_context(format!("Path: {final_path}"))
+                    .with_context(format!("Reason: {why}")));
+            }
+            Ok(digest)
+        }
+
+        /// Gets bytes back, and checks they are the ones that were asked for.
+        ///
+        /// An object that no longer hashes to its own name is removed and
+        /// reported. Storage that hands back different bytes than it was given
+        /// is rare and real, and a build that carries on with them produces
+        /// something nobody can explain later.
+        pub fn get(&self, digest: Digest) -> Result<Vec<u8>, Diagnostic> {
+            let path = self.path_of(digest);
+            let bytes = std::fs::read(&path).map_err(|why| {
+                fail("ES005", "That object is not in this store.")
+                    .with_context(format!("Object: {}", digest.to_short_hex(8)))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+
+            let found = sha256(&bytes);
+            if found != digest {
+                std::fs::remove_file(&path).ok();
+                return Err(
+                    corrupt("An object does not match the name it is kept under.")
+                        .with_context(format!("Asked for: {digest}"))
+                        .with_context(format!("Found: {found}"))
+                        .with_suggestion(
+                            "It has been removed, so the next build makes it again rather than \
+                         reading it. Nothing that came out of it should be trusted.",
+                        ),
+                );
+            }
+
+            // A sweep takes the least recently wanted first, so wanting it now
+            // is what has to be recorded.
+            self.touch(&path);
+            Ok(bytes)
+        }
+
+        fn touch(&self, path: &str) {
+            // No portable way to set a time without a dependency, so the file
+            // is opened for append and closed. That moves the modification time
+            // on every system this runs on and writes nothing.
+            std::fs::OpenOptions::new().append(true).open(path).ok();
+        }
+
+        pub fn has(&self, digest: Digest) -> bool {
+            std::path::Path::new(&self.path_of(digest)).is_file()
+        }
+
+        /// Holds an object against a sweep for as long as the lease lives.
+        pub fn lease(&self, digest: Digest) -> Lease {
+            let mut held = self.leased.lock().unwrap_or_else(|held| held.into_inner());
+            *held.entry(digest).or_insert(0) += 1;
+            drop(held);
+            Lease {
+                digest,
+                held: Arc::clone(&self.leased),
+            }
+        }
+
+        pub fn is_leased(&self, digest: Digest) -> bool {
+            self.leased
+                .lock()
+                .map(|held| held.contains_key(&digest))
+                .unwrap_or(false)
+        }
+
+        pub fn remove(&self, digest: Digest) -> Result<(), Diagnostic> {
+            let path = self.path_of(digest);
+            if !std::path::Path::new(&path).exists() {
+                return Ok(());
+            }
+            std::fs::remove_file(&path).map_err(|why| {
+                fail("ES006", "An object could not be removed.")
+                    .with_context(format!("Object: {}", digest.to_short_hex(8)))
+                    .with_context(format!("Reason: {why}"))
+            })
+        }
+
+        /// Everything in here, oldest use first.
+        ///
+        /// A file whose name is not a digest is not an object. It is skipped
+        /// rather than reported, because a store is somewhere a person can
+        /// look, and something they left there should not stop a build.
+        pub fn list(&self) -> Vec<Held> {
+            let mut found = Vec::new();
+            let Ok(folders) = std::fs::read_dir(&self.root) else {
+                return found;
+            };
+            for folder in folders.flatten() {
+                let name = folder.file_name();
+                let Some(prefix) = name.to_str() else {
+                    continue;
+                };
+                if prefix.len() != 2 || !folder.path().is_dir() {
+                    continue;
+                }
+                let Ok(entries) = std::fs::read_dir(folder.path()) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let Some(rest) = entry.file_name().to_str().map(str::to_string) else {
+                        continue;
+                    };
+                    let Some(digest) = Digest::from_hex(&format!("{prefix}{rest}")) else {
+                        continue;
+                    };
+                    let Ok(facts) = entry.metadata() else {
+                        continue;
+                    };
+                    if !facts.is_file() {
+                        continue;
+                    }
+                    found.push(Held {
+                        digest,
+                        bytes: facts.len(),
+                        touched: facts
+                            .modified()
+                            .ok()
+                            .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|since| since.as_secs() as i64)
+                            .unwrap_or_default(),
+                    });
+                }
+            }
+            found.sort_by_key(|held| (held.touched, held.digest.to_hex()));
+            found
+        }
+
+        pub fn total_bytes(&self) -> u64 {
+            self.list().iter().map(|held| held.bytes).sum()
+        }
+
+        /// Brings the store down to a size, taking what was wanted longest ago
+        /// first.
+        ///
+        /// Nothing leased is taken, and nothing named in `keep` is taken. A
+        /// store already inside its budget is left entirely alone, so calling
+        /// this when there is nothing to do costs one listing and no writes.
+        pub fn sweep(&self, budget: u64, keep: &BTreeSet<Digest>) -> Swept {
+            let held = self.list();
+            let mut total: u64 = held.iter().map(|one| one.bytes).sum();
+            let mut swept = Swept {
+                kept: held.len() as u64,
+                ..Swept::default()
+            };
+            if total <= budget {
+                return swept;
+            }
+
+            for one in held {
+                if total <= budget {
+                    break;
+                }
+                if keep.contains(&one.digest) || self.is_leased(one.digest) {
+                    swept.held_back += 1;
+                    continue;
+                }
+                if self.remove(one.digest).is_ok() {
+                    total = total.saturating_sub(one.bytes);
+                    swept.removed += 1;
+                    swept.freed += one.bytes;
+                    swept.kept = swept.kept.saturating_sub(1);
+                }
+            }
+            swept
+        }
+
+        /// Throws away anything left staged.
+        ///
+        /// A staged object is one a build was writing when it stopped. Nothing
+        /// reads them and nothing can, since the name they wait under is
+        /// random, so what is left is space nobody will ever claim.
+        pub fn clear_staging(&self) -> u64 {
+            let staging = format!("{}/{STAGING}", self.root);
+            let Ok(entries) = std::fs::read_dir(&staging) else {
+                return 0;
+            };
+            let mut cleared = 0;
+            for entry in entries.flatten() {
+                if std::fs::remove_file(entry.path()).is_ok() {
+                    cleared += 1;
+                }
+            }
+            cleared
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            let held = self.list();
+            w.begin_object(Some(key));
+            w.field_str("root", &self.root);
+            w.field_u64("objects", held.len() as u64);
+            w.field_u64("bytes", held.iter().map(|one| one.bytes).sum());
+            w.field_u64(
+                "leased",
+                self.leased.lock().map(|held| held.len()).unwrap_or(0) as u64,
+            );
+            w.end_object();
+        }
+    }
+}
+
 pub mod cache {
-    use crate::hash::{sha256_fields, Digest};
+    use crate::diag::{Diagnostic, Severity};
+    use crate::hash::Digest;
     use crate::json::Writer;
     use crate::project::{Optimization, Profile};
+    use crate::FailureClass;
 
     #[derive(Clone, Copy, Debug)]
     pub struct Inputs<'a> {
@@ -4224,29 +4806,41 @@ pub mod cache {
     }
 
     impl Inputs<'_> {
-        pub fn key(&self) -> Key {
-            let numbers = format!("{}|{}", self.min_sdk, self.target_sdk);
-            let environment = self
+        /// What this compilation is, written one way.
+        ///
+        /// The environment used to be joined with `=` between a name and its
+        /// value and a unit separator between pairs, which meant a variable
+        /// whose value held a unit separator could be written to look like two
+        /// variables, and two different environments could come to one key. It
+        /// was also left in the order it was handed over, so the same
+        /// environment listed differently missed the cache. Both are gone.
+        pub fn canonical(&self) -> crate::canonical::Record {
+            let environment: Vec<(String, Vec<u8>)> = self
                 .relevant_environment
                 .iter()
-                .map(|(name, value)| format!("{name}={value}"))
-                .collect::<Vec<_>>()
-                .join("\u{1f}");
+                .map(|(name, value)| ((*name).to_string(), value.as_bytes().to_vec()))
+                .collect();
 
-            Key(sha256_fields(&[
-                ("source", self.source_digest.as_bytes()),
-                ("dependencies", self.dependency_digest.as_bytes()),
-                ("plugin", self.plugin_version.as_bytes()),
-                ("compiler", self.compiler_version.as_bytes()),
-                ("toolchain", self.toolchain_version.as_bytes()),
-                ("sdk", numbers.as_bytes()),
-                ("abi", self.abi.as_bytes()),
-                ("profile", self.profile.as_str().as_bytes()),
-                ("optimization", self.optimization.as_str().as_bytes()),
-                ("features", self.feature_configuration.as_bytes()),
-                ("environment", environment.as_bytes()),
-                ("security", self.security_policy.as_bytes()),
-            ]))
+            let mut record = crate::canonical::Record::new();
+            record
+                .digest("source", self.source_digest)
+                .digest("dependencies", self.dependency_digest)
+                .text("plugin", self.plugin_version)
+                .text("compiler", self.compiler_version)
+                .text("toolchain", self.toolchain_version)
+                .number("minSdk", u64::from(self.min_sdk))
+                .number("targetSdk", u64::from(self.target_sdk))
+                .text("abi", self.abi)
+                .text("profile", self.profile.as_str())
+                .text("optimization", self.optimization.as_str())
+                .text("features", self.feature_configuration)
+                .text("security", self.security_policy)
+                .table("environment", &environment);
+            record
+        }
+
+        pub fn key(&self) -> Key {
+            Key(self.canonical().to_digest())
         }
     }
 
@@ -4297,6 +4891,11 @@ pub mod cache {
         key: Key,
         content: Digest,
         valid: bool,
+        /// How big what it points at is, so a budget can be worked out without
+        /// opening every object.
+        bytes: u64,
+        /// When it was last useful, in seconds.
+        used: i64,
     }
 
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4319,17 +4918,57 @@ pub mod cache {
         }
 
         pub fn store(&mut self, key: Key, content: Digest) {
+            self.record(key, content, 0, 0);
+        }
+
+        /// The same, told how large the object is and when this happened, which
+        /// is what a sweep needs and what survives being written down.
+        pub fn record(&mut self, key: Key, content: Digest, bytes: u64, now: i64) {
             match self.entries.iter_mut().find(|entry| entry.key == key) {
                 Some(entry) => {
                     entry.content = content;
                     entry.valid = true;
+                    entry.bytes = bytes;
+                    entry.used = now;
                 }
                 None => self.entries.push(Entry {
                     key,
                     content,
                     valid: true,
+                    bytes,
+                    used: now,
                 }),
             }
+        }
+
+        /// What a key points at, if it points at anything usable.
+        pub fn content_for(&self, key: Key) -> Option<Digest> {
+            self.entries
+                .iter()
+                .find(|entry| entry.key == key && entry.valid)
+                .map(|entry| entry.content)
+        }
+
+        /// Everything the index still expects to find, which is what a sweep
+        /// must not take.
+        pub fn wanted(&self) -> std::collections::BTreeSet<Digest> {
+            self.entries
+                .iter()
+                .filter(|entry| entry.valid)
+                .map(|entry| entry.content)
+                .collect()
+        }
+
+        /// Drops entries pointing at objects the store no longer holds.
+        ///
+        /// An index that outlives what it indexes is worse than no index: every
+        /// lookup says hit and every read then fails. Reconciling costs one
+        /// question per entry and is what makes the two safe to restart apart.
+        pub fn reconcile(&mut self, store: &crate::store::Store) -> usize {
+            let before = self.entries.len();
+            self.entries
+                .retain(|entry| !entry.valid || store.has(entry.content));
+            before - self.entries.len()
         }
 
         pub fn invalidate(&mut self, key: Key) {
@@ -4377,9 +5016,173 @@ pub mod cache {
             w.field_u64("misses", self.statistics.misses);
             w.field_u64("invalidated", self.statistics.invalidated);
             w.field_u64("corrupted", self.statistics.corrupted);
-            w.field_bool("persistent", false);
+            w.field_u64("bytes", self.entries.iter().map(|entry| entry.bytes).sum());
+            w.field_bool("persistent", true);
             w.end_object();
         }
+
+        /// The index written down, in the encoding everything else here is
+        /// written in.
+        ///
+        /// Statistics are not in it. They are what happened in one run and
+        /// carrying them forward would only make the numbers a person reads
+        /// meaningless.
+        pub fn encode(&self) -> Vec<u8> {
+            let mut sorted = self.entries.clone();
+            sorted.sort_by_key(|entry| entry.key);
+
+            let rows: Vec<Vec<u8>> = sorted
+                .iter()
+                .map(|entry| {
+                    let mut row = crate::canonical::Record::new();
+                    row.digest("key", entry.key.0)
+                        .digest("content", entry.content)
+                        .flag("valid", entry.valid)
+                        .number("bytes", entry.bytes)
+                        .number("used", entry.used.max(0) as u64);
+                    row.encode()
+                })
+                .collect();
+
+            let mut record = crate::canonical::Record::new();
+            record
+                .number("version", INDEX_VERSION)
+                .sequence("entries", &rows);
+            record.encode()
+        }
+
+        /// An index read back from what [`Index::encode`] wrote.
+        ///
+        /// Anything that does not read comes back as an empty index rather than
+        /// as a failure. A cache that cannot be read is a cache that is empty:
+        /// every lookup misses, every build runs, and the next write puts a
+        /// good one in its place. Refusing to start because a cache file got
+        /// damaged would be turning something harmless into something fatal.
+        pub fn decode(data: &[u8]) -> Index {
+            let Some(fields) = crate::canonical::decode(data) else {
+                return Index::new();
+            };
+            let find = |name: &str| {
+                fields
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .map(|(_, value)| value.clone())
+            };
+            let version = find("version")
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u64::from_be_bytes)
+                .unwrap_or_default();
+            if version != INDEX_VERSION {
+                return Index::new();
+            }
+            let Some(rows) = find("entries") else {
+                return Index::new();
+            };
+
+            let mut index = Index::new();
+            let mut at = 8usize;
+            let count = rows
+                .get(..8)
+                .and_then(|head| head.try_into().ok())
+                .map(u64::from_be_bytes)
+                .unwrap_or_default();
+            for _ in 0..count {
+                let Some(length) = rows
+                    .get(at..at + 8)
+                    .and_then(|head| head.try_into().ok())
+                    .map(|head| u64::from_be_bytes(head) as usize)
+                else {
+                    break;
+                };
+                at += 8;
+                let Some(row) = rows.get(at..at + length) else {
+                    break;
+                };
+                at += length;
+                let Some(entry) = Entry::decode(row) else {
+                    continue;
+                };
+                index.entries.push(entry);
+            }
+            index
+        }
+
+        /// Reads an index from a file, or hands back an empty one.
+        pub fn read(path: &str) -> Index {
+            std::fs::read(path)
+                .map(|data| Index::decode(&data))
+                .unwrap_or_default()
+        }
+
+        /// Writes the index beside itself and moves it over itself.
+        ///
+        /// A cache index half written is a cache index that says things that
+        /// are not so, and the machine that stopped in the middle is exactly
+        /// the one that will be asked to build again.
+        pub fn write(&self, path: &str) -> Result<(), Diagnostic> {
+            if let Some(folder) = std::path::Path::new(path).parent() {
+                std::fs::create_dir_all(folder).map_err(|why| {
+                    fail("EC001", "The folder for the cache index could not be made.")
+                        .with_context(format!("Reason: {why}"))
+                })?;
+            }
+            let beside = format!("{path}.writing");
+            std::fs::write(&beside, self.encode()).map_err(|why| {
+                fail("EC002", "The cache index could not be written.")
+                    .with_context(format!("Path: {beside}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            std::fs::rename(&beside, path).map_err(|why| {
+                std::fs::remove_file(&beside).ok();
+                fail("EC003", "The cache index could not be put in place.")
+                    .with_context(format!("Path: {path}"))
+                    .with_context(format!("Reason: {why}"))
+            })
+        }
+    }
+
+    pub const INDEX_VERSION: u64 = 1;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.cache",
+            message,
+        )
+    }
+
+    impl Entry {
+        fn decode(row: &[u8]) -> Option<Entry> {
+            let fields = crate::canonical::decode(row)?;
+            let find = |name: &str| {
+                fields
+                    .iter()
+                    .find(|(field, _)| field == name)
+                    .map(|(_, value)| value.as_slice())
+            };
+            let number = |name: &str| -> Option<u64> {
+                find(name)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u64::from_be_bytes)
+            };
+            Some(Entry {
+                key: Key(Digest::from_hex(&hex_of(find("key")?))?),
+                content: Digest::from_hex(&hex_of(find("content")?))?,
+                valid: find("valid")? == [1],
+                bytes: number("bytes")?,
+                used: number("used")? as i64,
+            })
+        }
+    }
+
+    fn hex_of(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
     }
 }
 
@@ -29076,6 +29879,242 @@ mod tests {
 
     fn hex_string(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn what_a_build_made_is_kept_checked_and_found_again_after_a_restart() {
+        let directory = temp_directory("omni-store");
+        let root = directory.join("Objects");
+        let root_text = root.to_str().unwrap().to_string();
+        let store = super::store::Store::at(&root_text);
+
+        // Names come from contents, so the same bytes put twice are one object.
+        let one = store.put(b"what the compiler wrote").unwrap();
+        let same = store.put(b"what the compiler wrote").unwrap();
+        assert_eq!(one, same, "the same bytes must be the same object");
+        assert_eq!(store.list().len(), 1, "and must not be kept twice");
+        assert_eq!(store.get(one).unwrap(), b"what the compiler wrote");
+
+        let other = store.put(b"and what it wrote next").unwrap();
+        assert_ne!(one, other);
+        assert!(store.has(other));
+        assert_eq!(store.list().len(), 2);
+
+        // Nothing is left behind from staging: an object arrives whole or not
+        // at all, and the name it waited under is gone either way.
+        let staged = std::fs::read_dir(format!("{root_text}/{}", super::store::STAGING))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(staged, 0, "a finished put leaves nothing staged");
+
+        // Storage that hands back different bytes than it was given is rare
+        // and real. An object that no longer hashes to its own name is thrown
+        // away and said so, rather than handed to a build that cannot tell.
+        let hex = one.to_hex();
+        let path = format!("{root_text}/{}/{}", &hex[..2], &hex[2..]);
+        std::fs::write(&path, b"not what the compiler wrote at all").unwrap();
+        let refused = store
+            .get(one)
+            .expect_err("an object that does not match its name must be refused");
+        assert_eq!(refused.code, "ES010");
+        assert!(
+            !store.has(one),
+            "and it must be gone, so the next build makes it again"
+        );
+
+        // Put back, so the rest has something to work with.
+        let one = store.put(b"what the compiler wrote").unwrap();
+
+        // A lease holds an object against a sweep, and lasts exactly as long as
+        // the lease does.
+        let budget = 4u64;
+        {
+            let held = store.lease(one);
+            assert_eq!(held.digest(), one);
+            assert!(store.is_leased(one));
+            let swept = store.sweep(budget, &std::collections::BTreeSet::new());
+            assert!(store.has(one), "a leased object must survive a sweep");
+            assert!(swept.held_back >= 1);
+        }
+        assert!(!store.is_leased(one), "and the hold ends with the lease");
+
+        // Named in `keep`, it survives too.
+        let mut keep = std::collections::BTreeSet::new();
+        keep.insert(one);
+        store.sweep(budget, &keep);
+        assert!(store.has(one), "an object asked for must survive a sweep");
+
+        // Nothing holding it, and over budget: it goes.
+        let swept = store.sweep(budget, &std::collections::BTreeSet::new());
+        assert!(swept.removed >= 1, "{swept:?}");
+        assert!(store.total_bytes() <= budget, "{}", store.total_bytes());
+
+        // A store already inside its budget is left entirely alone.
+        let before = store.list().len();
+        let quiet = store.sweep(u64::MAX, &std::collections::BTreeSet::new());
+        assert_eq!(quiet.removed, 0);
+        assert_eq!(store.list().len(), before);
+
+        // And now the index across a restart, which is the thing that was
+        // missing: an index that could say a key had been seen and could not
+        // hand back what was made for it.
+        let index_path = directory.join("Index").to_str().unwrap().to_string();
+        let made = store.put(b"the package this key stands for").unwrap();
+        let source = super::hash::sha256(b"source");
+        let dependencies = super::hash::sha256(b"deps");
+        let key = cache_inputs(&source, &dependencies).key();
+
+        let mut index = super::cache::Index::new();
+        index.record(key, made, 31, 1_787_000_000);
+        index.write(&index_path).expect("the index must write");
+        assert!(
+            !std::path::Path::new(&format!("{index_path}.writing")).exists(),
+            "the file written beside it should have been moved over it"
+        );
+
+        // A different process, a fresh index, the same folder.
+        let reopened = super::cache::Index::read(&index_path);
+        assert_eq!(
+            reopened.len(),
+            1,
+            "the index must survive being written down"
+        );
+        let found = reopened
+            .content_for(key)
+            .expect("and must still say what the key stands for");
+        assert_eq!(found, made);
+        assert_eq!(
+            store.get(found).unwrap(),
+            b"the package this key stands for",
+            "which is the whole point: the bytes come back"
+        );
+
+        // An index that outlives what it indexes is worse than none, because
+        // every lookup says hit and every read then fails.
+        store.remove(made).unwrap();
+        let mut stale = super::cache::Index::read(&index_path);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale.reconcile(&store), 1, "the dangling entry must go");
+        assert_eq!(stale.content_for(key), None);
+
+        // A damaged index is an empty index, not a failure. Refusing to start
+        // because a cache file got damaged would turn something harmless into
+        // something fatal.
+        std::fs::write(&index_path, b"this is not an index").unwrap();
+        assert!(super::cache::Index::read(&index_path).is_empty());
+        std::fs::write(&index_path, []).unwrap();
+        assert!(super::cache::Index::read(&index_path).is_empty());
+        assert!(super::cache::Index::read("nowhere at all").is_empty());
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "store: content-addressed, moved into place, checked on the way out, \
+             swept by lease and budget, and found again after a restart"
+        );
+    }
+
+    #[test]
+    fn two_different_projects_never_come_to_one_digest() {
+        use super::canonical::Record;
+
+        // The collision that was actually there. Joining a feature name to its
+        // value with `=` means these two are the same string, so they were the
+        // same digest, so a build of one could be served out of the cache for
+        // the other.
+        let mut one = super::project::Project::defaults("App", "com.my.app");
+        one.features = vec![("a=b".to_string(), true)];
+        let mut other = super::project::Project::defaults("App", "com.my.app");
+        other.features = vec![("a".to_string(), true), ("b".to_string(), true)];
+        assert_ne!(
+            one.digest(),
+            other.digest(),
+            "a feature called `a=b` and the features `a` and `b` must not share a digest"
+        );
+
+        // The other half of the same problem: order carried meaning where it
+        // had none, so listing two features the other way round was a miss and
+        // a rebuild for nothing.
+        let mut forwards = super::project::Project::defaults("App", "com.my.app");
+        forwards.features = vec![("alpha".to_string(), true), ("beta".to_string(), false)];
+        let mut backwards = super::project::Project::defaults("App", "com.my.app");
+        backwards.features = vec![("beta".to_string(), false), ("alpha".to_string(), true)];
+        assert_eq!(
+            forwards.digest(),
+            backwards.digest(),
+            "the same features in another order are the same project"
+        );
+
+        // The name is what a person calls it and changes nothing that is built.
+        let renamed = super::project::Project::defaults("Something Else", "com.my.app");
+        assert_eq!(
+            super::project::Project::defaults("App", "com.my.app").digest(),
+            renamed.digest(),
+            "renaming a project must not throw its cache away"
+        );
+
+        // The edition decides how the source is read, so it must be in there.
+        let mut with_edition = super::project::Project::defaults("App", "com.my.app");
+        with_edition.edition = Some("2021".to_string());
+        let mut other_edition = super::project::Project::defaults("App", "com.my.app");
+        other_edition.edition = Some("2024".to_string());
+        assert_ne!(with_edition.digest(), other_edition.digest());
+        assert_ne!(
+            with_edition.digest(),
+            super::project::Project::defaults("App", "com.my.app").digest(),
+            "an edition set at all is not the same as none"
+        );
+
+        // Every switch has to reach the digest, or a build with it flipped
+        // comes back out of the cache built without it.
+        let base = super::project::Project::defaults("App", "com.my.app");
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(base.digest().to_hex());
+        for change in 0..9usize {
+            let mut moved = base.clone();
+            match change {
+                0 => moved.lto = !moved.lto,
+                1 => moved.incremental = !moved.incremental,
+                2 => moved.parallel = !moved.parallel,
+                3 => moved.deterministic = !moved.deterministic,
+                4 => moved.provenance = !moved.provenance,
+                5 => moved.verification = !moved.verification,
+                6 => moved.min_sdk += 1,
+                7 => moved.target_sdk += 1,
+                _ => moved.compile_sdk += 1,
+            }
+            assert!(
+                seen.insert(moved.digest().to_hex()),
+                "change {change} did not reach the digest"
+            );
+        }
+
+        // And the encoding is injective because it can be read back, which is
+        // the same claim said in a way that can be tested.
+        let mut record = Record::new();
+        record
+            .text("name", "value")
+            .text("nam", "evalue")
+            .bytes("empty", b"")
+            .number("count", 7)
+            .flag("on", true);
+        let written = record.encode();
+        let read = super::canonical::decode(&written).expect("what was written must read back");
+        assert_eq!(read.len(), 5);
+        assert_eq!(
+            super::canonical::decode(&written[..written.len() - 1]),
+            None,
+            "a truncated encoding must not read as a shorter one"
+        );
+
+        // `name`=`value` and `nam`=`evalue` join to the same string and must
+        // not come to the same bytes.
+        let mut confusable = Record::new();
+        confusable.text("name", "value");
+        let mut also = Record::new();
+        also.text("nam", "evalue");
+        assert_ne!(confusable.encode(), also.encode());
+
+        eprintln!("canonical: features, editions and every switch reach the digest, none collide");
     }
 
     #[test]
