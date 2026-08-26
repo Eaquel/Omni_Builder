@@ -1304,30 +1304,34 @@ pub mod compiler {
         )
     }
 
-    /// The only machines anything built here is meant to run on.
+    /// The only machine anything built here is meant to run on.
     ///
-    /// Four, and no more. Every one of them is an Android device or an
-    /// emulator; there is no host build and no desktop target, because nothing
-    /// here is for a desktop. Narrowing this is what makes the back end
-    /// tractable: one object format, one linker convention, one set of
-    /// calling conventions per width.
+    /// One. A sixty-four bit ARM phone, and nothing else -- not an emulator,
+    /// not a thirty-two bit device, not a desktop. Everything else was taken
+    /// out deliberately.
+    ///
+    /// The reason is not that the others are hard. It is that every one of them
+    /// is a second answer to every question: a second set of calling
+    /// conventions, a second pointer width for a native library to disagree
+    /// about, a second build of everything to produce, a second thing to test
+    /// on and a second thing nobody tests on. A back end aimed at one machine
+    /// can be finished. A back end aimed at four is four back ends, and the
+    /// three nobody runs are the three that quietly stop working.
+    ///
+    /// Google Play has required a sixty-four bit build since 2019 and Android
+    /// has shipped devices with no thirty-two bit support at all since 2023.
+    /// The width this drops is the width that is going away anyway.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum Abi {
         Arm64V8a,
-        ArmeabiV7a,
-        X86,
-        X86_64,
     }
 
     impl Abi {
-        pub const ALL: &'static [Abi] = &[Abi::Arm64V8a, Abi::ArmeabiV7a, Abi::X86, Abi::X86_64];
+        pub const ALL: &'static [Abi] = &[Abi::Arm64V8a];
 
         pub const fn as_str(self) -> &'static str {
             match self {
                 Abi::Arm64V8a => "arm64-v8a",
-                Abi::ArmeabiV7a => "armeabi-v7a",
-                Abi::X86 => "x86",
-                Abi::X86_64 => "x86_64",
             }
         }
 
@@ -1335,14 +1339,13 @@ pub mod compiler {
         pub const fn triple(self) -> &'static str {
             match self {
                 Abi::Arm64V8a => "aarch64-linux-android",
-                Abi::ArmeabiV7a => "armv7-linux-androideabi",
-                Abi::X86 => "i686-linux-android",
-                Abi::X86_64 => "x86_64-linux-android",
             }
         }
 
+        /// True, and it stays a question that can be asked so that anything
+        /// depending on the answer says so rather than assuming.
         pub const fn is_64_bit(self) -> bool {
-            matches!(self, Abi::Arm64V8a | Abi::X86_64)
+            true
         }
 
         pub fn parse(value: &str) -> Option<Abi> {
@@ -1352,9 +1355,11 @@ pub mod compiler {
 
     /// The oldest and newest Android anything built here targets.
     ///
-    /// Nine to seventeen, which is API 28 to 36. Below that is a platform
-    /// nothing here supports; above it is one nothing here has seen.
-    pub const OLDEST_API: u32 = 28;
+    /// API 30 to 36, which is Android 11 through 16 -- seven releases, since
+    /// 12L is its own API level. Below 30 is a platform nothing here supports;
+    /// above 36 is one that has not shipped, and a compiler cannot target a
+    /// platform it has never been given.
+    pub const OLDEST_API: u32 = 30;
     pub const NEWEST_API: u32 = 36;
 
     pub const fn api_is_supported(level: u32) -> bool {
@@ -2133,13 +2138,14 @@ pub mod compiler {
             }
         }
 
-        // And two requests that differ have to plan differently.
-        let other = Request::new(Abi::X86_64, OLDEST_API)
+        // And two requests that differ have to plan differently. There is one
+        // machine now, so the thing varied here is the platform.
+        let other = Request::new(Abi::Arm64V8a, NEWEST_API)
             .with_source(Source::of("probe.txt", b"anything at all"));
         if let (Ok(first), Ok(second)) = (compiler.plan(&request), compiler.plan(&other)) {
             if first.key == second.key {
                 wrong.push(format!(
-                    "{}: two machines planned to the same key",
+                    "{}: two platforms planned to the same key",
                     contract.id
                 ));
             }
@@ -4184,9 +4190,9 @@ pub mod project {
                 id: id.into(),
                 version: "0.1.0".to_string(),
                 edition: None,
-                min_sdk: 28,
-                target_sdk: 36,
-                compile_sdk: 36,
+                min_sdk: crate::compiler::OLDEST_API,
+                target_sdk: crate::compiler::NEWEST_API,
+                compile_sdk: crate::compiler::NEWEST_API,
                 profile: Profile::Debug,
                 optimization: Optimization::None,
                 lto: false,
@@ -14575,7 +14581,9 @@ pub mod guard {
     use crate::xml::Element;
     use crate::FailureClass;
 
-    pub const MINIMUM_SDK: i64 = 28;
+    /// The security floor is the oldest platform anything here builds for.
+    /// Two numbers for one thing is how they drift apart.
+    pub const MINIMUM_SDK: i64 = crate::compiler::OLDEST_API as i64;
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Verdict {
@@ -14765,7 +14773,7 @@ pub mod guard {
                 rule: "minimum-platform",
                 code: "EG006",
                 what: format!("The package does not require API {MINIMUM_SDK} or later."),
-                why: "Below API 28 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.".to_string(),
+                why: "Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.".to_string(),
                 remedy: format!("Declare android:minSdkVersion at {MINIMUM_SDK} or above."),
             }),
         }
@@ -17416,7 +17424,7 @@ pub mod scaffold {
     use crate::json::Writer;
     use crate::FailureClass;
 
-    pub const ARM32: &str = "armeabi-v7a";
+    /// The one machine a project here is built for. See `compiler::Abi`.
     pub const ARM64: &str = "arm64-v8a";
 
     pub const LANGUAGES: &[(&str, &str)] = &[
@@ -17443,8 +17451,11 @@ pub mod scaffold {
 
     pub const LABEL_RESOURCE: &str = "app_name";
 
-    pub const OLDEST_SUPPORTED: u32 = 28;
-    pub const NEWEST_SUPPORTED: u32 = 36;
+    /// The scaffold does not get to have an opinion about which Android
+    /// releases are supported. It asks the compilers, because they are the
+    /// ones that have to produce something a device of that age can run.
+    pub const OLDEST_SUPPORTED: u32 = crate::compiler::OLDEST_API;
+    pub const NEWEST_SUPPORTED: u32 = crate::compiler::NEWEST_API;
 
     pub const DEFAULT_PACKAGE: &str = "com.my.app";
     pub const DEFAULT_LABEL: &str = "My App";
@@ -17482,7 +17493,7 @@ pub mod scaffold {
             Spec {
                 package: DEFAULT_PACKAGE.to_string(),
                 label: DEFAULT_LABEL.to_string(),
-                abis: vec![ARM32.to_string(), ARM64.to_string()],
+                abis: vec![ARM64.to_string()],
                 min_sdk: OLDEST_SUPPORTED,
                 target_sdk: NEWEST_SUPPORTED,
                 languages: vec!["kotlin".to_string()],
@@ -17560,13 +17571,19 @@ pub mod scaffold {
                     "abis" => {
                         for abi in value.split(',').filter(|a| !a.trim().is_empty()) {
                             let abi = abi.trim();
-                            if abi != ARM32 && abi != ARM64 {
+                            if abi != ARM64 {
                                 return Err(fail(
                                     "EP003",
                                     "An architecture is not one this build knows.",
                                 )
                                 .with_context(format!("Value: {abi:?}"))
-                                .with_context(format!("Known: {ARM32}, {ARM64}")));
+                                .with_context(format!("Known: {ARM64}"))
+                                .with_suggestion(
+                                    "This builds for sixty-four bit ARM and nothing else. \
+                                     A thirty-two bit or an emulator build is not produced \
+                                     here, so it is refused rather than written and left \
+                                     to fail somewhere further along.",
+                                ));
                             }
                             spec.abis.push(abi.to_string());
                         }
@@ -22743,7 +22760,7 @@ pub mod builder {
                 "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n",
                 "    package=\"{package}\"\n",
                 "    android:versionCode=\"1\" android:versionName=\"1.0\">\n",
-                "    <uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />\n",
+                "    <uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\" />\n",
                 "    <application android:label=\"{label}\" android:allowBackup=\"false\"\n",
                 "        android:extractNativeLibs=\"false\">\n",
                 "        <activity android:name=\"{activity}\" android:exported=\"true\">\n",
@@ -26527,7 +26544,7 @@ mod tests {
             .add("lib/arm64-v8a/libomni_builder.so", vec![0x7f; 5_000])
             .unwrap();
         builder
-            .add("lib/x86_64/libomni_builder.so", vec![0x7f; 3_000])
+            .add("lib/arm64-v8a/libomni_bridge.so", vec![0x7f; 3_000])
             .unwrap();
         builder.add("classes.dex", vec![1; 200]).unwrap();
         let bytes = builder.finish().unwrap();
@@ -27220,7 +27237,7 @@ mod tests {
                 "--v3-signing-enabled",
                 "false",
                 "--min-sdk-version",
-                "28",
+                &crate::compiler::OLDEST_API.to_string(),
                 apk.to_str().unwrap(),
             ])
             .output()
@@ -27960,7 +27977,7 @@ mod tests {
     android:versionCode="1" android:versionName="1.0"
     android:installLocation="auto" android:sharedUserId="com.omni.probe.shared"
     android:compileSdkVersion="36" android:compileSdkVersionCodename="16">
-  <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" android:maxSdkVersion="36"/>
+  <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" android:maxSdkVersion="36"/>
   <uses-permission android:name="android.permission.INTERNET"/>
   <uses-feature android:name="android.hardware.camera" android:required="false"/>
   <application android:label="L" android:icon="@android:drawable/ic_delete"
@@ -27988,7 +28005,7 @@ mod tests {
 
     const PROBE_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.probe">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.INTERNET" />
     <application android:label="Omni" android:allowBackup="false" android:supportsRtl="true" android:extractNativeLibs="false" android:theme="@0x7f060000">
         <activity android:name="com.omni.probe.Main" android:exported="true" />
@@ -28380,7 +28397,7 @@ mod tests {
 
     const OMNI_BUILT_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.selfbuilt" android:versionCode="1" android:versionName="1.0">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <application android:label="Omni Self Built" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
 </manifest>"#;
 
@@ -28482,7 +28499,7 @@ mod tests {
                 "--verbose",
                 "--print-certs",
                 "--min-sdk-version",
-                "28",
+                &crate::compiler::OLDEST_API.to_string(),
                 path.to_str().unwrap(),
             ])
             .output()
@@ -28661,7 +28678,7 @@ mod tests {
 
     const SAFE_PROJECT_MANIFEST: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.made" android:versionCode="1" android:versionName="1.0">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <application android:label="Made By Omni" android:hasCode="false" android:allowBackup="false" android:extractNativeLibs="false" />
 </manifest>"#;
 
@@ -28723,7 +28740,7 @@ mod tests {
                 "--verbose",
                 "--print-certs",
                 "--min-sdk-version",
-                "28",
+                &crate::compiler::OLDEST_API.to_string(),
                 path.to_str().unwrap(),
             ])
             .output()
@@ -29284,7 +29301,7 @@ mod tests {
                 "--verbose",
                 "--print-certs",
                 "--min-sdk-version",
-                "28",
+                &crate::compiler::OLDEST_API.to_string(),
                 path.to_str().unwrap(),
             ])
             .output()
@@ -29355,7 +29372,7 @@ mod tests {
             let manifest = format!(
                 r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     {application}
 </manifest>"#
             );
@@ -29386,7 +29403,7 @@ mod tests {
         let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.weak"
     android:sharedUserId="com.omni.shared">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
     <application android:label="X" android:allowBackup="false" android:hasCode="false"
         android:extractNativeLibs="false" />
@@ -29416,7 +29433,7 @@ mod tests {
         // A manifest with nothing wrong: every rule runs and none of them fires.
         let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.my.app">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <application android:label="X" android:allowBackup="false" android:hasCode="false"
         android:extractNativeLibs="false">
         <activity android:name="A" android:exported="true" android:permission="p">
@@ -29461,7 +29478,7 @@ mod tests {
     fn a_launcher_activity_is_allowed_to_be_exported() {
         let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.omni.app">
-    <uses-sdk android:minSdkVersion="28" android:targetSdkVersion="36" />
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
     <application android:label="X" android:allowBackup="false">
         <activity android:name="Main" android:exported="true">
             <intent-filter>
@@ -29717,7 +29734,7 @@ mod tests {
     fn a_project_is_a_manifest_and_language_folders_and_nothing_else() {
         let directory = temp_directory("omni-scaffold");
         let root = directory.join("MyApp");
-        let spec = "package=com.tr.yt;label=My App;abis=arm64-v8a,armeabi-v7a;minSdk=28;targetSdk=36;languages=kotlin,rust,cpp,java";
+        let spec = "package=com.tr.yt;label=My App;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=kotlin,rust,cpp,java";
 
         let root_c = std::ffi::CString::new(root.to_str().unwrap()).unwrap();
         let spec_c = std::ffi::CString::new(spec).unwrap();
@@ -29775,7 +29792,7 @@ mod tests {
             "{manifest}"
         );
         assert!(
-            manifest.contains("android:minSdkVersion=\"28\""),
+            manifest.contains("android:minSdkVersion=\"30\""),
             "{manifest}"
         );
 
@@ -30438,7 +30455,7 @@ mod tests {
         );
         assert_eq!(listed[0].version_name, "1.0.0");
         assert_eq!(listed[0].version_code, 1);
-        assert_eq!(listed[0].min_sdk, 28);
+        assert_eq!(listed[0].min_sdk, 30);
         assert_eq!(listed[0].target_sdk, 36);
         assert!(listed[0].icon.is_none());
 
@@ -30866,7 +30883,7 @@ mod tests {
             "A: package=\"com.tr.yt\"",
             "android:versionCode(0x0101021b)=3",
             "android:versionName(0x0101021c)=\"1.0.0\"",
-            "android:minSdkVersion(0x0101020c)=28",
+            "android:minSdkVersion(0x0101020c)=30",
             "android:targetSdkVersion(0x01010270)=36",
             "android:label(0x01010001)=@0x7f020000",
             "android:allowBackup(0x01010280)=false",
@@ -30925,7 +30942,7 @@ mod tests {
             concat!(
                 "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ",
                 "package=\"com.tr.yt\">",
-                "<uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />",
+                "<uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\" />",
                 "<application android:label=\"@string/name\" android:allowBackup=\"false\" />",
                 "</manifest>",
             ),
@@ -30969,7 +30986,7 @@ mod tests {
         let weak = super::builder::from_manifest(concat!(
             "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ",
             "package=\"com.tr.yt\" android:versionCode=\"1\" android:versionName=\"1.0.0\">",
-            "<uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />",
+            "<uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\" />",
             "<application android:label=\"X\" android:allowBackup=\"false\" ",
             "android:debuggable=\"true\">",
             "<activity android:name=\"com.tr.yt.MainActivity\" android:exported=\"false\" />",
@@ -31106,7 +31123,7 @@ mod tests {
             concat!(
                 "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" ",
                 "package=\"com.tr.yt\" android:versionCode=\"1\" android:versionName=\"1.0.0\">",
-                "<uses-sdk android:minSdkVersion=\"28\" android:targetSdkVersion=\"36\" />",
+                "<uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\" />",
                 "<application android:label=\"X\" android:allowBackup=\"false\" />",
                 "</manifest>",
             ),
@@ -31869,7 +31886,7 @@ mod tests {
             package: "com.tr.yt".to_string(),
             label: "Only Rust".to_string(),
             abis: vec![super::scaffold::ARM64.to_string()],
-            min_sdk: 28,
+            min_sdk: 30,
             target_sdk: 36,
             languages: vec!["rust".to_string()],
             locales: vec![super::scaffold::BASE_LOCALE.to_string(), "tr".to_string()],
@@ -31923,7 +31940,11 @@ mod tests {
                 "EP015",
             ),
             (
-                "package=com.tr.yt;label=X;abis=x86;languages=kotlin",
+                "package=com.tr.yt;label=X;abis=armeabi-v7a;languages=kotlin",
+                "EP003",
+            ),
+            (
+                "package=com.tr.yt;label=X;abis=x86_64;languages=kotlin",
                 "EP003",
             ),
             (
@@ -32787,7 +32808,7 @@ mod tests {
         use super::compiler::{Abi, Identity, Plan, Request, Source};
 
         let identity = Identity::new("kotlin", "omni.kotlin", "2.4.10", "aarch64-linux-android");
-        let base = Request::new(Abi::Arm64V8a, 28)
+        let base = Request::new(Abi::Arm64V8a, 30)
             .with_source(Source::of("A.kt", b"fun main() {}"))
             .with_source(Source::of("B.kt", b"fun other() {}"));
 
@@ -32800,7 +32821,7 @@ mod tests {
 
         // Handing the same sources over in another order is the same
         // compilation, not a different one.
-        let reordered = Request::new(Abi::Arm64V8a, 28)
+        let reordered = Request::new(Abi::Arm64V8a, 30)
             .with_source(Source::of("B.kt", b"fun other() {}"))
             .with_source(Source::of("A.kt", b"fun main() {}"));
         assert_eq!(
@@ -32813,11 +32834,16 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         seen.insert(Plan::key_for(&identity, &base).to_hex());
 
-        let mut changed = base.clone();
-        changed.abi = Abi::X86_64;
+        // There is one machine, so there is no second value to vary. What
+        // still has to hold is that the machine reaches the key at all, so
+        // that naming a second one later cannot land on the first one's
+        // artifacts.
+        let encoded = base.canonical().encode();
         assert!(
-            seen.insert(Plan::key_for(&identity, &changed).to_hex()),
-            "abi"
+            encoded
+                .windows(Abi::Arm64V8a.as_str().len())
+                .any(|window| window == Abi::Arm64V8a.as_str().as_bytes()),
+            "the machine has to be part of what the key is taken over"
         );
 
         let mut changed = base.clone();
@@ -32880,7 +32906,7 @@ mod tests {
             Identity::new("kotlin", "omni.kotlin", "2.4.11", "aarch64-linux-android"),
             Identity::new("kotlin", "other.kotlin", "2.4.10", "aarch64-linux-android"),
             Identity::new("java", "omni.kotlin", "2.4.10", "aarch64-linux-android"),
-            Identity::new("kotlin", "omni.kotlin", "2.4.10", "x86_64-linux-android"),
+            Identity::new("kotlin", "omni.kotlin", "2.4.10", "aarch64-linux-android30"),
             identity.clone().with("stdlib", "2.4.10"),
         ] {
             assert!(
@@ -33591,7 +33617,7 @@ mod tests {
             "E: manifest",
             "A: package=\"com.omni.probe\"",
             "E: uses-sdk",
-            "android:minSdkVersion(0x0101020c)=28",
+            "android:minSdkVersion(0x0101020c)=30",
             "android:targetSdkVersion(0x01010270)=36",
             "E: uses-permission",
             "android:name(0x01010003)=\"android.permission.INTERNET\"",
@@ -34203,7 +34229,7 @@ mod tests {
             compiler_version: "2.4.10",
             toolchain_version: "9.7.0",
             target_sdk: 36,
-            min_sdk: 28,
+            min_sdk: 30,
             abi: "arm64-v8a",
             profile: Profile::Release,
             optimization: Optimization::Size,
@@ -34246,11 +34272,11 @@ mod tests {
                 ..cache_inputs(&source, &dependencies)
             },
             CacheInputs {
-                min_sdk: 29,
+                min_sdk: 31,
                 ..cache_inputs(&source, &dependencies)
             },
             CacheInputs {
-                abi: "x86_64",
+                abi: "arm64-v8a-hypothetical",
                 ..cache_inputs(&source, &dependencies)
             },
             CacheInputs {
@@ -34780,7 +34806,7 @@ Version   = "1.0.0"
 Edition    = "01/01/2000"
 
 [ Android ]
-Min_sdk      = 28
+Min_sdk      = 30
 Target_sdk   = 36
 Compile_sdk = 36
 
@@ -34813,7 +34839,7 @@ Viewbinding   = false
         assert_eq!(project.id, "com.demo");
         assert_eq!(project.version, "1.0.0");
         assert_eq!(project.edition.as_deref(), Some("01/01/2000"));
-        assert_eq!(project.min_sdk, 28);
+        assert_eq!(project.min_sdk, 30);
         assert_eq!(project.target_sdk, 36);
         assert_eq!(project.compile_sdk, 36);
         assert_eq!(project.profile, Profile::Release);
@@ -34876,7 +34902,7 @@ Viewbinding   = false
 
         assert_eq!(project.name, "Tiny");
         assert_eq!(project.id, "com.omni.tiny");
-        assert_eq!(project.min_sdk, 28);
+        assert_eq!(project.min_sdk, 30);
         assert_eq!(project.target_sdk, 36);
         assert_eq!(project.compile_sdk, 36);
         assert!(project.deterministic);

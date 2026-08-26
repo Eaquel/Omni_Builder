@@ -81,10 +81,7 @@ jobs:
           set -euo pipefail
           rustup toolchain install "$OMNI_RUST_VERSION" --profile minimal
           rustup default "$OMNI_RUST_VERSION"
-          rustup target add \
-            aarch64-linux-android \
-            armv7-linux-androideabi \
-            x86_64-linux-android
+          rustup target add aarch64-linux-android
           rustc --version
 
       - name: Install the pinned Android SDK packages

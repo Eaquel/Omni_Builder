@@ -29,7 +29,6 @@
     <string name="omni_form_version_code">Código de versión</string>
     <string name="omni_form_min_sdk">Android más antiguo</string>
     <string name="omni_form_target_sdk">Android más nuevo</string>
-    <string name="omni_form_architecture">Arquitectura</string>
     <string name="omni_form_languages">Lenguajes</string>
     <string name="omni_form_locales">Idiomas que habla la aplicación</string>
     <string name="omni_form_locales_note">Para cada uno se escribe una carpeta de palabras, y de ahí se lee el nombre de la aplicación. El inglés se escribe siempre, porque un dispositivo que no esté en ninguno de los otros recurre a él.</string>

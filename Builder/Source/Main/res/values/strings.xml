@@ -29,7 +29,6 @@
     <string name="omni_form_version_code">Version code</string>
     <string name="omni_form_min_sdk">Oldest Android</string>
     <string name="omni_form_target_sdk">Newest Android</string>
-    <string name="omni_form_architecture">Architecture</string>
     <string name="omni_form_languages">Languages</string>
     <string name="omni_form_locales">Languages the application speaks</string>
     <string name="omni_form_locales_note">A folder of words is written for each one, and the application name is read from it. English is always written, because a device set to none of the others falls back to it.</string>

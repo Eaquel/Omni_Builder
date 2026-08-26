@@ -12,19 +12,19 @@ val omniNdkVersion = "29.0.14206865"
 val omniBuildToolsVersion = "36.0.0"
 val omniCmakeVersion = "4.4.2"
 val omniCompileSdk = 36
-val omniMinSdk = 28
+val omniMinSdk = 30
 val omniTargetSdk = 36
 
+// One machine. See the note on `compiler::Abi` in Builder.rs for why the other
+// three were taken out rather than left in unused: every one of them is a
+// second build to produce, a second thing to test on, and a second thing nobody
+// tests on.
 val omniAbis = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
-    "armeabi-v7a" to "armv7-linux-androideabi",
-    "x86_64" to "x86_64-linux-android",
 )
 
 val omniClangPrefix = mapOf(
     "aarch64-linux-android" to "aarch64-linux-android",
-    "armv7-linux-androideabi" to "armv7a-linux-androideabi",
-    "x86_64-linux-android" to "x86_64-linux-android",
 )
 
 val omniRustProfile = "release"

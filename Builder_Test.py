@@ -310,7 +310,7 @@ def check_bridge() -> str:
         archive.extractall(work)
 
     checked = 0
-    for abi in ("arm64-v8a", "armeabi-v7a", "x86_64"):
+    for abi in ("arm64-v8a",):
         library = work / f"lib/{abi}/libomni_builder.so"
         if not library.is_file():
             raise AssertionError(f"no native library for {abi}")

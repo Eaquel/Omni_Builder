@@ -29,7 +29,6 @@
     <string name="omni_form_version_code">رمز الإصدار</string>
     <string name="omni_form_min_sdk">أقدم أندرويد</string>
     <string name="omni_form_target_sdk">أحدث أندرويد</string>
-    <string name="omni_form_architecture">البنية</string>
     <string name="omni_form_languages">اللغات</string>
     <string name="omni_form_locales">اللغات التي يتحدثها التطبيق</string>
     <string name="omni_form_locales_note">يُكتب لكل واحدة مجلد كلمات، ومنه يُقرأ اسم التطبيق. تُكتب الإنجليزية دائمًا، لأن الجهاز غير المضبوط على أي من الأخريات يرجع إليها.</string>

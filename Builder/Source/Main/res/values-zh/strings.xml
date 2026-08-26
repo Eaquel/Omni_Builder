@@ -29,7 +29,6 @@
     <string name="omni_form_version_code">版本号</string>
     <string name="omni_form_min_sdk">最低 Android</string>
     <string name="omni_form_target_sdk">最新 Android</string>
-    <string name="omni_form_architecture">架构</string>
     <string name="omni_form_languages">编程语言</string>
     <string name="omni_form_locales">应用所说的语言</string>
     <string name="omni_form_locales_note">每种语言都会写一个词条文件夹，应用名称从那里读取。英文总会写入，因为设置成其他任何一种之外的设备都会回退到它。</string>

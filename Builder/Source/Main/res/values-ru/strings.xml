@@ -29,7 +29,6 @@
     <string name="omni_form_version_code">Код версии</string>
     <string name="omni_form_min_sdk">Самый старый Android</string>
     <string name="omni_form_target_sdk">Самый новый Android</string>
-    <string name="omni_form_architecture">Архитектура</string>
     <string name="omni_form_languages">Языки</string>
     <string name="omni_form_locales">Языки, на которых говорит приложение</string>
     <string name="omni_form_locales_note">Для каждого пишется папка слов, и из неё читается имя приложения. Английский пишется всегда: устройство, настроенное ни на один из остальных, обращается к нему.</string>

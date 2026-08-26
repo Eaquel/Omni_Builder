@@ -1230,13 +1230,19 @@ class BuilderActivity : Activity() {
         const val DEFAULT_KEY_YEARS = 10
         const val DEFAULT_KEY_PASSWORD = "My_App_Builder"
 
-        val ABI_CHOICES = listOf(
-            "32" to listOf("armeabi-v7a"),
-            "64" to listOf("arm64-v8a"),
-            "32 + 64" to listOf("armeabi-v7a", "arm64-v8a"),
-        )
+        /**
+         * The one machine anything built here runs on.
+         *
+         * There was a chooser with three answers. Two of them produced packages
+         * for devices Google Play has not accepted since 2019 and Android has
+         * shipped without since 2023, and every one of them was a second build
+         * to make and a second thing nobody tested on. Asking a question with
+         * one right answer is not a choice; it is a way to get it wrong.
+         */
+        val ONLY_ABI = listOf("arm64-v8a")
+
         val ANDROID_RELEASES = listOf(
-            28 to "9", 29 to "10", 30 to "11", 31 to "12", 32 to "12L",
+            30 to "11", 31 to "12", 32 to "12L",
             33 to "13", 34 to "14", 35 to "15", 36 to "16",
         )
         val LANGUAGE_CHOICES = listOf(
@@ -1273,8 +1279,7 @@ class BuilderActivity : Activity() {
     private var formLabel = DEFAULT_LABEL
     private var formVersionName = "1.0.0"
     private var formVersionCode = "1"
-    private var formAbi = 2
-    private var formMinSdk = 28
+    private var formMinSdk = 30
     private var formTargetSdk = 36
     private val formLanguages = linkedSetOf("kotlin")
     private val formLocales = Preferences.LANGUAGES.mapTo(linkedSetOf()) { it.first }
@@ -1706,8 +1711,6 @@ class BuilderActivity : Activity() {
         )
         content.addView(identity)
 
-        content.addView(label(getString(R.string.omni_form_architecture)))
-        content.addView(chips(ABI_CHOICES.map { it.first }, { it == formAbi }) { formAbi = it })
 
         content.addView(label(getString(R.string.omni_form_min_sdk)))
         content.addView(
@@ -2620,7 +2623,7 @@ class BuilderActivity : Activity() {
         label = formLabel.trim(),
         versionName = formVersionName.trim(),
         versionCode = formVersionCode.trim().toIntOrNull() ?: 0,
-        abis = ABI_CHOICES[formAbi].second,
+        abis = ONLY_ABI,
         minSdk = formMinSdk,
         targetSdk = formTargetSdk,
         languages = formLanguages.toList(),
