@@ -15366,7 +15366,7 @@ pub mod dexwrite {
         }
     }
 
-    #[derive(Clone, Debug)]
+    #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct MethodRef {
         pub class: String,
         pub name: String,
@@ -15393,6 +15393,59 @@ pub mod dexwrite {
         }
     }
 
+    /// What an instruction points at, when it points at something the pools
+    /// hold.
+    ///
+    /// A translator cannot write the final code units on its own: `iget` needs
+    /// the index of a field in this file's field table, and that index is not
+    /// known until every field in every class has been gathered and sorted.
+    /// So an instruction says what it means and the writer fills in where that
+    /// thing ended up. Anything else would mean two places deciding what a
+    /// pool index is, and they would disagree.
+    #[derive(Clone, PartialEq, Eq, Debug, Default)]
+    pub enum Operand {
+        #[default]
+        None,
+        Method(MethodRef),
+        Field(FieldRef),
+        Type(String),
+        Text(String),
+    }
+
+    /// One instruction: its code units, and which unit holds the index that has
+    /// to be filled in.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Insn {
+        pub units: Vec<u16>,
+        pub patch: Option<usize>,
+        pub operand: Operand,
+    }
+
+    impl Insn {
+        /// An instruction that points at nothing.
+        pub fn raw(units: Vec<u16>) -> Insn {
+            Insn {
+                units,
+                patch: None,
+                operand: Operand::None,
+            }
+        }
+
+        /// An instruction whose unit at `patch` is filled in with where its
+        /// operand ended up.
+        pub fn pointing(units: Vec<u16>, patch: usize, operand: Operand) -> Insn {
+            Insn {
+                units,
+                patch: Some(patch),
+                operand,
+            }
+        }
+
+        pub fn width(&self) -> usize {
+            self.units.len()
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub struct Method {
         pub reference: MethodRef,
@@ -15400,7 +15453,7 @@ pub mod dexwrite {
         pub registers: u16,
         pub inputs: u16,
         pub outputs: u16,
-        pub instructions: Vec<u16>,
+        pub instructions: Vec<Insn>,
     }
 
     /// A field, named the way a dex file names one.
@@ -15572,6 +15625,26 @@ pub mod dexwrite {
                     pools.fields.push(field.reference.clone());
                 }
             }
+            // Anything the code points at has to be in the pools too, or the
+            // index filled in later would be an index into nothing.
+            for method in class.methods() {
+                for instruction in &method.instructions {
+                    match &instruction.operand {
+                        Operand::None => {}
+                        Operand::Method(reference) => references.push(reference.clone()),
+                        Operand::Field(reference) => {
+                            pools.kind(&reference.class);
+                            pools.kind(&reference.descriptor);
+                            pools.string(&reference.name);
+                            if !pools.fields.contains(reference) {
+                                pools.fields.push(reference.clone());
+                            }
+                        }
+                        Operand::Type(descriptor) => pools.kind(descriptor),
+                        Operand::Text(text) => pools.string(text),
+                    }
+                }
+            }
         }
         for reference in &references {
             pools.kind(&reference.class);
@@ -15680,8 +15753,8 @@ pub mod dexwrite {
                 }
                 here.push((data_off + data.len()) as u32);
 
-                let mut instructions = method.instructions.clone();
-                if instructions.is_empty() {
+                let mut instructions: Vec<u16> = Vec::new();
+                if method.instructions.is_empty() {
                     let super_init = MethodRef {
                         class: class.superclass.clone(),
                         name: "<init>".to_string(),
@@ -15693,6 +15766,32 @@ pub mod dexwrite {
                     instructions.push(target as u16);
                     instructions.push(0);
                     instructions.push(OP_RETURN_VOID);
+                }
+                for instruction in &method.instructions {
+                    let mut units = instruction.units.clone();
+                    if let Some(at) = instruction.patch {
+                        let index = match &instruction.operand {
+                            Operand::None => 0,
+                            Operand::Method(reference) => pools.index_of_method(reference)?,
+                            Operand::Field(reference) => pools.index_of_field(reference)?,
+                            Operand::Type(descriptor) => pools.index_of_type(descriptor)?,
+                            Operand::Text(text) => pools.index_of_string(text)?,
+                        };
+                        if index > u32::from(u16::MAX) {
+                            return Err(fail(
+                                "EW006",
+                                "This dex holds more of one thing than an instruction can name.",
+                            ));
+                        }
+                        let Some(slot) = units.get_mut(at) else {
+                            return Err(fail(
+                                "EW007",
+                                "An instruction says to fill in a unit it does not have.",
+                            ));
+                        };
+                        *slot = index as u16;
+                    }
+                    instructions.extend_from_slice(&units);
                 }
 
                 data.extend_from_slice(&method.registers.to_le_bytes());
@@ -15881,6 +15980,1090 @@ pub mod dexwrite {
         let checksum = adler32(&out[12..]);
         out[8..12].copy_from_slice(&checksum.to_le_bytes());
         Ok(out)
+    }
+}
+
+/// JVM bytecode, turned into the bytecode Android runs.
+///
+/// The two machines disagree about the most basic thing. The JVM computes on a
+/// stack: `iadd` takes the top two values, whatever they are and wherever they
+/// came from. Dalvik computes on registers: `add-int v3, v1, v2` says exactly
+/// which three. Getting from one to the other means knowing, at every point in
+/// the method, what the stack currently holds -- which is knowable, because the
+/// stack depth at any instruction is the same however you got there. That is
+/// not a convenience of well-behaved code; it is a rule the class file format
+/// enforces, and it is what makes this translation possible at all.
+///
+/// # How the registers are laid out
+///
+/// Dalvik insists the incoming parameters occupy the *last* registers of a
+/// method. The JVM puts them in the first locals. Both cannot be true, so the
+/// method gets room for both and a prologue that moves each parameter down into
+/// the local it belongs in:
+///
+/// ```text
+///   v0 .. vL-1        the JVM's locals
+///   vL .. vL+S-1      the JVM's stack, one register per slot
+///   vL+S .. vN-1      where the parameters arrive
+/// ```
+///
+/// It costs a move per parameter, once, at the top of the method.
+///
+/// # What it refuses
+///
+/// Every instruction it does not translate, by name and by the offset it was
+/// found at. A translator that skips what it does not understand produces a
+/// method that runs and does the wrong thing, which is the worst outcome
+/// available.
+pub mod dalvik {
+    use crate::dexwrite::{FieldRef, Insn, Method, MethodRef, Operand};
+    use crate::diag::{Diagnostic, Severity};
+    use crate::jvm;
+    use crate::FailureClass;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::InternalError,
+            "core.dalvik",
+            message,
+        )
+    }
+
+    /// What an opcode is called, so a refusal names it rather than numbering it.
+    fn name_of(opcode: u8) -> &'static str {
+        match opcode {
+            0x0b..=0x0f => "a float or double constant",
+            0x2e..=0x35 => "reading from an array",
+            0x4f..=0x56 => "writing into an array",
+            0x62 | 0x63 | 0x66 | 0x67 | 0x6a | 0x6b | 0x6e | 0x6f | 0x72 | 0x73 => {
+                "floating-point arithmetic"
+            }
+            0x76 | 0x77 => "floating-point negation",
+            0x86 | 0x87 | 0x89 | 0x8a | 0x8b..=0x90 => "a floating-point conversion",
+            0xa8 | 0xa9 => "`jsr` or `ret`",
+            0xaa | 0xab => "`switch`",
+            0xba => "`invokedynamic`",
+            0xbc | 0xbd => "making an array",
+            0xbf => "`athrow`",
+            0xc2 | 0xc3 => "`monitorenter` or `monitorexit`",
+            0xc4 => "a `wide` instruction",
+            0xc5 => "a multi-dimensional array",
+            0x5a | 0x5b | 0x5d | 0x5e | 0x5f => "a stack shuffle",
+            _ => "that instruction",
+        }
+    }
+
+    fn unsupported(at: usize, opcode: u8, name: &str) -> Diagnostic {
+        fail(
+            "ED900",
+            format!("`{name}` is not translated to Dalvik here."),
+        )
+        .with_context(format!("Offset {at}, opcode {opcode:#04x}"))
+        .with_suggestion(
+            "Nothing is skipped. An instruction this does not understand would become a \
+             method that runs and does the wrong thing, which is worse than one that \
+             does not build.",
+        )
+    }
+
+    /// A branch waiting for the offset it jumps to.
+    struct Fixup {
+        /// Which code unit holds the offset.
+        unit: usize,
+        /// Where in the Dalvik code the instruction starts, which the offset is
+        /// measured from.
+        from: usize,
+        /// The bytecode offset in the original method.
+        target: usize,
+    }
+
+    pub struct Translator<'a> {
+        class: &'a jvm::Class,
+        code: Vec<Insn>,
+        /// Where each JVM bytecode offset ended up, in code units.
+        landed: std::collections::BTreeMap<usize, usize>,
+        fixups: Vec<Fixup>,
+        stack_base: u16,
+        depth: u16,
+        max_outputs: u16,
+    }
+
+    /// How wide a descriptor's value is, in registers.
+    fn width_of(descriptor: &str) -> u16 {
+        match descriptor.chars().next() {
+            Some('J') | Some('D') => 2,
+            _ => 1,
+        }
+    }
+
+    /// The units an instruction takes, before it is written.
+    fn units(code: &[Insn]) -> usize {
+        code.iter().map(|one| one.width()).sum()
+    }
+
+    impl<'a> Translator<'a> {
+        pub fn new(class: &'a jvm::Class, code: &jvm::Code) -> Translator<'a> {
+            Translator {
+                class,
+                code: Vec::new(),
+                landed: std::collections::BTreeMap::new(),
+                fixups: Vec::new(),
+                stack_base: code.max_locals,
+                depth: 0,
+                max_outputs: 0,
+            }
+        }
+
+        fn push(&mut self, instruction: Insn) {
+            self.code.push(instruction);
+        }
+
+        /// The register a stack slot lives in.
+        fn slot(&self, from_top: u16) -> u16 {
+            self.stack_base + self.depth - from_top
+        }
+
+        fn grow(&mut self, by: u16) {
+            self.depth += by;
+        }
+
+        fn shrink(&mut self, by: u16) -> Result<(), Diagnostic> {
+            if self.depth < by {
+                return Err(fail("ED001", "The stack went below empty."));
+            }
+            self.depth -= by;
+            Ok(())
+        }
+    }
+
+    impl Translator<'_> {
+        /// Walks the method once, translating as it goes.
+        ///
+        /// The stack depth is tracked as a number rather than as a list of
+        /// types, because that is all the register layout needs: slot `n` is
+        /// always register `stack_base + n`, whatever is in it. What each slot
+        /// holds matters only for choosing between `move` and `move-object`,
+        /// and the JVM instruction being translated always says which.
+        pub fn walk(&mut self, bytes: &[u8]) -> Result<(), Diagnostic> {
+            let mut at = 0usize;
+            while at < bytes.len() {
+                self.landed.insert(at, units(&self.code));
+                let opcode = bytes[at];
+                let start = at;
+                at += 1;
+                self.one(opcode, bytes, start, &mut at)?;
+            }
+            self.landed.insert(bytes.len(), units(&self.code));
+            Ok(())
+        }
+
+        /// Fills in every branch, now that every destination is known.
+        pub fn finish(mut self) -> Result<Vec<Insn>, Diagnostic> {
+            // Where each instruction begins, so a fixup can be found by unit.
+            let mut positions = Vec::with_capacity(self.code.len());
+            let mut running = 0usize;
+            for instruction in &self.code {
+                positions.push(running);
+                running += instruction.width();
+            }
+
+            for fixup in &self.fixups {
+                let Some(landing) = self.landed.get(&fixup.target).copied() else {
+                    return Err(fail("ED003", "A branch points at no instruction.")
+                        .with_context(format!("Offset {}", fixup.target)));
+                };
+                let offset = landing as i64 - fixup.from as i64;
+                let Ok(offset) = i16::try_from(offset) else {
+                    return Err(fail(
+                        "ED004",
+                        "A branch reaches further than a Dalvik branch can.",
+                    )
+                    .with_context(format!("Distance: {offset} code units")));
+                };
+                // Which instruction holds this unit.
+                let Some(index) = positions.iter().rposition(|start| *start <= fixup.unit) else {
+                    return Err(fail("ED005", "A branch is not inside any instruction."));
+                };
+                let inside = fixup.unit - positions[index];
+                let Some(slot) = self.code[index].units.get_mut(inside) else {
+                    return Err(fail("ED005", "A branch is not inside any instruction."));
+                };
+                *slot = offset as u16;
+            }
+            Ok(self.code)
+        }
+
+        fn u16_at(bytes: &[u8], at: usize) -> u16 {
+            u16::from_be_bytes([
+                *bytes.get(at).unwrap_or(&0),
+                *bytes.get(at + 1).unwrap_or(&0),
+            ])
+        }
+
+        /// Puts a constant into the top of the stack.
+        fn constant(&mut self, value: i32, wide: bool) {
+            let to = self.stack_base + self.depth;
+            if wide {
+                if i16::try_from(value).is_ok() {
+                    // const-wide/16
+                    self.push(Insn::raw(vec![0x0016 | (to << 8), value as i16 as u16]));
+                } else {
+                    // const-wide/32
+                    self.push(Insn::raw(vec![
+                        0x0017 | (to << 8),
+                        value as u32 as u16,
+                        (value as u32 >> 16) as u16,
+                    ]));
+                }
+                self.grow(2);
+                return;
+            }
+            if (-8..=7).contains(&value) && to < 16 {
+                // const/4
+                self.push(Insn::raw(vec![
+                    0x0012 | (to << 8) | (((value as u16) & 0xf) << 12),
+                ]));
+            } else if i16::try_from(value).is_ok() {
+                // const/16
+                self.push(Insn::raw(vec![0x0013 | (to << 8), value as i16 as u16]));
+            } else {
+                // const
+                self.push(Insn::raw(vec![
+                    0x0014 | (to << 8),
+                    value as u32 as u16,
+                    (value as u32 >> 16) as u16,
+                ]));
+            }
+            self.grow(1);
+        }
+
+        /// A constant pool entry, by index, or nothing if it is not there.
+        ///
+        /// The pool is numbered from one, and the reader keeps a placeholder at
+        /// zero so that the index in a class file is the index here. Subtracting
+        /// one, which is what this did first, reads the entry before the one
+        /// asked for -- and since a pool is mostly names and descriptors, that
+        /// mostly reads as something plausible rather than as an error.
+        fn constant_at(&self, index: u16) -> Option<&jvm::Constant> {
+            self.class.constants.get(usize::from(index))
+        }
+
+        fn utf8_at(&self, index: u16) -> Option<String> {
+            match self.constant_at(index)? {
+                jvm::Constant::Utf8(text) => Some(text.clone()),
+                _ => None,
+            }
+        }
+
+        /// A class entry holds the index of the text of its name, not the name,
+        /// so getting one out is two steps rather than one.
+        fn class_name(&self, index: u16, start: usize) -> Result<String, Diagnostic> {
+            let Some(jvm::Constant::Class(name)) = self.constant_at(index) else {
+                return Err(fail("ED010", "A class reference points at no class.")
+                    .with_context(format!("Offset {start}, constant {index}")));
+            };
+            self.utf8_at(*name).ok_or_else(|| {
+                fail("ED010", "A class reference names nothing.")
+                    .with_context(format!("Offset {start}, constant {index}"))
+            })
+        }
+
+        /// `ldc`: an int, a float or a string.
+        fn load_constant(&mut self, index: u16, start: usize) -> Result<(), Diagnostic> {
+            match self.constant_at(index).cloned() {
+                Some(jvm::Constant::Integer(value)) => {
+                    self.constant(value, false);
+                    Ok(())
+                }
+                Some(jvm::Constant::String(text)) => {
+                    let text = self.utf8_at(text).ok_or_else(|| {
+                        fail("ED011", "A string constant points at no text.")
+                            .with_context(format!("Offset {start}"))
+                    })?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::pointing(
+                        vec![0x001a | (to << 8), 0],
+                        1,
+                        Operand::Text(text),
+                    ));
+                    self.grow(1);
+                    Ok(())
+                }
+                Some(jvm::Constant::Class(_)) => {
+                    let name = self.class_name(index, start)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::pointing(
+                        vec![0x001c | (to << 8), 0],
+                        1,
+                        Operand::Type(format!("L{name};")),
+                    ));
+                    self.grow(1);
+                    Ok(())
+                }
+                other => Err(fail("ED011", "That constant is not one this translates.")
+                    .with_context(format!("Offset {start}, constant {index}"))
+                    .with_context(format!("Found: {other:?}"))),
+            }
+        }
+
+        /// `ldc2_w`: a long or a double.
+        fn load_wide_constant(&mut self, index: u16, start: usize) -> Result<(), Diagnostic> {
+            match self.constant_at(index).cloned() {
+                Some(jvm::Constant::Long(value)) => {
+                    let to = self.stack_base + self.depth;
+                    if let Ok(narrow) = i32::try_from(value) {
+                        self.constant(narrow, true);
+                    } else {
+                        // const-wide, all sixty-four bits of it.
+                        let raw = value as u64;
+                        self.push(Insn::raw(vec![
+                            0x0018 | (to << 8),
+                            raw as u16,
+                            (raw >> 16) as u16,
+                            (raw >> 32) as u16,
+                            (raw >> 48) as u16,
+                        ]));
+                        self.grow(2);
+                    }
+                    Ok(())
+                }
+                other => Err(
+                    fail("ED011", "That wide constant is not one this translates.")
+                        .with_context(format!("Offset {start}, constant {index}"))
+                        .with_context(format!("Found: {other:?}")),
+                ),
+            }
+        }
+
+        /// What a Fieldref or Methodref points at: the class, the name and the
+        /// descriptor.
+        fn member_at(
+            &self,
+            index: u16,
+            start: usize,
+        ) -> Result<(String, String, String), Diagnostic> {
+            let (class_index, name_and_type) = match self.constant_at(index) {
+                Some(jvm::Constant::FieldRef(class, what))
+                | Some(jvm::Constant::MethodRef(class, what))
+                | Some(jvm::Constant::InterfaceMethodRef(class, what)) => (*class, *what),
+                _ => {
+                    return Err(fail("ED012", "A member reference points at no member.")
+                        .with_context(format!("Offset {start}, constant {index}")))
+                }
+            };
+            let class = self.class_name(class_index, start)?;
+            let Some(jvm::Constant::NameAndType(name, descriptor)) =
+                self.constant_at(name_and_type)
+            else {
+                return Err(fail("ED013", "A member reference has no name and type.")
+                    .with_context(format!("Offset {start}")));
+            };
+            let (name, descriptor) = (*name, *descriptor);
+            let name = self
+                .utf8_at(name)
+                .ok_or_else(|| fail("ED013", "A member has no name."))?;
+            let descriptor = self
+                .utf8_at(descriptor)
+                .ok_or_else(|| fail("ED013", "A member has no descriptor."))?;
+            Ok((class, name, descriptor))
+        }
+
+        fn field(&mut self, opcode: u8, index: u16, start: usize) -> Result<(), Diagnostic> {
+            let (class, name, descriptor) = self.member_at(index, start)?;
+            let width = width_of(&descriptor);
+            let reference = FieldRef {
+                class: format!("L{class};"),
+                name,
+                descriptor: descriptor.clone(),
+            };
+
+            // The opcode depends on what kind of value it is, because Dalvik
+            // has one instruction per width and one for objects.
+            let kind = match descriptor.chars().next() {
+                Some('J') | Some('D') => 1u16, // -wide
+                Some('L') | Some('[') => 2,    // -object
+                Some('Z') => 3,                // -boolean
+                Some('B') => 4,                // -byte
+                Some('C') => 5,                // -char
+                Some('S') => 6,                // -short
+                _ => 0,
+            };
+
+            match opcode {
+                0xb2 => {
+                    // sget
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::pointing(
+                        vec![(0x0060 + kind) | (to << 8), 0],
+                        1,
+                        Operand::Field(reference),
+                    ));
+                    self.grow(width);
+                }
+                0xb3 => {
+                    // sput
+                    let from = self.slot(width);
+                    self.shrink(width)?;
+                    self.push(Insn::pointing(
+                        vec![(0x0067 + kind) | (from << 8), 0],
+                        1,
+                        Operand::Field(reference),
+                    ));
+                }
+                0xb4 => {
+                    // iget
+                    let object = self.slot(1);
+                    self.shrink(1)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::pointing(
+                        vec![(0x0052 + kind) | (to << 8) | (object << 12), 0],
+                        1,
+                        Operand::Field(reference),
+                    ));
+                    self.grow(width);
+                }
+                _ => {
+                    // iput: the value is on top, the object under it.
+                    let value = self.slot(width);
+                    let object = self.slot(width + 1);
+                    self.shrink(width + 1)?;
+                    self.push(Insn::pointing(
+                        vec![(0x0059 + kind) | (value << 8) | (object << 12), 0],
+                        1,
+                        Operand::Field(reference),
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn call(&mut self, opcode: u8, index: u16, start: usize) -> Result<(), Diagnostic> {
+            let (class, name, descriptor) = self.member_at(index, start)?;
+            let Some((parameters, returns)) = split_descriptor(&descriptor) else {
+                return Err(fail("ED014", "A call has a descriptor that will not read.")
+                    .with_context(format!("Offset {start}: {descriptor}")));
+            };
+
+            let argument_words: u16 =
+                parameters.iter().map(|one| width_of(one)).sum::<u16>() + u16::from(opcode != 0xb8);
+
+            let dalvik = match opcode {
+                0xb6 => 0x006eu16, // invoke-virtual
+                0xb7 => 0x0070,    // invoke-direct, which is also how super is called
+                0xb8 => 0x0071,    // invoke-static
+                _ => 0x0072,       // invoke-interface
+            };
+
+            let reference = MethodRef {
+                class: format!("L{class};"),
+                name,
+                return_type: returns.clone(),
+                parameters,
+            };
+            self.invoke(dalvik, reference, argument_words);
+            self.shrink(argument_words)?;
+
+            // What it returned, if anything, is fetched into the stack slot it
+            // now belongs in. Dalvik keeps a result register apart from the
+            // ones a method uses, which is why this is a separate instruction.
+            let width = if returns == "V" {
+                0
+            } else {
+                width_of(&returns)
+            };
+            if width > 0 {
+                let to = self.stack_base + self.depth;
+                let fetch = match returns.chars().next() {
+                    Some('J') | Some('D') => 0x000bu16,
+                    Some('L') | Some('[') => 0x000c,
+                    _ => 0x000a,
+                };
+                self.push(Insn::raw(vec![fetch | (to << 8)]));
+                self.grow(width);
+            }
+            Ok(())
+        }
+
+        /// One JVM instruction.
+        fn one(
+            &mut self,
+            opcode: u8,
+            bytes: &[u8],
+            start: usize,
+            at: &mut usize,
+        ) -> Result<(), Diagnostic> {
+            match opcode {
+                // -- constants
+                0x00 => {} // nop
+                0x01 => {
+                    // aconst_null is const/4 with zero, which is what null is.
+                    self.constant(0, false);
+                }
+                0x02..=0x08 => self.constant(i32::from(opcode) - 0x03, false),
+                0x09 | 0x0a => self.constant(i32::from(opcode) - 0x09, true),
+                0x0b..=0x0f => {
+                    return Err(unsupported(start, opcode, "a float or double constant"))
+                }
+                0x10 => {
+                    let value = bytes[*at] as i8;
+                    *at += 1;
+                    self.constant(i32::from(value), false);
+                }
+                0x11 => {
+                    let value = Self::u16_at(bytes, *at) as i16;
+                    *at += 2;
+                    self.constant(i32::from(value), false);
+                }
+                0x12 | 0x13 => {
+                    let index = if opcode == 0x12 {
+                        let index = u16::from(bytes[*at]);
+                        *at += 1;
+                        index
+                    } else {
+                        let index = Self::u16_at(bytes, *at);
+                        *at += 2;
+                        index
+                    };
+                    self.load_constant(index, start)?;
+                }
+                0x14 => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    self.load_wide_constant(index, start)?;
+                }
+
+                // -- loads: a local into the top of the stack
+                0x15 | 0x17 => {
+                    let local = self.operand_local(bytes, at, opcode == 0x15);
+                    self.load_local(local, 0x01, 1);
+                }
+                0x16 | 0x18 => {
+                    let local = self.operand_local(bytes, at, false);
+                    self.load_local(local, 0x04, 2);
+                }
+                0x19 => {
+                    let local = self.operand_local(bytes, at, false);
+                    self.load_local(local, 0x07, 1);
+                }
+                0x1a..=0x1d => self.load_local(u16::from(opcode) - 0x1a, 0x01, 1),
+                0x1e..=0x21 => self.load_local(u16::from(opcode) - 0x1e, 0x04, 2),
+                0x22..=0x25 => self.load_local(u16::from(opcode) - 0x22, 0x01, 1),
+                0x26..=0x29 => self.load_local(u16::from(opcode) - 0x26, 0x04, 2),
+                0x2a..=0x2d => self.load_local(u16::from(opcode) - 0x2a, 0x07, 1),
+
+                // -- stores: the top of the stack into a local
+                0x36 | 0x38 => {
+                    let local = self.operand_local(bytes, at, opcode == 0x36);
+                    self.store_local(local, 0x01, 1)?;
+                }
+                0x37 | 0x39 => {
+                    let local = self.operand_local(bytes, at, false);
+                    self.store_local(local, 0x04, 2)?;
+                }
+                0x3a => {
+                    let local = self.operand_local(bytes, at, false);
+                    self.store_local(local, 0x07, 1)?;
+                }
+                0x3b..=0x3e => self.store_local(u16::from(opcode) - 0x3b, 0x01, 1)?,
+                0x3f..=0x42 => self.store_local(u16::from(opcode) - 0x3f, 0x04, 2)?,
+                0x43..=0x46 => self.store_local(u16::from(opcode) - 0x43, 0x01, 1)?,
+                0x47..=0x4a => self.store_local(u16::from(opcode) - 0x47, 0x04, 2)?,
+                0x4b..=0x4e => self.store_local(u16::from(opcode) - 0x4b, 0x07, 1)?,
+
+                // -- the stack itself
+                0x57 => self.shrink(1)?,
+                0x58 => self.shrink(2)?,
+                0x59 => {
+                    let from = self.slot(1);
+                    let to = self.stack_base + self.depth;
+                    self.push(move_register(0x01, to, from));
+                    self.grow(1);
+                }
+                0x5c => {
+                    let from = self.slot(2);
+                    let to = self.stack_base + self.depth;
+                    self.push(move_register(0x04, to, from));
+                    self.grow(2);
+                }
+
+                // -- arithmetic, two off the stack and one back on
+                0x60..=0x77 => self.arithmetic(opcode, start)?,
+                0x78..=0x83 => self.arithmetic(opcode, start)?,
+
+                0x84 => {
+                    // iinc: a local stepped where it stands.
+                    let local = u16::from(bytes[*at]);
+                    let by = bytes[*at + 1] as i8;
+                    *at += 2;
+                    // add-int/lit8 vAA, vBB, #+CC
+                    self.push(Insn::raw(vec![
+                        0x00d8 | (local << 8),
+                        (local & 0xff) | ((by as u8 as u16) << 8),
+                    ]));
+                }
+
+                // -- conversions
+                0x85..=0x93 => self.convert(opcode, start)?,
+
+                // -- comparisons that leave an int
+                0x94 => self.compare(0x31, 2)?,
+                0x95 => self.compare(0x2d, 1)?,
+                0x96 => self.compare(0x2e, 1)?,
+                0x97 => self.compare(0x2f, 2)?,
+                0x98 => self.compare(0x30, 2)?,
+
+                // -- branches
+                0x99..=0x9e => {
+                    let target = self.jump_target(bytes, at, start);
+                    let register = self.slot(1);
+                    self.shrink(1)?;
+                    // if-eqz .. if-lez
+                    self.branch(0x0038 + u16::from(opcode) - 0x99, vec![register], target);
+                }
+                0x9f..=0xa4 => {
+                    let target = self.jump_target(bytes, at, start);
+                    let left = self.slot(2);
+                    let right = self.slot(1);
+                    self.shrink(2)?;
+                    // if-eq .. if-le
+                    self.branch(0x0032 + u16::from(opcode) - 0x9f, vec![left, right], target);
+                }
+                0xa5 | 0xa6 => {
+                    let target = self.jump_target(bytes, at, start);
+                    let left = self.slot(2);
+                    let right = self.slot(1);
+                    self.shrink(2)?;
+                    self.branch(
+                        if opcode == 0xa5 { 0x0032 } else { 0x0033 },
+                        vec![left, right],
+                        target,
+                    );
+                }
+                0xc6 | 0xc7 => {
+                    let target = self.jump_target(bytes, at, start);
+                    let register = self.slot(1);
+                    self.shrink(1)?;
+                    // ifnull is if-eqz, ifnonnull is if-nez.
+                    self.branch(
+                        if opcode == 0xc6 { 0x0038 } else { 0x0039 },
+                        vec![register],
+                        target,
+                    );
+                }
+                0xa7 => {
+                    let target = self.jump_target(bytes, at, start);
+                    // goto/16, always, so that every branch is two units and
+                    // one pass is enough.
+                    self.branch(0x0029, Vec::new(), target);
+                }
+
+                // -- returns
+                0xac | 0xae => {
+                    let register = self.slot(1);
+                    self.shrink(1)?;
+                    self.push(Insn::raw(vec![0x000f | (register << 8)]));
+                }
+                0xad | 0xaf => {
+                    let register = self.slot(2);
+                    self.shrink(2)?;
+                    self.push(Insn::raw(vec![0x0010 | (register << 8)]));
+                }
+                0xb0 => {
+                    let register = self.slot(1);
+                    self.shrink(1)?;
+                    self.push(Insn::raw(vec![0x0011 | (register << 8)]));
+                }
+                0xb1 => self.push(Insn::raw(vec![0x000e])),
+
+                // -- fields
+                0xb2..=0xb5 => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    self.field(opcode, index, start)?;
+                }
+
+                // -- calls
+                0xb6..=0xb8 => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    self.call(opcode, index, start)?;
+                }
+                0xb9 => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 4;
+                    self.call(opcode, index, start)?;
+                }
+
+                0xbb => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    let name = self.class_name(index, start)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::pointing(
+                        vec![0x0022 | (to << 8), 0],
+                        1,
+                        Operand::Type(format!("L{name};")),
+                    ));
+                    self.grow(1);
+                }
+                0xbe => {
+                    let from = self.slot(1);
+                    self.shrink(1)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::raw(vec![0x0021 | (to << 8) | (from << 12)]));
+                    self.grow(1);
+                }
+                0xc0 | 0xc1 => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    let name = self.class_name(index, start)?;
+                    let descriptor = if name.starts_with('[') {
+                        name
+                    } else {
+                        format!("L{name};")
+                    };
+                    let register = self.slot(1);
+                    if opcode == 0xc0 {
+                        self.push(Insn::pointing(
+                            vec![0x001f | (register << 8), 0],
+                            1,
+                            Operand::Type(descriptor),
+                        ));
+                    } else {
+                        self.shrink(1)?;
+                        let to = self.stack_base + self.depth;
+                        self.push(Insn::pointing(
+                            vec![0x0020 | (to << 8) | (register << 12), 0],
+                            1,
+                            Operand::Type(descriptor),
+                        ));
+                        self.grow(1);
+                    }
+                }
+
+                _ => return Err(unsupported(start, opcode, name_of(opcode))),
+            }
+            Ok(())
+        }
+
+        fn operand_local(&self, bytes: &[u8], at: &mut usize, _narrow: bool) -> u16 {
+            let local = u16::from(bytes[*at]);
+            *at += 1;
+            local
+        }
+
+        fn jump_target(&self, bytes: &[u8], at: &mut usize, start: usize) -> usize {
+            let offset = Self::u16_at(bytes, *at) as i16;
+            *at += 2;
+            (start as i64 + i64::from(offset)) as usize
+        }
+
+        fn load_local(&mut self, local: u16, kind: u8, width: u16) {
+            let to = self.stack_base + self.depth;
+            self.push(move_register(kind, to, local));
+            self.grow(width);
+        }
+
+        fn store_local(&mut self, local: u16, kind: u8, width: u16) -> Result<(), Diagnostic> {
+            let from = self.slot(width);
+            self.shrink(width)?;
+            self.push(move_register(kind, local, from));
+            Ok(())
+        }
+
+        fn compare(&mut self, opcode: u16, width: u16) -> Result<(), Diagnostic> {
+            let left = self.slot(width * 2);
+            let right = self.slot(width);
+            self.shrink(width * 2)?;
+            let to = self.stack_base + self.depth;
+            self.push(Insn::raw(vec![
+                opcode | (to << 8),
+                (left & 0xff) | ((right & 0xff) << 8),
+            ]));
+            self.grow(1);
+            Ok(())
+        }
+
+        /// The binary operators, which all take the same shape in Dalvik:
+        /// `op vAA, vBB, vCC`.
+        fn arithmetic(&mut self, opcode: u8, start: usize) -> Result<(), Diagnostic> {
+            // (dalvik opcode, width of each operand, width of the result)
+            let (dalvik, left_width, right_width, result) = match opcode {
+                0x60 => (0x0090u16, 1, 1, 1), // add-int
+                0x61 => (0x009b, 2, 2, 2),    // add-long
+                0x64 => (0x0091, 1, 1, 1),    // sub-int
+                0x65 => (0x009c, 2, 2, 2),    // sub-long
+                0x68 => (0x0092, 1, 1, 1),    // mul-int
+                0x69 => (0x009d, 2, 2, 2),    // mul-long
+                0x6c => (0x0093, 1, 1, 1),    // div-int
+                0x6d => (0x009e, 2, 2, 2),    // div-long
+                0x70 => (0x0094, 1, 1, 1),    // rem-int
+                0x71 => (0x009f, 2, 2, 2),    // rem-long
+                0x74 => {
+                    // neg-int, which takes one operand and is a different shape.
+                    let from = self.slot(1);
+                    self.shrink(1)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::raw(vec![0x007b | (to << 8) | (from << 12)]));
+                    self.grow(1);
+                    return Ok(());
+                }
+                0x75 => {
+                    let from = self.slot(2);
+                    self.shrink(2)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::raw(vec![0x007d | (to << 8) | (from << 12)]));
+                    self.grow(2);
+                    return Ok(());
+                }
+                0x78 => (0x0098, 1, 1, 1), // shl-int
+                0x79 => (0x00a3, 2, 1, 2), // shl-long
+                0x7a => (0x0099, 1, 1, 1), // shr-int
+                0x7b => (0x00a4, 2, 1, 2), // shr-long
+                0x7c => (0x009a, 1, 1, 1), // ushr-int
+                0x7d => (0x00a5, 2, 1, 2), // ushr-long
+                0x7e => (0x0095, 1, 1, 1), // and-int
+                0x7f => (0x00a0, 2, 2, 2), // and-long
+                0x80 => (0x0096, 1, 1, 1), // or-int
+                0x81 => (0x00a1, 2, 2, 2), // or-long
+                0x82 => (0x0097, 1, 1, 1), // xor-int
+                0x83 => (0x00a2, 2, 2, 2), // xor-long
+                _ => return Err(unsupported(start, opcode, name_of(opcode))),
+            };
+
+            let left = self.slot(left_width + right_width);
+            let right = self.slot(right_width);
+            self.shrink(left_width + right_width)?;
+            let to = self.stack_base + self.depth;
+            self.push(Insn::raw(vec![
+                dalvik | (to << 8),
+                (left & 0xff) | ((right & 0xff) << 8),
+            ]));
+            self.grow(result);
+            Ok(())
+        }
+
+        fn convert(&mut self, opcode: u8, start: usize) -> Result<(), Diagnostic> {
+            let (dalvik, from_width, to_width) = match opcode {
+                0x85 => (0x0081u16, 1, 2), // int-to-long
+                0x88 => (0x0084, 2, 1),    // long-to-int
+                0x91 => (0x008d, 1, 1),    // int-to-byte
+                0x92 => (0x008e, 1, 1),    // int-to-char
+                0x93 => (0x008f, 1, 1),    // int-to-short
+                _ => return Err(unsupported(start, opcode, name_of(opcode))),
+            };
+            let from = self.slot(from_width);
+            self.shrink(from_width)?;
+            let to = self.stack_base + self.depth;
+            self.push(Insn::raw(vec![dalvik | (to << 8) | (from << 12)]));
+            self.grow(to_width);
+            Ok(())
+        }
+
+        /// A branch, recorded for `finish` to fill in.
+        fn branch(&mut self, opcode: u16, registers: Vec<u16>, target: usize) {
+            let from = units(&self.code);
+            let mut first = opcode;
+            match registers.len() {
+                0 => {}
+                1 => first |= registers[0] << 8,
+                _ => first |= (registers[0] << 8) | (registers[1] << 12),
+            }
+            self.push(Insn::raw(vec![first, 0]));
+            self.fixups.push(Fixup {
+                unit: from + 1,
+                from,
+                target,
+            });
+        }
+
+        /// An invoke, in the form that names up to five registers.
+        fn invoke(&mut self, opcode: u16, reference: MethodRef, argument_words: u16) {
+            let first = self.slot(argument_words) + 1;
+            let mut registers = Vec::new();
+            for step in 0..argument_words {
+                registers.push(first + step);
+            }
+            self.max_outputs = self.max_outputs.max(argument_words);
+
+            let count = registers.len() as u16;
+            let mut packed = 0u16;
+            for (index, register) in registers.iter().take(4).enumerate() {
+                packed |= (register & 0xf) << (index * 4);
+            }
+            let fifth = registers.get(4).copied().unwrap_or(0) & 0xf;
+            self.push(Insn::pointing(
+                vec![opcode | (fifth << 8) | (count << 12), 0, packed],
+                1,
+                Operand::Method(reference),
+            ));
+        }
+    }
+
+    /// What a whole class comes to.
+    pub fn translate_class(class: &jvm::Class) -> Result<crate::dexwrite::Class, Diagnostic> {
+        // The reader hands back names the way a person writes them, with dots,
+        // because that is what a report wants. A dex descriptor wants the
+        // internal form with slashes. Reading one as the other produces a
+        // descriptor that looks right and names a class nobody has.
+        let descriptor = format!("L{};", class.name.replace('.', "/"));
+        let superclass = format!(
+            "L{};",
+            class
+                .superclass
+                .as_deref()
+                .unwrap_or("java.lang.Object")
+                .replace('.', "/")
+        );
+        let mut out =
+            crate::dexwrite::Class::named(&descriptor, &superclass, u32::from(class.access_flags));
+
+        for field in &class.fields {
+            let entry = crate::dexwrite::Field {
+                reference: FieldRef {
+                    class: descriptor.clone(),
+                    name: field.name.clone(),
+                    descriptor: field.descriptor.clone(),
+                },
+                access_flags: u32::from(field.access_flags),
+            };
+            if field.access_flags & 0x0008 != 0 {
+                out.static_fields.push(entry);
+            } else {
+                out.instance_fields.push(entry);
+            }
+        }
+
+        for method in &class.methods {
+            let translated = translate_method(class, method, &descriptor)?;
+            // Constructors, static methods and private ones are called without
+            // asking what the object is; everything else is dispatched on it.
+            let direct = method.access_flags & (0x0008 | 0x0002) != 0
+                || method.name == "<init>"
+                || method.name == "<clinit>";
+            if direct {
+                out.direct_methods.push(translated);
+            } else {
+                out.virtual_methods.push(translated);
+            }
+        }
+
+        Ok(out)
+    }
+
+    fn translate_method(
+        class: &jvm::Class,
+        method: &jvm::Member,
+        owner: &str,
+    ) -> Result<Method, Diagnostic> {
+        let (parameters, returns) = split_descriptor(&method.descriptor).ok_or_else(|| {
+            fail("ED002", "A method descriptor could not be read.")
+                .with_context(format!("Method: {}", method.name))
+                .with_context(format!("Descriptor: {}", method.descriptor))
+        })?;
+
+        let reference = MethodRef {
+            class: owner.to_string(),
+            name: method.name.clone(),
+            return_type: returns.clone(),
+            parameters: parameters.clone(),
+        };
+
+        let is_static = method.access_flags & 0x0008 != 0;
+        let inputs: u16 =
+            parameters.iter().map(|one| width_of(one)).sum::<u16>() + u16::from(!is_static);
+
+        let Some(code) = &method.code else {
+            // Abstract or native: no body, no registers.
+            return Ok(Method {
+                reference,
+                access_flags: u32::from(method.access_flags),
+                registers: 0,
+                inputs,
+                outputs: 0,
+                instructions: Vec::new(),
+            });
+        };
+
+        let mut translator = Translator::new(class, code);
+        let total = code.max_locals + code.max_stack + inputs;
+
+        // The parameters arrive at the top and belong at the bottom.
+        let mut at = code.max_locals + code.max_stack;
+        let mut local = 0u16;
+        if !is_static {
+            translator.push(move_register(0x07, local, at));
+            at += 1;
+            local += 1;
+        }
+        for parameter in &parameters {
+            let wide = width_of(parameter) == 2;
+            let opcode = if wide {
+                0x04
+            } else if parameter.starts_with('L') || parameter.starts_with('[') {
+                0x07
+            } else {
+                0x01
+            };
+            translator.push(move_register(opcode, local, at));
+            at += width_of(parameter);
+            local += width_of(parameter);
+        }
+
+        translator.walk(&code.bytes)?;
+        let outputs = translator.max_outputs;
+        let instructions = translator.finish()?;
+
+        Ok(Method {
+            reference,
+            access_flags: u32::from(method.access_flags),
+            registers: total.max(1),
+            inputs,
+            outputs,
+            instructions,
+        })
+    }
+
+    /// `move`, `move-wide` or `move-object`, in whichever width reaches.
+    fn move_register(kind: u8, to: u16, from: u16) -> Insn {
+        if to < 16 && from < 16 {
+            return Insn::raw(vec![u16::from(kind) | (to << 8) | (from << 12)]);
+        }
+        // The /from16 forms, which are the next opcode along in every case.
+        let wide = u16::from(kind + 1);
+        Insn::raw(vec![wide | (to << 8), from])
+    }
+
+    /// A method descriptor as its parameter descriptors and its return one.
+    pub fn split_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
+        let bytes = descriptor.as_bytes();
+        if bytes.first() != Some(&b'(') {
+            return None;
+        }
+        let mut at = 1usize;
+        let mut parameters = Vec::new();
+        while *bytes.get(at)? != b')' {
+            parameters.push(one_descriptor(descriptor, &mut at)?);
+        }
+        at += 1;
+        Some((parameters, one_descriptor(descriptor, &mut at)?))
+    }
+
+    fn one_descriptor(descriptor: &str, at: &mut usize) -> Option<String> {
+        let start = *at;
+        let bytes = descriptor.as_bytes();
+        while *bytes.get(*at)? == b'[' {
+            *at += 1;
+        }
+        if *bytes.get(*at)? == b'L' {
+            let end = descriptor[*at..].find(';')? + *at;
+            *at = end + 1;
+        } else {
+            *at += 1;
+        }
+        Some(descriptor[start..*at].to_string())
     }
 }
 
@@ -21758,9 +22941,21 @@ pub mod jvm {
     pub enum Constant {
         Utf8(String),
         Integer(i32),
+        Float(u32),
+        Long(i64),
+        Double(u64),
         Class(u16),
         String(u16),
         NameAndType(u16, u16),
+        /// The three member references, each holding the class it is in and
+        /// the name-and-type that says what it is.
+        ///
+        /// These were all thrown into `Other` before, which was enough to say a
+        /// class file had references in it and not enough to say what they
+        /// pointed at. Translating a call needs to know.
+        FieldRef(u16, u16),
+        MethodRef(u16, u16),
+        InterfaceMethodRef(u16, u16),
         Unusable,
         Other(u8),
     }
@@ -22025,18 +23220,33 @@ pub mod jvm {
                     Constant::NameAndType(name, descriptor)
                 }
                 3 => Constant::Integer(reader.i32()?),
-                4 => {
-                    reader.skip(4)?;
-                    Constant::Other(tag)
-                }
+                4 => Constant::Float(reader.u32()?),
                 5 | 6 => {
-                    reader.skip(8)?;
-                    constants.push(Constant::Other(tag));
+                    let high = u64::from(reader.u32()?);
+                    let low = u64::from(reader.u32()?);
+                    let raw = (high << 32) | low;
+                    // A long or a double takes two entries, and the second is
+                    // a hole the format leaves and every reader has to step
+                    // over.
+                    constants.push(if tag == 5 {
+                        Constant::Long(raw as i64)
+                    } else {
+                        Constant::Double(raw)
+                    });
                     constants.push(Constant::Unusable);
                     index += 2;
                     continue;
                 }
-                9 | 10 | 11 | 17 | 18 => {
+                9..=11 => {
+                    let class = reader.u16()?;
+                    let what = reader.u16()?;
+                    match tag {
+                        9 => Constant::FieldRef(class, what),
+                        10 => Constant::MethodRef(class, what),
+                        _ => Constant::InterfaceMethodRef(class, what),
+                    }
+                }
+                17 | 18 => {
                     reader.skip(4)?;
                     Constant::Other(tag)
                 }
@@ -28218,7 +29428,7 @@ mod tests {
             inputs: 1,
             outputs: 0,
             // return-void, which is the whole body.
-            instructions: vec![0x000e],
+            instructions: vec![super::dexwrite::Insn::raw(vec![0x000e])],
         }];
         class
     }

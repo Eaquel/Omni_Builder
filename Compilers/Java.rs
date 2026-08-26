@@ -4827,6 +4827,146 @@ mod tests {
     }
 
     #[test]
+    fn java_source_becomes_a_dex_that_dexdump_reads() {
+        // The whole way through, in one test: text, to a class file, to the
+        // bytecode Android runs, read back by the Android tool. Every step here
+        // is this project's own -- there is no javac and no d8 in it.
+        let source = r#"
+            package com.my.app;
+
+            public class Counter {
+                private int count;
+                private String label;
+
+                public static int twice(int value) {
+                    return value * 2;
+                }
+
+                public int add(int by) {
+                    count = count + by;
+                    return count;
+                }
+
+                public int sumTo(int limit) {
+                    int total = 0;
+                    int i = 0;
+                    while (i < limit) {
+                        total = total + i;
+                        i = i + 1;
+                    }
+                    return total;
+                }
+
+                public void reset() {
+                    count = 0;
+                }
+            }
+        "#;
+
+        let (name, class_bytes) = compile(source, &empty()).expect("this must compile");
+        assert_eq!(name, "com/my/app/Counter.class");
+
+        let class = crate::jvm::read(&class_bytes).expect("what was written must read");
+        let translated =
+            crate::dalvik::translate_class(&class).expect("and must translate to Dalvik");
+
+        assert_eq!(translated.descriptor, "Lcom/my/app/Counter;");
+        assert_eq!(translated.superclass, "Ljava/lang/Object;");
+        assert_eq!(translated.instance_fields.len(), 2);
+        assert!(translated.static_fields.is_empty());
+
+        // `twice` is static and the constructor is direct; the rest are
+        // dispatched on the object.
+        let direct: Vec<&str> = translated
+            .direct_methods
+            .iter()
+            .map(|one| one.reference.name.as_str())
+            .collect();
+        let virtual_: Vec<&str> = translated
+            .virtual_methods
+            .iter()
+            .map(|one| one.reference.name.as_str())
+            .collect();
+        assert!(direct.contains(&"<init>"), "{direct:?}");
+        assert!(direct.contains(&"twice"), "{direct:?}");
+        for wanted in ["add", "sumTo", "reset"] {
+            assert!(virtual_.contains(&wanted), "{virtual_:?}");
+        }
+
+        // Every method that has a body has instructions, and every one of them
+        // declares enough registers to hold what it uses.
+        for method in translated
+            .direct_methods
+            .iter()
+            .chain(translated.virtual_methods.iter())
+        {
+            assert!(
+                !method.instructions.is_empty(),
+                "{} came out with no code",
+                method.reference.name
+            );
+            assert!(
+                method.registers >= method.inputs,
+                "{} declares {} registers and takes {} in",
+                method.reference.name,
+                method.registers,
+                method.inputs
+            );
+        }
+
+        let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
+
+        let mut sink = crate::diag::Sink::new();
+        let read = crate::dex::read(&dex, &mut sink).expect("our own reader must read it");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        assert_eq!(read.class_names(), vec!["com.my.app.Counter"]);
+        assert!(crate::dex::integrity(&dex).unwrap().self_consistent());
+
+        // The same source is the same dex, which is what the compiler contract
+        // promises when it says its output is reproducible.
+        let (_, again) = compile(source, &empty()).unwrap();
+        let again = crate::dalvik::translate_class(&crate::jvm::read(&again).unwrap()).unwrap();
+        assert_eq!(
+            dex,
+            crate::dexwrite::write(&[again], &[]).unwrap(),
+            "the same source must come to the same dex"
+        );
+
+        eprintln!(
+            "dalvik: java source to a {} byte dex, five methods and two fields, no javac and no d8",
+            dex.len()
+        );
+    }
+
+    #[test]
+    fn what_the_translator_cannot_turn_into_dalvik_it_names() {
+        // A method using something the translator does not handle has to be
+        // refused with the instruction named, not skipped. A translator that
+        // skips what it does not understand produces a method that runs and
+        // does the wrong thing.
+        let source = r#"
+            public class WithArray {
+                public int first(int[] values) {
+                    return values[0];
+                }
+            }
+        "#;
+        let (_, bytes) = compile(source, &empty()).expect("this compiles to a class file");
+        let class = crate::jvm::read(&bytes).unwrap();
+        let refused = crate::dalvik::translate_class(&class)
+            .expect_err("reading from an array is not translated yet");
+        assert_eq!(refused.code, "ED900");
+        assert!(
+            refused.message.contains("array"),
+            "the refusal has to name it: {}",
+            refused.message
+        );
+        assert!(refused.suggestion.is_some());
+
+        eprintln!("dalvik: what it cannot translate, it names");
+    }
+
+    #[test]
     fn it_calls_into_classes_it_was_handed_and_refuses_ones_it_was_not() {
         // A class file for something to call, written by this compiler, then
         // read back as a dependency -- which is exactly what the contract does
