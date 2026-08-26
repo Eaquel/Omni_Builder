@@ -31,21 +31,22 @@
 //!
 //! # What it targets
 //!
-//! Class file major version 49, which is Java 5. Not because the language
-//! stops there -- what is accepted above is a subset of every Java since -- but
-//! because of how class files are verified. From version 50 the JVM uses the
+//! Class file major version 59, which is Java 15.
+//!
+//! That number is not a label. From version 50 the JVM verifies with the
 //! type-checking verifier, which wants a StackMapTable attribute on every
 //! method that branches, and from 51 a missing one is a hard failure rather
-//! than a fallback. This does not write frames yet.
+//! than a fallback. Writing 59 without frames would produce class files that
+//! read fine, that `javap` prints happily, that pass through `d8` -- and that a
+//! real JVM refuses the moment a method contains an `if`. So this writes
+//! frames.
 //!
-//! Claiming 52 and omitting the frames would produce class files that read
-//! fine, that `javap` prints happily, that pass through `d8` -- and that a real
-//! JVM refuses the moment a method contains an `if`. Claiming 49 produces class
-//! files that verify everywhere, today, at the cost of saying the language
-//! level is older than the language actually used. The first is a lie that
-//! surfaces on somebody else's machine; the second is a limitation written on
-//! the tin. Frames are the next thing this needs, and until they exist the
-//! contract says so.
+//! What that costs is a second thing to be right about. The verifier does not
+//! infer the state of the stack and locals at a branch target; it is told, and
+//! it checks that every path arriving there agrees with what it was told. A
+//! frame that is wrong is worse than no frame, because it is a claim. The
+//! emitter therefore tracks what type is in every local and every stack slot as
+//! it goes, and records that state wherever a branch can land.
 
 use crate::caps::Capability;
 use crate::compiler::{
@@ -58,15 +59,16 @@ use crate::Status;
 
 pub const ORIGIN: &str = "omni.plugin.java";
 
-/// Java 5 class files, which verify without stack map frames. See the note at
-/// the top of this file for why that is the honest choice and not a shortcut.
-pub const CLASS_MAJOR: u16 = 49;
+/// Java 15 class files. Verified by the type-checking verifier, which means
+/// every method that branches carries a StackMapTable and every one of those
+/// has to be right. See the note at the top of this file.
+pub const CLASS_MAJOR: u16 = 59;
 pub const CLASS_MINOR: u16 = 0;
 
 /// The Java this accepts is a subset of every release from 8 onward. The
 /// version named here is the one the project pins, and it reaches the compiler
 /// identity so that changing it invalidates what the old one built.
-pub const LANGUAGE_RELEASE: &str = "25";
+pub const LANGUAGE_RELEASE: &str = "15";
 
 fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(
@@ -2416,6 +2418,67 @@ struct Pending {
     from: usize,
 }
 
+/// What the verifier is told is in a slot.
+///
+/// Not the same as [`Type`]: the verifier does not distinguish a boolean from
+/// an int, because the machine does not. It does distinguish the second half of
+/// a long from anything else, which is what `Top` is for here.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Verified {
+    Top,
+    Integer,
+    Float,
+    Double,
+    Long,
+    Null,
+    /// `this`, inside a constructor, before the superclass constructor has run.
+    UninitializedThis,
+    Object(String),
+}
+
+impl Verified {
+    fn of(what: &Type) -> Verified {
+        match what {
+            Type::Boolean | Type::Byte | Type::Short | Type::Char | Type::Int => Verified::Integer,
+            Type::Long => Verified::Long,
+            Type::Float => Verified::Float,
+            Type::Double => Verified::Double,
+            Type::Void => Verified::Top,
+            Type::Object(name) => Verified::Object(name.clone()),
+            Type::Array(_) => Verified::Object(what.descriptor()),
+        }
+    }
+
+    fn is_wide(&self) -> bool {
+        matches!(self, Verified::Long | Verified::Double)
+    }
+
+    fn write(&self, out: &mut Vec<u8>, pool: &mut Pool) {
+        match self {
+            Verified::Top => out.push(0),
+            Verified::Integer => out.push(1),
+            Verified::Float => out.push(2),
+            Verified::Double => out.push(3),
+            Verified::Long => out.push(4),
+            Verified::Null => out.push(5),
+            Verified::UninitializedThis => out.push(6),
+            Verified::Object(name) => {
+                out.push(7);
+                let index = pool.class(name);
+                out.extend_from_slice(&index.to_be_bytes());
+            }
+        }
+    }
+}
+
+/// What the verifier has to be told at one place a branch can land.
+#[derive(Clone, Debug)]
+struct Frame {
+    at: usize,
+    locals: Vec<Verified>,
+    stack: Vec<Verified>,
+}
+
 /// Turns one method body into bytecode.
 ///
 /// There is no separate checking pass. Every expression is typed as it is
@@ -2443,6 +2506,13 @@ struct Emitter<'a> {
     /// "text"; }` compiled, and produced a class file whose verifier would
     /// have thrown it out on the device.
     returns: Type,
+    /// What is in each local slot, as the verifier would say it.
+    ///
+    /// A local that has been declared but never given a value is `Top`, which
+    /// is the verifier's word for "nothing you may read".
+    slots: Vec<Verified>,
+    /// Everywhere a branch can land, and what is true there.
+    frames: Vec<Frame>,
 }
 
 impl<'a> Emitter<'a> {
@@ -2469,6 +2539,8 @@ impl<'a> Emitter<'a> {
             continues: Vec::new(),
             static_,
             returns: Type::Void,
+            slots: Vec::new(),
+            frames: Vec::new(),
         }
     }
 
@@ -2483,6 +2555,63 @@ impl<'a> Emitter<'a> {
         if self.depth < 0 {
             self.depth = 0;
         }
+    }
+
+    /// Records what is in a local slot, for the frames to report.
+    fn slot_holds(&mut self, slot: u16, what: &Type) {
+        let verified = Verified::of(what);
+        let wide = verified.is_wide();
+        let at = usize::from(slot);
+        while self.slots.len() <= at + usize::from(wide) {
+            self.slots.push(Verified::Top);
+        }
+        self.slots[at] = verified;
+        if wide {
+            self.slots[at + 1] = Verified::Top;
+        }
+    }
+
+    /// Notes that a branch can land at the current position, and what is on the
+    /// stack when it does.
+    ///
+    /// Every one of these becomes a frame. The verifier does not work out what
+    /// is true at a branch target; it is told, and it checks that every path
+    /// arriving agrees with what it was told. So a frame that is wrong is worse
+    /// than no frame at all, because it is a claim rather than a gap.
+    ///
+    /// The locals are read from what has been declared. The stack is passed in,
+    /// because every place a branch lands here is a place this compiler wrote
+    /// the branch and therefore knows exactly what is left on it -- and that is
+    /// a shorter road to being right than threading a type through every
+    /// arithmetic instruction and hoping the two counts never drift apart.
+    fn a_branch_lands_here(&mut self, stack: &[Verified]) {
+        let at = self.code.len();
+        let mut locals = self.slots.clone();
+        while matches!(locals.last(), Some(Verified::Top)) {
+            locals.pop();
+        }
+        let frame = Frame {
+            at,
+            locals,
+            stack: stack.to_vec(),
+        };
+        match self.frames.iter().position(|held| held.at == at) {
+            // Two branches landing on one instruction have to agree, and where
+            // this compiler writes them they do: one is the jump over an else
+            // and the other is the end of the then. Keeping the wider of the
+            // two stacks would be inventing something neither said.
+            Some(index) => self.frames[index] = frame,
+            None => self.frames.push(frame),
+        }
+    }
+
+    /// The stack, when one value of a known type is on it.
+    fn one_on_the_stack(what: &Type) -> Vec<Verified> {
+        let verified = Verified::of(what);
+        if verified.is_wide() {
+            return vec![verified, Verified::Top];
+        }
+        vec![verified]
     }
 
     fn op(&mut self, opcode: u8) {
@@ -2535,10 +2664,14 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
+        // A local that has gone out of scope is nothing the verifier may read,
+        // and a frame written after this must not claim otherwise.
+        self.slots.truncate(usize::from(self.next_slot));
     }
 
     fn declare(&mut self, name: &str, what: Type) -> u16 {
         let slot = self.next_slot;
+        self.slot_holds(slot, &what);
         self.next_slot += what.width();
         if self.next_slot > self.max_slot {
             self.max_slot = self.next_slot;
@@ -2960,9 +3093,11 @@ impl Emitter<'_> {
                         self.push_int(0);
                         let over = self.jump(0xa7);
                         self.land(jump);
+                        self.a_branch_lands_here(&[]);
                         self.grow(-1);
                         self.push_int(1);
                         self.land(over);
+                        self.a_branch_lands_here(&[Verified::Integer]);
                         Ok(Type::Boolean)
                     }
                 }
@@ -2995,9 +3130,16 @@ impl Emitter<'_> {
                 let taken = self.value(then, line)?;
                 let over = self.jump(0xa7);
                 self.land(to_else);
+                self.a_branch_lands_here(&[]);
                 self.depth = depth_before;
                 let other = self.value(otherwise, line)?;
                 self.land(over);
+                let landed = if taken == other || taken.is_reference() {
+                    taken.clone()
+                } else {
+                    taken.promoted_with(&other).unwrap_or(Type::Int)
+                };
+                self.a_branch_lands_here(&Self::one_on_the_stack(&landed));
                 if taken != other && !taken.is_reference() {
                     let both = taken.promoted_with(&other).ok_or_else(|| {
                         at(
@@ -3234,9 +3376,11 @@ impl Emitter<'_> {
             }
             let over = self.jump(0xa7);
             self.land(shortcut);
+            self.a_branch_lands_here(&[]);
             self.grow(-1);
             self.push_int(i64::from(operator == Binary::OrElse));
             self.land(over);
+            self.a_branch_lands_here(&[Verified::Integer]);
             return Ok(Type::Boolean);
         }
 
@@ -3427,9 +3571,11 @@ impl Emitter<'_> {
         self.push_int(0);
         let over = self.jump(0xa7);
         self.land(jump);
+        self.a_branch_lands_here(&[]);
         self.grow(-1);
         self.push_int(1);
         self.land(over);
+        self.a_branch_lands_here(&[Verified::Integer]);
         Ok(Type::Boolean)
     }
 
@@ -4101,17 +4247,34 @@ impl Emitter<'_> {
                 self.statement(then)?;
                 match otherwise {
                     Some(otherwise) => {
-                        let over = self.jump(0xa7);
+                        // Where the `then` side always returns, the jump over
+                        // the `else` can never be taken. Writing it anyway
+                        // leaves an instruction nothing reaches, and an
+                        // instruction nothing reaches begins a block the
+                        // verifier wants a frame for -- so a version 59 class
+                        // file is refused with "expecting a stack map frame"
+                        // over three bytes that do nothing.
+                        let over = (!always_returns(&then.node)).then(|| self.jump(0xa7));
                         self.land(to_else);
+                        self.a_branch_lands_here(&[]);
                         self.statement(otherwise)?;
-                        self.land(over);
+                        if let Some(over) = over {
+                            self.land(over);
+                            self.a_branch_lands_here(&[]);
+                        }
                     }
-                    None => self.land(to_else),
+                    None => {
+                        self.land(to_else);
+                        self.a_branch_lands_here(&[]);
+                    }
                 }
                 Ok(())
             }
             Statement::While { condition, body } => {
                 let top = self.code.len();
+                // A loop jumps back here, so the verifier has to be told what
+                // is true at the top as well as after the end.
+                self.a_branch_lands_here(&[]);
                 let found = self.value(condition, line)?;
                 if found != Type::Boolean {
                     return Err(at("EJ206", line, 1, "A `while` wants a boolean."));
@@ -4124,11 +4287,13 @@ impl Emitter<'_> {
                 for pending in self.continues.pop().unwrap_or_default() {
                     self.land(pending);
                 }
+                self.a_branch_lands_here(&[]);
                 self.jump_back(0xa7, top);
                 self.land(out);
                 for pending in self.breaks.pop().unwrap_or_default() {
                     self.land(pending);
                 }
+                self.a_branch_lands_here(&[]);
                 Ok(())
             }
             Statement::For {
@@ -4142,6 +4307,7 @@ impl Emitter<'_> {
                     self.statement(one)?;
                 }
                 let top = self.code.len();
+                self.a_branch_lands_here(&[]);
                 let out = match condition {
                     Some(condition) => {
                         let found = self.value(condition, line)?;
@@ -4160,6 +4326,7 @@ impl Emitter<'_> {
                 for pending in self.continues.pop().unwrap_or_default() {
                     self.land(pending);
                 }
+                self.a_branch_lands_here(&[]);
                 for expression in step {
                     match expression {
                         Expression::Step { target, by, after } => {
@@ -4195,6 +4362,7 @@ impl Emitter<'_> {
                 for pending in self.breaks.pop().unwrap_or_default() {
                     self.land(pending);
                 }
+                self.a_branch_lands_here(&[]);
                 self.close();
                 Ok(())
             }
@@ -4274,6 +4442,99 @@ impl Emitter<'_> {
 }
 
 // ------------------------------------------------------ the class file
+
+/// The StackMapTable a method's frames come to.
+///
+/// Every frame is written as a `full_frame`, which spells out every local and
+/// every stack slot rather than saying how this one differs from the last. The
+/// compact forms save a few bytes and each one is a separate chance to describe
+/// a state that is not the state; a verifier that rejects a class file gives no
+/// hint which frame it disbelieved. The bytes are cheap and being right is not.
+fn stack_map_table(frames: &[Frame], pool: &mut Pool) -> Option<Vec<u8>> {
+    if frames.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&Frame> = frames.iter().collect();
+    sorted.sort_by_key(|frame| frame.at);
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+
+    // Offsets are written as the gap since the last frame, and the first gap is
+    // measured from the start rather than from one before it -- so every frame
+    // after the first is one less than the plain difference. Getting that wrong
+    // shifts every frame by one instruction and the verifier rejects the lot.
+    let mut previous: Option<usize> = None;
+    for frame in sorted {
+        let delta = match previous {
+            None => frame.at,
+            Some(before) => frame.at - before - 1,
+        };
+        previous = Some(frame.at);
+
+        body.push(255); // full_frame
+        body.extend_from_slice(&(delta as u16).to_be_bytes());
+        body.extend_from_slice(&(frame.locals.len() as u16).to_be_bytes());
+        for local in &frame.locals {
+            local.write(&mut body, pool);
+        }
+        body.extend_from_slice(&(frame.stack.len() as u16).to_be_bytes());
+        for held in &frame.stack {
+            held.write(&mut body, pool);
+        }
+    }
+    Some(body)
+}
+
+/// Whether every way out of this statement is a `return`.
+///
+/// The first version of this asked only whether the last statement in a method
+/// was one. That is true of most methods and false of every method ending in an
+/// `if` with a `return` down both sides -- so `if (x) return a; else return b;`
+/// was refused for reaching its end without returning, which it cannot do.
+///
+/// This is the specification's "can complete normally", narrowed to what is
+/// compiled here. Where it is not sure it says no, and the worst that costs is
+/// a `return` written after code that cannot reach it.
+fn always_returns(statement: &Statement) -> bool {
+    match statement {
+        Statement::Return(_) => true,
+        Statement::Block(inside) => inside.iter().any(|one| always_returns(&one.node)),
+        Statement::If {
+            then,
+            otherwise: Some(otherwise),
+            ..
+        } => always_returns(&then.node) && always_returns(&otherwise.node),
+        // A `for` with no condition runs until something inside leaves it, and
+        // a `break` is the only way out that is not a `return`.
+        Statement::For {
+            condition: None,
+            body,
+            ..
+        } => !holds_a_break(&body.node),
+        _ => false,
+    }
+}
+
+/// Whether a `break` inside this statement could leave the loop around it.
+///
+/// A `break` in a nested loop belongs to that loop, which is why this stops
+/// descending at one.
+fn holds_a_break(statement: &Statement) -> bool {
+    match statement {
+        Statement::Break => true,
+        Statement::Block(inside) => inside.iter().any(|one| holds_a_break(&one.node)),
+        Statement::If {
+            then, otherwise, ..
+        } => {
+            holds_a_break(&then.node)
+                || otherwise
+                    .as_ref()
+                    .is_some_and(|otherwise| holds_a_break(&otherwise.node))
+        }
+        _ => false,
+    }
+}
 
 fn write_attribute(out: &mut Vec<u8>, name: u16, body: &[u8]) {
     out.extend_from_slice(&name.to_be_bytes());
@@ -4401,7 +4662,7 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
         // A method that can fall off its end needs a return there. A `void`
         // one gets it; anything else that reaches the end without returning is
         // a mistake in the source and is said so.
-        let ends_returned = matches!(body.last().map(|one| &one.node), Some(Statement::Return(_)));
+        let ends_returned = body.iter().any(|one| always_returns(&one.node));
         if returns == Type::Void {
             if !ends_returned {
                 emitter.op(0xb1);
@@ -4421,6 +4682,17 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
         let code = emitter.code;
         let max_stack = emitter.max_depth.max(1) as u16;
         let max_locals = emitter.max_slot.max(1);
+        let frames = emitter.frames;
+
+        // A frame at the very start says nothing: the verifier already knows
+        // what a method is entered with. One past the end is not a place
+        // anything can land.
+        let frames: Vec<Frame> = frames
+            .into_iter()
+            .filter(|frame| frame.at > 0 && frame.at < code.len())
+            .collect();
+        let table = stack_map_table(&frames, &mut pool);
+        let table_name = table.as_ref().map(|_| pool.utf8("StackMapTable"));
 
         let mut attribute = Vec::new();
         attribute.extend_from_slice(&max_stack.to_be_bytes());
@@ -4428,7 +4700,10 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
         attribute.extend_from_slice(&(code.len() as u32).to_be_bytes());
         attribute.extend_from_slice(&code);
         attribute.extend_from_slice(&0u16.to_be_bytes()); // no exception table
-        attribute.extend_from_slice(&0u16.to_be_bytes()); // no attributes
+        attribute.extend_from_slice(&u16::from(table.is_some()).to_be_bytes());
+        if let (Some(body), Some(name)) = (&table, table_name) {
+            write_attribute(&mut attribute, name, body);
+        }
 
         let name = pool.utf8(&method.name);
         let descriptor = Signature {
@@ -4938,32 +5213,257 @@ mod tests {
         );
     }
 
+    /// Hands a class file to a real JVM and asks it to verify it.
+    ///
+    /// `java -Xverify:all -cp <dir> <class>` loads and verifies before it looks
+    /// for a `main`, so "no main method" means the verifier was satisfied and
+    /// anything else means it was not. This is the only check that actually
+    /// exercises the frames: our own reader will read a class file whose
+    /// StackMapTable is nonsense, and so will `javap`.
+    fn jvm_verifies(name: &str, bytes: &[u8]) -> Option<(bool, String)> {
+        let java = std::env::var("JAVA_HOME")
+            .ok()
+            .map(|home| format!("{home}/bin/java"))
+            .filter(|path| std::path::Path::new(path).is_file())
+            .or_else(|| {
+                std::process::Command::new("which")
+                    .arg("java")
+                    .output()
+                    .ok()
+                    .filter(|found| found.status.success())
+                    .map(|found| String::from_utf8_lossy(&found.stdout).trim().to_string())
+            })?;
+
+        let directory = std::env::temp_dir().join(format!("omni-verify-{}", std::process::id()));
+        let path = directory.join(format!("{name}.class"));
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, bytes).ok()?;
+
+        let outcome = std::process::Command::new(java)
+            .args([
+                "-Xverify:all",
+                "-cp",
+                directory.to_str()?,
+                &name.replace('/', "."),
+            ])
+            .output()
+            .ok()?;
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&outcome.stdout),
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        std::fs::remove_dir_all(&directory).ok();
+
+        // The verifier speaks up by name when it is unhappy.
+        let refused = said.contains("VerifyError")
+            || said.contains("ClassFormatError")
+            || said.contains("UnsupportedClassVersionError");
+        Some((!refused, said))
+    }
+
     #[test]
-    fn what_the_translator_cannot_turn_into_dalvik_it_names() {
-        // A method using something the translator does not handle has to be
-        // refused with the instruction named, not skipped. A translator that
-        // skips what it does not understand produces a method that runs and
-        // does the wrong thing.
+    fn a_real_jvm_verifies_what_this_writes() {
+        // Branches in every shape this compiler can produce: an if with an
+        // else, a while, a for, a conditional expression, both short-circuit
+        // operators and a comparison. Each one is a place the verifier is told
+        // what is true, and each one is a chance to have told it wrong.
         let source = r#"
-            public class WithArray {
-                public int first(int[] values) {
-                    return values[0];
+            public class Branchy {
+                private int count;
+
+                public int classify(int value) {
+                    if (value < 0) {
+                        return -1;
+                    } else {
+                        return 1;
+                    }
+                }
+
+                public int sumTo(int limit) {
+                    int total = 0;
+                    for (int i = 0; i < limit; i++) {
+                        total = total + i;
+                    }
+                    return total;
+                }
+
+                public int countDown(int from) {
+                    int steps = 0;
+                    while (from > 0) {
+                        from = from - 1;
+                        steps++;
+                    }
+                    return steps;
+                }
+
+                public int pick(boolean which, int left, int right) {
+                    return which ? left : right;
+                }
+
+                public boolean between(int value, int low, int high) {
+                    return value >= low && value <= high;
+                }
+
+                public boolean outside(int value, int low, int high) {
+                    return value < low || value > high;
+                }
+
+                public boolean isNot(boolean value) {
+                    return !value;
+                }
+
+                public long widened(int value) {
+                    long total = value;
+                    if (total > 100) {
+                        total = total * 2;
+                    }
+                    return total;
+                }
+
+                public String describe() {
+                    return "count is " + count;
                 }
             }
         "#;
-        let (_, bytes) = compile(source, &empty()).expect("this compiles to a class file");
-        let class = crate::jvm::read(&bytes).unwrap();
+
+        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let class = crate::jvm::read(&bytes).expect("and read back");
+        assert_eq!(class.major_version, 59, "Java 15 class files");
+
+        // Every method that branches has to carry a table, or a version 59
+        // class file is refused before it is even run.
+        let with_frames = class
+            .methods
+            .iter()
+            .filter(|method| {
+                method
+                    .code
+                    .as_ref()
+                    .is_some_and(|code| code.bytes.iter().any(|byte| (0x99..=0xa7).contains(byte)))
+            })
+            .count();
+        assert!(with_frames >= 7, "only {with_frames} methods branch");
+
+        let Some((verified, said)) = jvm_verifies("Branchy", &bytes) else {
+            eprintln!("java: no JVM here, so the frames were not put to a verifier");
+            return;
+        };
+        assert!(
+            verified,
+            "a real JVM refused a class file this wrote:\n{said}"
+        );
+
+        eprintln!("java: a real JVM verified a version 59 class file with {with_frames} branching methods");
+    }
+
+    #[test]
+    fn arrays_and_floating_point_reach_dalvik() {
+        let source = r#"
+            public class Numbers {
+                public int first(int[] values) {
+                    return values[0];
+                }
+                public void put(int[] values, int at, int value) {
+                    values[at] = value;
+                }
+                public int[] make(int size) {
+                    return new int[size];
+                }
+                public int howMany(int[] values) {
+                    return values.length;
+                }
+                public double half(double value) {
+                    return value / 2.0;
+                }
+                public float scale(float value, float by) {
+                    return value * by;
+                }
+                public double widen(int value) {
+                    return value;
+                }
+                public int narrow(double value) {
+                    return (int) value;
+                }
+            }
+        "#;
+        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let class = crate::jvm::read(&bytes).expect("and read back");
+        let translated = crate::dalvik::translate_class(&class)
+            .expect("arrays and floating point must translate");
+
+        let named: Vec<&str> = translated
+            .direct_methods
+            .iter()
+            .chain(translated.virtual_methods.iter())
+            .map(|one| one.reference.name.as_str())
+            .collect();
+        for wanted in [
+            "first", "put", "make", "howMany", "half", "scale", "widen", "narrow",
+        ] {
+            assert!(
+                named.contains(&wanted),
+                "{wanted} is missing from {named:?}"
+            );
+        }
+
+        let dex = crate::dexwrite::write(&[translated], &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+
+        eprintln!(
+            "dalvik: arrays and floating point, eight methods, into a {} byte dex",
+            dex.len()
+        );
+    }
+
+    #[test]
+    fn what_the_translator_cannot_turn_into_dalvik_it_names() {
+        // Built by hand, because the Java compiler here no longer emits
+        // anything the translator refuses -- which is what the last change was
+        // for, and not a reason to stop checking that a refusal happens.
+        let class = crate::jvm::Class {
+            major_version: CLASS_MAJOR,
+            minor_version: 0,
+            constants: vec![crate::jvm::Constant::Unusable],
+            access_flags: 0x0001,
+            name: "Thrower".to_string(),
+            superclass: Some("java.lang.Object".to_string()),
+            interfaces: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![crate::jvm::Member {
+                access_flags: 0x0001,
+                name: "boom".to_string(),
+                descriptor: "()V".to_string(),
+                code: Some(crate::jvm::Code {
+                    max_stack: 1,
+                    max_locals: 1,
+                    // aconst_null, athrow -- and athrow is not translated.
+                    bytes: vec![0x01, 0xbf],
+                    handlers: Vec::new(),
+                }),
+            }],
+            attributes: Vec::new(),
+            kotlin: None,
+        };
+
         let refused = crate::dalvik::translate_class(&class)
-            .expect_err("reading from an array is not translated yet");
+            .expect_err("an instruction it does not know must be refused");
         assert_eq!(refused.code, "ED900");
         assert!(
-            refused.message.contains("array"),
+            refused.message.contains("athrow"),
             "the refusal has to name it: {}",
             refused.message
         );
+        assert!(
+            refused.context.iter().any(|line| line.contains("Offset 1")),
+            "and say where: {:?}",
+            refused.context
+        );
         assert!(refused.suggestion.is_some());
 
-        eprintln!("dalvik: what it cannot translate, it names");
+        eprintln!("dalvik: what it cannot translate, it names and locates");
     }
 
     #[test]

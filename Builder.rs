@@ -16034,18 +16034,9 @@ pub mod dalvik {
     /// What an opcode is called, so a refusal names it rather than numbering it.
     fn name_of(opcode: u8) -> &'static str {
         match opcode {
-            0x0b..=0x0f => "a float or double constant",
-            0x2e..=0x35 => "reading from an array",
-            0x4f..=0x56 => "writing into an array",
-            0x62 | 0x63 | 0x66 | 0x67 | 0x6a | 0x6b | 0x6e | 0x6f | 0x72 | 0x73 => {
-                "floating-point arithmetic"
-            }
-            0x76 | 0x77 => "floating-point negation",
-            0x86 | 0x87 | 0x89 | 0x8a | 0x8b..=0x90 => "a floating-point conversion",
             0xa8 | 0xa9 => "`jsr` or `ret`",
             0xaa | 0xab => "`switch`",
             0xba => "`invokedynamic`",
-            0xbc | 0xbd => "making an array",
             0xbf => "`athrow`",
             0xc2 | 0xc3 => "`monitorenter` or `monitorexit`",
             0xc4 => "a `wide` instruction",
@@ -16291,6 +16282,10 @@ pub mod dalvik {
                     self.grow(1);
                     Ok(())
                 }
+                Some(jvm::Constant::Float(bits)) => {
+                    self.wide_bits(u64::from(bits), false);
+                    Ok(())
+                }
                 Some(jvm::Constant::Class(_)) => {
                     let name = self.class_name(index, start)?;
                     let to = self.stack_base + self.depth;
@@ -16327,6 +16322,10 @@ pub mod dalvik {
                         ]));
                         self.grow(2);
                     }
+                    Ok(())
+                }
+                Some(jvm::Constant::Double(bits)) => {
+                    self.wide_bits(bits, true);
                     Ok(())
                 }
                 other => Err(
@@ -16503,8 +16502,14 @@ pub mod dalvik {
                 }
                 0x02..=0x08 => self.constant(i32::from(opcode) - 0x03, false),
                 0x09 | 0x0a => self.constant(i32::from(opcode) - 0x09, true),
-                0x0b..=0x0f => {
-                    return Err(unsupported(start, opcode, "a float or double constant"))
+                0x0b..=0x0d => {
+                    // fconst_0, fconst_1, fconst_2, as the bits they are.
+                    let value = (f32::from(opcode - 0x0b)).to_bits();
+                    self.wide_bits(u64::from(value), false);
+                }
+                0x0e | 0x0f => {
+                    let value = f64::from(opcode - 0x0e).to_bits();
+                    self.wide_bits(value, true);
                 }
                 0x10 => {
                     let value = bytes[*at] as i8;
@@ -16571,6 +16576,83 @@ pub mod dalvik {
                 0x43..=0x46 => self.store_local(u16::from(opcode) - 0x43, 0x01, 1)?,
                 0x47..=0x4a => self.store_local(u16::from(opcode) - 0x47, 0x04, 2)?,
                 0x4b..=0x4e => self.store_local(u16::from(opcode) - 0x4b, 0x07, 1)?,
+
+                // -- arrays
+                0x2e..=0x35 => {
+                    // aget, and the six narrower forms. The index is on top and
+                    // the array under it.
+                    let (dalvik, width) = match opcode {
+                        0x2e => (0x0044u16, 1), // int
+                        0x2f => (0x0045, 2),    // long
+                        0x30 => (0x0044, 1),    // float, which is a word like an int
+                        0x31 => (0x0045, 2),    // double
+                        0x32 => (0x0046, 1),    // object
+                        0x33 => (0x0047, 1),    // boolean or byte
+                        0x34 => (0x0049, 1),    // char
+                        _ => (0x004a, 1),       // short
+                    };
+                    let array = self.slot(2);
+                    let index = self.slot(1);
+                    self.shrink(2)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::raw(vec![
+                        dalvik | (to << 8),
+                        (array & 0xff) | ((index & 0xff) << 8),
+                    ]));
+                    self.grow(width);
+                }
+                0x4f..=0x56 => {
+                    // aput. The value is on top, then the index, then the array.
+                    let (dalvik, width) = match opcode {
+                        0x4f => (0x004bu16, 1),
+                        0x50 => (0x004c, 2),
+                        0x51 => (0x004b, 1),
+                        0x52 => (0x004c, 2),
+                        0x53 => (0x004d, 1),
+                        0x54 => (0x004e, 1),
+                        0x55 => (0x0050, 1),
+                        _ => (0x0051, 1),
+                    };
+                    let value = self.slot(width);
+                    let index = self.slot(width + 1);
+                    let array = self.slot(width + 2);
+                    self.shrink(width + 2)?;
+                    self.push(Insn::raw(vec![
+                        dalvik | (value << 8),
+                        (array & 0xff) | ((index & 0xff) << 8),
+                    ]));
+                }
+                0xbc => {
+                    // newarray, whose operand is a code for the element type.
+                    let code = bytes[*at];
+                    *at += 1;
+                    let element = match code {
+                        4 => "Z",
+                        5 => "C",
+                        6 => "F",
+                        7 => "D",
+                        8 => "B",
+                        9 => "S",
+                        10 => "I",
+                        11 => "J",
+                        _ => {
+                            return Err(fail("ED015", "An array of no known type was asked for.")
+                                .with_context(format!("Offset {start}, code {code}")))
+                        }
+                    };
+                    self.new_array(&format!("[{element}"))?;
+                }
+                0xbd => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    let name = self.class_name(index, start)?;
+                    let descriptor = if name.starts_with('[') {
+                        format!("[{name}")
+                    } else {
+                        format!("[L{name};")
+                    };
+                    self.new_array(&descriptor)?;
+                }
 
                 // -- the stack itself
                 0x57 => self.shrink(1)?,
@@ -16818,6 +16900,32 @@ pub mod dalvik {
                     self.grow(2);
                     return Ok(());
                 }
+                0x62 => (0x00a6, 1, 1, 1), // add-float
+                0x63 => (0x00ab, 2, 2, 2), // add-double
+                0x66 => (0x00a7, 1, 1, 1), // sub-float
+                0x67 => (0x00ac, 2, 2, 2), // sub-double
+                0x6a => (0x00a8, 1, 1, 1), // mul-float
+                0x6b => (0x00ad, 2, 2, 2), // mul-double
+                0x6e => (0x00a9, 1, 1, 1), // div-float
+                0x6f => (0x00ae, 2, 2, 2), // div-double
+                0x72 => (0x00aa, 1, 1, 1), // rem-float
+                0x73 => (0x00af, 2, 2, 2), // rem-double
+                0x76 => {
+                    let from = self.slot(1);
+                    self.shrink(1)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::raw(vec![0x007f | (to << 8) | (from << 12)]));
+                    self.grow(1);
+                    return Ok(());
+                }
+                0x77 => {
+                    let from = self.slot(2);
+                    self.shrink(2)?;
+                    let to = self.stack_base + self.depth;
+                    self.push(Insn::raw(vec![0x0080 | (to << 8) | (from << 12)]));
+                    self.grow(2);
+                    return Ok(());
+                }
                 0x78 => (0x0098, 1, 1, 1), // shl-int
                 0x79 => (0x00a3, 2, 1, 2), // shl-long
                 0x7a => (0x0099, 1, 1, 1), // shr-int
@@ -16848,7 +16956,17 @@ pub mod dalvik {
         fn convert(&mut self, opcode: u8, start: usize) -> Result<(), Diagnostic> {
             let (dalvik, from_width, to_width) = match opcode {
                 0x85 => (0x0081u16, 1, 2), // int-to-long
+                0x86 => (0x0082, 1, 1),    // int-to-float
+                0x87 => (0x0083, 1, 2),    // int-to-double
                 0x88 => (0x0084, 2, 1),    // long-to-int
+                0x89 => (0x0085, 2, 1),    // long-to-float
+                0x8a => (0x0086, 2, 2),    // long-to-double
+                0x8b => (0x0087, 1, 1),    // float-to-int
+                0x8c => (0x0088, 1, 2),    // float-to-long
+                0x8d => (0x0089, 1, 2),    // float-to-double
+                0x8e => (0x008a, 2, 1),    // double-to-int
+                0x8f => (0x008b, 2, 2),    // double-to-long
+                0x90 => (0x008c, 2, 1),    // double-to-float
                 0x91 => (0x008d, 1, 1),    // int-to-byte
                 0x92 => (0x008e, 1, 1),    // int-to-char
                 0x93 => (0x008f, 1, 1),    // int-to-short
@@ -16860,6 +16978,46 @@ pub mod dalvik {
             self.push(Insn::raw(vec![dalvik | (to << 8) | (from << 12)]));
             self.grow(to_width);
             Ok(())
+        }
+
+        /// `new-array vA, vB, type@CCCC`: the length is on the stack and the
+        /// array replaces it.
+        fn new_array(&mut self, descriptor: &str) -> Result<(), Diagnostic> {
+            let length = self.slot(1);
+            self.shrink(1)?;
+            let to = self.stack_base + self.depth;
+            self.push(Insn::pointing(
+                vec![0x0023 | (to << 8) | (length << 12), 0],
+                1,
+                Operand::Type(descriptor.to_string()),
+            ));
+            self.grow(1);
+            Ok(())
+        }
+
+        /// A constant put in by its bits rather than its value, which is how a
+        /// float or a double gets there. Dalvik has no float constant: it has a
+        /// register with the right bits in it, and the instruction that reads
+        /// the register decides what they mean.
+        fn wide_bits(&mut self, bits: u64, wide: bool) {
+            let to = self.stack_base + self.depth;
+            if wide {
+                self.push(Insn::raw(vec![
+                    0x0018 | (to << 8),
+                    bits as u16,
+                    (bits >> 16) as u16,
+                    (bits >> 32) as u16,
+                    (bits >> 48) as u16,
+                ]));
+                self.grow(2);
+                return;
+            }
+            self.push(Insn::raw(vec![
+                0x0014 | (to << 8),
+                bits as u16,
+                (bits >> 16) as u16,
+            ]));
+            self.grow(1);
         }
 
         /// A branch, recorded for `finish` to fill in.
