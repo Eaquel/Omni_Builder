@@ -21770,6 +21770,24 @@ pub mod jvm {
         pub access_flags: u16,
         pub name: String,
         pub descriptor: String,
+        /// What the method actually does, for a method that does anything.
+        ///
+        /// This was thrown away before, along with every other attribute, and
+        /// what was left described a class well enough to say what was in it
+        /// and not well enough to turn it into anything else. Translating to
+        /// dex needs the code.
+        pub code: Option<Code>,
+    }
+
+    /// A method body as the class file carries it.
+    #[derive(Clone, Debug, PartialEq, Eq, Default)]
+    pub struct Code {
+        pub max_stack: u16,
+        pub max_locals: u16,
+        pub bytes: Vec<u8>,
+        /// Where exceptions are caught: start, end, handler, and the type
+        /// caught, zero meaning anything.
+        pub handlers: Vec<(u16, u16, u16, u16)>,
     }
 
     #[derive(Clone, Debug)]
@@ -22095,10 +22113,18 @@ pub mod jvm {
             let descriptor_index = reader.u16()?;
             let attribute_count = reader.u16()?;
 
+            let mut code = None;
             for _ in 0..attribute_count {
-                let _name_index = reader.u16()?;
+                let attribute_name_index = reader.u16()?;
                 let length = reader.u32()?;
                 let length = reader.checked_length(u64::from(length))?;
+                let start = reader.position();
+                let named = constant_utf8(constants, attribute_name_index, "attribute name")
+                    .unwrap_or_default();
+                if named == "Code" {
+                    let content = reader.slice_at(start as u64, length as u64)?;
+                    code = read_code(content)?;
+                }
                 reader.skip(length)?;
             }
 
@@ -22110,9 +22136,59 @@ pub mod jvm {
                     descriptor_index,
                     &format!("{what} descriptor"),
                 )?,
+                code,
             });
         }
         Ok(members)
+    }
+
+    /// The body out of a Code attribute.
+    ///
+    /// Anything malformed comes back as no code rather than as a failure: a
+    /// class file that cannot be translated is still one whose shape can be
+    /// read and reported, and refusing to read it at all would turn a
+    /// question into a dead end.
+    fn read_code(content: &[u8]) -> Result<Option<Code>, Diagnostic> {
+        let mut reader = Reader::new(content, Endian::Big, "code");
+        let Ok(max_stack) = reader.u16() else {
+            return Ok(None);
+        };
+        let Ok(max_locals) = reader.u16() else {
+            return Ok(None);
+        };
+        let Ok(length) = reader.u32() else {
+            return Ok(None);
+        };
+        let Ok(length) = reader.checked_length(u64::from(length)) else {
+            return Ok(None);
+        };
+        let start = reader.position();
+        let Ok(bytes) = reader.slice_at(start as u64, length as u64) else {
+            return Ok(None);
+        };
+        let bytes = bytes.to_vec();
+        if reader.skip(length).is_err() {
+            return Ok(None);
+        }
+
+        let mut handlers = Vec::new();
+        if let Ok(count) = reader.u16() {
+            for _ in 0..count {
+                let (Ok(from), Ok(to), Ok(handler), Ok(caught)) =
+                    (reader.u16(), reader.u16(), reader.u16(), reader.u16())
+                else {
+                    break;
+                };
+                handlers.push((from, to, handler, caught));
+            }
+        }
+
+        Ok(Some(Code {
+            max_stack,
+            max_locals,
+            bytes,
+            handlers,
+        }))
     }
 
     fn read_kotlin_metadata(

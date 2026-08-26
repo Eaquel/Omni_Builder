@@ -2650,7 +2650,12 @@ impl Emitter<'_> {
     /// holds it. `iconst_1` is one byte where `ldc` is two and a pool entry.
     fn push_int(&mut self, value: i64) {
         match value {
-            -1..=5 => self.op(0x03u8.wrapping_add((value + 1) as u8)),
+            // iconst_m1 is 0x02 and iconst_0 is 0x03, so the opcode for n is
+            // 0x03 + n. The first version of this added one too many and every
+            // small constant came out as the next one up: `value * 2` compiled
+            // to `value * 3`. Nothing that checked the shape of a class file
+            // could see it; reading the bytes back is what found it.
+            -1..=5 => self.op((0x03 + value) as u8),
             -128..=127 => self.op1(0x10, value as i8 as u8),
             -32768..=32767 => self.op2(0x11, value as i16 as u16),
             _ => {
@@ -4778,6 +4783,47 @@ mod tests {
         }
 
         eprintln!("java: fifteen things refused, each by its own code");
+    }
+
+    #[test]
+    fn the_code_this_writes_comes_back_out_of_the_class_file() {
+        // A class file is only worth writing if what is in it can be got at
+        // again. Until the reader kept the Code attribute, a method could be
+        // named and described and its body was gone -- which is enough to say
+        // what a class is and not enough to turn it into anything else.
+        let source = r#"
+            public class Small {
+                public static int twice(int value) {
+                    return value * 2;
+                }
+                public void nothing() {
+                }
+            }
+        "#;
+        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let class = crate::jvm::read(&bytes).expect("what was written must read");
+
+        let twice = class.methods.iter().find(|m| m.name == "twice").unwrap();
+        let code = twice.code.as_ref().expect("a method with a body has code");
+        assert!(code.max_stack >= 2, "{}", code.max_stack);
+        assert_eq!(code.max_locals, 1, "one parameter, no `this`");
+        assert!(code.handlers.is_empty());
+
+        // iload_0, iconst_2, imul, ireturn. Read as the bytes they are, since
+        // that is what a translator will be handed.
+        assert_eq!(
+            code.bytes,
+            vec![0x1a, 0x05, 0x68, 0xac],
+            "{:02x?}",
+            code.bytes
+        );
+
+        let nothing = class.methods.iter().find(|m| m.name == "nothing").unwrap();
+        let code = nothing.code.as_ref().expect("even an empty body has code");
+        assert_eq!(code.bytes, vec![0xb1], "a bare return-void");
+        assert_eq!(code.max_locals, 1, "`this` alone");
+
+        eprintln!("java: the bytes of a method body survive being written and read back");
     }
 
     #[test]
