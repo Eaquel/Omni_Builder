@@ -15403,13 +15403,59 @@ pub mod dexwrite {
         pub instructions: Vec<u16>,
     }
 
+    /// A field, named the way a dex file names one.
+    #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    pub struct FieldRef {
+        pub class: String,
+        pub name: String,
+        pub descriptor: String,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Field {
+        pub reference: FieldRef,
+        pub access_flags: u32,
+    }
+
     #[derive(Clone, Debug)]
     pub struct Class {
         pub descriptor: String,
         pub superclass: String,
         pub access_flags: u32,
         pub source_file: Option<String>,
+        /// Constructors, static methods and anything private: everything that
+        /// is called without asking what the object actually is.
         pub direct_methods: Vec<Method>,
+        /// Everything dispatched on the object.
+        pub virtual_methods: Vec<Method>,
+        pub static_fields: Vec<Field>,
+        pub instance_fields: Vec<Field>,
+    }
+
+    impl Class {
+        /// A class with nothing in it but its name, for a caller to fill in.
+        pub fn named(descriptor: &str, superclass: &str, access_flags: u32) -> Class {
+            Class {
+                descriptor: descriptor.to_string(),
+                superclass: superclass.to_string(),
+                access_flags,
+                source_file: None,
+                direct_methods: Vec::new(),
+                virtual_methods: Vec::new(),
+                static_fields: Vec::new(),
+                instance_fields: Vec::new(),
+            }
+        }
+
+        fn methods(&self) -> impl Iterator<Item = &Method> {
+            self.direct_methods
+                .iter()
+                .chain(self.virtual_methods.iter())
+        }
+
+        fn fields(&self) -> impl Iterator<Item = &Field> {
+            self.static_fields.iter().chain(self.instance_fields.iter())
+        }
     }
 
     pub fn default_constructor(class: &str) -> Method {
@@ -15434,6 +15480,7 @@ pub mod dexwrite {
         types: Vec<String>,
         protos: Vec<(String, String, Vec<String>)>,
         methods: Vec<(String, String, usize)>,
+        fields: Vec<FieldRef>,
     }
 
     impl Pools {
@@ -15486,6 +15533,14 @@ pub mod dexwrite {
                 .map(|at| at as u32)
                 .ok_or_else(|| fail("EW004", "a method was not interned"))
         }
+
+        fn index_of_field(&self, reference: &FieldRef) -> Result<u32, Diagnostic> {
+            self.fields
+                .iter()
+                .position(|held| held == reference)
+                .map(|at| at as u32)
+                .ok_or_else(|| fail("EW005", "a field was not interned"))
+        }
     }
 
     fn utf16_order(left: &str, right: &str) -> core::cmp::Ordering {
@@ -15506,8 +15561,16 @@ pub mod dexwrite {
             if let Some(source) = &class.source_file {
                 pools.string(source);
             }
-            for method in &class.direct_methods {
+            for method in class.methods() {
                 references.push(method.reference.clone());
+            }
+            for field in class.fields() {
+                pools.kind(&field.reference.class);
+                pools.kind(&field.reference.descriptor);
+                pools.string(&field.reference.name);
+                if !pools.fields.contains(&field.reference) {
+                    pools.fields.push(field.reference.clone());
+                }
             }
         }
         for reference in &references {
@@ -15550,6 +15613,25 @@ pub mod dexwrite {
                 .then_with(|| a.2.len().cmp(&b.2.len()))
         });
 
+        {
+            let types = pools.types.clone();
+            let strings = pools.strings.clone();
+            let at_type = |descriptor: &str| -> usize {
+                types
+                    .iter()
+                    .position(|held| held == descriptor)
+                    .unwrap_or(0)
+            };
+            let at_string =
+                |text: &str| -> usize { strings.iter().position(|held| held == text).unwrap_or(0) };
+            pools.fields.sort_by(|left, right| {
+                at_type(&left.class)
+                    .cmp(&at_type(&right.class))
+                    .then_with(|| at_string(&left.name).cmp(&at_string(&right.name)))
+                    .then_with(|| at_type(&left.descriptor).cmp(&at_type(&right.descriptor)))
+            });
+        }
+
         for reference in &references {
             let proto = pools.index_of_proto(reference)? as usize;
             let entry = (reference.class.clone(), reference.name.clone(), proto);
@@ -15576,7 +15658,7 @@ pub mod dexwrite {
         let type_ids_off = string_ids_off + pools.strings.len() * 4;
         let proto_ids_off = type_ids_off + pools.types.len() * 4;
         let field_ids_off = proto_ids_off + pools.protos.len() * 12;
-        let method_ids_off = field_ids_off;
+        let method_ids_off = field_ids_off + pools.fields.len() * 8;
         let class_defs_off = method_ids_off + pools.methods.len() * 8;
         let data_off = class_defs_off + classes.len() * 32;
 
@@ -15592,7 +15674,7 @@ pub mod dexwrite {
         let mut code_offsets: Vec<Vec<u32>> = Vec::new();
         for class in classes {
             let mut here = Vec::new();
-            for method in &class.direct_methods {
+            for method in class.methods() {
                 while !(data_off + data.len()).is_multiple_of(4) {
                     data.push(0);
                 }
@@ -15630,18 +15712,53 @@ pub mod dexwrite {
         for (index, class) in classes.iter().enumerate() {
             class_data_offsets.push((data_off + data.len()) as u32);
             let mut body = Vec::new();
-            uleb128(&mut body, 0);
-            uleb128(&mut body, 0);
+            uleb128(&mut body, class.static_fields.len() as u32);
+            uleb128(&mut body, class.instance_fields.len() as u32);
             uleb128(&mut body, class.direct_methods.len() as u32);
-            uleb128(&mut body, 0);
+            uleb128(&mut body, class.virtual_methods.len() as u32);
 
-            let mut previous = 0u32;
-            for (slot, method) in class.direct_methods.iter().enumerate() {
-                let absolute = pools.index_of_method(&method.reference)?;
-                uleb128(&mut body, absolute - previous);
-                previous = absolute;
-                uleb128(&mut body, method.access_flags);
-                uleb128(&mut body, code_offsets[index][slot]);
+            // Every list is written as differences from the entry before it,
+            // and each list starts again from zero. Sorting first is not
+            // tidiness: a difference that came out negative would be written as
+            // an enormous positive one, and the file would be read as
+            // describing a field nobody declared.
+            for list in [&class.static_fields, &class.instance_fields] {
+                let mut indices = Vec::with_capacity(list.len());
+                for field in list {
+                    indices.push((pools.index_of_field(&field.reference)?, field.access_flags));
+                }
+                indices.sort_by_key(|(at, _)| *at);
+                let mut previous = 0u32;
+                for (absolute, access_flags) in indices {
+                    uleb128(&mut body, absolute - previous);
+                    previous = absolute;
+                    uleb128(&mut body, access_flags);
+                }
+            }
+
+            // The code offsets were laid down in one pass over direct then
+            // virtual, so the slot a method's code sits at is its position in
+            // that walk -- which is not the order the entries are written in,
+            // because those are sorted. Each keeps hold of its own offset.
+            let mut walked = 0usize;
+            for list in [&class.direct_methods, &class.virtual_methods] {
+                let mut entries = Vec::with_capacity(list.len());
+                for method in list {
+                    entries.push((
+                        pools.index_of_method(&method.reference)?,
+                        method.access_flags,
+                        code_offsets[index][walked],
+                    ));
+                    walked += 1;
+                }
+                entries.sort_by_key(|(at, _, _)| *at);
+                let mut previous = 0u32;
+                for (absolute, access_flags, code) in entries {
+                    uleb128(&mut body, absolute - previous);
+                    previous = absolute;
+                    uleb128(&mut body, access_flags);
+                    uleb128(&mut body, code);
+                }
             }
             data.extend_from_slice(&body);
         }
@@ -15667,6 +15784,9 @@ pub mod dexwrite {
             (0x2000, classes.len() as u32, class_data_offsets[0]),
             (0x1000, 1, map_off as u32),
         ];
+        if !pools.fields.is_empty() {
+            map.push((0x0004, pools.fields.len() as u32, field_ids_off as u32));
+        }
         map.sort_by_key(|(_, _, offset)| *offset);
 
         let mut map_bytes = Vec::new();
@@ -15697,8 +15817,15 @@ pub mod dexwrite {
         out[68..72].copy_from_slice(&(type_ids_off as u32).to_le_bytes());
         out[72..76].copy_from_slice(&(pools.protos.len() as u32).to_le_bytes());
         out[76..80].copy_from_slice(&(proto_ids_off as u32).to_le_bytes());
-        out[80..84].copy_from_slice(&0u32.to_le_bytes());
-        out[84..88].copy_from_slice(&0u32.to_le_bytes());
+        out[80..84].copy_from_slice(&(pools.fields.len() as u32).to_le_bytes());
+        // The specification says an empty section has no offset, not an offset
+        // that happens to point at whatever follows it.
+        let field_ids_header = if pools.fields.is_empty() {
+            0
+        } else {
+            field_ids_off as u32
+        };
+        out[84..88].copy_from_slice(&field_ids_header.to_le_bytes());
         out[88..92].copy_from_slice(&(pools.methods.len() as u32).to_le_bytes());
         out[92..96].copy_from_slice(&(method_ids_off as u32).to_le_bytes());
         out[96..100].copy_from_slice(&(classes.len() as u32).to_le_bytes());
@@ -15716,6 +15843,13 @@ pub mod dexwrite {
             out.extend_from_slice(&pools.index_of_string(shorty)?.to_le_bytes());
             out.extend_from_slice(&pools.index_of_type(return_type)?.to_le_bytes());
             out.extend_from_slice(&0u32.to_le_bytes());
+        }
+        for reference in &pools.fields {
+            out.extend_from_slice(&(pools.index_of_type(&reference.class)? as u16).to_le_bytes());
+            out.extend_from_slice(
+                &(pools.index_of_type(&reference.descriptor)? as u16).to_le_bytes(),
+            );
+            out.extend_from_slice(&pools.index_of_string(&reference.name)?.to_le_bytes());
         }
         for (class, name, proto) in &pools.methods {
             out.extend_from_slice(&(pools.index_of_type(class)? as u16).to_le_bytes());
@@ -21294,6 +21428,9 @@ pub mod builder {
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
                 direct_methods: vec![crate::dexwrite::default_constructor(&descriptor)],
+                virtual_methods: Vec::new(),
+                static_fields: Vec::new(),
+                instance_fields: Vec::new(),
             }],
             references: vec![crate::dexwrite::MethodRef {
                 class: "Landroid/app/Activity;".to_string(),
@@ -21395,6 +21532,9 @@ pub mod builder {
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
                 direct_methods: vec![crate::dexwrite::default_constructor(&descriptor)],
+                virtual_methods: Vec::new(),
+                static_fields: Vec::new(),
+                instance_fields: Vec::new(),
             }],
             references: vec![crate::dexwrite::MethodRef {
                 class: "Landroid/app/Activity;".to_string(),
@@ -27946,7 +28086,65 @@ mod tests {
             direct_methods: vec![super::dexwrite::default_constructor(
                 "Lcom/omni/made/MainActivity;",
             )],
+            virtual_methods: Vec::new(),
+            static_fields: Vec::new(),
+            instance_fields: Vec::new(),
         }
+    }
+
+    /// The same class with what a real one carries: fields on both sides and a
+    /// method dispatched on the object. Until now the writer could hold none of
+    /// these, so a dex it produced could describe a class nobody would write.
+    fn furnished_activity_class() -> super::dexwrite::Class {
+        let descriptor = "Lcom/omni/made/MainActivity;";
+        let mut class = super::dexwrite::Class::named(
+            descriptor,
+            "Landroid/app/Activity;",
+            super::dexwrite::ACC_PUBLIC,
+        );
+        class.source_file = Some("MainActivity.java".to_string());
+        class.direct_methods = vec![super::dexwrite::default_constructor(descriptor)];
+        class.instance_fields = vec![
+            super::dexwrite::Field {
+                reference: super::dexwrite::FieldRef {
+                    class: descriptor.to_string(),
+                    name: "count".to_string(),
+                    descriptor: "I".to_string(),
+                },
+                access_flags: 0x2,
+            },
+            super::dexwrite::Field {
+                reference: super::dexwrite::FieldRef {
+                    class: descriptor.to_string(),
+                    name: "label".to_string(),
+                    descriptor: "Ljava/lang/String;".to_string(),
+                },
+                access_flags: 0x2,
+            },
+        ];
+        class.static_fields = vec![super::dexwrite::Field {
+            reference: super::dexwrite::FieldRef {
+                class: descriptor.to_string(),
+                name: "TAG".to_string(),
+                descriptor: "Ljava/lang/String;".to_string(),
+            },
+            access_flags: 0x8 | 0x10,
+        }];
+        class.virtual_methods = vec![super::dexwrite::Method {
+            reference: super::dexwrite::MethodRef {
+                class: descriptor.to_string(),
+                name: "describe".to_string(),
+                return_type: "V".to_string(),
+                parameters: Vec::new(),
+            },
+            access_flags: super::dexwrite::ACC_PUBLIC,
+            registers: 1,
+            inputs: 1,
+            outputs: 0,
+            // return-void, which is the whole body.
+            instructions: vec![0x000e],
+        }];
+        class
     }
 
     fn super_constructor() -> super::dexwrite::MethodRef {
@@ -27956,6 +28154,40 @@ mod tests {
             return_type: "V".to_string(),
             parameters: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_dex_carries_fields_and_methods_dispatched_on_the_object() {
+        let bytes = super::dexwrite::write(&[furnished_activity_class()], &[super_constructor()])
+            .expect("a furnished class must be written");
+
+        let mut sink = Sink::new();
+        let file = dex::read(&bytes, &mut sink).expect("our own reader must read it");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        assert_eq!(file.class_names(), vec!["com.omni.made.MainActivity"]);
+        assert!(dex::integrity(&bytes).unwrap().self_consistent());
+
+        // dexdump is the Android tool, and it knows nothing about the writer
+        // that produced this. If it reads the fields and the virtual method
+        // back, they are really in there.
+        let Some((fields, descriptors)) = dexdump(&bytes) else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_DEX_CONFORMANCE is set but dexdump is missing"
+            );
+            eprintln!("dexwrite conformance: dexdump is not available here");
+            return;
+        };
+        assert_eq!(descriptors, vec!["Lcom/omni/made/MainActivity;"]);
+        assert_eq!(
+            fields.get("field_ids_size").map(|v| v.as_str()),
+            Some("3"),
+            "three fields were written: {fields:?}"
+        );
+        eprintln!(
+            "dexwrite conformance: {} bytes with 3 fields and a virtual method, read by dexdump",
+            bytes.len()
+        );
     }
 
     #[test]
