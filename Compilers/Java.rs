@@ -48,10 +48,18 @@
 //! which has never been handed `android.jar` still compiles. Anything handed
 //! over as a dependency wins over it.
 //!
-//! Refused, by name, with the line it happened on: lambdas and method
-//! references, inner and anonymous classes, `synchronized` and `assert`.
-//! Annotations are parsed and discarded, which is safe because they are
-//! metadata and nothing here reads them; `@Override` therefore costs nothing.
+//! A class written where it is used -- `new Iface() { ... }` -- and a lambda
+//! both become a class of their own, named after the one they were written
+//! inside. What they read from around them is what they are built with: the
+//! enclosing instance, and every local of the method they were written in that
+//! their body names. `javac` writes an `invokedynamic` for a lambda and lets
+//! the runtime assemble the class; Android rewrites that back into a class
+//! anyway, so it is written out here.
+//!
+//! Refused, by name, with the line it happened on: method references, named
+//! classes inside classes, `synchronized` and `assert`. Annotations are parsed
+//! and discarded, which is safe because they are metadata and nothing here
+//! reads them; `@Override` therefore costs nothing.
 //!
 //! # What it targets
 //!
@@ -1021,6 +1029,33 @@ pub enum Expression {
         subject: Box<Expression>,
         arms: Vec<Arm>,
     },
+    /// `x -> ...`: the one method of an interface, written where it is
+    /// wanted. Which interface is decided by what it is being handed to.
+    Lambda {
+        parameters: Vec<(Option<Written>, String)>,
+        /// The body, as a block. An expression body is wrapped in one.
+        body: Vec<Positioned<Statement>>,
+        /// True when it was written as an expression, which means its value is
+        /// what the method returns -- unless the method returns nothing.
+        expression: bool,
+        line: u32,
+    },
+    /// A class with no name of its own, written where it is used.
+    Anonymous {
+        what: Written,
+        arguments: Vec<Expression>,
+        body: Box<Body>,
+        line: u32,
+        column: u32,
+    },
+}
+
+/// The members of a class body written without a name around it.
+#[derive(Clone, Debug)]
+pub struct Body {
+    pub fields: Vec<Field>,
+    pub methods: Vec<Method>,
+    pub instance_setup: Vec<Positioned<Statement>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1495,6 +1530,279 @@ fn as_the_class_a_record_is(
     Ok(unit)
 }
 
+/// The field a class written where it is used holds its enclosing instance in.
+const OUTER: &str = "$outer";
+
+/// A type as it would have been written, so that a synthesised member can name
+/// it. Only what a name can stand for: a primitive, an array, or a class.
+fn written_for(what: &Type) -> Option<Written> {
+    Some(match what {
+        Type::Void => return None,
+        Type::Boolean => Written::Boolean,
+        Type::Byte => Written::Byte,
+        Type::Short => Written::Short,
+        Type::Char => Written::Char,
+        Type::Int => Written::Int,
+        Type::Long => Written::Long,
+        Type::Float => Written::Float,
+        Type::Double => Written::Double,
+        Type::Array(of) => Written::Array(Box::new(written_for(of)?)),
+        Type::Object(name) => Written::Named(name.replace('/', ".")),
+    })
+}
+
+/// Every bare name a class body reads.
+///
+/// More than it needs: a name a method of the body declares itself is counted
+/// too. That costs an unused field at worst, because a local always wins over
+/// a field where both are visible -- and missing one would be a name that
+/// resolves to nothing.
+fn names_read(body: &Body, out: &mut Vec<String>) {
+    for field in &body.fields {
+        if let Some(value) = &field.value {
+            names_in_expression(value, out);
+        }
+    }
+    for method in &body.methods {
+        for statement in method.body.iter().flatten() {
+            names_in_statement(&statement.node, out);
+        }
+    }
+    for statement in &body.instance_setup {
+        names_in_statement(&statement.node, out);
+    }
+}
+
+/// Every bare name a class body writes to.
+fn names_assigned(body: &Body, out: &mut Vec<String>) {
+    fn assigned_in_expression(expression: &Expression, out: &mut Vec<String>) {
+        match expression {
+            Expression::Assign { target, value, .. } => {
+                if let Expression::Name(name) = target.as_ref() {
+                    out.push(name.clone());
+                }
+                assigned_in_expression(value, out);
+            }
+            Expression::Step { target, .. } => {
+                if let Expression::Name(name) = target.as_ref() {
+                    out.push(name.clone());
+                }
+            }
+            _ => walk_expression(expression, &mut |inside| {
+                assigned_in_expression(inside, out)
+            }),
+        }
+    }
+
+    let mut visit = |expression: &Expression| assigned_in_expression(expression, out);
+    for field in &body.fields {
+        if let Some(value) = &field.value {
+            visit(value);
+        }
+    }
+    for method in &body.methods {
+        for statement in method.body.iter().flatten() {
+            walk_statement(&statement.node, &mut visit);
+        }
+    }
+    for statement in &body.instance_setup {
+        walk_statement(&statement.node, &mut visit);
+    }
+}
+
+fn names_in_statement(statement: &Statement, out: &mut Vec<String>) {
+    walk_statement(statement, &mut |expression| {
+        names_in_expression(expression, out)
+    });
+}
+
+fn names_in_expression(expression: &Expression, out: &mut Vec<String>) {
+    if let Expression::Name(name) = expression {
+        out.push(name.clone());
+    }
+    walk_expression(expression, &mut |inside| names_in_expression(inside, out));
+}
+
+/// Hands every expression written directly in a statement to `visit`, and
+/// walks into the statements inside it.
+fn walk_statement(statement: &Statement, visit: &mut impl FnMut(&Expression)) {
+    match statement {
+        Statement::Nothing | Statement::Break(_) | Statement::Continue(_) => {}
+        Statement::Block(held) | Statement::Several(held) => {
+            for one in held {
+                walk_statement(&one.node, visit);
+            }
+        }
+        Statement::Declare { value, .. } => {
+            if let Some(value) = value {
+                visit(value);
+            }
+        }
+        Statement::Express(value) | Statement::Throw(value) | Statement::Yield(value) => {
+            visit(value)
+        }
+        Statement::Return(value) => {
+            if let Some(value) = value {
+                visit(value);
+            }
+        }
+        Statement::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            visit(condition);
+            walk_statement(&then.node, visit);
+            if let Some(otherwise) = otherwise {
+                walk_statement(&otherwise.node, visit);
+            }
+        }
+        Statement::While { condition, body } | Statement::DoWhile { body, condition } => {
+            visit(condition);
+            walk_statement(&body.node, visit);
+        }
+        Statement::For {
+            start,
+            condition,
+            step,
+            body,
+        } => {
+            for one in start {
+                walk_statement(&one.node, visit);
+            }
+            if let Some(condition) = condition {
+                visit(condition);
+            }
+            for one in step {
+                visit(one);
+            }
+            walk_statement(&body.node, visit);
+        }
+        Statement::ForEach { over, body, .. } => {
+            visit(over);
+            walk_statement(&body.node, visit);
+        }
+        Statement::Switch { subject, arms } => {
+            visit(subject);
+            for arm in arms {
+                for label in &arm.labels {
+                    visit(label);
+                }
+                for one in &arm.body {
+                    walk_statement(&one.node, visit);
+                }
+            }
+        }
+        Statement::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            for one in body {
+                walk_statement(&one.node, visit);
+            }
+            for catch in catches {
+                for one in &catch.body {
+                    walk_statement(&one.node, visit);
+                }
+            }
+            for one in finally.iter().flatten() {
+                walk_statement(&one.node, visit);
+            }
+        }
+        Statement::Labelled { body, .. } => walk_statement(&body.node, visit),
+        Statement::Chain { arguments, .. } => {
+            for one in arguments {
+                visit(one);
+            }
+        }
+    }
+}
+
+/// Hands every expression written directly inside this one to `visit`.
+fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression)) {
+    match expression {
+        Expression::Int(_)
+        | Expression::Long(_)
+        | Expression::Float(_)
+        | Expression::Double(_)
+        | Expression::Char(_)
+        | Expression::Str(_)
+        | Expression::Boolean(_)
+        | Expression::Null
+        | Expression::This
+        | Expression::Name(_) => {}
+        Expression::Field { of, .. } => visit(of),
+        Expression::Call { on, arguments, .. } => {
+            if let Some(on) = on {
+                visit(on);
+            }
+            arguments.iter().for_each(visit);
+        }
+        Expression::New { arguments, .. } => arguments.iter().for_each(visit),
+        Expression::NewArray { length, .. } => visit(length),
+        Expression::Index { of, at } => {
+            visit(of);
+            visit(at);
+        }
+        Expression::Unary { of, .. } => visit(of),
+        Expression::Binary { left, right, .. } => {
+            visit(left);
+            visit(right);
+        }
+        Expression::Assign { target, value, .. } => {
+            visit(target);
+            visit(value);
+        }
+        Expression::Step { target, .. } => visit(target),
+        Expression::Cast { of, .. } => visit(of),
+        Expression::Conditional {
+            condition,
+            then,
+            otherwise,
+        } => {
+            visit(condition);
+            visit(then);
+            visit(otherwise);
+        }
+        Expression::InstanceOf { of, .. } => visit(of),
+        Expression::Switch { subject, arms } => {
+            visit(subject);
+            for arm in arms {
+                arm.labels.iter().for_each(&mut *visit);
+                for statement in &arm.body {
+                    walk_statement(&statement.node, visit);
+                }
+            }
+        }
+        Expression::Lambda { body, .. } => {
+            for statement in body {
+                walk_statement(&statement.node, visit);
+            }
+        }
+        Expression::Anonymous {
+            arguments, body, ..
+        } => {
+            arguments.iter().for_each(&mut *visit);
+            // A class inside a class reads from further out too, and what it
+            // reads has to reach the one holding it.
+            for field in &body.fields {
+                if let Some(value) = &field.value {
+                    visit(value);
+                }
+            }
+            for method in &body.methods {
+                for statement in method.body.iter().flatten() {
+                    walk_statement(&statement.node, visit);
+                }
+            }
+            for statement in &body.instance_setup {
+                walk_statement(&statement.node, visit);
+            }
+        }
+    }
+}
+
 /// One constant of an enum, as it was written.
 #[derive(Clone, Debug)]
 pub struct Constant {
@@ -1610,6 +1918,10 @@ pub struct Unit {
     pub instance_setup: Vec<Positioned<Statement>>,
     /// `static { ... }`, which runs once when the class is loaded.
     pub static_setup: Vec<Positioned<Statement>>,
+    /// The class this one was written inside, when it has no name of its own.
+    /// Its instance is held in a field, and a name this class cannot find is
+    /// looked for there before it is refused.
+    pub outer: Option<String>,
 }
 
 impl Unit {
@@ -2067,6 +2379,7 @@ impl Parser {
             methods,
             instance_setup,
             static_setup,
+            outer: None,
         };
         if shape == Shape::Enum {
             return Ok(as_the_class_it_is(unit, &constants));
@@ -2558,7 +2871,7 @@ impl Parser {
                 // `default` takes no value, and `case a, b:` takes several.
             } else if self.eat_word("case") {
                 loop {
-                    labels.push(self.expression()?);
+                    labels.push(self.case_label()?);
                     if !self.eat_mark(",") {
                         break;
                     }
@@ -2639,6 +2952,44 @@ impl Parser {
         }
 
         Ok(Statement::Switch { subject, arms })
+    }
+
+    /// What a `case` answers to: a number, a character, a string, or the name
+    /// of a constant.
+    ///
+    /// Not an expression. `case EARTH ->` reads as a lambda if it is handed to
+    /// the expression parser, because a name followed by an arrow is exactly
+    /// what a lambda looks like.
+    fn case_label(&mut self) -> Result<Expression, Diagnostic> {
+        let (line, column) = (self.line(), self.column());
+        let negated = self.eat_mark("-");
+        let found = match self.take() {
+            Token::Int(value) => Expression::Int(value),
+            Token::Long(value) => Expression::Long(value),
+            Token::Char(value) => Expression::Char(value),
+            Token::Str(text) => Expression::Str(text),
+            Token::True => Expression::Boolean(true),
+            Token::False => Expression::Boolean(false),
+            Token::Identifier(name) => Expression::Name(name),
+            other => {
+                return Err(at(
+                    "EJ239",
+                    line,
+                    column,
+                    format!(
+                        "A `case` answers to a constant, and {} was found.",
+                        other.describe()
+                    ),
+                ))
+            }
+        };
+        if negated {
+            return Ok(Expression::Unary {
+                operator: Unary::Negate,
+                of: Box::new(found),
+            });
+        }
+        Ok(found)
     }
 
     fn try_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
@@ -3135,17 +3486,76 @@ impl Parser {
         }
     }
 
+    /// `x -> ...`, `(x, y) -> ...`, `() -> ...`, with or without written
+    /// types on the parameters.
+    fn lambda(&mut self, line: u32) -> Result<Expression, Diagnostic> {
+        let mut parameters: Vec<(Option<Written>, String)> = Vec::new();
+        if self.eat_mark("(") {
+            while !self.is_mark(")") {
+                self.eat_word("final");
+                // `(String a)` names the type; `(a)` leaves it to the
+                // interface. One token of lookahead tells them apart.
+                let written = if matches!(self.here().token, Token::Identifier(_))
+                    && matches!(
+                        self.ahead(1),
+                        Token::Punctuation(",") | Token::Punctuation(")")
+                    ) {
+                    None
+                } else {
+                    Some(self.written_type()?)
+                };
+                parameters.push((written, self.want_name()?));
+                if !self.eat_mark(",") {
+                    break;
+                }
+            }
+            self.want_mark(")")?;
+        } else {
+            parameters.push((None, self.want_name()?));
+        }
+        self.want_mark("->")?;
+
+        if self.is_mark("{") {
+            let body = self.braced_block()?;
+            return Ok(Expression::Lambda {
+                parameters,
+                body,
+                expression: false,
+                line,
+            });
+        }
+        let (value_line, column) = (self.line(), self.column());
+        let value = self.expression()?;
+        Ok(Expression::Lambda {
+            parameters,
+            body: vec![Positioned {
+                node: Statement::Express(value),
+                line: value_line,
+                column,
+            }],
+            expression: true,
+            line,
+        })
+    }
+
     fn primary(&mut self) -> Result<Expression, Diagnostic> {
         let (line, column) = (self.line(), self.column());
 
         if self.is_mark("(") {
             if self.looks_like_lambda() {
-                return Err(unsupported(line, column, "A lambda"));
+                return self.lambda(line);
             }
             self.take();
             let inner = self.expression()?;
             self.want_mark(")")?;
             return Ok(inner);
+        }
+
+        // `x -> ...`: one parameter, with no brackets and no type.
+        if matches!(self.here().token, Token::Identifier(_))
+            && matches!(self.ahead(1), Token::Punctuation("->"))
+        {
+            return self.lambda(line);
         }
 
         if self.eat_word("this") {
@@ -3177,7 +3587,54 @@ impl Parser {
             }
             let arguments = self.arguments()?;
             if self.is_mark("{") {
-                return Err(unsupported(line, column, "An anonymous class"));
+                // A class with no name of its own, written where it is used.
+                // What it holds is read the same way any class body is; the
+                // name and the shape are settled when it is compiled.
+                let mut fields = Vec::new();
+                let mut methods = Vec::new();
+                let mut instance_setup = Vec::new();
+                let mut static_setup = Vec::new();
+                self.want_mark("{")?;
+                while !self.is_mark("}") {
+                    if matches!(self.here().token, Token::End) {
+                        return Err(at(
+                            "EJ105",
+                            line,
+                            column,
+                            "An anonymous class was opened and never closed.",
+                        ));
+                    }
+                    if self.eat_mark(";") {
+                        continue;
+                    }
+                    self.member(
+                        Shape::Class,
+                        "",
+                        &mut fields,
+                        &mut methods,
+                        &mut instance_setup,
+                        &mut static_setup,
+                    )?;
+                }
+                self.want_mark("}")?;
+                if !static_setup.is_empty() {
+                    return Err(unsupported(
+                        line,
+                        column,
+                        "A `static` block in an anonymous class",
+                    ));
+                }
+                return Ok(Expression::Anonymous {
+                    what,
+                    arguments,
+                    body: Box::new(Body {
+                        fields,
+                        methods,
+                        instance_setup,
+                    }),
+                    line,
+                    column,
+                });
             }
             return Ok(Expression::New { what, arguments });
         }
@@ -4000,6 +4457,13 @@ struct Emitter<'a> {
     /// The `switch` expressions being written, innermost last, and where each
     /// one's arms jump to once they have their value.
     yields: Vec<Yielding>,
+    /// The classes this method's body turned out to need, which are compiled
+    /// after it. A class written where it is used has no name until here.
+    made: &'a mut Vec<Unit>,
+    /// The type the expression about to be written is being handed to, when
+    /// that is known. A lambda has no type of its own: which interface it is
+    /// depends entirely on where it is going.
+    expecting: Option<Type>,
     static_: bool,
     /// What this method said it returns. A `return` is checked against it, and
     /// the first version of this did not do that -- so `int f() { return
@@ -4022,8 +4486,10 @@ impl<'a> Emitter<'a> {
         unit: &'a Unit,
         this_class: String,
         static_: bool,
+        made: &'a mut Vec<Unit>,
     ) -> Emitter<'a> {
         Emitter {
+            made,
             pool,
             classpath,
             unit,
@@ -4041,6 +4507,7 @@ impl<'a> Emitter<'a> {
             inlined: Vec::new(),
             pending_label: None,
             yields: Vec::new(),
+            expecting: None,
             static_,
             returns: Type::Void,
             slots: Vec::new(),
@@ -4788,6 +5255,7 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "(Landroid/view/View;)V",
         false,
     ),
+    ("java/lang/Runnable", "run", "()V", false),
     (
         "android/widget/TextView",
         "setText",
@@ -4928,6 +5396,7 @@ const BUILT_IN_ABOVE: &[(&str, &str)] = &[
 /// class file that verifies and then fails to link on the device.
 const BUILT_IN_INTERFACES: &[&str] = &[
     "android/view/View$OnClickListener",
+    "java/lang/Runnable",
     "java/lang/CharSequence",
     "java/lang/Iterable",
     "java/lang/AutoCloseable",
@@ -5079,12 +5548,13 @@ fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<Strin
         if exists(&internal) {
             return Some(internal);
         }
-        // A nested class is written with a dot and named with a dollar:
-        // `View.OnClickListener` is `android/view/View$OnClickListener`. Only
-        // the last dot can be the one that separates them, because a package
-        // never follows a class.
-        if let Some((before, last)) = internal.rsplit_once('/') {
-            let nested = format!("{before}${last}");
+    }
+    // A nested class is written with a dot and named with a dollar, and what
+    // comes before the dot is itself a name to resolve: `View.OnClickListener`
+    // where `View` was imported is `android/view/View$OnClickListener`.
+    if let Some((before, last)) = name.rsplit_once('.') {
+        if let Some(holder) = resolve_named(classpath, unit, before) {
+            let nested = format!("{holder}${last}");
             if exists(&nested) {
                 return Some(nested);
             }
@@ -5095,6 +5565,9 @@ fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<Strin
         if exists(&beside) {
             return Some(beside);
         }
+    } else if exists(name) {
+        // No package, so a bare name and an internal name are the same thing.
+        return Some(name.to_string());
     }
     for import in &unit.imports {
         if import.rsplit('.').next() == Some(name) {
@@ -5121,6 +5594,7 @@ const WELL_KNOWN: &[&str] = &[
     "java/lang/String",
     "java/lang/Enum",
     "java/lang/Record",
+    "java/lang/Runnable",
     "java/lang/CharSequence",
     "java/lang/StringBuilder",
     "java/lang/System",
@@ -5619,6 +6093,19 @@ impl Emitter<'_> {
                 Ok(Type::Boolean)
             }
             Expression::Switch { subject, arms } => self.switch_value(subject, arms, line),
+            Expression::Anonymous {
+                what,
+                arguments,
+                body,
+                line: written,
+                ..
+            } => self.anonymous(what, arguments, body, *written),
+            Expression::Lambda {
+                parameters,
+                body,
+                expression,
+                line: written,
+            } => self.lambda(parameters, body, *expression, *written),
             Expression::NewArray { of, length } => {
                 let element = self.resolve(of, line)?;
                 let found = self.value(length, line)?;
@@ -5732,6 +6219,27 @@ impl Emitter<'_> {
                 return Ok(what);
             }
         }
+        // A class written inside another can read what that one holds. Its
+        // instance is in a field, so the road is one field access longer.
+        if let Some(enclosing) = self.unit.outer.clone() {
+            if let Some((holder, (_, what, static_))) = self.classpath.find_field(&enclosing, name)
+            {
+                let (holder, what, static_) = (holder.name.clone(), what.clone(), *static_);
+                let descriptor = what.descriptor();
+                if static_ {
+                    let index = self.pool.field(&holder, name, &descriptor);
+                    self.op2(0xb2, index);
+                    self.grow(i32::from(what.width()));
+                    return Ok(what);
+                }
+                self.reach_the_enclosing_instance(&enclosing)?;
+                let index = self.pool.field(&holder, name, &descriptor);
+                self.op2(0xb4, index);
+                self.grow(i32::from(what.width()) - 1);
+                return Ok(what);
+            }
+        }
+
         Err(at(
             "EJ211",
             line,
@@ -5767,6 +6275,85 @@ impl Emitter<'_> {
             return false;
         }
         self.resolve_class(name, 1).is_ok()
+    }
+
+    /// Writes a value into a field of the class this one was written inside.
+    fn assign_through_the_enclosing_instance(
+        &mut self,
+        enclosing: &str,
+        name: &str,
+        operator: Option<Binary>,
+        value: &Expression,
+        line: u32,
+        wanted: bool,
+    ) -> Result<Type, Diagnostic> {
+        let Some((holder, (_, what, static_))) = self.classpath.find_field(enclosing, name) else {
+            return Err(at(
+                "EJ229",
+                line,
+                1,
+                format!("`{name}` is nothing that can be assigned to."),
+            ));
+        };
+        let (holder, what, static_) = (holder.name.clone(), what.clone(), *static_);
+        if wanted {
+            return Err(unsupported(
+                line,
+                1,
+                "Using the value of an assignment into the class around this one",
+            ));
+        }
+        if operator.is_some() {
+            return Err(unsupported(
+                line,
+                1,
+                "A compound assignment into the class around this one",
+            ));
+        }
+        if !static_ {
+            self.reach_the_enclosing_instance(enclosing)?;
+            self.grow(1);
+        }
+        let found = self.value_for(value, &what, line)?;
+        if !found.may_be_given_to(&what) {
+            return Err(at(
+                "EJ228",
+                line,
+                1,
+                format!(
+                    "A {} cannot be put in `{name}`, which is a {}.",
+                    found.readable(),
+                    what.readable()
+                ),
+            ));
+        }
+        if !found.is_reference() {
+            self.convert(&found, &what, line)?;
+        }
+        let descriptor = what.descriptor();
+        let index = self.pool.field(&holder, name, &descriptor);
+        if static_ {
+            self.op2(0xb3, index);
+            self.grow(-i32::from(what.width()));
+        } else {
+            self.op2(0xb5, index);
+            self.grow(-i32::from(what.width()) - 1);
+        }
+        Ok(what)
+    }
+
+    /// Puts the instance of the class this one was written inside on the
+    /// stack.
+    fn reach_the_enclosing_instance(&mut self, enclosing: &str) -> Result<(), Diagnostic> {
+        let this = Type::Object(self.this_class.clone());
+        self.load(0, &this);
+        let held = Type::Object(enclosing.to_string());
+        let descriptor = held.descriptor();
+        let index = self
+            .pool
+            .field(&self.this_class.clone(), OUTER, &descriptor);
+        self.op2(0xb4, index);
+        Ok(())
     }
 
     /// A static field named through its class.
@@ -6246,7 +6833,7 @@ impl Emitter<'_> {
             ));
         }
         for (want, expression) in wanted.iter().zip(given.iter()) {
-            let found = self.value(expression, line)?;
+            let found = self.value_for(expression, want, line)?;
             if !found.may_be_given_to(want) {
                 return Err(at(
                     "EJ221",
@@ -6358,6 +6945,33 @@ impl Emitter<'_> {
                         };
                         let descriptor = signature.descriptor();
                         let index = self.pool.method(&owner, name, &descriptor, false);
+                        self.op2(if signature.static_ { 0xb8 } else { 0xb6 }, index);
+                        let taken: i32 = signature
+                            .parameters
+                            .iter()
+                            .map(|one| i32::from(one.width()))
+                            .sum();
+                        let popped = taken + i32::from(!signature.static_);
+                        self.grow(-popped + i32::from(signature.returns.width()));
+                        return Ok(signature.returns);
+                    }
+                }
+                if let Some(enclosing) = self.unit.outer.clone() {
+                    if let Some(signature) =
+                        self.signature_for(&enclosing, name, arguments, line)?
+                    {
+                        if !signature.static_ {
+                            self.reach_the_enclosing_instance(&enclosing)?;
+                            self.grow(1);
+                        }
+                        self.arguments_for(&signature.parameters, arguments, line)?;
+                        let descriptor = signature.descriptor();
+                        let index = self.pool.method(
+                            &signature.owner,
+                            name,
+                            &descriptor,
+                            signature.interface,
+                        );
                         self.op2(if signature.static_ { 0xb8 } else { 0xb6 }, index);
                         let taken: i32 = signature
                             .parameters
@@ -6514,6 +7128,22 @@ impl Emitter<'_> {
         Ok(signature.returns)
     }
 
+    /// Writes an expression that is going somewhere known.
+    ///
+    /// A lambda has no type until it has a target, so the target has to reach
+    /// it. Everything else ignores this.
+    fn value_for(
+        &mut self,
+        expression: &Expression,
+        wanted: &Type,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        self.expecting = Some(wanted.clone());
+        let found = self.value(expression, line);
+        self.expecting = None;
+        found
+    }
+
     /// What an expression's type is, without keeping the code that works it
     /// out.
     ///
@@ -6581,6 +7211,15 @@ impl Emitter<'_> {
             return Ok(candidates.into_iter().next());
         }
 
+        // A lambda has no type until it has a target, and the target is what
+        // is being chosen here. Where one is handed over, the count is all
+        // there is to go on.
+        if arguments
+            .iter()
+            .any(|one| matches!(one, Expression::Lambda { .. }))
+        {
+            return Ok(candidates.into_iter().next());
+        }
         let mut given = Vec::with_capacity(arguments.len());
         for expression in arguments {
             given.push(self.type_of(expression, line)?);
@@ -6660,7 +7299,7 @@ impl Emitter<'_> {
             Expression::Name(name) if self.local(name).is_some() => {
                 let local = self.local(name).unwrap();
                 let found = match operator {
-                    None => self.value(value, line)?,
+                    None => self.value_for(value, &local.what, line)?,
                     Some(operator) => {
                         self.binary(operator, &Expression::Name(name.clone()), value, line)?
                     }
@@ -6688,20 +7327,29 @@ impl Emitter<'_> {
                 Ok(local.what)
             }
             Expression::Name(name) => {
-                let field = self
+                let own = self
                     .unit
                     .fields
                     .iter()
                     .find(|held| held.name == *name)
-                    .cloned()
-                    .ok_or_else(|| {
-                        at(
-                            "EJ229",
-                            line,
-                            1,
-                            format!("`{name}` is nothing that can be assigned to."),
-                        )
-                    })?;
+                    .cloned();
+                let Some(field) = own else {
+                    // A class written inside another can write what that one
+                    // holds, the same way it reads it.
+                    if let Some(enclosing) = self.unit.outer.clone() {
+                        if self.classpath.find_field(&enclosing, name).is_some() {
+                            return self.assign_through_the_enclosing_instance(
+                                &enclosing, name, operator, value, line, wanted,
+                            );
+                        }
+                    }
+                    return Err(at(
+                        "EJ229",
+                        line,
+                        1,
+                        format!("`{name}` is nothing that can be assigned to."),
+                    ));
+                };
                 let what = self.resolve(&field.what, line)?;
                 let owner = self.this_class.clone();
                 if !field.modifiers.static_ {
@@ -6716,7 +7364,7 @@ impl Emitter<'_> {
                     self.load(0, &Type::Object(owner.clone()));
                 }
                 let found = match operator {
-                    None => self.value(value, line)?,
+                    None => self.value_for(value, &what, line)?,
                     Some(operator) => {
                         self.binary(operator, &Expression::Name(name.clone()), value, line)?
                     }
@@ -7089,7 +7737,7 @@ impl Emitter<'_> {
                 let target = self.resolve(what, line)?;
                 match value {
                     Some(expression) => {
-                        let found = self.value(expression, line)?;
+                        let found = self.value_for(expression, &target, line)?;
                         if !found.may_be_given_to(&target) {
                             return Err(at(
                                 "EJ230",
@@ -7438,7 +8086,7 @@ impl Emitter<'_> {
                                 "This returns nothing, and the `return` carries a value.",
                             ));
                         }
-                        let found = self.value(expression, line)?;
+                        let found = self.value_for(expression, &wanted, line)?;
                         if !found.may_be_given_to(&wanted) {
                             return Err(at(
                                 "EJ201",
@@ -8397,6 +9045,442 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// A class written where it is used.
+    ///
+    /// It gets a name -- the enclosing class, a dollar, and a number -- and
+    /// becomes an ordinary class compiled after this one. What it reads from
+    /// around it becomes what it is built with: the enclosing instance, when
+    /// there is one, and every local of the method it was written in that its
+    /// body names. Those are copied in, which is why Java insists they do not
+    /// change afterwards: a copy that could go stale is worse than a rule.
+    fn anonymous(
+        &mut self,
+        what: &Written,
+        arguments: &[Expression],
+        body: &Body,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let target = self.resolve(what, line)?;
+        self.synthesise(target, arguments, body, line)
+    }
+
+    /// `x -> ...`: the one method of an interface, written where it is
+    /// wanted.
+    ///
+    /// A lambda has no type of its own. Which interface it is depends
+    /// entirely on where it is going, so what it is being handed to has to be
+    /// known before it can be written at all -- and where that is not known,
+    /// saying so is the only honest answer.
+    fn lambda(
+        &mut self,
+        parameters: &[(Option<Written>, String)],
+        body: &[Positioned<Statement>],
+        expression: bool,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let Some(target) = self.expecting.take() else {
+            return Err(at(
+                "EJ250",
+                line,
+                1,
+                "There is nothing here saying which interface this stands for.",
+            )
+            .with_suggestion(
+                "A lambda takes its type from what it is handed to: an argument, a \
+                 declared variable, or what a method returns. Write the type, or write \
+                 the class out.",
+            ));
+        };
+        let Type::Object(named) = target.clone() else {
+            return Err(at(
+                "EJ250",
+                line,
+                1,
+                format!("A lambda cannot stand for a {}.", target.readable()),
+            ));
+        };
+
+        let single = self.the_one_method_of(&named, line)?;
+        if single.parameters.len() != parameters.len() {
+            return Err(at(
+                "EJ251",
+                line,
+                1,
+                format!(
+                    "`{}.{}` takes {} argument(s) and this was written with {}.",
+                    named.replace('/', "."),
+                    single.name,
+                    single.parameters.len(),
+                    parameters.len()
+                ),
+            ));
+        }
+
+        // The types come from the interface. A type written on a parameter has
+        // to agree with it rather than replace it.
+        let mut written = Vec::new();
+        for ((given, name), wanted) in parameters.iter().zip(single.parameters.iter()) {
+            if let Some(given) = given {
+                let found = self.resolve(given, line)?;
+                if found != *wanted {
+                    return Err(at(
+                        "EJ251",
+                        line,
+                        1,
+                        format!(
+                            "`{name}` is written as a {} and `{}` hands over a {}.",
+                            found.readable(),
+                            single.name,
+                            wanted.readable()
+                        ),
+                    ));
+                }
+            }
+            let Some(shape) = written_for(wanted) else {
+                return Err(at(
+                    "EJ251",
+                    line,
+                    1,
+                    format!("`{}` hands over something this cannot name.", single.name),
+                ));
+            };
+            written.push((shape, name.clone()));
+        }
+
+        // An expression body is the value the method hands back, unless it
+        // hands back nothing -- in which case it is just something that
+        // happens.
+        let mut inside = body.to_vec();
+        if expression && single.returns != Type::Void {
+            if let Some(last) = inside.pop() {
+                let Statement::Express(value) = last.node else {
+                    return Err(at(
+                        "EJ251",
+                        line,
+                        1,
+                        "A lambda body has to produce a value.",
+                    ));
+                };
+                inside.push(Positioned {
+                    node: Statement::Return(Some(value)),
+                    line: last.line,
+                    column: last.column,
+                });
+            }
+        }
+
+        let Some(returns) = written_for(&single.returns).or(Some(Written::Void)) else {
+            unreachable!("void is nameable")
+        };
+        let made = Body {
+            fields: Vec::new(),
+            methods: vec![Method {
+                modifiers: Modifiers {
+                    public: true,
+                    ..Modifiers::default()
+                },
+                returns: if single.returns == Type::Void {
+                    Written::Void
+                } else {
+                    returns
+                },
+                name: single.name.clone(),
+                parameters: written,
+                body: Some(inside),
+                constructor: false,
+                variadic: false,
+                line,
+            }],
+            instance_setup: Vec::new(),
+        };
+        self.synthesise(target, &[], &made, line)
+    }
+
+    /// The one method an interface has, which is what a lambda stands for.
+    fn the_one_method_of(&self, named: &str, line: u32) -> Result<Signature, Diagnostic> {
+        let mut found: Vec<Signature> = Vec::new();
+        if let Some(known) = self.classpath.get(named) {
+            found.extend(known.methods.iter().cloned());
+        }
+        if found.is_empty() {
+            for (class, name, descriptor, static_) in BUILT_IN_METHODS {
+                if *class != named || *static_ {
+                    continue;
+                }
+                let Some((parameters, returns)) = read_descriptor(descriptor) else {
+                    continue;
+                };
+                found.push(Signature {
+                    owner: named.to_string(),
+                    name: (*name).to_string(),
+                    parameters,
+                    returns,
+                    static_: false,
+                    interface: true,
+                });
+            }
+        }
+        found.retain(|one| !one.static_ && one.name != "<init>");
+        match found.len() {
+            1 => Ok(found.remove(0)),
+            0 => Err(at(
+                "EJ250",
+                line,
+                1,
+                format!(
+                    "`{}` has no method this compilation knows, so there is nothing for a \
+                     lambda to be.",
+                    named.replace('/', ".")
+                ),
+            )
+            .with_suggestion("Hand the class file that declares it over as a dependency.")),
+            many => Err(at(
+                "EJ250",
+                line,
+                1,
+                format!(
+                    "`{}` has {many} methods, so a lambda cannot say which one it is.",
+                    named.replace('/', ".")
+                ),
+            )
+            .with_suggestion("Write the class out, naming the method.")),
+        }
+    }
+
+    /// Makes one class out of a body and a type it stands in for.
+    fn synthesise(
+        &mut self,
+        target: Type,
+        arguments: &[Expression],
+        body: &Body,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let Type::Object(named) = target.clone() else {
+            return Err(at(
+                "EJ248",
+                line,
+                1,
+                format!(
+                    "A class written where it is used has to name a class or an \
+                     interface, and {} is neither.",
+                    target.readable()
+                ),
+            ));
+        };
+        let is_interface = match self.classpath.get(&named) {
+            Some(known) => known.interface,
+            None => BUILT_IN_INTERFACES.contains(&named.as_str()),
+        };
+        if is_interface && !arguments.is_empty() {
+            return Err(at(
+                "EJ248",
+                line,
+                1,
+                "An interface has no constructor, so there is nothing to hand it.",
+            ));
+        }
+
+        // What the body reads that belongs to the method around it.
+        let mut wanted: Vec<String> = Vec::new();
+        names_read(body, &mut wanted);
+        let mut captured: Vec<Local> = Vec::new();
+        for name in &wanted {
+            let Some(local) = self.local(name) else {
+                continue;
+            };
+            if captured.iter().any(|held| held.slot == local.slot) {
+                continue;
+            }
+            captured.push(local);
+        }
+        captured.sort_by_key(|held| held.slot);
+
+        let mut assigned: Vec<String> = Vec::new();
+        names_assigned(body, &mut assigned);
+        for name in &assigned {
+            if captured.iter().any(|held| held.name == *name) {
+                return Err(at(
+                    "EJ249",
+                    line,
+                    1,
+                    format!(
+                        "`{name}` belongs to the method around this class, and this \
+                         class writes to it."
+                    ),
+                )
+                .with_suggestion(
+                    "What a class written here reads from around it is copied in, so a \
+                     write would not be seen outside. Use a field, or an array of one.",
+                ));
+            }
+        }
+
+        // What the superclass constructor is handed, worked out here because
+        // these are expressions of the method around this class.
+        let mut given = Vec::new();
+        for argument in arguments {
+            given.push(self.type_of(argument, line)?);
+        }
+
+        let outer = (!self.static_).then(|| self.this_class.clone());
+        let index = self.made.len() + 1;
+        let name = format!("{}${index}", self.unit.name);
+
+        // The fields it is built with, and the constructor that fills them.
+        let mut fields = Vec::new();
+        let mut parameters: Vec<(Written, String)> = Vec::new();
+        let mut filling: Vec<Positioned<Statement>> = Vec::new();
+        let held = |what: Written, name: &str, line: u32| Field {
+            modifiers: Modifiers {
+                private: true,
+                final_: true,
+                ..Modifiers::default()
+            },
+            what,
+            name: name.to_string(),
+            value: None,
+            line,
+        };
+        let fill = |name: &str, line: u32| Positioned {
+            node: Statement::Express(Expression::Assign {
+                target: Box::new(Expression::Field {
+                    of: Box::new(Expression::This),
+                    name: name.to_string(),
+                }),
+                operator: None,
+                value: Box::new(Expression::Name(name.to_string())),
+            }),
+            line,
+            column: 1,
+        };
+
+        if let Some(enclosing) = &outer {
+            let written = Written::Named(enclosing.replace('/', "."));
+            fields.push(held(written.clone(), OUTER, line));
+            parameters.push((written, OUTER.to_string()));
+            filling.push(fill(OUTER, line));
+        }
+        for local in &captured {
+            let Some(written) = written_for(&local.what) else {
+                return Err(at(
+                    "EJ249",
+                    line,
+                    1,
+                    format!(
+                        "`{}` is a {} and a class written here cannot hold one.",
+                        local.name,
+                        local.what.readable()
+                    ),
+                ));
+            };
+            fields.push(held(written.clone(), &local.name, line));
+            parameters.push((written, local.name.clone()));
+            filling.push(fill(&local.name, line));
+        }
+
+        let mut chain = Vec::new();
+        for (position, one) in given.iter().enumerate() {
+            let Some(written) = written_for(one) else {
+                return Err(at(
+                    "EJ248",
+                    line,
+                    1,
+                    format!(
+                        "A {} cannot be handed to a superclass here.",
+                        one.readable()
+                    ),
+                ));
+            };
+            let argument = format!("$arg{position}");
+            parameters.push((written, argument.clone()));
+            chain.push(Expression::Name(argument));
+        }
+
+        let mut constructor_body = vec![Positioned {
+            node: Statement::Chain {
+                to_super: true,
+                arguments: chain,
+            },
+            line,
+            column: 1,
+        }];
+        constructor_body.extend(filling);
+
+        let mut methods = vec![Method {
+            modifiers: Modifiers::default(),
+            returns: Written::Void,
+            name: "<init>".to_string(),
+            parameters: parameters.clone(),
+            body: Some(constructor_body),
+            constructor: true,
+            variadic: false,
+            line,
+        }];
+        methods.extend(body.methods.iter().cloned());
+        fields.extend(body.fields.iter().cloned());
+
+        let dotted = named.replace('/', ".");
+        self.made.push(Unit {
+            shape: Shape::Class,
+            package: self.unit.package.clone(),
+            imports: self.unit.imports.clone(),
+            modifiers: Modifiers {
+                final_: true,
+                ..Modifiers::default()
+            },
+            name: name.clone(),
+            extends: (!is_interface).then(|| dotted.clone()),
+            implements: if is_interface {
+                vec![dotted]
+            } else {
+                Vec::new()
+            },
+            fields,
+            methods,
+            instance_setup: body.instance_setup.clone(),
+            static_setup: Vec::new(),
+            outer: outer.clone(),
+        });
+
+        // And the making of it, here.
+        let made = match &self.unit.package {
+            Some(package) => format!("{}/{name}", package.replace('.', "/")),
+            None => name,
+        };
+        let index = self.pool.class(&made);
+        self.op2(0xbb, index);
+        self.grow(1);
+        self.op(0x59);
+        self.grow(1);
+
+        let mut descriptor = String::from("(");
+        if outer.is_some() {
+            let this = Type::Object(self.this_class.clone());
+            self.load(0, &this);
+            descriptor.push_str(&this.descriptor());
+        }
+        for local in &captured {
+            self.load(local.slot, &local.what);
+            descriptor.push_str(&local.what.descriptor());
+        }
+        for (argument, want) in arguments.iter().zip(given.iter()) {
+            let found = self.value(argument, line)?;
+            if !found.is_reference() {
+                self.convert(&found, want, line)?;
+            }
+            descriptor.push_str(&want.descriptor());
+        }
+        descriptor.push_str(")V");
+
+        let init = self.pool.method(&made, "<init>", &descriptor, false);
+        self.op2(0xb7, init);
+        let taken: i32 = read_descriptor(&descriptor)
+            .map(|(parameters, _)| parameters.iter().map(|one| i32::from(one.width())).sum())
+            .unwrap_or(0);
+        self.grow(-(taken + 1));
+        Ok(target)
+    }
+
     /// `super(...)` or `this(...)`, at the top of a constructor.
     fn chain_to(
         &mut self,
@@ -8744,13 +9828,25 @@ fn method_shape(method: &Method) -> u16 {
     0
 }
 
-pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagnostic> {
+/// One unit, and whatever classes its bodies turned out to need.
+pub fn compile_unit(
+    unit: &Unit,
+    classpath: &Classpath,
+) -> Result<(Vec<u8>, Vec<Unit>), Diagnostic> {
     let this_class = unit.internal_name();
     let mut pool = Pool::new();
+    let mut made: Vec<Unit> = Vec::new();
 
     let superclass = match &unit.extends {
         Some(name) => {
-            let probe = Emitter::new(&mut pool, classpath, unit, this_class.clone(), true);
+            let probe = Emitter::new(
+                &mut pool,
+                classpath,
+                unit,
+                this_class.clone(),
+                true,
+                &mut made,
+            );
             probe.resolve_class(name, 1)?
         }
         None => "java/lang/Object".to_string(),
@@ -8758,14 +9854,28 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
 
     let mut interfaces = Vec::new();
     for name in &unit.implements {
-        let probe = Emitter::new(&mut pool, classpath, unit, this_class.clone(), true);
+        let probe = Emitter::new(
+            &mut pool,
+            classpath,
+            unit,
+            this_class.clone(),
+            true,
+            &mut made,
+        );
         interfaces.push(probe.resolve_class(name, 1)?);
     }
 
     // Fields.
     let mut field_bytes = Vec::new();
     for field in &unit.fields {
-        let probe = Emitter::new(&mut pool, classpath, unit, this_class.clone(), true);
+        let probe = Emitter::new(
+            &mut pool,
+            classpath,
+            unit,
+            this_class.clone(),
+            true,
+            &mut made,
+        );
         let what = probe.resolve(&field.what, field.line)?;
         let name = pool.utf8(&field.name);
         let descriptor = pool.utf8(&what.descriptor());
@@ -8872,7 +9982,14 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
     for method in &methods {
         let Some(body) = &method.body else {
             let name = pool.utf8(&method.name);
-            let probe = Emitter::new(&mut pool, classpath, unit, this_class.clone(), true);
+            let probe = Emitter::new(
+                &mut pool,
+                classpath,
+                unit,
+                this_class.clone(),
+                true,
+                &mut made,
+            );
             let mut parameters = Vec::new();
             for (what, _) in &method.parameters {
                 parameters.push(probe.resolve(what, method.line)?);
@@ -8907,6 +10024,7 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
             unit,
             this_class.clone(),
             method.modifiers.static_,
+            &mut made,
         );
         emitter.open();
         if !method.modifiers.static_ {
@@ -9082,7 +10200,7 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
     out.extend_from_slice(&written.to_be_bytes());
     out.extend_from_slice(&method_bytes);
     out.extend_from_slice(&0u16.to_be_bytes());
-    Ok(out)
+    Ok((out, made))
 }
 
 /// Reads Java and writes a class file.
@@ -9104,10 +10222,36 @@ pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u
         together.declare(unit);
     }
 
-    let mut out = Vec::with_capacity(declared.len());
-    for unit in &declared {
-        let name = format!("{}.class", unit.internal_name());
-        out.push((name, compile_unit(unit, &together)?));
+    // A body can turn out to need a class of its own -- one written where it
+    // is used has no name until it is compiled. Those go on the end and are
+    // compiled in their turn, and may need classes themselves.
+    let mut out = Vec::new();
+    let mut waiting = declared;
+    let mut rounds = 0usize;
+    while !waiting.is_empty() {
+        rounds += 1;
+        if rounds > 64 {
+            return Err(at(
+                "EJ119",
+                1,
+                1,
+                "This file keeps producing classes that produce more classes.",
+            ));
+        }
+        let mut next = Vec::new();
+        for unit in &waiting {
+            let name = format!("{}.class", unit.internal_name());
+            let (bytes, made) = compile_unit(unit, &together)?;
+            out.push((name, bytes));
+            next.extend(made);
+        }
+        for unit in &next {
+            together.shell(unit);
+        }
+        for unit in &next {
+            together.declare(unit);
+        }
+        waiting = next;
     }
     Ok(out)
 }
@@ -9392,9 +10536,16 @@ mod tests {
     #[test]
     fn what_it_does_not_compile_it_refuses_by_name_and_line() {
         for (source, expected) in [
+            // A lambda with nothing saying what it stands for.
             (
-                "public class A { void f() { Runnable r = () -> {}; } }",
-                "EJ900",
+                "public class A { Object f() { return () -> {}; } }",
+                "EJ250",
+            ),
+            // And one handed to an interface with more than one method, which
+            // cannot say which of them it is.
+            (
+                "public class A { void f() { CharSequence c = () -> {}; } }",
+                "EJ250",
             ),
             ("public class A { class B { } }", "EJ900"),
             (
@@ -10777,6 +11928,174 @@ public class Shaped {
         }
 
         eprintln!("java: lists, maps, iterators and a try that closes what it opened, verified");
+    }
+
+    #[test]
+    fn a_class_written_where_it_is_used_becomes_a_class_of_its_own() {
+        let source = r#"
+            package com.my.app;
+
+            import android.app.Activity;
+            import android.os.Bundle;
+            import android.view.View;
+            import android.widget.Button;
+
+            public final class MainActivity extends Activity {
+                private int taps;
+
+                @Override
+                protected void onCreate(Bundle state) {
+                    super.onCreate(state);
+                    final Button button = new Button(this);
+                    final String said = "tapped";
+                    button.setOnClickListener(new View.OnClickListener() {
+                        @Override
+                        public void onClick(View which) {
+                            count();
+                            button.setText(said + taps);
+                        }
+                    });
+                    setContentView(button);
+                }
+
+                private void count() {
+                    taps = taps + 1;
+                }
+            }
+        "#;
+
+        let produced = compile(source, &empty()).expect("this must compile");
+        let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "com/my/app/MainActivity.class",
+                "com/my/app/MainActivity$1.class"
+            ]
+        );
+
+        let listener = crate::jvm::read(&produced[1].1).expect("the listener must read back");
+        assert_eq!(
+            listener.interfaces,
+            vec!["android.view.View$OnClickListener"]
+        );
+        let fields: Vec<&str> = listener
+            .fields
+            .iter()
+            .map(|one| one.name.as_str())
+            .collect();
+        // The enclosing instance, and every local the body reads.
+        for wanted in ["$outer", "button", "said"] {
+            assert!(fields.contains(&wanted), "{fields:?}");
+        }
+
+        for (name, bytes) in &produced {
+            let simple = name.trim_end_matches(".class");
+            match jvm_verifies(simple, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here to verify {name}");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {name}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+
+        let mut classes = Vec::new();
+        for (_, bytes) in &produced {
+            let class = crate::jvm::read(bytes).unwrap();
+            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+        }
+        let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
+        if let Some(text) = dexdump_disassembly(&dex) {
+            assert!(text.contains("Lcom/my/app/MainActivity$1;"));
+            assert!(text.contains("$outer"));
+        }
+
+        eprintln!(
+            "java: a listener written where it is used, holding its enclosing instance \
+             and two locals, verified"
+        );
+    }
+
+    #[test]
+    fn a_lambda_becomes_the_interface_it_is_handed_to() {
+        let source = r#"
+            package com.my.app;
+
+            import android.app.Activity;
+            import android.os.Bundle;
+            import android.view.View;
+            import android.widget.Button;
+
+            public final class MainActivity extends Activity {
+                private int taps;
+
+                @Override
+                protected void onCreate(Bundle state) {
+                    super.onCreate(state);
+                    final Button button = new Button(this);
+                    final String said = "tapped ";
+                    button.setOnClickListener(which -> {
+                        taps = taps + 1;
+                        button.setText(said + taps);
+                    });
+                    Runnable later = () -> button.setText("done");
+                    later.run();
+                    setContentView(button);
+                }
+            }
+        "#;
+
+        let produced = compile(source, &empty()).expect("this must compile");
+        let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "com/my/app/MainActivity.class",
+                "com/my/app/MainActivity$1.class",
+                "com/my/app/MainActivity$2.class"
+            ],
+            "one class per lambda, numbered in the order they were written"
+        );
+
+        let listener = crate::jvm::read(&produced[1].1).unwrap();
+        assert_eq!(
+            listener.interfaces,
+            vec!["android.view.View$OnClickListener"]
+        );
+        assert!(listener.methods.iter().any(|one| one.name == "onClick"));
+
+        let later = crate::jvm::read(&produced[2].1).unwrap();
+        assert_eq!(later.interfaces, vec!["java.lang.Runnable"]);
+        assert!(later.methods.iter().any(|one| one.name == "run"));
+
+        for (name, bytes) in &produced {
+            let simple = name.trim_end_matches(".class");
+            match jvm_verifies(simple, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here to verify {name}");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {name}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+
+        let mut classes = Vec::new();
+        for (_, bytes) in &produced {
+            let class = crate::jvm::read(bytes).unwrap();
+            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+        }
+        let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
+        if let Some(text) = dexdump_disassembly(&dex) {
+            assert!(text.contains("Lcom/my/app/MainActivity$2;"));
+            // No invokedynamic: the class is written out, which is what
+            // Android's own tooling does to a lambda anyway.
+            assert!(!text.contains("invoke-polymorphic"));
+        }
+
+        eprintln!("java: two lambdas, two classes, no invokedynamic, verified");
     }
 
     #[test]
