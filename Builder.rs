@@ -23471,14 +23471,93 @@ pub mod builder {
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
 
+        // The identifiers the resource table hands out, worked out here rather
+        // than at packaging time, because `R.string.app_name` is how a person
+        // reaches a resource and the compiler needs the number behind it.
+        // Assignment is from sorted order, so working it out twice gives the
+        // same answers both times.
+        let mut sink = crate::diag::Sink::new();
+        let table = compile_resources(&project, &mut sink)?;
+        let mut sources = Vec::new();
+        if let Some(icons) = &table {
+            let mut named = crate::diag::Sink::new();
+            let parsed = crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut named);
+            let package = parsed.as_ref().map(package_name).unwrap_or_default();
+            if !package.is_empty() {
+                sources.push(("R.java".to_string(), r_source(&package, &icons.compiled)));
+            }
+        }
+
         // What the person wrote, compiled, and put in the package instead of
         // the empty activity `from_manifest` describes. Until this, everything
         // in the Java folder was carried around and none of it was built.
-        let written = compiled_java(root)?;
+        let written = compiled_java(root, sources)?;
         if !written.is_empty() {
             project.code = written;
         }
         Ok(project)
+    }
+
+    /// The `R` class, as Java, from the identifiers the resource table gave
+    /// out.
+    ///
+    /// It is written as source rather than assembled as a class file because
+    /// that is one road instead of two: whatever the compiler does with a
+    /// nested class holding static final ints, it does here as well, and there
+    /// is no second description of a class file to keep in step.
+    ///
+    /// Every field is a `static final int` with a value, which is exactly what
+    /// the platform's own `R` is. `android.R` is not this: that one belongs to
+    /// the framework and is already on the device.
+    pub fn r_source(package: &str, compiled: &crate::resources::Compiled) -> String {
+        let mut kinds: Vec<crate::resources::Kind> = Vec::new();
+        for (kind, _, _) in compiled.assignments() {
+            if !kinds.contains(kind) {
+                kinds.push(*kind);
+            }
+        }
+        kinds.sort_by_key(|kind| kind.as_str());
+
+        let mut out = String::new();
+        out.push_str(&format!(
+            "package {package};
+
+public final class R {{
+"
+        ));
+        for kind in kinds {
+            out.push_str(&format!(
+                "    public static final class {} {{
+",
+                kind.as_str()
+            ));
+            let mut named: Vec<(&str, u32)> = compiled
+                .assignments()
+                .iter()
+                .filter(|(held, _, _)| *held == kind)
+                .map(|(_, name, id)| (name.as_str(), id.raw()))
+                .collect();
+            named.sort();
+            for (name, raw) in named {
+                // Written as a signed decimal, because `0x7f...` is above what
+                // an `int` holds as a positive number and this compiler reads
+                // a literal the way Java does.
+                out.push_str(&format!(
+                    "        public static final int {} = {};
+",
+                    name, raw as i32
+                ));
+            }
+            out.push_str(
+                "    }
+",
+            );
+        }
+        out.push_str(
+            "}
+",
+        );
+        out
     }
 
     /// Every class the project's Java comes to.
@@ -23487,7 +23566,10 @@ pub mod builder {
     /// named by another, and each class file is turned into the Dalvik the
     /// device runs. A project with no Java is not an error: it keeps the
     /// activity the manifest describes, which is enough to install and launch.
-    pub fn compiled_java(root: &str) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
+    pub fn compiled_java(
+        root: &str,
+        generated: Vec<(String, String)>,
+    ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
         let folder = std::path::Path::new(root).join(crate::scaffold::JAVA_FOLDER);
         let mut sources = Vec::new();
         gather_java(&folder, &mut sources);
@@ -23498,24 +23580,30 @@ pub mod builder {
         // package whatever the filesystem hands back first.
         sources.sort();
 
-        let classpath = crate::compilers::java::Classpath::new();
-        let mut out = Vec::new();
+        // Read first, compiled as one. A class in one file names a class in
+        // another without saying where it lives, which only works if every
+        // file is on the table before any body is written.
+        let mut read = Vec::new();
         for path in &sources {
             let text = std::fs::read_to_string(path).map_err(|why| {
                 fail("EB040", "A Java file could not be read.")
                     .with_context(format!("Path: {}", path.display()))
                     .with_context(format!("Reason: {why}"))
             })?;
-            let produced = crate::compilers::java::compile(&text, &classpath)
-                .map_err(|error| error.with_context(format!("File: {}", path.display())))?;
-            for (name, bytes) in produced {
-                let class = crate::jvm::read(&bytes)
-                    .map_err(|error| error.with_context(format!("Class: {name}")))?;
-                out.push(
-                    crate::dalvik::translate_class(&class)
-                        .map_err(|error| error.with_context(format!("Class: {name}")))?,
-                );
-            }
+            read.push((path.display().to_string(), text));
+        }
+        read.extend(generated);
+
+        let classpath = crate::compilers::java::Classpath::new();
+        let produced = crate::compilers::java::compile_together(&read, &classpath)?;
+        let mut out = Vec::new();
+        for (name, bytes) in produced {
+            let class = crate::jvm::read(&bytes)
+                .map_err(|error| error.with_context(format!("Class: {name}")))?;
+            out.push(
+                crate::dalvik::translate_class(&class)
+                    .map_err(|error| error.with_context(format!("Class: {name}")))?,
+            );
         }
         Ok(out)
     }
@@ -30345,6 +30433,94 @@ mod tests {
             super::ffi::omni_string_free(raw);
             text
         }
+    }
+
+    #[test]
+    fn the_java_somebody_wrote_can_name_the_resources_the_project_holds() {
+        // `R.string.app_name` is the first line of Android anybody writes.
+        // The class behind it is not on disk and never was: it is written from
+        // the identifiers the resource table hands out, and compiled with
+        // everything else.
+        let directory = temp_directory("omni-java-resources");
+        let root = directory.join("Named");
+        let spec =
+            "package=com.tr.yt;label=Named;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
+        super::scaffold::create(
+            root.to_str().unwrap(),
+            &super::scaffold::Spec::parse(spec).unwrap(),
+        )
+        .expect("the project must be created");
+
+        let source = r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.os.Bundle;
+
+public final class MainActivity extends Activity {
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        setTitle(getString(R.string.app_name));
+    }
+
+    public int named() {
+        return R.string.app_name;
+    }
+}
+"#;
+        std::fs::write(
+            root.join(super::scaffold::JAVA_FOLDER)
+                .join("MainActivity.java"),
+            source,
+        )
+        .unwrap();
+
+        let project = super::builder::from_project(root.to_str().unwrap())
+            .expect("naming a resource must build");
+        let names: Vec<&str> = project
+            .code
+            .iter()
+            .map(|one| one.descriptor.as_str())
+            .collect();
+        assert!(names.contains(&"Lcom/tr/yt/R$string;"), "{names:?}");
+        assert!(names.contains(&"Lcom/tr/yt/MainActivity;"), "{names:?}");
+
+        // The number in the class is the number the table gives out, not a
+        // guess -- an `R` that disagrees with the table is an application that
+        // shows the wrong words or crashes looking for them.
+        let mut sink = super::diag::Sink::new();
+        let mut table =
+            super::resources::Table::for_package(super::resources::APPLICATION_PACKAGE_ID);
+        for (folder, text) in &project.values {
+            let origin = format!("{}/{}", folder, super::scaffold::STRINGS_FILE);
+            let config = super::resources::Config::parse_values_directory(folder).unwrap();
+            assert!(table.read_values_for(text, &origin, config, &mut sink));
+        }
+        let compiled = table.compile(&mut sink).expect("the table must build");
+        let wanted = compiled
+            .id(super::resources::Kind::String, "app_name")
+            .expect("app_name is declared");
+
+        let held = project
+            .code
+            .iter()
+            .find(|one| one.descriptor == "Lcom/tr/yt/R$string;")
+            .unwrap();
+        assert!(
+            held.static_fields
+                .iter()
+                .any(|field| field.reference.name == "app_name"),
+            "{:?}",
+            held.static_fields
+        );
+        let said = super::builder::r_source("com.tr.yt", &compiled);
+        assert!(
+            said.contains(&format!("app_name = {};", wanted.raw() as i32)),
+            "{said}"
+        );
+
+        let _ = directory;
     }
 
     #[test]

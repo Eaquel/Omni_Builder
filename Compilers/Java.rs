@@ -6178,6 +6178,19 @@ fn built_in_field(owner: &str, name: &str) -> Option<Type> {
 /// proof that it does, which is why every step also asks whether the class is
 /// actually there. Taking an import as proof is how a call to a class nobody
 /// handed over got as far as being written into a class file.
+/// The dotted name an expression is written as, where it is written as one.
+///
+/// `R.string` is a chain of `Field`s over a `Name`, and so is `a.b` where `a`
+/// is a variable. This says what was written; whether it names anything is a
+/// separate question.
+fn written_as_a_path(expression: &Expression) -> Option<String> {
+    match expression {
+        Expression::Name(name) => Some(name.clone()),
+        Expression::Field { of, name } => Some(format!("{}.{name}", written_as_a_path(of)?)),
+        _ => None,
+    }
+}
+
 fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<String> {
     let exists =
         |internal: &str| classpath.get(internal).is_some() || WELL_KNOWN.contains(&internal);
@@ -6594,6 +6607,18 @@ impl Emitter<'_> {
                     if self.meant_as_a_class(maybe_class) {
                         let owner = self.resolve_class(maybe_class, line)?;
                         return self.read_static_field(&owner, name, line);
+                    }
+                }
+                // `R.string.app_name` is a field of a class written inside a
+                // class, and the dots between them look exactly like fields of
+                // fields. What is in front of the last dot is tried as a class
+                // before it is tried as a value.
+                if let Some(path) = written_as_a_path(of) {
+                    let head = path.split('.').next().unwrap_or_default();
+                    if self.meant_as_a_class(head) {
+                        if let Some(owner) = resolve_named(self.classpath, self.unit, &path) {
+                            return self.read_static_field(&owner, name, line);
+                        }
                     }
                 }
                 let owner = self.value(of, line)?;
@@ -11781,16 +11806,65 @@ pub fn compile_unit(
 /// each of them is a class file of its own -- which is what the JVM has always
 /// required and what `javac` has always done.
 pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
-    let declared = parse(source)?;
+    compile_together(&[("".to_string(), source.to_string())], classpath)
+}
+
+/// Every class a whole project's Java comes to.
+///
+/// The files are compiled as one compilation rather than one after another,
+/// because that is what Java is: a class in one file names a class in another
+/// without either of them saying where it lives, and neither exists as a class
+/// file yet. So every file is parsed first, every type it declares is put on
+/// one shared classpath, and only then is any body written. Compiling them in
+/// turn would mean the first file could not see the second, which is a project
+/// of more than one file refused for no reason a person would accept.
+///
+/// Each source is handed over with a label -- the path it was read from -- so
+/// that a refusal says which file it is about.
+pub fn compile_together(
+    sources: &[(String, String)],
+    classpath: &Classpath,
+) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
+    let mut declared = Vec::new();
+    for (label, text) in sources {
+        let units = parse(text).map_err(|error| named_file(error, label))?;
+        for unit in units {
+            declared.push((label.clone(), unit));
+        }
+    }
 
     // A type declared beside another can be named by it, so each one is on the
     // classpath the others are compiled against.
     let mut together = classpath.clone();
-    for unit in &declared {
+    for (_, unit) in &declared {
         together.shell(unit);
     }
-    for unit in &declared {
+    for (_, unit) in &declared {
         together.declare(unit);
+    }
+
+    // Two files declaring the same type would each write over the other's
+    // class, and which one the device ran would come down to the order the
+    // filesystem handed them back.
+    for (index, (label, unit)) in declared.iter().enumerate() {
+        let name = unit.internal_name();
+        if let Some((first, _)) = declared
+            .iter()
+            .take(index)
+            .find(|(_, held)| held.internal_name() == name)
+        {
+            return Err(named_file(
+                at(
+                    "EJ253",
+                    1,
+                    1,
+                    format!("`{}` is declared twice.", name.replace('/', ".")),
+                )
+                .with_context(format!("Also in: {first}"))
+                .with_suggestion("One type, one place. Rename one of them."),
+                label,
+            ));
+        }
     }
 
     // A body can turn out to need a class of its own -- one written where it
@@ -11806,25 +11880,34 @@ pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u
                 "EJ119",
                 1,
                 1,
-                "This file keeps producing classes that produce more classes.",
+                "This keeps producing classes that produce more classes.",
             ));
         }
         let mut next = Vec::new();
-        for unit in &waiting {
+        for (label, unit) in &waiting {
             let name = format!("{}.class", unit.internal_name());
-            let (bytes, made) = compile_unit(unit, &together)?;
+            let (bytes, made) =
+                compile_unit(unit, &together).map_err(|error| named_file(error, label))?;
             out.push((name, bytes));
-            next.extend(made);
+            next.extend(made.into_iter().map(|one| (label.clone(), one)));
         }
-        for unit in &next {
+        for (_, unit) in &next {
             together.shell(unit);
         }
-        for unit in &next {
+        for (_, unit) in &next {
             together.declare(unit);
         }
         waiting = next;
     }
     Ok(out)
+}
+
+/// Says which file a refusal is about, where there is more than one.
+fn named_file(error: Diagnostic, label: &str) -> Diagnostic {
+    if label.is_empty() {
+        return error;
+    }
+    error.with_context(format!("File: {label}"))
 }
 
 // ------------------------------------------------------- the contract
@@ -14026,6 +14109,146 @@ public class Shaped {
             "java: arrays written out, two dimensions, boxing, locks, assertions, class \
              literals, varargs and stepping an element -- all verified"
         );
+    }
+
+    #[test]
+    fn a_class_written_inside_a_class_is_reached_through_its_holder() {
+        // `R.string.app_name` is how every Android application reaches a
+        // resource, and it is a static field of a class written inside a
+        // class. Written down it looks exactly like a field of a field, which
+        // is why it has to be tried as a class first.
+        let held = r#"
+            package com.my.app;
+
+            public final class R {
+                public static final class string {
+                    public static final int app_name = 2130903040;
+                }
+                public static final class drawable {
+                    public static final int icon = 2130837504;
+                }
+            }
+        "#;
+        let produced = compile(held, &empty()).expect("the holder must compile");
+        let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"com/my/app/R$string.class"), "{names:?}");
+
+        let mut classpath = empty();
+        for (_, bytes) in &produced {
+            let class = crate::jvm::read(bytes).expect("read back");
+            classpath.learn(&class).expect("and learn");
+        }
+
+        let user = r#"
+            package com.my.app;
+
+            public class Screen {
+                public int title() {
+                    return R.string.app_name;
+                }
+                public int icon() {
+                    return R.drawable.icon;
+                }
+            }
+        "#;
+        let (_, bytes) = compile_one(user, &classpath).expect("and reaching it must compile");
+        match jvm_verifies("com/my/app/Screen", &bytes) {
+            None | Some(Verdict::TooOld(_)) => {}
+            Some(Verdict::Refused(said)) => panic!("a real JVM refused it:\n{said}"),
+            Some(Verdict::Verified) => {}
+        }
+
+        // A name that is not there is still refused, rather than read as
+        // something else and quietly emitted.
+        let missing = r#"
+            package com.my.app;
+            public class Screen { public int f() { return R.string.nothing; } }
+        "#;
+        let refused = compile_one(missing, &classpath).expect_err("must be refused");
+        assert_eq!(refused.code, "EJ213");
+
+        eprintln!("java: a class inside a class, reached the way Android reaches R");
+    }
+
+    #[test]
+    fn files_compiled_together_can_name_each_other() {
+        // A project is more than one file, and a class in one names a class in
+        // another without either saying where it lives. Compiling them one
+        // after the other would mean the first could not see the second.
+        let sources = vec![
+            (
+                "Greeter.java".to_string(),
+                r#"
+                    package com.my.app;
+
+                    public class Greeter {
+                        private final Name held;
+
+                        public Greeter(Name held) {
+                            this.held = held;
+                        }
+
+                        public String greeting() {
+                            return "hello " + held.text();
+                        }
+                    }
+                "#
+                .to_string(),
+            ),
+            (
+                "Name.java".to_string(),
+                r#"
+                    package com.my.app;
+
+                    public class Name {
+                        private final String text;
+
+                        public Name(String text) {
+                            this.text = text;
+                        }
+
+                        public String text() {
+                            return text;
+                        }
+
+                        public static Greeter of(String text) {
+                            return new Greeter(new Name(text));
+                        }
+                    }
+                "#
+                .to_string(),
+            ),
+        ];
+        let produced = compile_together(&sources, &empty()).expect("both must compile");
+        let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(names.contains(&"com/my/app/Greeter.class"), "{names:?}");
+        assert!(names.contains(&"com/my/app/Name.class"), "{names:?}");
+
+        for (file, bytes) in &produced {
+            let named = file.trim_end_matches(".class");
+            match jvm_verifies(named, bytes) {
+                None | Some(Verdict::TooOld(_)) => return,
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {file}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+
+        // Named the other way round, the answer is the same.
+        let backwards = vec![sources[1].clone(), sources[0].clone()];
+        let again = compile_together(&backwards, &empty()).expect("order must not matter");
+        assert_eq!(again.len(), produced.len());
+
+        // And one type in two files is refused rather than silently written
+        // over.
+        let twice = vec![sources[0].clone(), sources[0].clone()];
+        let refused = compile_together(&twice, &empty()).expect_err("one type, one place");
+        assert_eq!(refused.code, "EJ253");
+        assert!(refused
+            .context
+            .iter()
+            .any(|line| line.contains("Greeter.java")));
+
+        eprintln!("java: files compiled together, whichever order they arrive in");
     }
 
     #[test]
