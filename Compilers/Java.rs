@@ -70,10 +70,17 @@
 //! `try` that holds things closes them in the reverse of the order it opened
 //! them.
 //!
-//! There is a small fixed table of runtime signatures -- the exceptions,
-//! printing, string work, boxing, arithmetic, the collections -- so that code
-//! which has never been handed `android.jar` still compiles. Anything handed
-//! over as a dependency wins over it.
+//! What it may call into is what it was handed. A jar is a zip of class
+//! files, and reading one is reading every class in it -- names, superclasses,
+//! interfaces, and the descriptors a call will be checked against. Hand over
+//! `android.jar` and the whole platform is there: import what you like. The
+//! builder does that on its own, from the project's `Libraries` folder and
+//! from the SDK where there is one.
+//!
+//! Behind that there is a small fixed table of runtime signatures -- the
+//! exceptions, printing, string work, boxing, arithmetic, the collections --
+//! so that code which has been handed nothing still compiles. Anything handed
+//! over wins over it.
 //!
 //! A class written where it is used -- `new Iface() { ... }` -- and a lambda
 //! both become a class of their own, named after the one they were written
@@ -5002,6 +5009,10 @@ pub struct Classpath {
 pub struct KnownClass {
     pub name: String,
     pub superclass: Option<String>,
+    /// What it implements, which is as much a road to a method as what it
+    /// extends: `ArrayAdapter` answers `ListAdapter`'s methods, and a call
+    /// handing one where the other is wanted has to know that.
+    pub interfaces: Vec<String>,
     pub methods: Vec<Signature>,
     pub fields: Vec<(String, Type, bool)>,
     pub interface: bool,
@@ -5085,6 +5096,11 @@ impl Classpath {
             .iter()
             .filter_map(|named| resolve_named(self, unit, named))
             .collect();
+        known.interfaces = unit
+            .implements
+            .iter()
+            .filter_map(|named| resolve_named(self, unit, named))
+            .collect();
 
         let shallow = |written: &Written| -> Option<Type> { resolve_written(self, unit, written) };
 
@@ -5133,6 +5149,56 @@ impl Classpath {
         self.known.insert(internal, known);
     }
 
+    /// Adds everything a jar says about itself.
+    ///
+    /// A jar is a zip of class files, and `android.jar` is the whole platform
+    /// in one. Reading it is what turns "import what you like" from a promise
+    /// into a fact: every class, every method, every field, with the
+    /// descriptors the device will check the call against.
+    ///
+    /// A member this compiler cannot read is left out rather than guessed at,
+    /// and an entry that is not a class file is skipped -- a jar carries a
+    /// manifest and whatever else somebody put in it.
+    pub fn learn_jar(&mut self, bytes: &[u8]) -> Result<usize, Diagnostic> {
+        let mut sink = crate::diag::Sink::new();
+        let Some(archive) = crate::archive::read(bytes, &mut sink) else {
+            return Err(at("EJ255", 1, 1, "That is not an archive this can read.")
+                .with_suggestion("A dependency is a jar, which is a zip of class files."));
+        };
+        let mut learned = 0usize;
+        for entry in archive.entries() {
+            if entry.is_directory() || !entry.name.ends_with(".class") {
+                continue;
+            }
+            let from = entry.data_offset as usize;
+            let to = from.saturating_add(entry.compressed_size as usize);
+            let Some(held) = bytes.get(from..to) else {
+                continue;
+            };
+            let held = match entry.compression {
+                crate::archive::Compression::Stored => held.to_vec(),
+                crate::archive::Compression::Deflate => match crate::inflate::raw(held) {
+                    Ok(found) => found,
+                    Err(_) => continue,
+                },
+                crate::archive::Compression::Other(_) => continue,
+            };
+            // A class file this cannot read is one class fewer to call into,
+            // not a reason to refuse the whole jar.
+            let Ok(class) = crate::jvm::read(&held) else {
+                continue;
+            };
+            if self.learn(&class).is_ok() {
+                learned += 1;
+            }
+        }
+        if learned == 0 {
+            return Err(at("EJ255", 1, 1, "That archive holds no class files.")
+                .with_suggestion("A dependency is a jar, which is a zip of class files."));
+        }
+        Ok(learned)
+    }
+
     /// Adds everything one class file says about itself.
     ///
     /// The reader hands names back the way a person writes them, with dots.
@@ -5146,6 +5212,11 @@ impl Classpath {
         let mut known = KnownClass {
             name: internal.clone(),
             superclass: class.superclass.as_ref().map(|name| name.replace('.', "/")),
+            interfaces: class
+                .interfaces
+                .iter()
+                .map(|name| name.replace('.', "/"))
+                .collect(),
             interface,
             ..KnownClass::default()
         };
@@ -5197,6 +5268,32 @@ impl Classpath {
     }
 
     /// A method on a class or anything above it.
+    /// Every method of this name and shape the classpath knows, nearest
+    /// first: what the class itself declares, then what it inherits.
+    pub fn find_methods(&self, owner: &str, name: &str, arity: usize) -> Vec<Signature> {
+        let mut found: Vec<Signature> = Vec::new();
+        for one in self.ancestors(owner) {
+            let Some(known) = self.known.get(&one) else {
+                continue;
+            };
+            for held in &known.methods {
+                if held.name != name || held.parameters.len() != arity {
+                    continue;
+                }
+                // A method an interface declares and a class implements is one
+                // method, and the class's is the one that answers.
+                if found
+                    .iter()
+                    .any(|before| before.parameters == held.parameters)
+                {
+                    continue;
+                }
+                found.push(held.clone());
+            }
+        }
+        found
+    }
+
     pub fn find_method(&self, owner: &str, name: &str, arity: usize) -> Option<&Signature> {
         let mut at = Some(owner.to_string());
         let mut seen = 0;
@@ -5224,20 +5321,31 @@ impl Classpath {
     /// always last, because everything answers its methods whether or not
     /// anybody handed its class file over.
     pub fn ancestors(&self, owner: &str) -> Vec<String> {
+        // Both roads up: what it extends and what it implements. A class may
+        // have several, so this is a walk over a graph and not up a chain --
+        // and the order is what it was written in, so a superclass answers
+        // before an interface does.
         let mut out = vec![owner.to_string()];
-        let mut at = self
-            .known
-            .get(owner)
-            .and_then(|held| held.superclass.clone());
-        while let Some(current) = at {
-            if out.contains(&current) || out.len() > 64 {
+        let mut at = 0usize;
+        while at < out.len() {
+            if out.len() > 256 {
                 break;
             }
-            out.push(current.clone());
-            at = self
-                .known
-                .get(&current)
-                .and_then(|held| held.superclass.clone());
+            let Some(known) = self.known.get(&out[at]) else {
+                at += 1;
+                continue;
+            };
+            let mut above = Vec::new();
+            if let Some(one) = &known.superclass {
+                above.push(one.clone());
+            }
+            above.extend(known.interfaces.iter().cloned());
+            at += 1;
+            for one in above {
+                if !out.contains(&one) {
+                    out.push(one);
+                }
+            }
         }
         if !out.iter().any(|held| held == "java/lang/Object") {
             out.push("java/lang/Object".to_string());
@@ -10120,10 +10228,13 @@ impl Emitter<'_> {
     }
 
     fn candidates_taking(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
-        // A class file handed over is the truth, and `find_method` already
-        // climbs as far as the classpath can see.
-        if let Some(found) = self.classpath.find_method(owner, name, count) {
-            return vec![found.clone()];
+        // A class file handed over is the truth. Every one of them that takes
+        // this many, not the first: `new ArrayAdapter(context, id, list)` and
+        // `new ArrayAdapter(context, id, position)` both take three, and
+        // picking whichever came first in the file is picking at random.
+        let found = self.classpath.find_methods(owner, name, count);
+        if !found.is_empty() {
+            return found;
         }
         // Where the classpath runs out, the built-in table takes over -- for
         // the class and for everything it inherits from. An enum handed over
@@ -18656,6 +18767,186 @@ public class Boxed {
             ),
         }
         eprintln!("java: a box of one's own gives back what it was written holding");
+    }
+
+    #[test]
+    fn a_jar_handed_over_is_a_jar_the_code_may_call_into() {
+        // What "import what you like" comes to: a jar of class files is read,
+        // every class in it is known, and code compiled afterwards calls into
+        // them with the descriptors the device will check.
+        //
+        // The jar here is built out of this compiler's own output, so the test
+        // needs nothing installed. The one that matters is below.
+        let library = r#"
+            package com.some.lib;
+
+            public class Greeter {
+                private final String who;
+
+                public Greeter(String who) {
+                    this.who = who;
+                }
+
+                public String greeting() {
+                    return "hello " + who;
+                }
+
+                public static Greeter of(String who) {
+                    return new Greeter(who);
+                }
+            }
+        "#;
+        let produced = compile(library, &empty()).expect("the library must compile");
+
+        let mut jar = crate::archive::Builder::new();
+        for (name, bytes) in &produced {
+            jar.add(name.clone(), bytes.clone()).expect("into the jar");
+        }
+        let bytes = jar.finish().expect("a jar");
+
+        let mut classpath = empty();
+        let learned = classpath.learn_jar(&bytes).expect("and be read back");
+        assert_eq!(learned, produced.len());
+
+        let user = r#"
+            import com.some.lib.Greeter;
+
+            public class Uses {
+                public static void main(String[] args) {
+                    System.out.println(Greeter.of("world").greeting());
+                }
+            }
+        "#;
+        let (_, held) = compile_one(user, &classpath).expect("calling into it must compile");
+        let class = crate::jvm::read(&held).expect("read back");
+        let called: Vec<String> = class
+            .constants
+            .iter()
+            .filter_map(|one| match one {
+                crate::jvm::Constant::Utf8(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            called.iter().any(|one| one == "com/some/lib/Greeter"),
+            "the call names the class it was handed: {called:?}"
+        );
+
+        // And it runs, against the classes the jar carried.
+        let mut together = produced.clone();
+        together.push(("Uses.class".to_string(), held));
+        match jvm_runs(&together, "Uses") {
+            None => eprintln!("java: no JVM here to run against a jar"),
+            Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
+            Some(Ok(said)) => assert_eq!(said.trim(), "hello world"),
+        }
+
+        // A jar that is not one says so rather than being ignored.
+        let refused = empty()
+            .learn_jar(b"not a jar at all")
+            .expect_err("that is not an archive");
+        assert_eq!(refused.code, "EJ255");
+
+        eprintln!("java: a jar handed over, read, and called into");
+    }
+
+    #[test]
+    fn the_platform_jar_is_the_whole_android_api() {
+        // The real thing: `android.jar`, and code that imports whatever it
+        // likes out of it. None of this is in the compiler's own table.
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        let learned = classpath.learn_jar(&bytes).expect("must be read");
+        assert!(
+            learned > 1000,
+            "a platform jar holds thousands of classes, not {learned}"
+        );
+
+        let source = r#"
+            package com.my.app;
+
+            import android.app.Activity;
+            import android.content.SharedPreferences;
+            import android.os.Bundle;
+            import android.os.Handler;
+            import android.os.Looper;
+            import android.widget.ArrayAdapter;
+            import android.widget.ListView;
+            import android.widget.Spinner;
+
+            import java.text.SimpleDateFormat;
+            import java.util.ArrayList;
+            import java.util.Calendar;
+            import java.util.LinkedHashMap;
+            import java.util.List;
+            import java.util.Locale;
+            import java.util.Map;
+            import java.util.concurrent.atomic.AtomicInteger;
+
+            public class Screen extends Activity {
+                private final AtomicInteger counted = new AtomicInteger();
+                private final Map<String, Integer> seen = new LinkedHashMap<String, Integer>();
+                private SharedPreferences settings;
+                private Handler onTheMainThread;
+
+                @Override
+                protected void onCreate(Bundle state) {
+                    super.onCreate(state);
+                    settings = getSharedPreferences("screen", MODE_PRIVATE);
+                    onTheMainThread = new Handler(Looper.getMainLooper());
+
+                    List<String> rows = new ArrayList<String>();
+                    rows.add(stamped());
+                    ArrayAdapter<String> adapter = new ArrayAdapter<String>(
+                        this, android.R.layout.simple_list_item_1, rows);
+                    ListView list = new ListView(this);
+                    list.setAdapter(adapter);
+                    Spinner pick = new Spinner(this);
+                    pick.setAdapter(adapter);
+                    setContentView(list);
+                }
+
+                String stamped() {
+                    SimpleDateFormat shape = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
+                    return shape.format(Calendar.getInstance().getTime());
+                }
+
+                int remember(String key) {
+                    int held = counted.incrementAndGet();
+                    seen.put(key, held);
+                    settings.edit().putInt(key, held).apply();
+                    return seen.get(key);
+                }
+
+                void later(final Runnable what) {
+                    onTheMainThread.postDelayed(what, 500L);
+                }
+            }
+        "#;
+        let produced = compile(source, &classpath).expect("real Android code must compile");
+        assert!(produced
+            .iter()
+            .any(|(name, _)| name == "com/my/app/Screen.class"));
+
+        // It has to reach the device, not just the compiler.
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+
+        eprintln!("java: {learned} classes from the platform, and code that imports what it likes");
     }
 
     #[test]

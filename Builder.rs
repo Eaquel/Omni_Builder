@@ -18036,6 +18036,14 @@ pub mod scaffold {
     /// what to compile.
     pub const JAVA_FOLDER: &str = "Java";
 
+    /// The folder a project's dependencies live in.
+    ///
+    /// A jar dropped in here is a jar the code may call into: `android.jar`
+    /// for the platform, or anything else somebody wants to use. Nothing
+    /// creates it -- a project without one compiles against what this
+    /// compiler knows on its own, which is the way it has always worked.
+    pub const LIBRARY_FOLDER: &str = "Libraries";
+
     pub const LANGUAGES: &[(&str, &str)] = &[
         ("kotlin", "Kotlin"),
         ("java", JAVA_FOLDER),
@@ -23664,7 +23672,7 @@ public final class R {{
         }
         read.extend(generated);
 
-        let classpath = crate::compilers::java::Classpath::new();
+        let classpath = what_it_may_call_into(root)?;
         let produced = crate::compilers::java::compile_together(&read, &classpath)?;
         let mut out = Vec::new();
         for (name, bytes) in produced {
@@ -23676,6 +23684,98 @@ public final class R {{
             );
         }
         Ok(out)
+    }
+
+    /// Everything the project's Java may call into.
+    ///
+    /// Every jar in the project's own `Libraries` folder, and the platform's
+    /// `android.jar` where one can be found. A project with neither compiles
+    /// against what the compiler knows on its own, which is the handful of
+    /// signatures ordinary Java touches -- enough to build something, and not
+    /// enough to pretend the platform is there.
+    ///
+    /// A jar that cannot be read stops the build. It was put there on purpose,
+    /// and quietly ignoring it would mean a refusal three screens later about
+    /// a class that is right in front of the person.
+    pub fn what_it_may_call_into(
+        root: &str,
+    ) -> Result<crate::compilers::java::Classpath, Diagnostic> {
+        let mut classpath = crate::compilers::java::Classpath::new();
+        let mut jars: Vec<std::path::PathBuf> = Vec::new();
+
+        let folder = std::path::Path::new(root).join(crate::scaffold::LIBRARY_FOLDER);
+        if let Ok(entries) = std::fs::read_dir(&folder) {
+            let mut found: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|held| held == "jar" || held == "zip")
+                })
+                .collect();
+            // In a settled order, so that two jars declaring the same class
+            // come out the same way every time.
+            found.sort();
+            jars.extend(found);
+        }
+
+        // The platform, unless the project brought its own.
+        if !jars
+            .iter()
+            .any(|path| path.file_name().is_some_and(|held| held == "android.jar"))
+        {
+            if let Some(platform) = platform_jar() {
+                jars.insert(0, platform);
+            }
+        }
+
+        for path in jars {
+            let bytes = std::fs::read(&path).map_err(|why| {
+                fail("EB045", "A dependency could not be read.")
+                    .with_context(format!("Path: {}", path.display()))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            classpath
+                .learn_jar(&bytes)
+                .map_err(|error| error.with_context(format!("Path: {}", path.display())))?;
+        }
+        Ok(classpath)
+    }
+
+    /// The newest `android.jar` this machine has, where it has one.
+    ///
+    /// On a device there is no SDK and this finds nothing, which is why a
+    /// project may carry its own in `Libraries`. Off one -- a desktop, a
+    /// build server -- the SDK is where it always is.
+    pub fn platform_jar() -> Option<std::path::PathBuf> {
+        let mut roots: Vec<std::path::PathBuf> = Vec::new();
+        for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
+            if let Ok(value) = std::env::var(name) {
+                if !value.is_empty() {
+                    roots.push(std::path::PathBuf::from(value));
+                }
+            }
+        }
+        roots.push(std::path::PathBuf::from("/opt/android-sdk"));
+        roots.push(std::path::PathBuf::from("/usr/local/lib/android/sdk"));
+        if let Ok(home) = std::env::var("HOME") {
+            roots.push(std::path::PathBuf::from(home).join("Android/Sdk"));
+        }
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(root.join("platforms")) else {
+                continue;
+            };
+            let mut platforms: Vec<std::path::PathBuf> =
+                entries.flatten().map(|entry| entry.path()).collect();
+            platforms.sort();
+            for platform in platforms.into_iter().rev() {
+                let candidate = platform.join("android.jar");
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 
     fn gather_java(folder: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
@@ -30503,6 +30603,137 @@ mod tests {
             super::ffi::omni_string_free(raw);
             text
         }
+    }
+
+    #[test]
+    fn the_java_somebody_wrote_can_call_into_the_platform_it_was_handed() {
+        // The whole point of a dependency: the person imports what they like
+        // and it compiles. Nothing here is in the compiler's own table -- a
+        // SharedPreferences, a Handler, a generic ArrayAdapter, a date format
+        // -- and all of it comes from the platform jar.
+        let Some(platform) = super::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine to call into");
+            return;
+        };
+
+        let directory = temp_directory("omni-java-platform");
+        let root = directory.join("Called");
+        let spec =
+            "package=com.tr.yt;label=Called;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
+        super::scaffold::create(
+            root.to_str().unwrap(),
+            &super::scaffold::Spec::parse(spec).unwrap(),
+        )
+        .expect("the project must be created");
+
+        let source = r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.content.SharedPreferences;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.util.Log;
+import android.widget.ArrayAdapter;
+import android.widget.ListView;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public final class MainActivity extends Activity {
+
+    private final AtomicInteger counted = new AtomicInteger();
+    private SharedPreferences settings;
+    private Handler onTheMainThread;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        settings = getSharedPreferences("called", MODE_PRIVATE);
+        onTheMainThread = new Handler(Looper.getMainLooper());
+
+        List<String> rows = new ArrayList<String>();
+        rows.add(stamped());
+        ArrayAdapter<String> adapter =
+            new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, rows);
+        ListView list = new ListView(this);
+        list.setAdapter(adapter);
+        setContentView(list);
+
+        Log.i("Called", rows.get(0));
+    }
+
+    String stamped() {
+        SimpleDateFormat shape = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
+        return shape.format(Calendar.getInstance().getTime());
+    }
+
+    int remember(String key) {
+        int held = counted.incrementAndGet();
+        settings.edit().putInt(key, held).apply();
+        return held;
+    }
+}
+"#;
+        std::fs::write(
+            root.join(super::scaffold::JAVA_FOLDER)
+                .join("MainActivity.java"),
+            source,
+        )
+        .unwrap();
+
+        let project = super::builder::from_project(root.to_str().unwrap())
+            .expect("calling into the platform must build");
+        let names: Vec<&str> = project
+            .code
+            .iter()
+            .map(|one| one.descriptor.as_str())
+            .collect();
+        assert!(names.contains(&"Lcom/tr/yt/MainActivity;"), "{names:?}");
+
+        // And the call really is the platform's, with the descriptor the
+        // device will check it against.
+        let activity = project
+            .code
+            .iter()
+            .find(|one| one.descriptor == "Lcom/tr/yt/MainActivity;")
+            .unwrap();
+        let called: Vec<String> = activity
+            .virtual_methods
+            .iter()
+            .chain(activity.direct_methods.iter())
+            .flat_map(|one| one.instructions.iter())
+            .filter_map(|one| match &one.operand {
+                super::dexwrite::Operand::Method(held) => {
+                    Some(format!("{}.{}", held.class, held.name))
+                }
+                _ => None,
+            })
+            .collect();
+        for wanted in [
+            "Landroid/content/SharedPreferences;.edit",
+            "Landroid/os/Handler;.<init>",
+            // Declared on DateFormat and inherited, which is the class the
+            // call names -- the same one `javac` writes.
+            "Ljava/text/DateFormat;.format",
+            "Landroid/content/SharedPreferences$Editor;.apply",
+            "Ljava/util/concurrent/atomic/AtomicInteger;.incrementAndGet",
+        ] {
+            assert!(
+                called.iter().any(|one| one == wanted),
+                "{wanted} is missing from {called:?}"
+            );
+        }
+
+        // A project with no jar of its own still built, against the platform
+        // this machine has.
+        let _ = platform;
+        let _ = directory;
     }
 
     #[test]
