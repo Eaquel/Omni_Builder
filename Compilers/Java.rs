@@ -15,28 +15,32 @@
 //! Handled: a package and its imports; one top-level class per file, with a
 //! superclass and interfaces; fields, methods and constructors with the usual
 //! modifiers; the primitive types, `String`, arrays and declared types;
-//! blocks, local declarations, `if`/`else`, `while`, `for`, `return`, `break`,
-//! `continue` and expression statements; literals, names, field access, method
+//! blocks, local declarations, `if`/`else`, `while`, `do`/`while`, `for` in
+//! both the counted and the enhanced form, `switch` as a statement in both the
+//! colon and the arrow form, `try`/`catch`/`finally`, `throw`, `return`,
+//! `break`, `continue` -- plain and labelled -- and expression statements;
+//! `var` for a local whose type the value already says; literals including
+//! text blocks and underscored numbers; names, field access, method
 //! invocation, `new`, the arithmetic, comparison, logical and bitwise
 //! operators with Java's precedence, assignment and compound assignment,
 //! `++`/`--`, casts, array indexing, `this`, `super`, the conditional
 //! operator, and string concatenation with `+`.
 //!
 //! Refused, by name, with the line it happened on: generics, lambdas and
-//! method references, inner and anonymous classes, interfaces and enums as
-//! declarations, `switch`, `try`/`catch`/`finally`, `synchronized`, `assert`,
-//! labelled statements, `do`/`while`, and varargs. Annotations are parsed and
+//! method references, inner and anonymous classes, interfaces, enums and
+//! records as declarations, `switch` as an expression, pattern matching,
+//! `synchronized`, `assert`, and varargs. Annotations are parsed and
 //! discarded, which is safe because they are metadata and nothing here reads
 //! them; `@Override` therefore costs nothing.
 //!
 //! # What it targets
 //!
-//! Class file major version 59, which is Java 15.
+//! Class file major version 69, which is Java 25.
 //!
 //! That number is not a label. From version 50 the JVM verifies with the
 //! type-checking verifier, which wants a StackMapTable attribute on every
 //! method that branches, and from 51 a missing one is a hard failure rather
-//! than a fallback. Writing 59 without frames would produce class files that
+//! than a fallback. Writing 69 without frames would produce class files that
 //! read fine, that `javap` prints happily, that pass through `d8` -- and that a
 //! real JVM refuses the moment a method contains an `if`. So this writes
 //! frames.
@@ -59,16 +63,16 @@ use crate::Status;
 
 pub const ORIGIN: &str = "omni.plugin.java";
 
-/// Java 15 class files. Verified by the type-checking verifier, which means
+/// Java 25 class files. Verified by the type-checking verifier, which means
 /// every method that branches carries a StackMapTable and every one of those
 /// has to be right. See the note at the top of this file.
-pub const CLASS_MAJOR: u16 = 59;
+pub const CLASS_MAJOR: u16 = 69;
 pub const CLASS_MINOR: u16 = 0;
 
 /// The Java this accepts is a subset of every release from 8 onward. The
 /// version named here is the one the project pins, and it reaches the compiler
 /// identity so that changing it invalidates what the old one built.
-pub const LANGUAGE_RELEASE: &str = "15";
+pub const LANGUAGE_RELEASE: &str = "25";
 
 fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
     Diagnostic::new(
@@ -304,6 +308,9 @@ impl<'a> Lexer<'a> {
         let byte = self.peek(0);
 
         if byte == b'"' {
+            if self.peek(1) == b'"' && self.peek(2) == b'"' {
+                return self.text_block(line, column);
+            }
             return self.text(line, column);
         }
         if byte == b'\'' {
@@ -429,6 +436,77 @@ impl<'a> Lexer<'a> {
             }
         }
         Ok(Token::Str(String::from_utf16_lossy(&units)))
+    }
+
+    /// A text block: `"""`, a line terminator, the content, and `"""` again.
+    ///
+    /// The rule that makes these worth having is the one about indentation.
+    /// A block written inside a method is indented to sit with the code around
+    /// it, and none of that indentation is part of the string. Java decides
+    /// how much to remove by taking the smallest indentation of any non-blank
+    /// line -- and of the closing delimiter's line, whether it is blank or
+    /// not, which is what lets the closing `"""` choose the margin on its own.
+    fn text_block(&mut self, line: u32, column: u32) -> Result<Token, Diagnostic> {
+        self.bump();
+        self.bump();
+        self.bump();
+
+        // Only whitespace may follow the opening delimiter, and then the line
+        // has to end. Anything else is not a text block at all.
+        while matches!(self.peek(0), b' ' | b'\t' | b'\x0c') {
+            self.bump();
+        }
+        if self.peek(0) == b'\r' {
+            self.bump();
+        }
+        if self.peek(0) != b'\n' {
+            return Err(at(
+                "EJ011",
+                line,
+                column,
+                "A text block opens with `\"\"\"` and then a line break.",
+            )
+            .with_suggestion("Move the content to the next line."));
+        }
+        self.bump();
+
+        // The raw content, with escapes left alone: an escaped quote must not
+        // be able to end the block, and `\\n` must not become a line the
+        // indentation rule then measures.
+        let mut raw = String::new();
+        loop {
+            if self.at >= self.source.len() {
+                return Err(at("EJ005", line, column, "A text block was never closed."));
+            }
+            if self.peek(0) == b'"' && self.peek(1) == b'"' && self.peek(2) == b'"' {
+                self.bump();
+                self.bump();
+                self.bump();
+                break;
+            }
+            if self.peek(0) == b'\\' {
+                raw.push('\\');
+                self.bump();
+                if self.at < self.source.len() {
+                    let start = self.at;
+                    self.bump();
+                    while self.peek(0) >= 0x80 && self.peek(0) < 0xc0 {
+                        self.bump();
+                    }
+                    raw.push_str(&String::from_utf8_lossy(&self.source[start..self.at]));
+                }
+                continue;
+            }
+            let start = self.at;
+            self.bump();
+            while self.peek(0) >= 0x80 && self.peek(0) < 0xc0 {
+                self.bump();
+            }
+            raw.push_str(&String::from_utf8_lossy(&self.source[start..self.at]));
+        }
+
+        let stripped = strip_incidental_whitespace(&raw);
+        Ok(Token::Str(text_block_escapes(&stripped, line, column)?))
     }
 
     fn character(&mut self, line: u32, column: u32) -> Result<Token, Diagnostic> {
@@ -559,6 +637,149 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Removes the indentation that is there to make the source readable rather
+/// than to be part of the string.
+///
+/// The measure is the smallest indentation of any non-blank line, and of the
+/// closing delimiter's own line when it has one -- so moving the closing
+/// `"""` left or right moves the margin without touching the content. Trailing
+/// whitespace goes from every line, because it is invisible and therefore
+/// cannot have been meant.
+fn strip_incidental_whitespace(raw: &str) -> String {
+    let normalised = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = normalised.split('\n').collect();
+
+    let closing_is_alone = lines
+        .last()
+        .is_some_and(|last| last.chars().all(char::is_whitespace));
+
+    let mut margin = usize::MAX;
+    for (index, line) in lines.iter().enumerate() {
+        let blank = line.chars().all(char::is_whitespace);
+        let last = index + 1 == lines.len();
+        if blank && !(last && closing_is_alone) {
+            continue;
+        }
+        let indent = if blank {
+            line.chars().count()
+        } else {
+            line.chars().take_while(|one| one.is_whitespace()).count()
+        };
+        margin = margin.min(indent);
+    }
+    if margin == usize::MAX {
+        margin = 0;
+    }
+
+    let mut kept: Vec<String> = lines
+        .iter()
+        .map(|line| {
+            let body: String = line.chars().skip(margin).collect();
+            body.trim_end().to_string()
+        })
+        .collect();
+    if closing_is_alone && kept.len() > 1 {
+        // The delimiter's own line is the margin, not content. What it leaves
+        // behind is the line break before it.
+        kept.pop();
+        kept.push(String::new());
+    }
+    kept.join("\n")
+}
+
+/// The escapes a text block takes, which are the ordinary ones and two more.
+///
+/// `\s` is a space that survives the trailing-whitespace rule, and a backslash
+/// at the end of a line joins it to the next one. Both exist because the rule
+/// that removes invisible whitespace would otherwise make some strings
+/// impossible to write.
+fn text_block_escapes(text: &str, line: u32, column: u32) -> Result<String, Diagnostic> {
+    let source: Vec<char> = text.chars().collect();
+    let mut units: Vec<u16> = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < source.len() {
+        if source[cursor] != '\\' {
+            let mut buffer = [0u16; 2];
+            units.extend_from_slice(source[cursor].encode_utf16(&mut buffer));
+            cursor += 1;
+            continue;
+        }
+        cursor += 1;
+        let Some(&marker) = source.get(cursor) else {
+            return Err(at_end_of_escape(line, column));
+        };
+        cursor += 1;
+        match marker {
+            'n' => units.push(u16::from(b'\n')),
+            't' => units.push(u16::from(b'\t')),
+            'r' => units.push(u16::from(b'\r')),
+            'b' => units.push(8),
+            'f' => units.push(12),
+            's' => units.push(u16::from(b' ')),
+            '0'..='7' => {
+                // An octal escape is one to three digits, and no more than
+                // 0377.
+                let mut value = u32::from(marker) - u32::from('0');
+                let mut taken = 1;
+                while taken < 3 {
+                    match source.get(cursor) {
+                        Some(next @ '0'..='7') if value * 8 + 7 <= 0o377 => {
+                            value = value * 8 + (u32::from(*next) - u32::from('0'));
+                            cursor += 1;
+                            taken += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                units.push(value as u16);
+            }
+            '\'' | '"' | '\\' => {
+                let mut buffer = [0u16; 2];
+                units.extend_from_slice(marker.encode_utf16(&mut buffer));
+            }
+            // A backslash cursor the end of a line joins the two lines.
+            '\n' => {}
+            'u' => {
+                while source.get(cursor) == Some(&'u') {
+                    cursor += 1;
+                }
+                let mut value = 0u16;
+                for _ in 0..4 {
+                    let Some(digit) = source.get(cursor).and_then(|one| one.to_digit(16)) else {
+                        return Err(at(
+                            "EJ006",
+                            line,
+                            column,
+                            "A `\\u` escape wants four hexadecimal digits.",
+                        ));
+                    };
+                    value = value * 16 + digit as u16;
+                    cursor += 1;
+                }
+                units.push(value);
+            }
+            other => {
+                return Err(at(
+                    "EJ006",
+                    line,
+                    column,
+                    format!("`\\{other}` is not an escape Java has."),
+                ))
+            }
+        }
+    }
+    Ok(String::from_utf16_lossy(&units))
+}
+
+fn at_end_of_escape(line: u32, column: u32) -> Diagnostic {
+    at(
+        "EJ006",
+        line,
+        column,
+        "A backslash was the last thing in the text block.",
+    )
+}
+
 /// Java's integer literals are unsigned in the source and signed in the value:
 /// `0x80000000` is a legal `int` and it is negative. Parsing has to allow the
 /// whole unsigned range and then reinterpret.
@@ -588,6 +809,9 @@ fn parse_integer(digits: &str, radix: u32, long: bool) -> Option<i64> {
 /// here and becomes a class later, or fails to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Written {
+    /// `var`. The type is whatever the value turns out to be, so there is
+    /// nothing to resolve until there is a value to resolve it from.
+    Inferred,
     Void,
     Boolean,
     Byte,
@@ -798,10 +1022,60 @@ pub enum Statement {
         step: Vec<Expression>,
         body: Box<Positioned<Statement>>,
     },
+    DoWhile {
+        body: Box<Positioned<Statement>>,
+        condition: Expression,
+    },
+    /// `for (T name : over)`, over an array.
+    ForEach {
+        what: Written,
+        name: String,
+        over: Expression,
+        body: Box<Positioned<Statement>>,
+    },
+    Switch {
+        subject: Expression,
+        arms: Vec<Arm>,
+    },
+    Try {
+        body: Vec<Positioned<Statement>>,
+        catches: Vec<Catch>,
+        finally: Option<Vec<Positioned<Statement>>>,
+    },
+    Throw(Expression),
+    /// A name in front of a statement, which `break` and `continue` can then
+    /// say by name.
+    Labelled {
+        label: String,
+        body: Box<Positioned<Statement>>,
+    },
     Return(Option<Expression>),
-    Break,
-    Continue,
+    Break(Option<String>),
+    Continue(Option<String>),
     Nothing,
+}
+
+/// One arm of a `switch`.
+#[derive(Clone, Debug)]
+pub struct Arm {
+    /// The values this arm answers to. Empty means `default`.
+    pub labels: Vec<Expression>,
+    /// Written `->` rather than `:`, which means it does not fall through.
+    pub arrow: bool,
+    pub body: Vec<Positioned<Statement>>,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// One `catch` clause.
+#[derive(Clone, Debug)]
+pub struct Catch {
+    /// More than one for `catch (A | B name)`.
+    pub types: Vec<Written>,
+    pub name: String,
+    pub body: Vec<Positioned<Statement>>,
+    pub line: u32,
+    pub column: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -1060,6 +1334,16 @@ impl Parser {
                     ))
                 }
             },
+            Token::Identifier(name)
+                if name == "var"
+                    && !matches!(
+                        self.ahead(1),
+                        Token::Punctuation(".") | Token::Punctuation("[")
+                    ) =>
+            {
+                self.take();
+                Written::Inferred
+            }
             Token::Identifier(_) => Written::Named(self.qualified()?),
             other => {
                 return Err(at(
@@ -1381,17 +1665,22 @@ impl Parser {
     }
 
     fn statement_node(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
-        for (word, what) in [
-            ("switch", "`switch`"),
-            ("try", "`try`"),
-            ("synchronized", "`synchronized`"),
-            ("assert", "`assert`"),
-            ("do", "`do`/`while`"),
-            ("throw", "`throw`"),
-        ] {
+        for (word, what) in [("synchronized", "`synchronized`"), ("assert", "`assert`")] {
             if self.is_word(word) {
                 return Err(unsupported(line, column, what));
             }
+        }
+
+        // A name and a colon in front of a statement is a label. A colon after
+        // anything else at the start of a statement is not, so one token of
+        // lookahead settles it.
+        if matches!(self.here().token, Token::Identifier(_))
+            && matches!(self.ahead(1), Token::Punctuation(":"))
+        {
+            let label = self.want_name()?;
+            self.want_mark(":")?;
+            let body = Box::new(self.statement()?);
+            return Ok(Statement::Labelled { label, body });
         }
 
         if self.is_mark("{") {
@@ -1436,8 +1725,39 @@ impl Parser {
             return Ok(Statement::While { condition, body });
         }
 
+        if self.eat_word("do") {
+            let body = Box::new(self.statement()?);
+            if !self.eat_word("while") {
+                return Err(at(
+                    "EJ109",
+                    self.line(),
+                    self.column(),
+                    "A `do` block is followed by `while`.",
+                ));
+            }
+            self.want_mark("(")?;
+            let condition = self.expression()?;
+            self.want_mark(")")?;
+            self.want_mark(";")?;
+            return Ok(Statement::DoWhile { body, condition });
+        }
+
         if self.eat_word("for") {
             return self.for_statement(line, column);
+        }
+
+        if self.eat_word("switch") {
+            return self.switch_statement(line, column);
+        }
+
+        if self.eat_word("try") {
+            return self.try_statement(line, column);
+        }
+
+        if self.eat_word("throw") {
+            let what = self.expression()?;
+            self.want_mark(";")?;
+            return Ok(Statement::Throw(what));
         }
 
         if self.eat_word("return") {
@@ -1451,19 +1771,22 @@ impl Parser {
         }
 
         if self.eat_word("break") {
-            if matches!(self.here().token, Token::Identifier(_)) {
-                return Err(unsupported(line, column, "A labelled `break`"));
-            }
+            let label = self.optional_label()?;
             self.want_mark(";")?;
-            return Ok(Statement::Break);
+            return Ok(Statement::Break(label));
         }
 
         if self.eat_word("continue") {
-            if matches!(self.here().token, Token::Identifier(_)) {
-                return Err(unsupported(line, column, "A labelled `continue`"));
-            }
+            let label = self.optional_label()?;
             self.want_mark(";")?;
-            return Ok(Statement::Continue);
+            return Ok(Statement::Continue(label));
+        }
+
+        if self.is_word("final") && self.ahead(1) != &Token::End {
+            self.take();
+            let statement = self.declaration()?;
+            self.want_mark(";")?;
+            return Ok(statement);
         }
 
         if self.looks_like_declaration() {
@@ -1495,14 +1818,195 @@ impl Parser {
         Ok(Statement::Declare { what, name, value })
     }
 
+    fn optional_label(&mut self) -> Result<Option<String>, Diagnostic> {
+        if matches!(self.here().token, Token::Identifier(_)) {
+            return Ok(Some(self.want_name()?));
+        }
+        Ok(None)
+    }
+
+    /// A `switch`, in either the colon form or the arrow form.
+    ///
+    /// The two are not mixed, because Java does not allow it and because they
+    /// mean different things about falling through: an arm written with `:`
+    /// runs into the next one unless something stops it, and an arm written
+    /// with `->` never does.
+    fn switch_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
+        self.want_mark("(")?;
+        let subject = self.expression()?;
+        self.want_mark(")")?;
+        self.want_mark("{")?;
+
+        let mut arms: Vec<Arm> = Vec::new();
+        let mut arrow_form: Option<bool> = None;
+        while !self.is_mark("}") {
+            if matches!(self.here().token, Token::End) {
+                return Err(at("EJ110", line, column, "A `switch` was never closed."));
+            }
+            let (arm_line, arm_column) = (self.line(), self.column());
+
+            let mut labels = Vec::new();
+            if self.eat_word("default") {
+                // `default` takes no value, and `case a, b:` takes several.
+            } else if self.eat_word("case") {
+                loop {
+                    labels.push(self.expression()?);
+                    if !self.eat_mark(",") {
+                        break;
+                    }
+                }
+            } else {
+                return Err(at(
+                    "EJ111",
+                    arm_line,
+                    arm_column,
+                    format!(
+                        "A `switch` holds `case` and `default` arms, and {} was found.",
+                        self.here().token.describe()
+                    ),
+                ));
+            }
+
+            let arrow = if self.eat_mark("->") {
+                true
+            } else {
+                self.want_mark(":")?;
+                false
+            };
+            match arrow_form {
+                None => arrow_form = Some(arrow),
+                Some(first) if first != arrow => {
+                    return Err(at(
+                        "EJ112",
+                        arm_line,
+                        arm_column,
+                        "A `switch` uses `->` for every arm or `:` for every arm, not both.",
+                    ))
+                }
+                Some(_) => {}
+            }
+
+            let mut body = Vec::new();
+            if arrow {
+                // One statement, or a block, and nothing runs on into the
+                // next arm.
+                if self.eat_word("throw") {
+                    let what = self.expression()?;
+                    self.want_mark(";")?;
+                    let (l, c) = (arm_line, arm_column);
+                    body.push(Positioned {
+                        node: Statement::Throw(what),
+                        line: l,
+                        column: c,
+                    });
+                } else {
+                    body.push(self.statement()?);
+                }
+            } else {
+                while !self.is_mark("}") && !self.is_word("case") && !self.is_word("default") {
+                    if matches!(self.here().token, Token::End) {
+                        return Err(at("EJ110", line, column, "A `switch` was never closed."));
+                    }
+                    body.push(self.statement()?);
+                }
+            }
+
+            arms.push(Arm {
+                labels,
+                arrow,
+                body,
+                line: arm_line,
+                column: arm_column,
+            });
+        }
+        self.want_mark("}")?;
+
+        if arms.iter().filter(|arm| arm.labels.is_empty()).count() > 1 {
+            return Err(at(
+                "EJ113",
+                line,
+                column,
+                "A `switch` has one `default` arm at most.",
+            ));
+        }
+
+        Ok(Statement::Switch { subject, arms })
+    }
+
+    fn try_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
+        if self.is_mark("(") {
+            return Err(unsupported(line, column, "A `try` with resources"));
+        }
+        let body = self.braced_block()?;
+
+        let mut catches = Vec::new();
+        while self.is_word("catch") {
+            let (catch_line, catch_column) = (self.line(), self.column());
+            self.take();
+            self.want_mark("(")?;
+            self.eat_word("final");
+            let mut types = vec![self.written_type()?];
+            while self.eat_mark("|") {
+                types.push(self.written_type()?);
+            }
+            let name = self.want_name()?;
+            self.want_mark(")")?;
+            let body = self.braced_block()?;
+            catches.push(Catch {
+                types,
+                name,
+                body,
+                line: catch_line,
+                column: catch_column,
+            });
+        }
+
+        let finally = if self.eat_word("finally") {
+            Some(self.braced_block()?)
+        } else {
+            None
+        };
+
+        if catches.is_empty() && finally.is_none() {
+            return Err(at(
+                "EJ114",
+                line,
+                column,
+                "A `try` needs a `catch` or a `finally`.",
+            ));
+        }
+
+        Ok(Statement::Try {
+            body,
+            catches,
+            finally,
+        })
+    }
+
+    fn braced_block(&mut self) -> Result<Vec<Positioned<Statement>>, Diagnostic> {
+        let (line, column) = (self.line(), self.column());
+        self.want_mark("{")?;
+        let mut found = Vec::new();
+        while !self.is_mark("}") {
+            if matches!(self.here().token, Token::End) {
+                return Err(at("EJ108", line, column, "A block was never closed."));
+            }
+            found.push(self.statement()?);
+        }
+        self.want_mark("}")?;
+        Ok(found)
+    }
+
     fn for_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
         self.want_mark("(")?;
 
-        // `for (Type name : thing)` is the enhanced form, which needs an
-        // iterator and is not compiled here.
-        {
+        // `for (Type name : thing)` is the enhanced form. Which form this is
+        // cannot be told from the first token, so the header is scanned for a
+        // colon that is not inside anything.
+        let enhanced = {
             let mut ahead = 0usize;
             let mut depth = 0usize;
+            let mut found = false;
             loop {
                 match self.ahead(ahead) {
                     Token::Punctuation("(") => depth += 1,
@@ -1510,19 +2014,39 @@ impl Parser {
                     Token::Punctuation(")") => depth -= 1,
                     Token::Punctuation(";") if depth == 0 => break,
                     Token::Punctuation(":") if depth == 0 => {
-                        return Err(unsupported(line, column, "A `for` over a collection"))
+                        found = true;
+                        break;
                     }
                     Token::End => break,
                     _ => {}
                 }
                 ahead += 1;
             }
+            found
+        };
+
+        if enhanced {
+            self.eat_word("final");
+            let what = self.written_type()?;
+            let name = self.want_name()?;
+            self.want_mark(":")?;
+            let over = self.expression()?;
+            self.want_mark(")")?;
+            let body = Box::new(self.statement()?);
+            let _ = (line, column);
+            return Ok(Statement::ForEach {
+                what,
+                name,
+                over,
+                body,
+            });
         }
 
         let mut start = Vec::new();
         if !self.is_mark(";") {
             let (line, column) = (self.line(), self.column());
-            let node = if self.looks_like_declaration() {
+            let node = if self.is_word("final") || self.looks_like_declaration() {
+                self.eat_word("final");
                 self.declaration()?
             } else {
                 Statement::Express(self.expression()?)
@@ -2471,6 +2995,30 @@ impl Verified {
     }
 }
 
+/// One loop or switch, and where the jumps out of it are waiting to be told
+/// where they land.
+struct Level {
+    /// The name in front of it, when it was written with one.
+    label: Option<String>,
+    /// True for a loop, which is the only thing `continue` can reach.
+    loops: bool,
+    breaks: Vec<Pending>,
+    continues: Vec<Pending>,
+    /// How many `finally` bodies were pending when this was entered, so that
+    /// a jump out of it knows how many of them to run.
+    finallys: usize,
+}
+
+/// One row of a method's exception table.
+struct Handler {
+    start: usize,
+    end: usize,
+    target: usize,
+    /// The class caught, or `None` for the handler that catches everything so
+    /// that a `finally` runs on the way past.
+    class: Option<String>,
+}
+
 /// What the verifier has to be told at one place a branch can land.
 #[derive(Clone, Debug)]
 struct Frame {
@@ -2498,8 +3046,26 @@ struct Emitter<'a> {
     max_slot: u16,
     depth: i32,
     max_depth: i32,
-    breaks: Vec<Vec<Pending>>,
-    continues: Vec<Vec<Pending>>,
+    /// The loops and switches this is inside, innermost last.
+    levels: Vec<Level>,
+    /// The `finally` bodies that have to run before control leaves where it
+    /// is, innermost last. A `return`, a `break` or a `continue` that jumps
+    /// past one of these runs it on the way out.
+    finallys: Vec<Vec<Positioned<Statement>>>,
+    /// The exception table this method comes to.
+    handlers: Vec<Handler>,
+    /// Every stretch of code that is an inlined `finally`, and the outermost
+    /// `finally` that stretch ran.
+    ///
+    /// A handler that protects a `try` must not protect the copy of that
+    /// `try`'s own `finally` that a `return` inside it left behind, or a throw
+    /// from the `finally` would run the `finally` a second time and swallow
+    /// the exception in its own cleanup. It must still protect a copy of some
+    /// *inner* `try`'s `finally`, because that one really is inside it -- which
+    /// is why the depth is recorded alongside the range.
+    inlined: Vec<(usize, usize, usize)>,
+    /// A label read but not yet handed to the loop or switch it belongs to.
+    pending_label: Option<String>,
     static_: bool,
     /// What this method said it returns. A `return` is checked against it, and
     /// the first version of this did not do that -- so `int f() { return
@@ -2535,8 +3101,11 @@ impl<'a> Emitter<'a> {
             max_slot: 0,
             depth: 0,
             max_depth: 0,
-            breaks: Vec::new(),
-            continues: Vec::new(),
+            levels: Vec::new(),
+            finallys: Vec::new(),
+            handlers: Vec::new(),
+            inlined: Vec::new(),
+            pending_label: None,
             static_,
             returns: Type::Void,
             slots: Vec::new(),
@@ -2639,7 +3208,13 @@ impl<'a> Emitter<'a> {
     }
 
     fn land(&mut self, pending: Pending) {
-        let offset = (self.code.len() - pending.from) as i16;
+        let to = self.code.len();
+        self.land_at(pending, to);
+    }
+
+    /// Where a jump goes, when that is somewhere other than here.
+    fn land_at(&mut self, pending: Pending, to: usize) {
+        let offset = (to as i64 - pending.from as i64) as i16;
         self.code[pending.at..pending.at + 2].copy_from_slice(&offset.to_be_bytes());
     }
 
@@ -2696,6 +3271,15 @@ impl<'a> Emitter<'a> {
 
     fn resolve(&self, written: &Written, line: u32) -> Result<Type, Diagnostic> {
         Ok(match written {
+            Written::Inferred => {
+                return Err(at(
+                    "EJ234",
+                    line,
+                    1,
+                    "A `var` takes its type from the value given to it, and there is none here.",
+                )
+                .with_suggestion("Write the type, or give it a value."))
+            }
             Written::Void => Type::Void,
             Written::Boolean => Type::Boolean,
             Written::Byte => Type::Byte,
@@ -2768,14 +3352,475 @@ impl<'a> Emitter<'a> {
     }
 }
 
-/// The handful of `java.lang` classes that can be named without anything on the
-/// classpath, because a compiler that cannot say `String` cannot compile
-/// anything at all.
+/// Signatures from the runtime library that this compiler knows without being
+/// handed a class file.
+///
+/// This is not a model of the JDK, and it is not trying to become one. It is
+/// the handful of things ordinary Java touches in almost every method -- the
+/// exceptions people throw, printing, string work, boxing, arithmetic -- and
+/// without them a compiler that has never been given `android.jar` cannot
+/// compile `throw new IllegalStateException("...")`. The implementation comes
+/// from the device at run time; what is wanted here is only the descriptor,
+/// because the descriptor is what the constant pool records.
+///
+/// Anything not here still works the moment the class file that declares it is
+/// handed over as a dependency, which is the way anything outside this list is
+/// meant to arrive.
+const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
+    // -- Object
+    ("java/lang/Object", "<init>", "()V", false),
+    (
+        "java/lang/Object",
+        "toString",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    ("java/lang/Object", "hashCode", "()I", false),
+    ("java/lang/Object", "equals", "(Ljava/lang/Object;)Z", false),
+    ("java/lang/Object", "getClass", "()Ljava/lang/Class;", false),
+    // -- Throwable, and the exceptions that get thrown by hand
+    (
+        "java/lang/Throwable",
+        "getMessage",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    (
+        "java/lang/Throwable",
+        "getLocalizedMessage",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    (
+        "java/lang/Throwable",
+        "getCause",
+        "()Ljava/lang/Throwable;",
+        false,
+    ),
+    ("java/lang/Throwable", "printStackTrace", "()V", false),
+    (
+        "java/lang/Throwable",
+        "toString",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    // -- String
+    ("java/lang/String", "length", "()I", false),
+    ("java/lang/String", "isEmpty", "()Z", false),
+    ("java/lang/String", "isBlank", "()Z", false),
+    ("java/lang/String", "charAt", "(I)C", false),
+    (
+        "java/lang/String",
+        "indexOf",
+        "(Ljava/lang/String;)I",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "lastIndexOf",
+        "(Ljava/lang/String;)I",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "substring",
+        "(I)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "substring",
+        "(II)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "concat",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "contains",
+        "(Ljava/lang/CharSequence;)Z",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "startsWith",
+        "(Ljava/lang/String;)Z",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "endsWith",
+        "(Ljava/lang/String;)Z",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "equalsIgnoreCase",
+        "(Ljava/lang/String;)Z",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "compareTo",
+        "(Ljava/lang/String;)I",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "replace",
+        "(CC)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "toUpperCase",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    (
+        "java/lang/String",
+        "toLowerCase",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    ("java/lang/String", "trim", "()Ljava/lang/String;", false),
+    ("java/lang/String", "strip", "()Ljava/lang/String;", false),
+    ("java/lang/String", "repeat", "(I)Ljava/lang/String;", false),
+    (
+        "java/lang/String",
+        "split",
+        "(Ljava/lang/String;)[Ljava/lang/String;",
+        false,
+    ),
+    ("java/lang/String", "toCharArray", "()[C", false),
+    ("java/lang/String", "valueOf", "(I)Ljava/lang/String;", true),
+    ("java/lang/String", "valueOf", "(J)Ljava/lang/String;", true),
+    ("java/lang/String", "valueOf", "(D)Ljava/lang/String;", true),
+    ("java/lang/String", "valueOf", "(Z)Ljava/lang/String;", true),
+    ("java/lang/String", "valueOf", "(C)Ljava/lang/String;", true),
+    (
+        "java/lang/String",
+        "valueOf",
+        "(Ljava/lang/Object;)Ljava/lang/String;",
+        true,
+    ),
+    // -- StringBuilder, which is also what `+` on strings comes to
+    ("java/lang/StringBuilder", "<init>", "()V", false),
+    (
+        "java/lang/StringBuilder",
+        "<init>",
+        "(Ljava/lang/String;)V",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(I)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(J)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(F)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(D)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(Z)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(C)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(Ljava/lang/String;)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "append",
+        "(Ljava/lang/Object;)Ljava/lang/StringBuilder;",
+        false,
+    ),
+    (
+        "java/lang/StringBuilder",
+        "toString",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    ("java/lang/StringBuilder", "length", "()I", false),
+    // -- boxing, and reading numbers out of text
+    (
+        "java/lang/Integer",
+        "parseInt",
+        "(Ljava/lang/String;)I",
+        true,
+    ),
+    (
+        "java/lang/Integer",
+        "valueOf",
+        "(I)Ljava/lang/Integer;",
+        true,
+    ),
+    (
+        "java/lang/Integer",
+        "toString",
+        "(I)Ljava/lang/String;",
+        true,
+    ),
+    ("java/lang/Integer", "intValue", "()I", false),
+    ("java/lang/Long", "parseLong", "(Ljava/lang/String;)J", true),
+    ("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", true),
+    ("java/lang/Long", "toString", "(J)Ljava/lang/String;", true),
+    ("java/lang/Long", "longValue", "()J", false),
+    (
+        "java/lang/Double",
+        "parseDouble",
+        "(Ljava/lang/String;)D",
+        true,
+    ),
+    ("java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", true),
+    ("java/lang/Double", "doubleValue", "()D", false),
+    (
+        "java/lang/Float",
+        "parseFloat",
+        "(Ljava/lang/String;)F",
+        true,
+    ),
+    ("java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", true),
+    ("java/lang/Float", "floatValue", "()F", false),
+    (
+        "java/lang/Boolean",
+        "parseBoolean",
+        "(Ljava/lang/String;)Z",
+        true,
+    ),
+    (
+        "java/lang/Boolean",
+        "valueOf",
+        "(Z)Ljava/lang/Boolean;",
+        true,
+    ),
+    ("java/lang/Boolean", "booleanValue", "()Z", false),
+    (
+        "java/lang/Character",
+        "valueOf",
+        "(C)Ljava/lang/Character;",
+        true,
+    ),
+    ("java/lang/Character", "charValue", "()C", false),
+    ("java/lang/Character", "isDigit", "(C)Z", true),
+    ("java/lang/Character", "isLetter", "(C)Z", true),
+    ("java/lang/Character", "isWhitespace", "(C)Z", true),
+    ("java/lang/Character", "toUpperCase", "(C)C", true),
+    ("java/lang/Character", "toLowerCase", "(C)C", true),
+    // -- arithmetic
+    ("java/lang/Math", "abs", "(I)I", true),
+    ("java/lang/Math", "abs", "(J)J", true),
+    ("java/lang/Math", "abs", "(F)F", true),
+    ("java/lang/Math", "abs", "(D)D", true),
+    ("java/lang/Math", "max", "(II)I", true),
+    ("java/lang/Math", "max", "(JJ)J", true),
+    ("java/lang/Math", "max", "(DD)D", true),
+    ("java/lang/Math", "min", "(II)I", true),
+    ("java/lang/Math", "min", "(JJ)J", true),
+    ("java/lang/Math", "min", "(DD)D", true),
+    ("java/lang/Math", "sqrt", "(D)D", true),
+    ("java/lang/Math", "pow", "(DD)D", true),
+    ("java/lang/Math", "floor", "(D)D", true),
+    ("java/lang/Math", "ceil", "(D)D", true),
+    ("java/lang/Math", "round", "(D)J", true),
+    ("java/lang/Math", "random", "()D", true),
+    // -- the clock, and somewhere to print
+    ("java/lang/System", "currentTimeMillis", "()J", true),
+    ("java/lang/System", "nanoTime", "()J", true),
+    ("java/io/PrintStream", "println", "()V", false),
+    (
+        "java/io/PrintStream",
+        "println",
+        "(Ljava/lang/String;)V",
+        false,
+    ),
+    ("java/io/PrintStream", "println", "(I)V", false),
+    ("java/io/PrintStream", "println", "(J)V", false),
+    ("java/io/PrintStream", "println", "(D)V", false),
+    ("java/io/PrintStream", "println", "(Z)V", false),
+    ("java/io/PrintStream", "println", "(C)V", false),
+    (
+        "java/io/PrintStream",
+        "println",
+        "(Ljava/lang/Object;)V",
+        false,
+    ),
+    (
+        "java/io/PrintStream",
+        "print",
+        "(Ljava/lang/String;)V",
+        false,
+    ),
+    ("java/io/PrintStream", "print", "(I)V", false),
+];
+
+/// The exceptions this compiler knows how to construct without being handed
+/// their class files. Each takes nothing or a message, which is how they are
+/// almost always thrown.
+const BUILT_IN_THROWABLES: &[&str] = &[
+    "java/lang/Throwable",
+    "java/lang/Exception",
+    "java/lang/RuntimeException",
+    "java/lang/Error",
+    "java/lang/ArithmeticException",
+    "java/lang/ArrayIndexOutOfBoundsException",
+    "java/lang/ClassCastException",
+    "java/lang/CloneNotSupportedException",
+    "java/lang/IllegalArgumentException",
+    "java/lang/IllegalStateException",
+    "java/lang/IndexOutOfBoundsException",
+    "java/lang/InterruptedException",
+    "java/lang/NullPointerException",
+    "java/lang/NumberFormatException",
+    "java/lang/UnsupportedOperationException",
+    "java/io/IOException",
+];
+
+/// The fields of the runtime library this compiler knows, which is `System.out`
+/// and `System.err` and the limits of the number types.
+const BUILT_IN_FIELDS: &[(&str, &str, &str)] = &[
+    ("java/lang/System", "out", "Ljava/io/PrintStream;"),
+    ("java/lang/System", "err", "Ljava/io/PrintStream;"),
+    ("java/lang/Integer", "MAX_VALUE", "I"),
+    ("java/lang/Integer", "MIN_VALUE", "I"),
+    ("java/lang/Long", "MAX_VALUE", "J"),
+    ("java/lang/Long", "MIN_VALUE", "J"),
+    ("java/lang/Double", "MAX_VALUE", "D"),
+    ("java/lang/Double", "MIN_VALUE", "D"),
+    ("java/lang/Float", "MAX_VALUE", "F"),
+    ("java/lang/Float", "MIN_VALUE", "F"),
+    ("java/lang/Short", "MAX_VALUE", "S"),
+    ("java/lang/Short", "MIN_VALUE", "S"),
+    ("java/lang/Byte", "MAX_VALUE", "B"),
+    ("java/lang/Byte", "MIN_VALUE", "B"),
+    ("java/lang/Character", "MAX_VALUE", "C"),
+    ("java/lang/Character", "MIN_VALUE", "C"),
+];
+
+/// A signature from [`BUILT_IN_METHODS`], if one of them is what was asked
+/// about.
+fn built_in_method(owner: &str, name: &str, count: usize) -> Option<Signature> {
+    if name == "<init>" && count <= 1 && BUILT_IN_THROWABLES.contains(&owner) {
+        let parameters = if count == 1 {
+            vec![Type::Object("java/lang/String".to_string())]
+        } else {
+            Vec::new()
+        };
+        return Some(Signature {
+            owner: owner.to_string(),
+            name: name.to_string(),
+            parameters,
+            returns: Type::Void,
+            static_: false,
+            interface: false,
+        });
+    }
+    // Everything that can be thrown answers Throwable's methods, and every
+    // class answers Object's.
+    let mut owners = vec![owner.to_string()];
+    if BUILT_IN_THROWABLES.contains(&owner) {
+        owners.push("java/lang/Throwable".to_string());
+    }
+    owners.push("java/lang/Object".to_string());
+
+    for held in owners {
+        for (class, held_name, descriptor, static_) in BUILT_IN_METHODS {
+            if *class != held || *held_name != name {
+                continue;
+            }
+            let Some((parameters, returns)) = read_descriptor(descriptor) else {
+                continue;
+            };
+            if parameters.len() != count {
+                continue;
+            }
+            return Some(Signature {
+                owner: class.to_string(),
+                name: name.to_string(),
+                parameters,
+                returns,
+                static_: *static_,
+                interface: false,
+            });
+        }
+    }
+    None
+}
+
+/// The type of one of the fields in [`BUILT_IN_FIELDS`].
+fn built_in_field(owner: &str, name: &str) -> Option<Type> {
+    let (_, _, descriptor) = BUILT_IN_FIELDS
+        .iter()
+        .find(|(class, held, _)| *class == owner && *held == name)?;
+    let mut at = 0usize;
+    read_type(descriptor, &mut at)
+}
+
+/// The classes that can be named without anything on the classpath, because a
+/// compiler that cannot say `String` cannot compile anything at all.
 const WELL_KNOWN: &[&str] = &[
     "java/lang/Object",
     "java/lang/String",
     "java/lang/CharSequence",
     "java/lang/StringBuilder",
+    "java/lang/System",
+    "java/lang/Math",
+    "java/lang/Integer",
+    "java/lang/Long",
+    "java/lang/Double",
+    "java/lang/Float",
+    "java/lang/Boolean",
+    "java/lang/Character",
+    "java/lang/Byte",
+    "java/lang/Short",
+    "java/lang/Number",
+    "java/lang/Class",
+    "java/io/PrintStream",
+    "java/lang/Throwable",
+    "java/lang/Exception",
+    "java/lang/RuntimeException",
+    "java/lang/Error",
+    "java/lang/ArithmeticException",
+    "java/lang/ArrayIndexOutOfBoundsException",
+    "java/lang/ClassCastException",
+    "java/lang/CloneNotSupportedException",
+    "java/lang/IllegalArgumentException",
+    "java/lang/IllegalStateException",
+    "java/lang/IndexOutOfBoundsException",
+    "java/lang/InterruptedException",
+    "java/lang/NullPointerException",
+    "java/lang/NumberFormatException",
+    "java/lang/UnsupportedOperationException",
+    "java/io/IOException",
 ];
 
 impl Emitter<'_> {
@@ -2841,22 +3886,23 @@ impl Emitter<'_> {
         self.grow(i32::from(what.width()));
     }
 
+    /// Writes a value out of the stack and into a slot.
+    ///
+    /// The first version of this had every opcode one too high -- `istore` as
+    /// 0x37, which is `lstore` -- and the compact forms were derived from
+    /// those, which put them back where they belonged. So a method using four
+    /// slots or fewer was correct and a method using five was not, and nothing
+    /// short of a real verifier could tell: our own reader and `javap` both
+    /// print what the bytes say without asking whether it makes sense.
     fn store(&mut self, slot: u16, what: &Type) {
-        let base = match what {
-            Type::Long => 0x38u8,
-            Type::Float => 0x39,
-            Type::Double => 0x3a,
-            other if other.is_reference() => 0x3b,
-            _ => 0x37,
+        let (base, compact) = match what {
+            Type::Long => (0x37u8, 0x3fu8),
+            Type::Float => (0x38, 0x43),
+            Type::Double => (0x39, 0x47),
+            other if other.is_reference() => (0x3a, 0x4b),
+            _ => (0x36, 0x3b),
         };
         if slot <= 3 {
-            let compact = match base {
-                0x37 => 0x3b,
-                0x38 => 0x3f,
-                0x39 => 0x43,
-                0x3a => 0x47,
-                _ => 0x4b,
-            };
             self.op(compact + slot as u8);
         } else if slot <= 255 {
             self.op1(base, slot as u8);
@@ -2982,17 +4028,7 @@ impl Emitter<'_> {
                 };
                 let found = self.value(index, line)?;
                 self.convert(&found, &Type::Int, line)?;
-                let opcode = match *element {
-                    Type::Long => 0x2fu8,
-                    Type::Float => 0x30,
-                    Type::Double => 0x31,
-                    Type::Byte | Type::Boolean => 0x33,
-                    Type::Char => 0x34,
-                    Type::Short => 0x35,
-                    ref other if other.is_reference() => 0x32,
-                    _ => 0x2e,
-                };
-                self.op(opcode);
+                self.op(array_load(&element));
                 self.grow(i32::from(element.width()) - 2);
                 Ok(*element)
             }
@@ -3320,6 +4356,18 @@ impl Emitter<'_> {
             ));
         };
         let Some((holder, (_, what, static_))) = self.classpath.find_field(class, name) else {
+            // A field nobody handed a class file for may still be one of the
+            // few this compiler knows on its own, and every one of those is
+            // static.
+            if let Some(what) = built_in_field(class, name) {
+                let descriptor = what.descriptor();
+                let index = self.pool.field(class, name, &descriptor);
+                self.op(0x57);
+                self.grow(-1);
+                self.op2(0xb2, index);
+                self.grow(i32::from(what.width()));
+                return Ok(what);
+            }
             return Err(at(
                 "EJ213",
                 line,
@@ -3667,10 +4715,7 @@ impl Emitter<'_> {
         self.op(0x59);
         self.grow(1);
 
-        let signature = self
-            .classpath
-            .find_method(&class, "<init>", arguments.len())
-            .cloned();
+        let signature = self.find_signature(&class, "<init>", arguments.len());
         let descriptor = match signature {
             Some(found) => {
                 self.arguments_for(&found.parameters, arguments, line)?;
@@ -3769,11 +4814,7 @@ impl Emitter<'_> {
                 ));
             };
             let owner = self.resolve_class(&parent, line)?;
-            let Some(signature) = self
-                .classpath
-                .find_method(&owner, name, arguments.len())
-                .cloned()
-            else {
+            let Some(signature) = self.find_signature(&owner, name, arguments.len()) else {
                 return Err(self.no_such_method(&owner, name, arguments.len(), line));
             };
             self.load(0, &Type::Object(self.this_class.clone()));
@@ -3871,11 +4912,7 @@ impl Emitter<'_> {
                 // through to read it as a value would report that a name is not
                 // visible, which is true and tells nobody anything.
                 let owner = self.resolve_class(maybe_class, line)?;
-                let Some(signature) = self
-                    .classpath
-                    .find_method(&owner, name, arguments.len())
-                    .cloned()
-                else {
+                let Some(signature) = self.find_signature(&owner, name, arguments.len()) else {
                     return Err(self.no_such_method(&owner, name, arguments.len(), line));
                 };
                 if !signature.static_ {
@@ -3912,11 +4949,7 @@ impl Emitter<'_> {
                 format!("A {} has no methods to call.", owner_type.readable()),
             ));
         };
-        let Some(signature) = self
-            .classpath
-            .find_method(&owner, name, arguments.len())
-            .cloned()
-        else {
+        let Some(signature) = self.find_signature(&owner, name, arguments.len()) else {
             return Err(self.no_such_method(&owner, name, arguments.len(), line));
         };
         self.arguments_for(&signature.parameters, arguments, line)?;
@@ -3945,6 +4978,19 @@ impl Emitter<'_> {
             self.grow(-(taken + 1) + i32::from(signature.returns.width()));
         }
         Ok(signature.returns)
+    }
+
+    /// The signature of a method, from a class file handed over if there is
+    /// one and from the built-in table if there is not.
+    ///
+    /// A dependency wins, always. What is handed over is the truth about the
+    /// version being built against; the table is what to fall back on when
+    /// nothing was handed over at all.
+    fn find_signature(&self, owner: &str, name: &str, count: usize) -> Option<Signature> {
+        if let Some(found) = self.classpath.find_method(owner, name, count) {
+            return Some(found.clone());
+        }
+        built_in_method(owner, name, count)
     }
 
     fn no_such_method(&self, owner: &str, name: &str, arity: usize, line: u32) -> Diagnostic {
@@ -4149,6 +5195,130 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
+    // -- the loops and switches around here, and the `finally` bodies that
+    // -- have to run on the way out of them.
+
+    fn enter(&mut self, loops: bool) {
+        let label = self.pending_label.take();
+        self.levels.push(Level {
+            label,
+            loops,
+            breaks: Vec::new(),
+            continues: Vec::new(),
+            finallys: self.finallys.len(),
+        });
+    }
+
+    fn leave(&mut self) -> Level {
+        self.levels.pop().expect("a level was entered")
+    }
+
+    /// Which level a `break` or a `continue` is talking about.
+    fn level_for(&self, label: Option<&str>, loops: bool) -> Option<usize> {
+        self.levels.iter().rposition(|level| match label {
+            Some(name) => level.label.as_deref() == Some(name) && (!loops || level.loops),
+            None => !loops || level.loops,
+        })
+    }
+
+    fn no_such_level(&self, label: Option<&str>, line: u32, word: &str) -> Diagnostic {
+        match label {
+            Some(name) => at(
+                "EJ231",
+                line,
+                1,
+                format!("`{word} {name};` names a label that is not around this."),
+            ),
+            None if word == "continue" => at("EJ231", line, 1, "`continue` is not inside a loop."),
+            None => at(
+                "EJ231",
+                line,
+                1,
+                "`break` is not inside a loop or a `switch`.",
+            ),
+        }
+    }
+
+    /// Writes out the `finally` bodies between here and where control is going.
+    ///
+    /// Innermost first, and while one runs it is not itself pending -- a
+    /// `return` inside a `finally` must not send that same `finally` round
+    /// again. Where the copy landed is recorded, because a handler that
+    /// protects the `try` must not protect this copy of its `finally`.
+    fn run_finallys(&mut self, down_to: usize) -> Result<(), Diagnostic> {
+        if self.finallys.len() <= down_to {
+            return Ok(());
+        }
+        let pending = self.finallys.clone();
+        let began = self.code.len();
+        for index in (down_to..pending.len()).rev() {
+            self.finallys.truncate(index);
+            for one in &pending[index] {
+                self.statement(one)?;
+            }
+        }
+        self.finallys = pending;
+        if self.code.len() > began {
+            self.inlined.push((began, self.code.len(), down_to));
+        }
+        Ok(())
+    }
+
+    /// Says that the stack is exactly this deep, which is what entering an
+    /// exception handler does regardless of how deep it was before.
+    fn set_depth(&mut self, depth: i32) {
+        self.depth = depth;
+        if self.depth > self.max_depth {
+            self.max_depth = self.depth;
+        }
+    }
+
+    /// Adds the exception-table rows protecting one stretch of code, leaving
+    /// out any inlined `finally` inside it.
+    fn protect(
+        &mut self,
+        start: usize,
+        end: usize,
+        target: usize,
+        class: Option<String>,
+        depth: usize,
+    ) {
+        let mut pieces = vec![(start, end)];
+        let inlined = self.inlined.clone();
+        for (from, to, ran_from) in inlined {
+            // A copy that ran this `try`'s own `finally` is not inside this
+            // `try` any more; a copy of something further in still is.
+            if ran_from > depth {
+                continue;
+            }
+            let mut next = Vec::new();
+            for (piece_start, piece_end) in pieces {
+                if to <= piece_start || from >= piece_end {
+                    next.push((piece_start, piece_end));
+                    continue;
+                }
+                if piece_start < from {
+                    next.push((piece_start, from));
+                }
+                if to < piece_end {
+                    next.push((to, piece_end));
+                }
+            }
+            pieces = next;
+        }
+        for (piece_start, piece_end) in pieces {
+            if piece_start >= piece_end {
+                continue;
+            }
+            self.handlers.push(Handler {
+                start: piece_start,
+                end: piece_end,
+                target,
+                class: class.clone(),
+            });
+        }
+    }
+
     fn statement(&mut self, statement: &Positioned<Statement>) -> Result<(), Diagnostic> {
         let line = statement.line;
         match &statement.node {
@@ -4162,6 +5332,37 @@ impl Emitter<'_> {
                 Ok(())
             }
             Statement::Declare { what, name, value } => {
+                // `var` has no type of its own, so the value has to be worked
+                // out before there is anything to check it against.
+                if matches!(what, Written::Inferred) {
+                    let Some(expression) = value else {
+                        return Err(self.resolve(what, line).unwrap_err());
+                    };
+                    let found = self.value(expression, line)?;
+                    if found == Type::Void {
+                        return Err(at(
+                            "EJ234",
+                            line,
+                            1,
+                            format!(
+                                "`{name}` was given the result of something that returns nothing."
+                            ),
+                        ));
+                    }
+                    if matches!(expression, Expression::Null) {
+                        return Err(at(
+                            "EJ234",
+                            line,
+                            1,
+                            format!("`var {name} = null` says nothing about what it holds."),
+                        )
+                        .with_suggestion("Write the type."));
+                    }
+                    let slot = self.declare(name, found.clone());
+                    self.store(slot, &found);
+                    self.grow(-i32::from(found.width()));
+                    return Ok(());
+                }
                 let target = self.resolve(what, line)?;
                 match value {
                     Some(expression) => {
@@ -4251,10 +5452,10 @@ impl Emitter<'_> {
                         // the `else` can never be taken. Writing it anyway
                         // leaves an instruction nothing reaches, and an
                         // instruction nothing reaches begins a block the
-                        // verifier wants a frame for -- so a version 59 class
+                        // verifier wants a frame for -- so a version 69 class
                         // file is refused with "expecting a stack map frame"
                         // over three bytes that do nothing.
-                        let over = (!always_returns(&then.node)).then(|| self.jump(0xa7));
+                        let over = (!never_completes(&then.node)).then(|| self.jump(0xa7));
                         self.land(to_else);
                         self.a_branch_lands_here(&[]);
                         self.statement(otherwise)?;
@@ -4281,16 +5482,16 @@ impl Emitter<'_> {
                 }
                 let out = self.jump(0x99);
                 self.grow(-1);
-                self.breaks.push(Vec::new());
-                self.continues.push(Vec::new());
+                self.enter(true);
                 self.statement(body)?;
-                for pending in self.continues.pop().unwrap_or_default() {
+                let level = self.leave();
+                for pending in level.continues {
                     self.land(pending);
                 }
                 self.a_branch_lands_here(&[]);
                 self.jump_back(0xa7, top);
                 self.land(out);
-                for pending in self.breaks.pop().unwrap_or_default() {
+                for pending in level.breaks {
                     self.land(pending);
                 }
                 self.a_branch_lands_here(&[]);
@@ -4320,10 +5521,10 @@ impl Emitter<'_> {
                     }
                     None => None,
                 };
-                self.breaks.push(Vec::new());
-                self.continues.push(Vec::new());
+                self.enter(true);
                 self.statement(body)?;
-                for pending in self.continues.pop().unwrap_or_default() {
+                let level = self.leave();
+                for pending in level.continues {
                     self.land(pending);
                 }
                 self.a_branch_lands_here(&[]);
@@ -4359,33 +5560,122 @@ impl Emitter<'_> {
                 if let Some(out) = out {
                     self.land(out);
                 }
-                for pending in self.breaks.pop().unwrap_or_default() {
+                for pending in level.breaks {
                     self.land(pending);
                 }
                 self.a_branch_lands_here(&[]);
                 self.close();
                 Ok(())
             }
-            Statement::Break => {
-                if self.breaks.is_empty() {
-                    return Err(at("EJ231", line, 1, "`break` is not inside a loop."));
+            Statement::DoWhile { body, condition } => {
+                let top = self.code.len();
+                self.a_branch_lands_here(&[]);
+                self.enter(true);
+                self.statement(body)?;
+                // `continue` in a `do` block goes to the test, not to the top:
+                // the body has already run once and the question is whether it
+                // runs again.
+                let level = self.leave();
+                for pending in level.continues {
+                    self.land(pending);
                 }
-                let jump = self.jump(0xa7);
-                self.breaks.last_mut().unwrap().push(jump);
+                self.a_branch_lands_here(&[]);
+                let found = self.value(condition, line)?;
+                if found != Type::Boolean {
+                    return Err(at("EJ206", line, 1, "A `do`/`while` wants a boolean."));
+                }
+                // ifne, so the loop runs again when the condition holds.
+                self.jump_back(0x9a, top);
+                self.grow(-1);
+                for pending in level.breaks {
+                    self.land(pending);
+                }
+                self.a_branch_lands_here(&[]);
                 Ok(())
             }
-            Statement::Continue => {
-                if self.continues.is_empty() {
-                    return Err(at("EJ231", line, 1, "`continue` is not inside a loop."));
+            Statement::ForEach {
+                what,
+                name,
+                over,
+                body,
+            } => self.for_each(what, name, over, body, line),
+            Statement::Switch { subject, arms } => self.switch(subject, arms, line),
+            Statement::Try {
+                body,
+                catches,
+                finally,
+            } => self.try_catch(body, catches, finally.as_deref(), line),
+            Statement::Throw(what) => {
+                let found = self.value(what, line)?;
+                if !found.is_reference() {
+                    return Err(at(
+                        "EJ235",
+                        line,
+                        1,
+                        format!(
+                            "`throw` wants a Throwable and was given a {}.",
+                            found.readable()
+                        ),
+                    ));
                 }
+                self.op(0xbf);
+                // Nothing after an athrow is reached from here, and the stack
+                // it left behind is not the stack anything else will find.
+                self.set_depth(0);
+                Ok(())
+            }
+            Statement::Labelled { label, body } => {
+                // A label on a loop or a switch belongs to it, so that
+                // `continue name` has somewhere to land. A label on anything
+                // else gets a level of its own that only `break` can reach.
+                if matches!(
+                    &body.node,
+                    Statement::While { .. }
+                        | Statement::DoWhile { .. }
+                        | Statement::For { .. }
+                        | Statement::ForEach { .. }
+                        | Statement::Switch { .. }
+                ) {
+                    self.pending_label = Some(label.clone());
+                    return self.statement(body);
+                }
+                self.pending_label = Some(label.clone());
+                self.enter(false);
+                self.statement(body)?;
+                let level = self.leave();
+                if !level.breaks.is_empty() {
+                    for pending in level.breaks {
+                        self.land(pending);
+                    }
+                    self.a_branch_lands_here(&[]);
+                }
+                Ok(())
+            }
+            Statement::Break(label) => {
+                let Some(index) = self.level_for(label.as_deref(), false) else {
+                    return Err(self.no_such_level(label.as_deref(), line, "break"));
+                };
+                self.run_finallys(self.levels[index].finallys)?;
                 let jump = self.jump(0xa7);
-                self.continues.last_mut().unwrap().push(jump);
+                self.levels[index].breaks.push(jump);
+                Ok(())
+            }
+            Statement::Continue(label) => {
+                let Some(index) = self.level_for(label.as_deref(), true) else {
+                    return Err(self.no_such_level(label.as_deref(), line, "continue"));
+                };
+                self.run_finallys(self.levels[index].finallys)?;
+                let jump = self.jump(0xa7);
+                self.levels[index].continues.push(jump);
                 Ok(())
             }
             Statement::Return(value) => {
                 let wanted = self.returns.clone();
                 match value {
                     None => {
+                        // Nothing is on the stack, so the pending `finally`
+                        // blocks can simply run here.
+                        self.run_finallys(0)?;
                         if wanted != Type::Void {
                             return Err(at(
                                 "EJ233",
@@ -4423,6 +5713,18 @@ impl Emitter<'_> {
                         }
                         if !found.is_reference() {
                             self.convert(&found, &wanted, line)?;
+                        }
+                        // The value is worked out before the `finally` runs,
+                        // because that is when the expression was written --
+                        // but the `finally` needs the stack, so the value
+                        // waits in a slot of its own until it is time to go.
+                        if !self.finallys.is_empty() {
+                            let held = self.declare("$returning", wanted.clone());
+                            self.store(held, &wanted);
+                            self.grow(-i32::from(wanted.width()));
+                            self.run_finallys(0)?;
+                            self.load(held, &wanted);
+                            self.grow(i32::from(wanted.width()));
                         }
                         let opcode = match &wanted {
                             Type::Long => 0xadu8,
@@ -4496,34 +5798,100 @@ fn stack_map_table(frames: &[Frame], pool: &mut Pool) -> Option<Vec<u8>> {
 /// This is the specification's "can complete normally", narrowed to what is
 /// compiled here. Where it is not sure it says no, and the worst that costs is
 /// a `return` written after code that cannot reach it.
-fn always_returns(statement: &Statement) -> bool {
+fn never_completes(statement: &Statement) -> bool {
     match statement {
-        Statement::Return(_) => true,
-        Statement::Block(inside) => inside.iter().any(|one| always_returns(&one.node)),
+        Statement::Return(_) | Statement::Throw(_) => true,
+        // A `break` or a `continue` does not fall through to what is written
+        // after it either. Whether it is allowed at all is the emitter's
+        // question, and it answers it.
+        Statement::Break(_) | Statement::Continue(_) => true,
+        Statement::Block(inside) => inside.iter().any(|one| never_completes(&one.node)),
         Statement::If {
             then,
             otherwise: Some(otherwise),
             ..
-        } => always_returns(&then.node) && always_returns(&otherwise.node),
-        // A `for` with no condition runs until something inside leaves it, and
-        // a `break` is the only way out that is not a `return`.
+        } => never_completes(&then.node) && never_completes(&otherwise.node),
+        // A loop with no way to fail its test runs until something inside
+        // leaves it, and a `break` is the only way out that is not a `return`
+        // or a `throw`.
         Statement::For {
             condition: None,
             body,
             ..
         } => !holds_a_break(&body.node),
+        Statement::For {
+            condition: Some(condition),
+            body,
+            ..
+        }
+        | Statement::While { condition, body } => {
+            matches!(condition, Expression::Boolean(true)) && !holds_a_break(&body.node)
+        }
+        Statement::DoWhile { body, condition } => {
+            matches!(condition, Expression::Boolean(true)) && !holds_a_break(&body.node)
+        }
+        // A `try` gets past only if something that could get past it does: the
+        // body or one of the handlers. A `finally` that never completes ends
+        // it whatever the rest did.
+        Statement::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            if finally
+                .as_ref()
+                .is_some_and(|inside| inside.iter().any(|one| never_completes(&one.node)))
+            {
+                return true;
+            }
+            body.iter().any(|one| never_completes(&one.node))
+                && catches
+                    .iter()
+                    .all(|catch| catch.body.iter().any(|one| never_completes(&one.node)))
+        }
+        // A `switch` gets past its own end if there is a value nothing
+        // answers to, if a `break` leaves it, or if the last thing it can run
+        // reaches the end.
+        //
+        // Which arm that is depends on the form. With `:` an arm runs into the
+        // next one, so the only one that can reach the end is the last -- and
+        // an empty arm in the middle is a label on the one after it, not a way
+        // out. With `->` every arm ends by jumping past the rest, so every one
+        // of them has to be checked.
+        Statement::Switch { arms, .. } => {
+            if arms.is_empty() || !arms.iter().any(|arm| arm.labels.is_empty()) {
+                return false;
+            }
+            if arms
+                .iter()
+                .any(|arm| arm.body.iter().any(|one| holds_a_break(&one.node)))
+            {
+                return false;
+            }
+            if arms.iter().any(|arm| arm.arrow) {
+                return arms
+                    .iter()
+                    .all(|arm| arm.body.iter().any(|one| never_completes(&one.node)));
+            }
+            arms.last()
+                .is_some_and(|arm| arm.body.iter().any(|one| never_completes(&one.node)))
+        }
         _ => false,
     }
 }
 
-/// Whether a `break` inside this statement could leave the loop around it.
+/// Whether a `break` inside this statement could leave the loop or switch
+/// around it.
 ///
 /// A `break` in a nested loop belongs to that loop, which is why this stops
-/// descending at one.
+/// descending at one. A labelled `break` is counted whatever it names, because
+/// working out where it lands would need the labels around it and being wrong
+/// in this direction only costs an instruction nothing reaches.
 fn holds_a_break(statement: &Statement) -> bool {
     match statement {
-        Statement::Break => true,
+        Statement::Break(_) => true,
         Statement::Block(inside) => inside.iter().any(|one| holds_a_break(&one.node)),
+        Statement::Labelled { body, .. } => holds_a_break(&body.node),
         Statement::If {
             then, otherwise, ..
         } => {
@@ -4532,7 +5900,585 @@ fn holds_a_break(statement: &Statement) -> bool {
                     .as_ref()
                     .is_some_and(|otherwise| holds_a_break(&otherwise.node))
         }
+        Statement::Try {
+            body,
+            catches,
+            finally,
+        } => {
+            body.iter().any(|one| holds_a_break(&one.node))
+                || catches
+                    .iter()
+                    .any(|catch| catch.body.iter().any(|one| holds_a_break(&one.node)))
+                || finally
+                    .as_ref()
+                    .is_some_and(|inside| inside.iter().any(|one| holds_a_break(&one.node)))
+        }
         _ => false,
+    }
+}
+
+impl Emitter<'_> {
+    /// `for (T name : array)`.
+    ///
+    /// The array and the index live in two slots of their own so that the body
+    /// cannot reach them and nothing it does to `name` can be seen by the next
+    /// turn. That is what Java says this means, and it is also the only way to
+    /// write it without evaluating the array once per element.
+    fn for_each(
+        &mut self,
+        what: &Written,
+        name: &str,
+        over: &Expression,
+        body: &Positioned<Statement>,
+        line: u32,
+    ) -> Result<(), Diagnostic> {
+        self.open();
+
+        let found = self.value(over, line)?;
+        let Type::Array(element) = found.clone() else {
+            return Err(at(
+                "EJ236",
+                line,
+                1,
+                format!(
+                    "A `for` over a {} needs an iterator, which is not compiled here.",
+                    found.readable()
+                ),
+            )
+            .with_suggestion("An array works, and so does a counted `for`."));
+        };
+
+        let declared = match what {
+            Written::Inferred => (*element).clone(),
+            other => self.resolve(other, line)?,
+        };
+        if !element.may_be_given_to(&declared) {
+            return Err(at(
+                "EJ237",
+                line,
+                1,
+                format!(
+                    "`{name}` is a {} and the array holds {}.",
+                    declared.readable(),
+                    element.readable()
+                ),
+            ));
+        }
+
+        let array = self.declare("$over", found.clone());
+        self.store(array, &found);
+        self.grow(-1);
+        self.op(0x03);
+        self.grow(1);
+        let index = self.declare("$at", Type::Int);
+        self.store(index, &Type::Int);
+        self.grow(-1);
+
+        let top = self.code.len();
+        self.a_branch_lands_here(&[]);
+        self.load(index, &Type::Int);
+        self.grow(1);
+        self.load(array, &found);
+        self.grow(1);
+        self.op(0xbe); // arraylength
+        let out = self.jump(0xa2); // if_icmpge
+        self.grow(-2);
+
+        self.open();
+        self.load(array, &found);
+        self.grow(1);
+        self.load(index, &Type::Int);
+        self.grow(1);
+        self.op(array_load(&element));
+        self.grow(i32::from(element.width()) - 2);
+        if declared != *element {
+            self.convert(&element, &declared, line)?;
+        }
+        let held = self.declare(name, declared.clone());
+        self.store(held, &declared);
+        self.grow(-i32::from(declared.width()));
+
+        self.enter(true);
+        self.statement(body)?;
+        let level = self.leave();
+        self.close();
+
+        for pending in level.continues {
+            self.land(pending);
+        }
+        self.a_branch_lands_here(&[]);
+        self.bump_local(index, 1);
+        self.jump_back(0xa7, top);
+        self.land(out);
+        for pending in level.breaks {
+            self.land(pending);
+        }
+        self.close();
+        self.a_branch_lands_here(&[]);
+        Ok(())
+    }
+
+    /// A `switch`, over an integer or over a String.
+    ///
+    /// The integer form becomes a real switch instruction. Which of the two
+    /// the JVM has is decided by how tightly the labels are packed:
+    /// `tableswitch` is a jump table, so it costs four bytes per value in the
+    /// range whether or not anything answers to it, and `lookupswitch` is a
+    /// sorted list the JVM searches. Dense labels take the table; scattered
+    /// ones take the list.
+    ///
+    /// The String form becomes a chain of `equals`. It is what a switch over
+    /// strings means, it throws where Java says it throws -- on a null subject
+    /// -- and it does not need the two-pass hashCode dance `javac` writes to
+    /// save comparisons in switches far larger than anybody writes by hand.
+    fn switch(&mut self, subject: &Expression, arms: &[Arm], line: u32) -> Result<(), Diagnostic> {
+        let found = self.value(subject, line)?;
+        let over_text = found == Type::Object("java/lang/String".to_string());
+        if !found.is_int_like() && !over_text {
+            return Err(at(
+                "EJ238",
+                line,
+                1,
+                format!(
+                    "A `switch` takes an integer or a String, and was given a {}.",
+                    found.readable()
+                ),
+            ));
+        }
+
+        self.open();
+        self.enter(false);
+        let mut ends: Vec<Pending> = Vec::new();
+        let mut targets: Vec<usize> = Vec::new();
+
+        let dispatch = if over_text {
+            self.text_dispatch(arms, line)?
+        } else {
+            self.integer_dispatch(arms, line)?
+        };
+
+        // The arms, in the order they were written, because that is the order
+        // one falls into the next.
+        let mut default_at: Option<usize> = None;
+        for arm in arms {
+            let at_here = self.code.len();
+            targets.push(at_here);
+            if arm.labels.is_empty() {
+                default_at = Some(at_here);
+            }
+            self.set_depth(0);
+            self.a_branch_lands_here(&[]);
+            self.open();
+            for one in &arm.body {
+                self.statement(one)?;
+            }
+            self.close();
+            // An arrow arm never runs into the next one.
+            if arm.arrow && !arm.body.iter().any(|one| never_completes(&one.node)) {
+                ends.push(self.jump(0xa7));
+            }
+        }
+
+        let after = self.code.len();
+        dispatch.settle(self, &targets, default_at.unwrap_or(after));
+        for pending in ends {
+            self.land(pending);
+        }
+        let level = self.leave();
+        for pending in level.breaks {
+            self.land(pending);
+        }
+        self.close();
+        self.set_depth(0);
+        self.a_branch_lands_here(&[]);
+        Ok(())
+    }
+
+    /// Writes the switch instruction, with the offsets left to be filled in
+    /// once the arms have been written and their positions are known.
+    fn integer_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
+        // Which arm answers to which value.
+        let mut keys: Vec<(i32, usize)> = Vec::new();
+        for (index, arm) in arms.iter().enumerate() {
+            for label in &arm.labels {
+                let value = constant_int(label).ok_or_else(|| {
+                    at(
+                        "EJ239",
+                        arm.line,
+                        arm.column,
+                        "A `case` over an integer wants a constant this compiler can read.",
+                    )
+                    .with_suggestion("A number, a character, or a `-` in front of one.")
+                })?;
+                if keys.iter().any(|(held, _)| *held == value) {
+                    return Err(at(
+                        "EJ240",
+                        arm.line,
+                        arm.column,
+                        format!("`case {value}` is written twice in one `switch`."),
+                    ));
+                }
+                keys.push((value, index));
+            }
+        }
+        keys.sort_by_key(|(value, _)| *value);
+        let _ = line;
+
+        let opcode_at = self.code.len();
+        let low = keys.first().map(|(value, _)| *value).unwrap_or(0);
+        let high = keys.last().map(|(value, _)| *value).unwrap_or(0);
+        let span = i64::from(high) - i64::from(low) + 1;
+        // A jump table costs four bytes for every value in the range. It is
+        // worth that when most of them are used and wasteful when they are
+        // not.
+        let table = !keys.is_empty() && span <= 2 * keys.len() as i64 + 8;
+
+        self.op(if table { 0xaa } else { 0xab });
+        self.grow(-1);
+        while !self.code.len().is_multiple_of(4) {
+            self.code.push(0);
+        }
+
+        let default_slot = self.code.len();
+        self.code.extend_from_slice(&[0; 4]);
+        let mut slots: Vec<(usize, usize)> = Vec::new();
+        if table {
+            self.code.extend_from_slice(&low.to_be_bytes());
+            self.code.extend_from_slice(&high.to_be_bytes());
+            for value in low..=high {
+                let slot = self.code.len();
+                self.code.extend_from_slice(&[0; 4]);
+                match keys.iter().find(|(held, _)| *held == value) {
+                    Some((_, arm)) => slots.push((slot, *arm)),
+                    // A hole in the range goes to the default, and which
+                    // instruction that is is not known yet.
+                    None => slots.push((slot, usize::MAX)),
+                }
+                if value == high {
+                    break;
+                }
+            }
+        } else {
+            self.code
+                .extend_from_slice(&(keys.len() as u32).to_be_bytes());
+            for (value, arm) in &keys {
+                self.code.extend_from_slice(&value.to_be_bytes());
+                let slot = self.code.len();
+                self.code.extend_from_slice(&[0; 4]);
+                slots.push((slot, *arm));
+            }
+        }
+
+        Ok(Dispatch::Instruction {
+            opcode_at,
+            default_slot,
+            slots,
+        })
+    }
+
+    /// A chain of `equals`, one per label, and a jump to the default at the
+    /// end of it.
+    fn text_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
+        let text = Type::Object("java/lang/String".to_string());
+        let held = self.declare("$switch", text.clone());
+        self.store(held, &text);
+        self.grow(-1);
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut waiting: Vec<(Pending, usize)> = Vec::new();
+        for (index, arm) in arms.iter().enumerate() {
+            for label in &arm.labels {
+                let Expression::Str(value) = label else {
+                    return Err(at(
+                        "EJ239",
+                        arm.line,
+                        arm.column,
+                        "A `case` in a `switch` over a String wants a String constant.",
+                    ));
+                };
+                if seen.contains(value) {
+                    return Err(at(
+                        "EJ240",
+                        arm.line,
+                        arm.column,
+                        format!("`case {value:?}` is written twice in one `switch`."),
+                    ));
+                }
+                seen.push(value.clone());
+
+                self.load(held, &text);
+                self.grow(1);
+                self.push_string(value);
+                let equals =
+                    self.pool
+                        .method("java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
+                self.op2(0xb6, equals);
+                self.grow(-1);
+                waiting.push((self.jump(0x9a), index));
+                self.grow(-1);
+            }
+        }
+
+        if seen.is_empty() {
+            // Java throws on a null subject whether or not there is anything
+            // to compare it against, so with nothing to compare it against the
+            // check is written out.
+            self.load(held, &text);
+            self.grow(1);
+            let class_of =
+                self.pool
+                    .method("java/lang/Object", "getClass", "()Ljava/lang/Class;", false);
+            self.op2(0xb6, class_of);
+            self.op(0x57);
+            self.grow(-1);
+        }
+        let _ = line;
+
+        let fallthrough = self.jump(0xa7);
+        Ok(Dispatch::Chain {
+            waiting,
+            fallthrough,
+        })
+    }
+
+    /// `try`, its `catch` clauses, and its `finally`.
+    ///
+    /// The `finally` is written out again at every way out: once after the
+    /// `try` completes, once after each `catch` completes, once at a handler
+    /// that catches everything and rethrows, and once at every `return`,
+    /// `break` or `continue` that jumps past it. That is four or more copies
+    /// of the same block, and it is what `javac` does, because the alternative
+    /// -- a subroutine the code jumps into and back out of -- is the `jsr`
+    /// instruction, which the type-checking verifier will not accept.
+    ///
+    /// The handler that rethrows must not protect the copies. A `finally` that
+    /// throws would otherwise run its own copy again, and then again, and the
+    /// exception would be swallowed by its own cleanup. So the ranges written
+    /// into the exception table have the inlined copies cut out of them.
+    fn try_catch(
+        &mut self,
+        body: &[Positioned<Statement>],
+        catches: &[Catch],
+        finally: Option<&[Positioned<Statement>]>,
+        line: u32,
+    ) -> Result<(), Diagnostic> {
+        let outer = self.finallys.len();
+        if let Some(finally) = finally {
+            self.finallys.push(finally.to_vec());
+        }
+
+        let begun = self.code.len();
+        self.open();
+        for one in body {
+            self.statement(one)?;
+        }
+        self.close();
+        let ended = self.code.len();
+
+        let mut outs: Vec<Pending> = Vec::new();
+        if !body.iter().any(|one| never_completes(&one.node)) {
+            self.run_finallys(outer)?;
+            outs.push(self.jump(0xa7));
+        }
+
+        // Every catch clause, in the order written, because the first one that
+        // matches is the one that runs.
+        let throwable = Type::Object("java/lang/Throwable".to_string());
+        let mut caught: Vec<(usize, usize)> = Vec::new();
+        for catch in catches {
+            let mut classes = Vec::new();
+            for written in &catch.types {
+                let resolved = self.resolve(written, catch.line)?;
+                let Type::Object(name) = resolved else {
+                    return Err(at(
+                        "EJ241",
+                        catch.line,
+                        catch.column,
+                        format!(
+                            "`catch` wants a class, and {} is not one.",
+                            resolved.readable()
+                        ),
+                    ));
+                };
+                classes.push(name);
+            }
+
+            // With one type caught, the slot holds exactly that type. With
+            // several, the slot holds what they have in common -- and working
+            // out what that is needs a class hierarchy this compiler does not
+            // have, so it holds a Throwable and says so if that is not enough.
+            let held = if classes.len() == 1 {
+                Type::Object(classes[0].clone())
+            } else {
+                throwable.clone()
+            };
+
+            let target = self.code.len();
+            for name in &classes {
+                self.protect(begun, ended, target, Some(name.clone()), outer);
+            }
+
+            self.set_depth(1);
+            self.a_branch_lands_here(&[Verified::of(&held)]);
+            self.open();
+            let slot = self.declare(&catch.name, held.clone());
+            self.store(slot, &held);
+            self.grow(-1);
+
+            let body_begun = self.code.len();
+            for one in &catch.body {
+                self.statement(one)?;
+            }
+            let body_ended = self.code.len();
+            self.close();
+            caught.push((body_begun, body_ended));
+
+            if !catch.body.iter().any(|one| never_completes(&one.node)) {
+                self.run_finallys(outer)?;
+                outs.push(self.jump(0xa7));
+            }
+        }
+
+        // The handler that exists only so the `finally` runs when something
+        // leaves by throwing.
+        if let Some(finally) = finally {
+            let target = self.code.len();
+            self.protect(begun, ended, target, None, outer);
+            for (from, to) in caught {
+                self.protect(from, to, target, None, outer);
+            }
+
+            self.set_depth(1);
+            self.a_branch_lands_here(&[Verified::of(&throwable)]);
+            self.open();
+            let slot = self.declare("$thrown", throwable.clone());
+            self.store(slot, &throwable);
+            self.grow(-1);
+
+            let held = std::mem::take(&mut self.finallys);
+            self.finallys = held[..outer].to_vec();
+            for one in finally {
+                self.statement(one)?;
+            }
+            self.finallys = held;
+
+            self.load(slot, &throwable);
+            self.grow(1);
+            self.op(0xbf);
+            self.set_depth(0);
+            self.close();
+        }
+
+        self.finallys.truncate(outer);
+        let _ = line;
+
+        if outs.is_empty() {
+            // Nothing arrives after this, so there is nothing to land and no
+            // frame to write: a frame at a place nothing reaches is a claim
+            // about a state that never happens.
+            return Ok(());
+        }
+        for pending in outs {
+            self.land(pending);
+        }
+        self.set_depth(0);
+        self.a_branch_lands_here(&[]);
+        Ok(())
+    }
+
+    /// `iinc`, on a slot this compiler owns.
+    fn bump_local(&mut self, slot: u16, by: i8) {
+        if slot <= 255 {
+            self.op(0x84);
+            self.code.push(slot as u8);
+            self.code.push(by as u8);
+            return;
+        }
+        self.op(0xc4);
+        self.op(0x84);
+        self.code.extend_from_slice(&slot.to_be_bytes());
+        self.code.extend_from_slice(&i16::from(by).to_be_bytes());
+    }
+}
+
+/// How a `switch` gets from its subject to an arm, once the arms have been
+/// written and their positions are known.
+enum Dispatch {
+    /// A `tableswitch` or a `lookupswitch`, whose offsets are still zero.
+    Instruction {
+        opcode_at: usize,
+        default_slot: usize,
+        /// Where each offset goes, and which arm it points at. `usize::MAX`
+        /// stands for a hole in a jump table's range, which goes to the
+        /// default.
+        slots: Vec<(usize, usize)>,
+    },
+    /// A chain of comparisons, each with a jump waiting to be told where its
+    /// arm is, and one more for the default at the end.
+    Chain {
+        waiting: Vec<(Pending, usize)>,
+        fallthrough: Pending,
+    },
+}
+
+impl Dispatch {
+    fn settle(self, emitter: &mut Emitter<'_>, targets: &[usize], default_at: usize) {
+        match self {
+            Dispatch::Instruction {
+                opcode_at,
+                default_slot,
+                slots,
+            } => {
+                let offset = |to: usize| (to as i64 - opcode_at as i64) as i32;
+                emitter.code[default_slot..default_slot + 4]
+                    .copy_from_slice(&offset(default_at).to_be_bytes());
+                for (slot, arm) in slots {
+                    let to = match targets.get(arm) {
+                        Some(found) => *found,
+                        None => default_at,
+                    };
+                    emitter.code[slot..slot + 4].copy_from_slice(&offset(to).to_be_bytes());
+                }
+            }
+            Dispatch::Chain {
+                waiting,
+                fallthrough,
+            } => {
+                for (pending, arm) in waiting {
+                    let to = targets.get(arm).copied().unwrap_or(default_at);
+                    emitter.land_at(pending, to);
+                }
+                emitter.land_at(fallthrough, default_at);
+            }
+        }
+    }
+}
+
+/// A `case` label that has to be a constant integer, read as one.
+fn constant_int(expression: &Expression) -> Option<i32> {
+    match expression {
+        Expression::Int(value) => i32::try_from(*value).ok(),
+        Expression::Char(value) => Some(i32::from(*value)),
+        Expression::Boolean(value) => Some(i32::from(*value)),
+        Expression::Unary {
+            operator: Unary::Negate,
+            of,
+        } => constant_int(of)?.checked_neg(),
+        _ => None,
+    }
+}
+
+/// The instruction that reads one element out of an array of this type.
+fn array_load(element: &Type) -> u8 {
+    match element {
+        Type::Long => 0x2f,
+        Type::Float => 0x30,
+        Type::Double => 0x31,
+        Type::Byte | Type::Boolean => 0x33,
+        Type::Char => 0x34,
+        Type::Short => 0x35,
+        other if other.is_reference() => 0x32,
+        _ => 0x2e,
     }
 }
 
@@ -4662,7 +6608,7 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
         // A method that can fall off its end needs a return there. A `void`
         // one gets it; anything else that reaches the end without returning is
         // a mistake in the source and is said so.
-        let ends_returned = body.iter().any(|one| always_returns(&one.node));
+        let ends_returned = body.iter().any(|one| never_completes(&one.node));
         if returns == Type::Void {
             if !ends_returned {
                 emitter.op(0xb1);
@@ -4683,6 +6629,7 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
         let max_stack = emitter.max_depth.max(1) as u16;
         let max_locals = emitter.max_slot.max(1);
         let frames = emitter.frames;
+        let handlers = emitter.handlers;
 
         // A frame at the very start says nothing: the verifier already knows
         // what a method is entered with. One past the end is not a place
@@ -4699,7 +6646,19 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
         attribute.extend_from_slice(&max_locals.to_be_bytes());
         attribute.extend_from_slice(&(code.len() as u32).to_be_bytes());
         attribute.extend_from_slice(&code);
-        attribute.extend_from_slice(&0u16.to_be_bytes()); // no exception table
+        attribute.extend_from_slice(&(handlers.len() as u16).to_be_bytes());
+        for handler in &handlers {
+            attribute.extend_from_slice(&(handler.start as u16).to_be_bytes());
+            attribute.extend_from_slice(&(handler.end as u16).to_be_bytes());
+            attribute.extend_from_slice(&(handler.target as u16).to_be_bytes());
+            let class = match &handler.class {
+                Some(name) => pool.class(name),
+                // Zero is the row that catches everything, which is how a
+                // `finally` gets to run on the way out.
+                None => 0,
+            };
+            attribute.extend_from_slice(&class.to_be_bytes());
+        }
         attribute.extend_from_slice(&u16::from(table.is_some()).to_be_bytes());
         if let (Some(body), Some(name)) = (&table, table_name) {
             write_attribute(&mut attribute, name, body);
@@ -5020,11 +6979,6 @@ mod tests {
     #[test]
     fn what_it_does_not_compile_it_refuses_by_name_and_line() {
         for (source, expected) in [
-            ("public class A { void f() { switch (1) {} } }", "EJ900"),
-            (
-                "public class A { void f() { try { } catch (E e) { } } }",
-                "EJ900",
-            ),
             ("public class A<T> { }", "EJ900"),
             ("public interface A { }", "EJ900"),
             (
@@ -5034,8 +6988,15 @@ mod tests {
             ("public class A { class B { } }", "EJ900"),
             ("public class A { void f(int... x) { } }", "EJ900"),
             (
-                "public class A { void f() { for (String s : list) { } } }",
+                "public class A { void f() { synchronized (this) { } } }",
                 "EJ900",
+            ),
+            // A `catch` of a class nobody handed over is a handler for
+            // something that might not exist, and the class file would name
+            // it either way.
+            (
+                "public class A { void f() { try { } catch (E e) { } } }",
+                "EJ200",
             ),
         ] {
             let refused = compile(source, &empty()).expect_err("this must be refused");
@@ -5213,6 +7174,19 @@ mod tests {
         );
     }
 
+    /// What a real JVM said when it was handed a class file.
+    enum Verdict {
+        /// It loaded and verified. The frames are right.
+        Verified,
+        /// It refused, and this is what it said.
+        Refused(String),
+        /// It is older than the class files this writes, so it never got as
+        /// far as the verifier. That is a fact about the machine the tests are
+        /// running on, not about the class file, and it must not be reported
+        /// as either a pass or a failure.
+        TooOld(String),
+    }
+
     /// Hands a class file to a real JVM and asks it to verify it.
     ///
     /// `java -Xverify:all -cp <dir> <class>` loads and verifies before it looks
@@ -5220,21 +7194,55 @@ mod tests {
     /// anything else means it was not. This is the only check that actually
     /// exercises the frames: our own reader will read a class file whose
     /// StackMapTable is nonsense, and so will `javap`.
-    fn jvm_verifies(name: &str, bytes: &[u8]) -> Option<(bool, String)> {
-        let java = std::env::var("JAVA_HOME")
-            .ok()
-            .map(|home| format!("{home}/bin/java"))
-            .filter(|path| std::path::Path::new(path).is_file())
-            .or_else(|| {
-                std::process::Command::new("which")
-                    .arg("java")
-                    .output()
-                    .ok()
-                    .filter(|found| found.status.success())
-                    .map(|found| String::from_utf8_lossy(&found.stdout).trim().to_string())
-            })?;
+    fn jvm_verifies(name: &str, bytes: &[u8]) -> Option<Verdict> {
+        let mut verdict = None;
+        for java in every_jvm_here() {
+            let found = one_jvm_verifies(&java, name, bytes)?;
+            // A machine can have several JVMs, and the default is often not
+            // the newest. One that is too old has not disagreed with the
+            // others -- it has not looked -- so keep asking.
+            if !matches!(found, Verdict::TooOld(_)) {
+                return Some(found);
+            }
+            verdict = Some(found);
+        }
+        verdict
+    }
 
-        let directory = std::env::temp_dir().join(format!("omni-verify-{}", std::process::id()));
+    /// Every `java` this machine has, the likeliest first.
+    fn every_jvm_here() -> Vec<String> {
+        let mut found = Vec::new();
+        if let Ok(home) = std::env::var("JAVA_HOME") {
+            found.push(format!("{home}/bin/java"));
+        }
+        if let Some(which) = std::process::Command::new("which")
+            .arg("java")
+            .output()
+            .ok()
+            .filter(|found| found.status.success())
+        {
+            found.push(String::from_utf8_lossy(&which.stdout).trim().to_string());
+        }
+        // Newest last in name order is newest last in version order for the
+        // way distributions name these, so the list is walked backwards.
+        if let Ok(entries) = std::fs::read_dir("/usr/lib/jvm") {
+            let mut installed: Vec<String> = entries
+                .flatten()
+                .map(|entry| entry.path().join("bin/java"))
+                .filter(|path| path.is_file())
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            installed.sort();
+            found.extend(installed.into_iter().rev());
+        }
+        found.retain(|path| std::path::Path::new(path).is_file());
+        found.dedup();
+        found
+    }
+
+    fn one_jvm_verifies(java: &str, name: &str, bytes: &[u8]) -> Option<Verdict> {
+        let directory =
+            std::env::temp_dir().join(format!("omni-verify-{}-{name}", std::process::id()));
         let path = directory.join(format!("{name}.class"));
         std::fs::create_dir_all(path.parent()?).ok()?;
         std::fs::write(&path, bytes).ok()?;
@@ -5255,11 +7263,17 @@ mod tests {
         );
         std::fs::remove_dir_all(&directory).ok();
 
+        // A JVM older than the class files this writes stops at the version
+        // number and never reaches the verifier. Counting that as a refusal
+        // would turn "your JDK is old" into "the compiler is broken".
+        if said.contains("UnsupportedClassVersionError") {
+            return Some(Verdict::TooOld(said));
+        }
         // The verifier speaks up by name when it is unhappy.
-        let refused = said.contains("VerifyError")
-            || said.contains("ClassFormatError")
-            || said.contains("UnsupportedClassVersionError");
-        Some((!refused, said))
+        if said.contains("VerifyError") || said.contains("ClassFormatError") {
+            return Some(Verdict::Refused(said));
+        }
+        Some(Verdict::Verified)
     }
 
     #[test]
@@ -5329,9 +7343,9 @@ mod tests {
 
         let (_, bytes) = compile(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&bytes).expect("and read back");
-        assert_eq!(class.major_version, 59, "Java 15 class files");
+        assert_eq!(class.major_version, CLASS_MAJOR, "Java 25 class files");
 
-        // Every method that branches has to carry a table, or a version 59
+        // Every method that branches has to carry a table, or a version 69
         // class file is refused before it is even run.
         let with_frames = class
             .methods
@@ -5345,16 +7359,366 @@ mod tests {
             .count();
         assert!(with_frames >= 7, "only {with_frames} methods branch");
 
-        let Some((verified, said)) = jvm_verifies("Branchy", &bytes) else {
-            eprintln!("java: no JVM here, so the frames were not put to a verifier");
-            return;
-        };
-        assert!(
-            verified,
-            "a real JVM refused a class file this wrote:\n{said}"
+        match jvm_verifies("Branchy", &bytes) {
+            None => {
+                eprintln!("java: no JVM here, so the frames were not put to a verifier");
+                return;
+            }
+            Some(Verdict::TooOld(said)) => {
+                eprintln!(
+                    "java: the JVM here is older than Java {LANGUAGE_RELEASE}, so the frames \
+                     were not put to a verifier -- it said {:?}",
+                    said.lines().last().unwrap_or_default()
+                );
+                return;
+            }
+            Some(Verdict::Refused(said)) => {
+                panic!("a real JVM refused a class file this wrote:\n{said}")
+            }
+            Some(Verdict::Verified) => {}
+        }
+
+        eprintln!(
+            "java: a real JVM verified a version {CLASS_MAJOR} class file with {with_frames} branching methods"
+        );
+    }
+
+    #[test]
+    fn a_real_jvm_verifies_the_whole_of_what_java_25_adds() {
+        // Every construct this compiler learned, in one class, because the
+        // verifier is the only thing that will say whether the frames and the
+        // exception table are right. Our own reader will read nonsense; so
+        // will `javap`.
+        let source = "\
+public class Wide {
+    private int total;
+
+    public String grade(int score) {
+        switch (score) {
+            case 0:
+            case 1:
+                return \"low\";
+            case 2:
+                return \"middle\";
+            default:
+                return \"high\";
+        }
+    }
+
+    public int weigh(int kind) {
+        int out = 0;
+        switch (kind) {
+            case 1 -> out = 10;
+            case 2, 3 -> out = 20;
+            default -> out = 30;
+        }
+        return out;
+    }
+
+    public int scattered(int key) {
+        switch (key) {
+            case 1: return 1;
+            case 1000: return 2;
+            case 1000000: return 3;
+            default: return 0;
+        }
+    }
+
+    public int named(String word) {
+        switch (word) {
+            case \"one\": return 1;
+            case \"two\": return 2;
+            default: return 0;
+        }
+    }
+
+    public int guarded(int by) {
+        int seen = 0;
+        try {
+            seen = 100 / by;
+        } catch (ArithmeticException e) {
+            seen = -1;
+        } finally {
+            total = total + 1;
+        }
+        return seen;
+    }
+
+    public String caught(String text) {
+        try {
+            return text.substring(0, 2);
+        } catch (IndexOutOfBoundsException | NullPointerException e) {
+            return e.getMessage();
+        }
+    }
+
+    public int leavingThroughFinally(int value) {
+        try {
+            if (value > 0) {
+                return value;
+            }
+            return 0;
+        } finally {
+            total = total + 1;
+        }
+    }
+
+    public void refuse(int value) {
+        if (value < 0) {
+            throw new IllegalArgumentException(\"below zero\");
+        }
+    }
+
+    public int stepDown(int from) {
+        int steps = 0;
+        do {
+            from = from - 1;
+            steps++;
+        } while (from > 0);
+        return steps;
+    }
+
+    public int sum(int[] values) {
+        int out = 0;
+        for (int one : values) {
+            out = out + one;
+        }
+        return out;
+    }
+
+    public int firstNegative(int[][] rows) {
+        outer:
+        for (int[] row : rows) {
+            for (int one : row) {
+                if (one < 0) {
+                    break outer;
+                }
+                if (one == 0) {
+                    continue outer;
+                }
+                total = total + one;
+            }
+        }
+        return total;
+    }
+
+    public String inferred(String text) {
+        var held = text;
+        var count = held.length();
+        var doubled = count * 2;
+        return held + doubled;
+    }
+
+    public String block() {
+        return \"\"\"
+            first
+              second
+            \"\"\";
+    }
+
+    public int nestedGuard(int value) {
+        int out = 0;
+        try {
+            try {
+                out = 10 / value;
+            } finally {
+                out = out + 1;
+            }
+        } catch (ArithmeticException e) {
+            out = -1;
+        }
+        return out;
+    }
+
+    public int breakingOutOfASwitchInALoop(int[] values) {
+        int out = 0;
+        for (int one : values) {
+            switch (one) {
+                case 0:
+                    break;
+                case 1:
+                    out = out + 1;
+                    break;
+                default:
+                    out = out + 2;
+            }
+        }
+        return out;
+    }
+}
+";
+
+        let (name, bytes) = compile(source, &empty()).expect("this must compile");
+        assert_eq!(name, "Wide.class");
+        let class = crate::jvm::read(&bytes).expect("and read back");
+        assert_eq!(class.major_version, CLASS_MAJOR);
+
+        let with_handlers = class
+            .methods
+            .iter()
+            .filter(|method| {
+                method
+                    .code
+                    .as_ref()
+                    .is_some_and(|code| !code.handlers.is_empty())
+            })
+            .count();
+        assert_eq!(
+            with_handlers, 4,
+            "the four methods with a `try` are the four with an exception table"
         );
 
-        eprintln!("java: a real JVM verified a version 59 class file with {with_frames} branching methods");
+        match jvm_verifies("Wide", &bytes) {
+            None => {
+                eprintln!("java: no JVM here, so the frames were not put to a verifier");
+                return;
+            }
+            Some(Verdict::TooOld(_)) => {
+                eprintln!(
+                    "java: the JVM here is older than Java {LANGUAGE_RELEASE}, so the frames \
+                     were not put to a verifier"
+                );
+                return;
+            }
+            Some(Verdict::Refused(said)) => {
+                panic!("a real JVM refused a class file this wrote:\n{said}")
+            }
+            Some(Verdict::Verified) => {}
+        }
+
+        eprintln!(
+            "java: a real JVM verified switch, try/catch/finally, throw, do/while, \
+             enhanced for, labelled break, var and text blocks -- {} methods, {} with \
+             exception tables",
+            class.methods.len(),
+            with_handlers
+        );
+    }
+
+    #[test]
+    fn a_local_past_the_fourth_slot_is_stored_with_the_right_instruction() {
+        // The compact store instructions live four apart and the plain ones
+        // one apart, so a table that is off by one is right for the first four
+        // slots of every type and wrong for the fifth. Nothing but a verifier
+        // notices: the bytes still read, `javap` still prints them, and the
+        // method still looks like a method. So every type gets more than four
+        // locals here, and a real JVM is asked.
+        let source = r#"
+            public class Slots {
+                public double crowded(int a, long b, float c, double d, String e) {
+                    int i1 = a; int i2 = a; int i3 = a; int i4 = a; int i5 = a; int i6 = a;
+                    long l1 = b; long l2 = b; long l3 = b; long l4 = b; long l5 = b;
+                    float f1 = c; float f2 = c; float f3 = c; float f4 = c; float f5 = c;
+                    double d1 = d; double d2 = d; double d3 = d; double d4 = d; double d5 = d;
+                    String s1 = e; String s2 = e; String s3 = e; String s4 = e; String s5 = e;
+                    return i6 + l5 + f5 + d5 + s5.length();
+                }
+            }
+        "#;
+        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let class = crate::jvm::read(&bytes).expect("and read back");
+        let code = class
+            .methods
+            .iter()
+            .find(|method| method.name == "crowded")
+            .and_then(|method| method.code.as_ref())
+            .expect("the method is there with its code");
+        assert!(
+            code.max_locals > 40,
+            "only {} slots, which is not enough to reach past the compact forms",
+            code.max_locals
+        );
+
+        match jvm_verifies("Slots", &bytes) {
+            None | Some(Verdict::TooOld(_)) => {
+                eprintln!("java: no JVM new enough here to check the slot instructions");
+            }
+            Some(Verdict::Refused(said)) => {
+                panic!("a real JVM refused a class file this wrote:\n{said}")
+            }
+            Some(Verdict::Verified) => eprintln!(
+                "java: {} local slots of five types, every load and store verified",
+                code.max_locals
+            ),
+        }
+    }
+
+    #[test]
+    fn a_text_block_keeps_what_was_meant_and_drops_what_was_not() {
+        // The indentation rule is the whole reason these exist, so it is the
+        // thing worth pinning down.
+        let cases: &[(&str, &str)] = &[
+            ("\"\"\"\n    a\n    b\n    \"\"\"", "a\nb\n"),
+            ("\"\"\"\n    a\n      b\n    \"\"\"", "a\n  b\n"),
+            ("\"\"\"\n    a\n    b\"\"\"", "a\nb"),
+            ("\"\"\"\n      a\n    b\n    \"\"\"", "  a\nb\n"),
+            // Trailing whitespace is invisible and therefore cannot have been
+            // meant, unless it was written as an escape.
+            ("\"\"\"\n    a   \n    \"\"\"", "a\n"),
+            ("\"\"\"\n    a\\s\\s\n    \"\"\"", "a  \n"),
+            // A backslash at the end of a line joins it to the next.
+            ("\"\"\"\n    a\\\n    b\n    \"\"\"", "ab\n"),
+            (
+                r#""""
+    say \"hi\"
+    """"#,
+                "say \"hi\"\n",
+            ),
+        ];
+        for (written, wanted) in cases {
+            let tokens = Lexer::new(written).tokens().expect(written);
+            let Token::Str(found) = &tokens[0].token else {
+                panic!("{written} did not lex as a string: {:?}", tokens[0].token);
+            };
+            assert_eq!(found, wanted, "{written}");
+        }
+    }
+
+    #[test]
+    fn what_is_still_refused_is_refused_by_name() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "public class A { void f() { synchronized (this) {} } }",
+                "EJ900",
+            ),
+            ("public class A { void f() { assert 1 == 1; } }", "EJ900"),
+            (
+                "public class A { void f() { try (var a = b()) {} } }",
+                "EJ900",
+            ),
+            // A `switch` over something that is neither an integer nor a
+            // String has no instruction behind it.
+            (
+                "public class A { void f(double d) { switch (d) { default: } } }",
+                "EJ238",
+            ),
+            // Two arms answering to one value is a question with two answers.
+            (
+                "public class A { void f(int i) { switch (i) { case 1: case 1: } } }",
+                "EJ240",
+            ),
+            // The two forms mean different things about falling through, so
+            // they are not mixed.
+            (
+                "public class A { void f(int i) { switch (i) { case 1 -> {} case 2: } } }",
+                "EJ112",
+            ),
+            ("public class A { void f() { break; } }", "EJ231"),
+            (
+                "public class A { void f() { while (true) { continue nowhere; } } }",
+                "EJ231",
+            ),
+            ("public class A { void f() { throw 1; } }", "EJ235"),
+            ("public class A { void f() { var a; } }", "EJ234"),
+            (
+                "public class A { void f(int i) { for (int one : i) {} } }",
+                "EJ236",
+            ),
+        ];
+        for (source, code) in cases {
+            let error = compile(source, &empty()).expect_err(source);
+            assert_eq!(error.code, *code, "{source}");
+        }
     }
 
     #[test]
