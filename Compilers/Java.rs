@@ -12,28 +12,36 @@
 //! worse than one that refuses, because the refusal happens at build time and
 //! the mis-handling happens on somebody's phone.
 //!
-//! Handled: a package and its imports; the classes and interfaces one file
-//! declares, which may be several and may name each other, with a superclass
-//! and interfaces; fields with values on them, initialiser blocks
-//! -- static and not -- methods, varargs, and constructors that hand off to
-//! `this(...)` or up to `super(...)`; the primitive types, `String`, arrays
-//! and declared types; blocks, local declarations -- several to a line, and
-//! `var` where the value already says the type -- `if`/`else`, `while`,
-//! `do`/`while`, `for` in both the counted and the enhanced form, `switch` as
-//! a statement and as an expression, in both the colon and the arrow form and
-//! over integers or strings, `try`/`catch`/`finally` including multi-catch,
-//! `throw`, `return`, `yield`, `break` and `continue` -- plain and labelled --
-//! and expression statements; literals including text blocks and underscored
-//! numbers; names, field access, method invocation with the overload chosen by
-//! what is handed over, `new`, the arithmetic, comparison, logical and bitwise
+//! Handled: a package and its imports; the classes and interfaces a
+//! compilation declares, across as many files as it likes, which may name each
+//! other whichever order they arrive in, with a superclass and interfaces;
+//! fields with values on them, initialiser blocks -- static and not -- methods,
+//! varargs, and constructors that hand off to `this(...)` or up to
+//! `super(...)`; the primitive types, `String`, arrays and declared types;
+//! blocks, local declarations -- several to a line, and `var` where the value
+//! already says the type -- `if`/`else`, `while`, `do`/`while`, `for` in both
+//! the counted and the enhanced form, `switch` as a statement and as an
+//! expression, in both the colon and the arrow form, over integers, strings,
+//! enums or type patterns with `when` guards; `try`/`catch`/`finally` including
+//! multi-catch and the form that closes what it opened, `synchronized` on a
+//! method and as a block, `assert`, `throw`, `return`, `yield`, `break` and
+//! `continue` -- plain and labelled -- and expression statements; literals
+//! including text blocks and underscored numbers; names, field access, method
+//! invocation with the overload chosen by what is handed over, `new` -- and
+//! `held.new Inner()` -- the arithmetic, comparison, logical and bitwise
 //! operators with Java's precedence, assignment and compound assignment,
-//! `++`/`--`, casts, array indexing, `this`, `super`, the conditional
-//! operator, `instanceof` with a pattern that names what it matched, and
-//! string concatenation with `+`.
+//! `++`/`--`, casts, array indexing, `this`, `super`, `Outer.this`, class
+//! literals, the conditional operator, `instanceof` with a pattern that names
+//! what it matched, boxing and unboxing wherever Java does them, and string
+//! concatenation with `+`.
 //!
 //! Generic types are read and erased, which is what the JVM does with them:
 //! `List<String>` and `List` are the same class at run time, and the only
-//! thing lost is the checking `javac` does before erasing them itself.
+//! thing lost is the checking `javac` does before erasing them itself. A type
+//! variable erases to its bound, so `<T extends Number> T pick()` is a method
+//! returning `Number` and `<T> T pick()` is one returning `Object`. Where that
+//! makes an override differ from what it overrides, the bridge method the JVM
+//! needs to find it is written.
 //!
 //! Enums and records are read and turned into the classes they stand for --
 //! a final class extending `java.lang.Enum` with its constants, its class
@@ -62,10 +70,21 @@
 //! `static` belongs to an instance and keeps it in a field, which is what lets
 //! it read what that instance holds.
 //!
-//! Refused, by name, with the line it happened on: `synchronized` and
-//! `assert`. Annotations are parsed and discarded, which is safe because they
-//! are metadata and nothing here reads them; `@Override` therefore costs
-//! nothing.
+//! An interface may have `default`, `static` and `private` methods, and each
+//! gets the flags and the invoke instruction the JVM expects for it. A
+//! `sealed` type writes down what it permits, a record writes down its
+//! components, and a class written inside another says which nest it is in --
+//! all three are attributes rather than instructions, and all three are what
+//! reflection and the runtime read to answer questions about the shape.
+//!
+//! An annotation type of one's own is declared with `@interface`, with defaults
+//! on its elements. Whether an annotation reaches the class file is what
+//! `@Retention` on it says: one kept at runtime is written down so that
+//! reflection can read it back, and one kept only for the compiler is read and
+//! dropped -- which is why `@Override` costs nothing.
+//!
+//! `native` is refused by name, with the line it happened on. `strictfp` is
+//! read and ignored, which is what it means since Java 17.
 //!
 //! # What it targets
 //!
@@ -984,6 +1003,9 @@ pub enum Expression {
     New {
         what: Written,
         arguments: Vec<Expression>,
+        /// `held.new Inner()`: which instance the new one belongs to, where
+        /// that was written rather than left to be whichever one is here.
+        outer: Option<Box<Expression>>,
     },
     NewArray {
         of: Written,
@@ -1184,6 +1206,11 @@ pub enum Statement {
 pub struct Arm {
     /// The values this arm answers to. Empty means `default`.
     pub labels: Vec<Expression>,
+    /// `case String s ->`: the type this arm answers to and the name it gives
+    /// what it matched. An arm has a pattern or labels, never both.
+    pub pattern: Option<(Written, String)>,
+    /// `when ...` after a pattern, which has to hold as well as the type.
+    pub guard: Option<Expression>,
     /// Written `->` rather than `:`, which means it does not fall through.
     pub arrow: bool,
     pub body: Vec<Positioned<Statement>>,
@@ -1236,6 +1263,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             name: constant.name.clone(),
             value: None,
             line: constant.line,
+            annotations: Vec::new(),
         });
         let mut arguments = vec![
             Expression::Str(constant.name.clone()),
@@ -1248,6 +1276,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             Expression::New {
                 what: named.clone(),
                 arguments,
+                outer: None,
             },
         ));
     }
@@ -1266,6 +1295,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         name: HELD.to_string(),
         value: None,
         line: 1,
+        annotations: Vec::new(),
     });
     setup.push(set(
         1,
@@ -1307,6 +1337,9 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             constructor: true,
             variadic: false,
             line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
         });
     }
     for method in &mut unit.methods {
@@ -1380,6 +1413,9 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         constructor: false,
         variadic: false,
         line: 1,
+        bridge: false,
+        annotations: Vec::new(),
+        default_value: None,
     });
 
     // `valueOf` is written out rather than handed to `Enum.valueOf`, which
@@ -1408,6 +1444,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         Statement::Throw(Expression::New {
             what: Written::Named("IllegalArgumentException".to_string()),
             arguments: vec![Expression::Name("$name".to_string())],
+            outer: None,
         }),
     ));
     unit.methods.push(Method {
@@ -1423,6 +1460,9 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         constructor: false,
         variadic: false,
         line: 1,
+        bridge: false,
+        annotations: Vec::new(),
+        default_value: None,
     });
 
     unit.extends = Some("java.lang.Enum".to_string());
@@ -1472,6 +1512,7 @@ fn as_the_class_a_record_is(
             name: name.clone(),
             value: None,
             line: 1,
+            annotations: Vec::new(),
         });
     }
 
@@ -1504,6 +1545,9 @@ fn as_the_class_a_record_is(
             constructor: true,
             variadic: false,
             line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
         });
     }
 
@@ -1527,6 +1571,9 @@ fn as_the_class_a_record_is(
             constructor: false,
             variadic: false,
             line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
         });
     }
 
@@ -1569,10 +1616,16 @@ fn as_the_class_a_record_is(
             constructor: false,
             variadic: false,
             line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
         });
     }
 
-    unit.implements.push("java.lang.Record".to_string());
+    // A record *extends* `java.lang.Record`. Written as an interface it would
+    // still verify and `Class.isRecord` would answer no, which is the whole
+    // point of the shape.
+    unit.extends = Some("java.lang.Record".to_string());
     unit.modifiers.final_ = true;
     Ok(unit)
 }
@@ -1602,6 +1655,7 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
             name: OUTER.to_string(),
             value: None,
             line: 1,
+            annotations: Vec::new(),
         },
     );
 
@@ -1618,6 +1672,9 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
             constructor: true,
             variadic: false,
             line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
         });
     }
     for method in &mut unit.methods {
@@ -1668,6 +1725,7 @@ fn with_the_assertion_flag(unit: &Unit) -> Unit {
         name: ASSERTIONS_OFF.to_string(),
         value: None,
         line: 1,
+        annotations: Vec::new(),
     });
     held.static_setup.insert(
         0,
@@ -1754,6 +1812,10 @@ fn holds_an_assert(unit: &Unit) -> bool {
 /// The field an `assert` is guarded by, which the class initialiser works out
 /// once from what the runtime was asked for.
 const ASSERTIONS_OFF: &str = "$assertionsDisabled";
+
+/// Where a `switch` with patterns in it keeps what it is choosing on, so that
+/// every arm can test it and bind it without working it out again.
+const PATTERN_SUBJECT: &str = "$shape";
 
 /// The field a class written where it is used holds its enclosing instance in.
 const OUTER: &str = "$outer";
@@ -2082,6 +2144,10 @@ pub struct Modifiers {
     pub synchronized: bool,
     pub volatile: bool,
     pub transient: bool,
+    /// `sealed`, which is not an access flag. What it comes to in the class
+    /// file is the list of classes allowed to extend this one, and that list
+    /// is an attribute rather than a bit.
+    pub sealed: bool,
 }
 
 impl Modifiers {
@@ -2120,6 +2186,22 @@ impl Modifiers {
     }
 }
 
+/// One `@Something(...)` as it was written.
+///
+/// What it comes to in the class file depends on how long the annotation was
+/// meant to last: one kept for the runtime is written into the class file so
+/// that reflection can read it back, and one meant only for the compiler is
+/// read and dropped. Which is which is what `@Retention` on the annotation
+/// says.
+#[derive(Clone, Debug)]
+pub struct Annotated {
+    pub name: String,
+    /// `@Marked("x")` is the value called `value`; `@Marked(a = 1, b = 2)` is
+    /// two named ones.
+    pub values: Vec<(String, Expression)>,
+    pub line: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Field {
     pub modifiers: Modifiers,
@@ -2128,6 +2210,8 @@ pub struct Field {
     /// What was written on it, which runs in a constructor for an instance
     /// field and in the class initialiser for a static one.
     pub value: Option<Expression>,
+    /// What was written above it.
+    pub annotations: Vec<Annotated>,
     pub line: u32,
 }
 
@@ -2142,6 +2226,16 @@ pub struct Method {
     /// Written with `...` on the last parameter, so a call may leave the array
     /// unwritten and hand over the elements instead.
     pub variadic: bool,
+    /// Nobody wrote this one. A method that overrides one whose parameters or
+    /// return were generic has a second copy with the erased shape, so that a
+    /// call through the supertype reaches the override rather than the
+    /// original. It carries no code of its own beyond handing over.
+    pub bridge: bool,
+    /// What was written above it.
+    pub annotations: Vec<Annotated>,
+    /// `int order() default 0;` inside an `@interface`: what this element is
+    /// when nobody says otherwise.
+    pub default_value: Option<Expression>,
     pub line: u32,
 }
 
@@ -2182,6 +2276,16 @@ pub struct Unit {
     /// Its instance is held in a field, and a name this class cannot find is
     /// looked for there before it is refused.
     pub outer: Option<String>,
+    /// What a `sealed` type permits to extend it. Empty for everything else.
+    /// This is what `sealed` comes to in a class file: a list, checked by the
+    /// runtime rather than by the compiler alone.
+    pub permits: Vec<String>,
+    /// Written `@interface`. An annotation is an interface that extends
+    /// `java.lang.annotation.Annotation` and sets one more flag; the shape is
+    /// otherwise the same, which is why it is a flag here rather than a shape.
+    pub annotation: bool,
+    /// What was written above it.
+    pub annotations: Vec<Annotated>,
 }
 
 impl Unit {
@@ -2200,11 +2304,118 @@ impl Unit {
 pub struct Parser {
     tokens: Vec<Spelled>,
     at: usize,
+    /// The annotations read but not yet given to what they were written
+    /// above. `modifiers()` reads them because they may be written among the
+    /// modifiers, and what they belong to is only known afterwards.
+    held_annotations: Vec<Annotated>,
+    /// The type variables in scope, innermost frame last.
+    ///
+    /// Erasure happens here, where the name is read, rather than being carried
+    /// through the rest of the compiler. `<T extends Number> T pick()` is a
+    /// method returning `Number`, and `<T> T pick()` is one returning `Object`
+    /// -- that is all a type variable ever is once the class file is written,
+    /// and saying it once at the point the name is read means nothing further
+    /// in has to know type variables exist.
+    type_variables: Vec<Vec<(String, Written)>>,
 }
 
 impl Parser {
     pub fn new(tokens: Vec<Spelled>) -> Parser {
-        Parser { tokens, at: 0 }
+        Parser {
+            tokens,
+            at: 0,
+            held_annotations: Vec::new(),
+            type_variables: Vec::new(),
+        }
+    }
+
+    /// What a name stands for, where it is a type variable in scope.
+    fn erased(&self, name: &str) -> Option<Written> {
+        self.type_variables.iter().rev().find_map(|frame| {
+            frame
+                .iter()
+                .find(|(held, _)| held == name)
+                .map(|(_, bound)| bound.clone())
+        })
+    }
+
+    /// `<T>`, `<T extends Number>`, `<K, V extends Comparable<V> & Cloneable>`.
+    ///
+    /// Reads a declaration of type variables and puts them in scope. The bound
+    /// is read before the frame is pushed, so a variable cannot stand for
+    /// itself. Only the first bound counts: the class file records the erasure,
+    /// and the erasure of `A & B` is `A`.
+    fn push_type_parameters(&mut self) -> Result<bool, Diagnostic> {
+        if !self.is_mark("<") {
+            return Ok(false);
+        }
+        // A `<` here could still open type *arguments* rather than parameters
+        // in code the parser reaches by another road, so anything that is not
+        // a plain name gives up and skips, as before.
+        self.want_mark("<")?;
+        let mut frame = Vec::new();
+        loop {
+            let name = self.want_name()?;
+            let bound = if self.eat_word("extends") {
+                let first = self.written_type()?;
+                while self.eat_mark("&") {
+                    self.written_type()?;
+                }
+                first
+            } else {
+                Written::Named("Object".to_string())
+            };
+            frame.push((name, bound));
+            if self.eat_mark(",") {
+                continue;
+            }
+            break;
+        }
+        self.close_type_parameters()?;
+        self.type_variables.push(frame);
+        Ok(true)
+    }
+
+    /// The `>` at the end of a type parameter list, which the lexer may have
+    /// read as part of a shift.
+    fn close_type_parameters(&mut self) -> Result<(), Diagnostic> {
+        match self.here().token {
+            Token::Punctuation(">") => {
+                self.take();
+                Ok(())
+            }
+            Token::Punctuation(">>") => {
+                self.tokens[self.at].token = Token::Punctuation(">");
+                Ok(())
+            }
+            Token::Punctuation(">>>") => {
+                self.tokens[self.at].token = Token::Punctuation(">>");
+                Ok(())
+            }
+            _ => Err(at(
+                "EJ115",
+                self.line(),
+                self.column(),
+                "A type parameter list was opened and never closed.",
+            )),
+        }
+    }
+
+    fn pop_type_parameters(&mut self, pushed: bool) {
+        if pushed {
+            self.type_variables.pop();
+        }
+    }
+
+    /// The type a written one erases to, where it names a type variable.
+    fn erasing(&self, written: Written) -> Written {
+        match &written {
+            Written::Named(name) => match self.erased(name) {
+                Some(bound) => bound,
+                None => written,
+            },
+            _ => written,
+        }
     }
 
     fn here(&self) -> &Spelled {
@@ -2297,39 +2508,108 @@ impl Parser {
     /// reads them, and refusing `@Override` would refuse most real Java for no
     /// reason at all.
     fn skip_annotations(&mut self) -> Result<(), Diagnostic> {
-        while self.is_mark("@") {
+        // `@interface` declares an annotation; it is not one.
+        while self.is_mark("@") && !matches!(self.ahead(1), Token::Keyword("interface")) {
+            let line = self.line();
             self.take();
-            self.qualified()?;
+            let name = self.qualified()?;
+            let mut values = Vec::new();
             if self.is_mark("(") {
-                let mut depth = 0usize;
-                loop {
-                    if self.is_mark("(") {
-                        depth += 1;
-                    } else if self.is_mark(")") {
-                        depth -= 1;
-                        if depth == 0 {
-                            self.take();
+                self.take();
+                if !self.is_mark(")") {
+                    loop {
+                        // `@Marked("x")` is the one called `value`;
+                        // `@Marked(a = 1)` says which.
+                        let named = match (&self.here().token, self.ahead(1)) {
+                            (Token::Identifier(word), Token::Punctuation("=")) => {
+                                let held = word.clone();
+                                self.take();
+                                self.take();
+                                held
+                            }
+                            _ => "value".to_string(),
+                        };
+                        values.push((named, self.annotation_value()?));
+                        if !self.eat_mark(",") {
                             break;
                         }
-                    } else if matches!(self.here().token, Token::End) {
-                        return Err(at(
-                            "EJ102",
-                            self.line(),
-                            self.column(),
-                            "An annotation was opened and never closed.",
-                        ));
                     }
-                    self.take();
                 }
+                self.want_mark(")")?;
             }
+            self.held_annotations.push(Annotated { name, values, line });
         }
         Ok(())
+    }
+
+    /// What one element of an annotation was given.
+    ///
+    /// Constants, a class literal, the name of an enum constant, an
+    /// annotation, or an array of any of those -- which is everything an
+    /// annotation element can hold.
+    fn annotation_value(&mut self) -> Result<Expression, Diagnostic> {
+        if self.is_mark("{") {
+            let line = self.line();
+            self.take();
+            let mut held = Vec::new();
+            while !self.is_mark("}") {
+                held.push(self.annotation_value()?);
+                if !self.eat_mark(",") {
+                    break;
+                }
+            }
+            self.want_mark("}")?;
+            return Ok(Expression::ArrayOf {
+                of: None,
+                values: held,
+                line,
+            });
+        }
+        self.expression()
+    }
+
+    /// The annotations read since the last time they were taken.
+    fn take_annotations(&mut self) -> Vec<Annotated> {
+        std::mem::take(&mut self.held_annotations)
+    }
+
+    /// Whether the name here is the `sealed` of a sealed declaration rather
+    /// than something called `sealed`.
+    fn looks_like_sealed(&self) -> bool {
+        if !matches!(&self.here().token, Token::Identifier(word) if word == "sealed") {
+            return false;
+        }
+        // What follows a modifier is another modifier or the declaration
+        // itself. What follows a variable called `sealed` is a name.
+        matches!(self.ahead(1), Token::Keyword(_))
+            || matches!(self.ahead(1), Token::Identifier(word) if word == "record")
+    }
+
+    fn looks_like_non_sealed(&self) -> bool {
+        matches!(&self.here().token, Token::Identifier(word) if word == "non")
+            && matches!(self.ahead(1), Token::Punctuation("-"))
+            && matches!(self.ahead(2), Token::Identifier(word) if word == "sealed")
     }
 
     fn modifiers(&mut self) -> Result<Modifiers, Diagnostic> {
         let mut found = Modifiers::default();
         loop {
             self.skip_annotations()?;
+            // `sealed` and `non-sealed` are not keywords: Java kept them
+            // names so that code already using them still compiles, which
+            // means telling them apart from a type called `sealed` is a matter
+            // of what follows.
+            if self.looks_like_sealed() {
+                self.take();
+                found.sealed = true;
+                continue;
+            }
+            if self.looks_like_non_sealed() {
+                self.take();
+                self.take();
+                self.take();
+                continue;
+            }
             let word = match &self.here().token {
                 Token::Keyword(word) => *word,
                 _ => break,
@@ -2353,7 +2633,12 @@ impl Parser {
                 }
                 "volatile" => found.volatile = true,
                 "transient" => found.transient = true,
-                "native" | "strictfp" => {
+                // `strictfp` said that floating point had to be exactly the
+                // same everywhere. Since Java 17 it always is, so the word is
+                // read and nothing is recorded -- which is what a class file
+                // of this version says either way.
+                "strictfp" => {}
+                "native" => {
                     return Err(unsupported(
                         self.line(),
                         self.column(),
@@ -2411,7 +2696,7 @@ impl Parser {
         // before it does exactly the same thing.
         self.skip_type_arguments()?;
 
-        let mut found = base;
+        let mut found = self.erasing(base);
         while self.is_mark("[") && matches!(self.ahead(1), Token::Punctuation("]")) {
             self.take();
             self.take();
@@ -2438,6 +2723,45 @@ impl Parser {
                         continue;
                     }
                     break;
+                }
+                // `List<String> words` is a declaration and `a < b > c` is
+                // not, and nothing but what follows tells them apart. The
+                // arguments are stepped over, balanced, and what is on the
+                // other side decides.
+                if matches!(self.ahead(ahead), Token::Punctuation("<")) {
+                    let mut depth = 0usize;
+                    loop {
+                        match self.ahead(ahead) {
+                            Token::Punctuation("<") => depth += 1,
+                            Token::Punctuation(">") => depth -= 1,
+                            Token::Punctuation(">>") => {
+                                if depth < 2 {
+                                    return false;
+                                }
+                                depth -= 2;
+                            }
+                            Token::Punctuation(">>>") => {
+                                if depth < 3 {
+                                    return false;
+                                }
+                                depth -= 3;
+                            }
+                            // Nothing a type argument list holds, so this was
+                            // a comparison after all.
+                            Token::Identifier(_)
+                            | Token::Punctuation(".")
+                            | Token::Punctuation(",")
+                            | Token::Punctuation("?")
+                            | Token::Punctuation("[")
+                            | Token::Punctuation("]")
+                            | Token::Keyword(_) => {}
+                            _ => return false,
+                        }
+                        ahead += 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
                 }
                 // Then any number of `[]`.
                 while matches!(self.ahead(ahead), Token::Punctuation("["))
@@ -2512,11 +2836,18 @@ impl Parser {
     ) -> Result<Unit, Diagnostic> {
         self.skip_annotations()?;
         let modifiers = self.modifiers()?;
+        let annotations = self.take_annotations();
         // `record` is not a keyword: Java kept it a name so that code already
         // using it still compiles. It is a declaration only when a name and a
         // parameter list follow it.
         let is_record = matches!(&self.here().token, Token::Identifier(word) if word == "record")
             && matches!(self.ahead(1), Token::Identifier(_));
+        // `@interface Marked { ... }`: an interface that extends
+        // `java.lang.annotation.Annotation`, with one more flag on it.
+        let annotation = self.is_mark("@") && matches!(self.ahead(1), Token::Keyword("interface"));
+        if annotation {
+            self.take();
+        }
         let shape = if self.eat_word("interface") {
             Shape::Interface
         } else if self.eat_word("class") {
@@ -2548,9 +2879,12 @@ impl Parser {
             Some(holder) => format!("{holder}${}", self.want_name()?),
             None => self.want_name()?,
         };
-        self.skip_type_arguments()?;
+        // `class Box<T>`: the type variables stay in scope for the whole body,
+        // which is what makes `T get()` inside it mean `Object get()`.
+        let pushed = self.push_type_parameters()?;
 
         // A record says what it holds in front of everything else.
+        let mut permits: Vec<String> = Vec::new();
         let components = if shape == Shape::Record {
             self.parameters_and_shape()?.0
         } else {
@@ -2579,6 +2913,19 @@ impl Parser {
         if self.eat_word("implements") {
             loop {
                 implements.push(self.qualified()?);
+                self.skip_type_arguments()?;
+                if !self.eat_mark(",") {
+                    break;
+                }
+            }
+        }
+
+        // `permits A, B`: who is allowed to extend a sealed type. Like
+        // `sealed` itself this is a name rather than a keyword.
+        if matches!(&self.here().token, Token::Identifier(word) if word == "permits") {
+            self.take();
+            loop {
+                permits.push(self.qualified()?);
                 self.skip_type_arguments()?;
                 if !self.eat_mark(",") {
                     break;
@@ -2651,6 +2998,8 @@ impl Parser {
         }
         self.want_mark("}")?;
 
+        self.pop_type_parameters(pushed);
+
         let unit = Unit {
             shape,
             package: package.clone(),
@@ -2664,6 +3013,9 @@ impl Parser {
             instance_setup,
             static_setup,
             outer: None,
+            permits,
+            annotation,
+            annotations,
         };
         if shape == Shape::Enum {
             return Ok(as_the_class_it_is(unit, &constants));
@@ -2701,9 +3053,14 @@ impl Parser {
         let began = self.at;
         self.skip_annotations()?;
         let mut modifiers = self.modifiers()?;
-        if shape == Shape::Interface {
-            // Every member of an interface is public; a field of one is a
-            // constant. Java lets all of that go unwritten, and most code does.
+        let annotations = self.take_annotations();
+        if shape == Shape::Interface && !modifiers.private {
+            // Every member of an interface is public unless it says otherwise;
+            // a field of one is a constant. Java lets all of that go unwritten,
+            // and most code does. A `private` method of an interface -- which
+            // exists so a `default` one has somewhere to put its working -- is
+            // the exception, and a class file naming a method both public and
+            // private is one the JVM refuses to load.
             modifiers.public = true;
         }
 
@@ -2754,13 +3111,16 @@ impl Parser {
                 constructor: true,
                 variadic,
                 line,
+                bridge: false,
+                annotations,
+                default_value: None,
             });
             return Ok(());
         }
 
         // `<T> void f(...)`: the method's own type parameters, erased like
-        // every other one.
-        self.skip_type_arguments()?;
+        // every other one, and in scope until the body ends.
+        let pushed = self.push_type_parameters()?;
 
         let what = self.written_type()?;
         let name = self.want_name()?;
@@ -2768,7 +3128,19 @@ impl Parser {
         if self.is_mark("(") {
             let (parameters, variadic) = self.parameters_and_shape()?;
             self.throws()?;
-            let body = self.method_body()?;
+            // `int order() default 0;` inside an `@interface`.
+            let default_value = if self.eat_word("default") {
+                let held = self.annotation_value()?;
+                self.want_mark(";")?;
+                Some(held)
+            } else {
+                None
+            };
+            let body = if default_value.is_some() {
+                None
+            } else {
+                self.method_body()?
+            };
             // A method of an interface with no body is abstract; anywhere
             // else, a method with no body is a mistake.
             if body.is_none() && !modifiers.abstract_ && shape != Shape::Interface {
@@ -2779,6 +3151,7 @@ impl Parser {
                     format!("`{name}` has no body and is not abstract."),
                 ));
             }
+            self.pop_type_parameters(pushed);
             methods.push(Method {
                 modifiers,
                 returns: what,
@@ -2788,9 +3161,13 @@ impl Parser {
                 constructor: false,
                 variadic,
                 line,
+                bridge: false,
+                annotations,
+                default_value,
             });
             return Ok(());
         }
+        self.pop_type_parameters(pushed);
 
         // One or more fields, each possibly with a value, separated by commas.
         let mut declared = Vec::new();
@@ -2828,6 +3205,7 @@ impl Parser {
                 name,
                 value,
                 line,
+                annotations: annotations.clone(),
             });
         }
         Ok(())
@@ -3189,13 +3567,25 @@ impl Parser {
             let (arm_line, arm_column) = (self.line(), self.column());
 
             let mut labels = Vec::new();
+            let mut pattern = None;
+            let mut guard = None;
             if self.eat_word("default") {
                 // `default` takes no value, and `case a, b:` takes several.
             } else if self.eat_word("case") {
-                loop {
-                    labels.push(self.case_label()?);
-                    if !self.eat_mark(",") {
-                        break;
+                if self.looks_like_a_type_pattern() {
+                    let what = self.written_type()?;
+                    let bound = self.want_name()?;
+                    pattern = Some((what, bound));
+                    if matches!(&self.here().token, Token::Identifier(word) if word == "when") {
+                        self.take();
+                        guard = Some(self.expression()?);
+                    }
+                } else {
+                    loop {
+                        labels.push(self.case_label()?);
+                        if !self.eat_mark(",") {
+                            break;
+                        }
                     }
                 }
             } else {
@@ -3256,6 +3646,8 @@ impl Parser {
 
             arms.push(Arm {
                 labels,
+                pattern,
+                guard,
                 arrow,
                 body,
                 line: arm_line,
@@ -3264,7 +3656,12 @@ impl Parser {
         }
         self.want_mark("}")?;
 
-        if arms.iter().filter(|arm| arm.labels.is_empty()).count() > 1 {
+        if arms
+            .iter()
+            .filter(|arm| arm.labels.is_empty() && arm.pattern.is_none())
+            .count()
+            > 1
+        {
             return Err(at(
                 "EJ113",
                 line,
@@ -3274,6 +3671,54 @@ impl Parser {
         }
 
         Ok(Statement::Switch { subject, arms })
+    }
+
+    /// Whether what follows `case` is a type and a name rather than a
+    /// constant.
+    ///
+    /// `case String s` and `case Integer i` are patterns; `case RED` is a
+    /// constant. Told apart by what comes after: a pattern is a type followed
+    /// by a name, and a constant is a name followed by the end of the label.
+    fn looks_like_a_type_pattern(&self) -> bool {
+        let mut at;
+        // A primitive type is a pattern in Java 25 too, and it is one token.
+        if matches!(self.ahead(0), Token::Keyword(word) if Written::of_keyword(word).is_some()) {
+            at = 1;
+        } else {
+            if !matches!(self.ahead(0), Token::Identifier(_)) {
+                return false;
+            }
+            at = 1;
+            while matches!(self.ahead(at), Token::Punctuation("."))
+                && matches!(self.ahead(at + 1), Token::Identifier(_))
+            {
+                at += 2;
+            }
+            // A type argument list, balanced, which changes nothing but has to
+            // be stepped over to see what follows.
+            if matches!(self.ahead(at), Token::Punctuation("<")) {
+                let mut depth = 0usize;
+                loop {
+                    match self.ahead(at) {
+                        Token::Punctuation("<") => depth += 1,
+                        Token::Punctuation(">") => depth -= 1,
+                        Token::Punctuation(">>") => depth = depth.saturating_sub(2),
+                        Token::End => return false,
+                        _ => {}
+                    }
+                    at += 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        while matches!(self.ahead(at), Token::Punctuation("["))
+            && matches!(self.ahead(at + 1), Token::Punctuation("]"))
+        {
+            at += 2;
+        }
+        matches!(self.ahead(at), Token::Identifier(_))
     }
 
     /// What a `case` answers to: a number, a character, a string, or the name
@@ -3293,6 +3738,9 @@ impl Parser {
             Token::True => Expression::Boolean(true),
             Token::False => Expression::Boolean(false),
             Token::Identifier(name) => Expression::Name(name),
+            // `case null` is the one value no type test matches, and the only
+            // way a `switch` over patterns can answer for it.
+            Token::Null => Expression::Null,
             other => {
                 return Err(at(
                     "EJ239",
@@ -3750,6 +4198,19 @@ impl Parser {
                     };
                     continue;
                 }
+                // `held.new Inner()`: the instance the new one belongs to,
+                // written rather than left to be whichever one is here.
+                if self.is_word("new") {
+                    self.take();
+                    let what = self.type_name_only()?;
+                    let arguments = self.arguments()?;
+                    found = Expression::New {
+                        what,
+                        arguments,
+                        outer: Some(Box::new(found)),
+                    };
+                    continue;
+                }
                 let name = self.want_name()?;
                 if self.is_mark("(") {
                     let arguments = self.arguments()?;
@@ -3812,7 +4273,7 @@ impl Parser {
             _ => Written::Named(self.qualified()?),
         };
         self.skip_type_arguments()?;
-        Ok(base)
+        Ok(self.erasing(base))
     }
 
     /// `{ a, b, c }`, with a trailing comma allowed because Java allows one.
@@ -4111,7 +4572,11 @@ impl Parser {
                     column,
                 });
             }
-            return Ok(Expression::New { what, arguments });
+            return Ok(Expression::New {
+                what,
+                arguments,
+                outer: None,
+            });
         }
 
         match self.take() {
@@ -4223,7 +4688,16 @@ impl Type {
         match self {
             Type::Object(name) => name.replace('/', "."),
             Type::Array(of) => format!("{}[]", of.readable()),
-            other => other.descriptor(),
+            // A refusal is read by a person, and `B` is not what they wrote.
+            Type::Void => "void".to_string(),
+            Type::Boolean => "boolean".to_string(),
+            Type::Byte => "byte".to_string(),
+            Type::Short => "short".to_string(),
+            Type::Char => "char".to_string(),
+            Type::Int => "int".to_string(),
+            Type::Long => "long".to_string(),
+            Type::Float => "float".to_string(),
+            Type::Double => "double".to_string(),
         }
     }
 
@@ -4308,6 +4782,10 @@ pub struct Signature {
     /// Whether the last parameter was written with `...`, which means a call
     /// may hand over the elements instead of the array.
     pub variadic: bool,
+    /// Whether it has no body. An interface with a `default` method and a
+    /// `private` one still has exactly one method a lambda can be, and this is
+    /// what tells them apart.
+    pub abstract_: bool,
 }
 
 impl Signature {
@@ -4344,6 +4822,10 @@ pub struct KnownClass {
     /// The class an instance of this one belongs to, for a class written
     /// inside another without `static`.
     pub outer: Option<String>,
+    /// Written `@interface` and marked `@Retention(RUNTIME)`, which is what
+    /// decides whether an annotation of this type is written into the class
+    /// files that carry it or read and dropped.
+    pub kept_at_runtime: bool,
 }
 
 impl Classpath {
@@ -4371,6 +4853,7 @@ impl Classpath {
                 }),
                 interface: unit.shape == Shape::Interface,
                 outer: unit.outer.clone(),
+                kept_at_runtime: kept_at_runtime(unit),
                 ..KnownClass::default()
             },
         );
@@ -4392,6 +4875,7 @@ impl Classpath {
                 superclass: Some("java/lang/Object".to_string()),
                 interface: unit.shape == Shape::Interface,
                 outer: unit.outer.clone(),
+                kept_at_runtime: kept_at_runtime(unit),
                 ..KnownClass::default()
             },
         };
@@ -4445,7 +4929,8 @@ impl Classpath {
                 returns,
                 static_: method.modifiers.static_,
                 interface: unit.shape == Shape::Interface,
-                variadic: false,
+                variadic: method.variadic,
+                abstract_: method.body.is_none(),
             });
         }
         self.known.insert(internal, known);
@@ -4481,6 +4966,7 @@ impl Classpath {
                 // ACC_VARARGS, which is the only record a class file keeps of
                 // the `...` somebody wrote.
                 variadic: method.access_flags & 0x0080 != 0,
+                abstract_: method.access_flags & 0x0400 != 0,
             });
         }
         for field in &class.fields {
@@ -4870,6 +5356,17 @@ impl Verified {
     }
 }
 
+/// Something that has to run before control leaves where it is.
+///
+/// A `finally` is the obvious one. A `synchronized` block is the other: the
+/// lock has to be given back on every road out, and the JVM refuses a method
+/// that returns while still holding one.
+#[derive(Clone, Debug)]
+enum Cleanup {
+    Block(Vec<Positioned<Statement>>),
+    Unlock(u16, Type),
+}
+
 /// One loop or switch, and where the jumps out of it are waiting to be told
 /// where they land.
 struct Level {
@@ -4936,7 +5433,7 @@ struct Emitter<'a> {
     /// The `finally` bodies that have to run before control leaves where it
     /// is, innermost last. A `return`, a `break` or a `continue` that jumps
     /// past one of these runs it on the way out.
-    finallys: Vec<Vec<Positioned<Statement>>>,
+    finallys: Vec<Cleanup>,
     /// The exception table this method comes to.
     handlers: Vec<Handler>,
     /// Every stretch of code that is an inlined `finally`, and the outermost
@@ -5631,6 +6128,42 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Character", "isWhitespace", "(C)Z", true),
     ("java/lang/Character", "toUpperCase", "(C)C", true),
     ("java/lang/Character", "toLowerCase", "(C)C", true),
+    // Every box is a Number, and asking a Number for a number is what code
+    // written against `? extends Number` does.
+    ("java/lang/Number", "intValue", "()I", false),
+    ("java/lang/Number", "longValue", "()J", false),
+    ("java/lang/Number", "floatValue", "()F", false),
+    ("java/lang/Number", "doubleValue", "()D", false),
+    ("java/lang/Number", "byteValue", "()B", false),
+    ("java/lang/Number", "shortValue", "()S", false),
+    ("java/lang/Integer", "compare", "(II)I", true),
+    (
+        "java/lang/Integer",
+        "compareTo",
+        "(Ljava/lang/Integer;)I",
+        false,
+    ),
+    ("java/lang/Integer", "doubleValue", "()D", false),
+    ("java/lang/Integer", "longValue", "()J", false),
+    ("java/lang/Long", "compare", "(JJ)I", true),
+    ("java/lang/Long", "intValue", "()I", false),
+    ("java/lang/Long", "doubleValue", "()D", false),
+    ("java/lang/Double", "compare", "(DD)I", true),
+    ("java/lang/Double", "intValue", "()I", false),
+    ("java/lang/Double", "isNaN", "()Z", false),
+    ("java/lang/Float", "doubleValue", "()D", false),
+    (
+        "java/lang/Boolean",
+        "toString",
+        "(Z)Ljava/lang/String;",
+        true,
+    ),
+    (
+        "java/lang/Character",
+        "toString",
+        "(C)Ljava/lang/String;",
+        true,
+    ),
     // -- arithmetic
     ("java/lang/Math", "abs", "(I)I", true),
     ("java/lang/Math", "abs", "(J)J", true),
@@ -6033,6 +6566,7 @@ const BUILT_IN_VARIADIC: &[(&str, &str)] = &[
 /// class file that verifies and then fails to link on the device.
 const BUILT_IN_INTERFACES: &[&str] = &[
     "android/view/View$OnClickListener",
+    "java/lang/annotation/Annotation",
     "java/lang/Runnable",
     "java/lang/CharSequence",
     "java/lang/Iterable",
@@ -6111,6 +6645,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             static_: false,
             interface: false,
             variadic: false,
+            abstract_: false,
         }];
     }
     // Everything that can be thrown answers Throwable's methods, everything
@@ -6149,6 +6684,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
                 static_: *static_,
                 interface: BUILT_IN_INTERFACES.contains(class),
                 variadic: BUILT_IN_VARIADIC.contains(&(*class, *held_name)),
+                abstract_: BUILT_IN_INTERFACES.contains(class),
             });
         }
         if !found.is_empty() {
@@ -6259,6 +6795,7 @@ fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<Strin
 const WELL_KNOWN: &[&str] = &[
     "java/lang/Object",
     "java/lang/String",
+    "java/lang/annotation/Annotation",
     "java/lang/Enum",
     "java/lang/Record",
     "java/lang/Runnable",
@@ -6954,7 +7491,11 @@ impl Emitter<'_> {
                 Ok(Type::Object("java/lang/Class".to_string()))
             }
             Expression::OuterThis { of, line: written } => self.outer_this(of, *written),
-            Expression::New { what, arguments } => self.new_object(what, arguments, line),
+            Expression::New {
+                what,
+                arguments,
+                outer,
+            } => self.new_object(what, arguments, outer.as_deref(), line),
             Expression::Call {
                 on,
                 super_call,
@@ -7053,6 +7594,13 @@ impl Emitter<'_> {
                 return Ok(what);
             }
         }
+        // A class written inside another with `static` holds no instance of it
+        // and can still read what it holds statically -- which is what makes
+        // `private static` a thing the whole file shares. The classes it is
+        // written inside are what its own name says, from the innermost out.
+        if let Some(what) = self.read_from_a_holder(name, line)? {
+            return Ok(what);
+        }
 
         Err(at(
             "EJ211",
@@ -7121,24 +7669,21 @@ impl Emitter<'_> {
             ));
         };
         let (holder, what, static_) = (holder.name.clone(), what.clone(), *static_);
-        if wanted {
-            return Err(unsupported(
-                line,
-                1,
-                "Using the value of an assignment into the class around this one",
-            ));
-        }
-        if operator.is_some() {
-            return Err(unsupported(
-                line,
-                1,
-                "A compound assignment into the class around this one",
-            ));
-        }
+        // The object the field belongs to goes on first, because that is the
+        // order `putfield` wants. Working the value out may reach the same
+        // instance again for its own reasons; that is a second road to the
+        // same object and costs one field read.
         if !static_ {
             self.reach_the_enclosing_instance(enclosing)?;
         }
-        let found = self.value_for(value, &what, line)?;
+        let found = match operator {
+            None => self.value_for(value, &what, line)?,
+            // `x += 1` is `x = x + 1`, and reading `x` here is the same road
+            // as reading it anywhere else in this class.
+            Some(operator) => {
+                self.binary(operator, &Expression::Name(name.to_string()), value, line)?
+            }
+        };
         if !self.fit(&found, &what, line)? {
             return Err(at(
                 "EJ228",
@@ -7151,6 +7696,17 @@ impl Emitter<'_> {
                 ),
             ));
         }
+        // `c = (a = b)` keeps the value. It is put in a slot and read back
+        // rather than shuffled under the object on the stack: `dup_x1` says
+        // it in one instruction and Dalvik, which is a register machine, has
+        // no instruction for it at all.
+        self.open();
+        let held = wanted.then(|| {
+            let slot = self.declare("$assigned", what.clone());
+            self.store(slot, &what);
+            self.load(slot, &what);
+            slot
+        });
         let descriptor = what.descriptor();
         let index = self.pool.field(&holder, name, &descriptor);
         if static_ {
@@ -7160,7 +7716,51 @@ impl Emitter<'_> {
             self.op2(0xb5, index);
             self.pops(i32::from(what.width()) + 1);
         }
+        if let Some(slot) = held {
+            self.load(slot, &what);
+        }
+        self.close();
         Ok(what)
+    }
+
+    /// A static field of one of the classes this one is written inside.
+    ///
+    /// `class Outer { private static int held; static class Inner { int f() {
+    /// return held; } } }` is ordinary Java: what a class holds privately is
+    /// held privately from the outside, not from the classes written in it.
+    /// Which classes those are is what this one's own name says -- `A$B$C` is
+    /// written inside `A$B`, which is written inside `A`.
+    /// The classes this one is written inside, innermost first.
+    ///
+    /// `A$B$C` is written inside `A$B`, which is written inside `A`. The name
+    /// says it, so nothing has to be carried alongside.
+    fn holders(&self) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut holder = self.this_class.as_str();
+        while let Some((outside, _)) = holder.rsplit_once('$') {
+            found.push(outside.to_string());
+            holder = outside;
+        }
+        found
+    }
+
+    fn read_from_a_holder(&mut self, name: &str, line: u32) -> Result<Option<Type>, Diagnostic> {
+        let _ = line;
+        for holder in self.holders() {
+            let Some((known, (_, what, static_))) = self.classpath.find_field(&holder, name) else {
+                continue;
+            };
+            if !*static_ {
+                continue;
+            }
+            let (owner, what) = (known.name.clone(), what.clone());
+            let descriptor = what.descriptor();
+            let index = self.pool.field(&owner, name, &descriptor);
+            self.op2(0xb2, index);
+            self.pushes(&what);
+            return Ok(Some(what));
+        }
+        Ok(None)
     }
 
     /// Puts the instance of the class this one was written inside on the
@@ -7382,6 +7982,25 @@ impl Emitter<'_> {
 
         // Both sides are promoted to one type before the operator sees them.
         let right_peeked = self.peek_type(right, line)?;
+
+        // A box where a number is wanted comes out of its box first. Java does
+        // this for every operator that is about numbers, which is all of them
+        // except `==` and `!=` between two references -- where the question
+        // really is whether they are the same object.
+        let wants_numbers = !matches!(operator, Binary::Equal | Binary::NotEqual)
+            || !(left_type.is_reference() && right_peeked.is_reference());
+        let left_type = match primitive_inside(&left_type) {
+            Some(inside) if wants_numbers => {
+                self.box_or_unbox(&left_type, &inside);
+                inside
+            }
+            _ => left_type,
+        };
+        let right_peeked = match primitive_inside(&right_peeked) {
+            Some(inside) if wants_numbers => inside,
+            _ => right_peeked,
+        };
+
         let common = if left_type.is_reference() || right_peeked.is_reference() {
             left_type.clone()
         } else {
@@ -7402,6 +8021,13 @@ impl Emitter<'_> {
             self.convert(&left_type, &common, line)?;
         }
         let right_type = self.value(right, line)?;
+        let right_type = match primitive_inside(&right_type) {
+            Some(inside) if wants_numbers => {
+                self.box_or_unbox(&right_type, &inside);
+                inside
+            }
+            _ => right_type,
+        };
         if !right_type.is_reference() {
             self.convert(&right_type, &common, line)?;
         }
@@ -7609,6 +8235,7 @@ impl Emitter<'_> {
         &mut self,
         what: &Written,
         arguments: &[Expression],
+        outer: Option<&Expression>,
         line: u32,
     ) -> Result<Type, Diagnostic> {
         let target = self.resolve(what, line)?;
@@ -7635,9 +8262,24 @@ impl Emitter<'_> {
             .get(&class)
             .and_then(|known| known.outer.clone());
         if let Some(enclosing) = &belongs {
-            // In a static method there is no instance here, and slot zero
-            // holds the first parameter rather than `this`.
-            if self.this_class == *enclosing && !self.static_ {
+            // `held.new Inner()` says which instance it belongs to, so nothing
+            // has to be worked out.
+            if let Some(written) = outer {
+                let found = self.value(written, line)?;
+                if !found.is_reference() {
+                    return Err(at(
+                        "EJ252",
+                        line,
+                        1,
+                        format!(
+                            "`new` on an instance wants an object, and a {} is not one.",
+                            found.readable()
+                        ),
+                    ));
+                }
+            } else if self.this_class == *enclosing && !self.static_ {
+                // In a static method there is no instance here, and slot zero
+                // holds the first parameter rather than `this`.
                 self.load(0, &Type::Object(self.this_class.clone()));
             } else if !self.static_ && self.unit.outer.as_deref() == Some(enclosing.as_str()) {
                 self.reach_the_enclosing_instance(enclosing)?;
@@ -7963,6 +8605,7 @@ impl Emitter<'_> {
                 static_: own.modifiers.static_,
                 interface: false,
                 variadic: false,
+                abstract_: false,
             }
             .descriptor();
 
@@ -7979,9 +8622,32 @@ impl Emitter<'_> {
             }
             self.arguments_for(&parameters, arguments, line)?;
             let owner = self.this_class.clone();
-            let index = self.pool.method(&owner, name, &descriptor, false);
-            self.op2(if own.modifiers.static_ { 0xb8 } else { 0xb6 }, index);
+            let inside_an_interface = self.unit.shape == Shape::Interface;
+            let index = self
+                .pool
+                .method(&owner, name, &descriptor, inside_an_interface);
+            // A method of an interface is not `invokevirtual`. A `private` one
+            // is `invokespecial`, because it cannot be overridden and there is
+            // nothing to look up; everything else is `invokeinterface`.
+            let opcode = match (
+                own.modifiers.static_,
+                inside_an_interface,
+                own.modifiers.private,
+            ) {
+                (true, _, _) => 0xb8u8,
+                (false, true, true) => 0xb7,
+                (false, true, false) => 0xb9,
+                (false, false, _) => 0xb6,
+            };
             let taken: i32 = parameters.iter().map(|p| i32::from(p.width())).sum();
+            if opcode == 0xb9 {
+                self.code.push(0xb9);
+                self.code.extend_from_slice(&index.to_be_bytes());
+                self.code.push((taken + 1) as u8);
+                self.code.push(0);
+            } else {
+                self.op2(opcode, index);
+            }
             let popped = taken + i32::from(!own.modifiers.static_);
             self.pops(popped);
             self.pushes(&returns);
@@ -8013,7 +8679,12 @@ impl Emitter<'_> {
                 }
                 self.arguments_for_signature(&signature, arguments, line)?;
                 let descriptor = signature.descriptor();
-                let index = self.pool.method(&signature.owner, name, &descriptor, false);
+                // A `static` method of an interface is still a method of an
+                // interface, and the constant pool has a different entry for
+                // those. The JVM checks, and says so by name.
+                let index =
+                    self.pool
+                        .method(&signature.owner, name, &descriptor, signature.interface);
                 self.op2(0xb8, index);
                 let taken: i32 = signature
                     .parameters
@@ -8087,6 +8758,24 @@ impl Emitter<'_> {
         {
             let values = values.clone();
             return self.array_of(wanted, &values, *written);
+        }
+        // `byte small = 1;` and `char c = 65;`. Java narrows a constant on the
+        // way into a smaller type, without a cast, as long as it fits -- which
+        // is why nobody writes `(byte) 1`. Whether it fits is known here and
+        // nowhere later, because by the time the value is on the stack it is
+        // an int like any other.
+        if matches!(wanted, Type::Byte | Type::Short | Type::Char) {
+            if let Some(value) = constant_int(expression) {
+                let fits = match wanted {
+                    Type::Byte => (-128..=127).contains(&value),
+                    Type::Short => (-32768..=32767).contains(&value),
+                    _ => (0..=65535).contains(&value),
+                };
+                if fits {
+                    self.push_int(i64::from(value));
+                    return Ok(wanted.clone());
+                }
+            }
         }
         self.expecting = Some(wanted.clone());
         let found = self.value(expression, line);
@@ -8181,18 +8870,26 @@ impl Emitter<'_> {
         }
 
         // An exact match first, because `println(1)` means the int one even
-        // though an int can be widened to a long.
-        for exact in [true, false] {
+        // though an int can be widened to a long. Then one that fits without
+        // boxing, and only then one that fits at all -- `append(Integer)` is
+        // `append(Object)` and not `append(String)`, and picking the wrong one
+        // is a class file the verifier throws out.
+        for round in 0..3 {
             for candidate in &candidates {
                 let fits = candidate
                     .parameters
                     .iter()
                     .zip(given.iter())
-                    .all(|(want, have)| {
-                        if exact {
-                            want == have
-                        } else {
-                            have.may_be_given_to(want)
+                    .all(|(want, have)| match round {
+                        0 => want == have,
+                        1 => self.reaches(have, want),
+                        _ => {
+                            self.reaches(have, want)
+                                || boxed_name(have)
+                                    .map(|boxed| Type::Object(boxed.to_string()))
+                                    .is_some_and(|boxed| self.reaches(&boxed, want))
+                                || primitive_inside(have)
+                                    .is_some_and(|inside| inside.may_be_given_to(want))
                         }
                     });
                 if fits {
@@ -8201,6 +8898,55 @@ impl Emitter<'_> {
             }
         }
         Ok(candidates.into_iter().next())
+    }
+
+    /// Whether a value of one type may be handed where another is wanted,
+    /// asking the classpath about classes rather than waving every reference
+    /// through.
+    ///
+    /// `Type::may_be_given_to` says any reference fits any reference, because a
+    /// `Type` on its own has no way to know better. Here there is one: the
+    /// classpath knows what a class extends. Where it does not know a class at
+    /// all -- one of the built-in names, say -- the old answer stands, because
+    /// refusing what cannot be checked would refuse working code.
+    fn reaches(&self, have: &Type, want: &Type) -> bool {
+        let (Type::Object(from), Type::Object(to)) = (have, want) else {
+            return have.may_be_given_to(want);
+        };
+        if from == to || to == "java/lang/Object" {
+            return true;
+        }
+        // Everything above it, as far as anything here can see. A class the
+        // classpath has never heard of has one ancestor -- itself -- and the
+        // built-in table is asked for the rest.
+        if self.classpath.ancestors(from).iter().any(|one| one == to) {
+            return true;
+        }
+        let mut at = Some(from.as_str());
+        let mut steps = 0;
+        while let Some(current) = at {
+            if current == to {
+                return true;
+            }
+            steps += 1;
+            if steps > 32 {
+                break;
+            }
+            at = BUILT_IN_ABOVE
+                .iter()
+                .find(|(below, _)| *below == current)
+                .map(|(_, above)| *above);
+        }
+        if let Some(known) = self.classpath.get(from) {
+            if known.interface {
+                return false;
+            }
+        }
+        // Neither side is anything this compilation was told about, so the
+        // question cannot be answered and the older, looser answer stands.
+        self.classpath.get(from).is_none()
+            && self.classpath.get(to).is_none()
+            && !BUILT_IN_ABOVE.iter().any(|(below, _)| *below == from)
     }
 
     /// Every signature of this name and shape that could be meant.
@@ -8246,6 +8992,7 @@ impl Emitter<'_> {
                     static_: *static_,
                     interface: BUILT_IN_INTERFACES.contains(class),
                     variadic: true,
+                    abstract_: BUILT_IN_INTERFACES.contains(class),
                 });
             }
             if !found.is_empty() {
@@ -8291,6 +9038,67 @@ impl Emitter<'_> {
              a call written against a method nobody has seen would be a class file the \
              device refuses.",
         )
+    }
+
+    /// Writes into a field of the class being compiled.
+    ///
+    /// `read` is how the field is read back for a compound assignment, which
+    /// is not always its name: `this.x += 1` where a parameter is also called
+    /// `x` has to read the field.
+    #[allow(clippy::too_many_arguments)]
+    fn assign_to_own_field(
+        &mut self,
+        field: &Field,
+        name: &str,
+        operator: Option<Binary>,
+        value: &Expression,
+        read: &Expression,
+        line: u32,
+        wanted: bool,
+    ) -> Result<Type, Diagnostic> {
+        let what = self.resolve(&field.what, line)?;
+        let owner = self.this_class.clone();
+        if !field.modifiers.static_ {
+            if self.static_ {
+                return Err(at(
+                    "EJ210",
+                    line,
+                    1,
+                    format!("`{name}` belongs to an instance and this method is static."),
+                ));
+            }
+            self.load(0, &Type::Object(owner.clone()));
+        }
+        let found = match operator {
+            None => self.value_for(value, &what, line)?,
+            Some(operator) => self.binary(operator, read, value, line)?,
+        };
+        if !self.fit(&found, &what, line)? {
+            return Err(at(
+                "EJ228",
+                line,
+                1,
+                format!(
+                    "A {} cannot be put in `{name}`, which is a {}.",
+                    found.readable(),
+                    what.readable()
+                ),
+            ));
+        }
+        if wanted {
+            self.op(if what.width() == 2 { 0x5c } else { 0x59 });
+            self.pushes(&what);
+        }
+        let descriptor = what.descriptor();
+        let index = self.pool.field(&owner, name, &descriptor);
+        if field.modifiers.static_ {
+            self.op2(0xb3, index);
+            self.pops(i32::from(what.width()));
+        } else {
+            self.op2(0xb5, index);
+            self.pops(i32::from(what.width()) + 1);
+        }
+        Ok(what)
     }
 
     /// An assignment. `wanted` says whether the value has to be left behind,
@@ -8348,6 +9156,19 @@ impl Emitter<'_> {
                             );
                         }
                     }
+                    // And one written inside another with `static` can write
+                    // what that one holds statically.
+                    for holder in self.holders() {
+                        let held = self
+                            .classpath
+                            .find_field(&holder, name)
+                            .map(|(_, (_, _, static_))| *static_);
+                        if held == Some(true) {
+                            return self.assign_through_the_enclosing_instance(
+                                &holder, name, operator, value, line, wanted,
+                            );
+                        }
+                    }
                     return Err(at(
                         "EJ229",
                         line,
@@ -8355,64 +9176,31 @@ impl Emitter<'_> {
                         format!("`{name}` is nothing that can be assigned to."),
                     ));
                 };
-                let what = self.resolve(&field.what, line)?;
-                let owner = self.this_class.clone();
-                if !field.modifiers.static_ {
-                    if self.static_ {
-                        return Err(at(
-                            "EJ210",
-                            line,
-                            1,
-                            format!("`{name}` belongs to an instance and this method is static."),
-                        ));
-                    }
-                    self.load(0, &Type::Object(owner.clone()));
-                }
-                let found = match operator {
-                    None => self.value_for(value, &what, line)?,
-                    Some(operator) => {
-                        self.binary(operator, &Expression::Name(name.clone()), value, line)?
-                    }
-                };
-                if !self.fit(&found, &what, line)? {
-                    return Err(at(
-                        "EJ228",
-                        line,
-                        1,
-                        format!(
-                            "A {} cannot be put in `{name}`, which is a {}.",
-                            found.readable(),
-                            what.readable()
-                        ),
-                    ));
-                }
-                if wanted {
-                    self.op(if what.width() == 2 { 0x5c } else { 0x59 });
-                    self.pushes(&what);
-                }
-                let descriptor = what.descriptor();
-                let index = self.pool.field(&owner, name, &descriptor);
-                if field.modifiers.static_ {
-                    self.op2(0xb3, index);
-                    self.pops(i32::from(what.width()));
-                } else {
-                    self.op2(0xb5, index);
-                    self.pops(i32::from(what.width()) + 1);
-                }
-                Ok(what)
+                let read = Expression::Name(name.clone());
+                self.assign_to_own_field(&field, name, operator, value, &read, line, wanted)
             }
             // `this.name = ...` and `other.name = ...`.
             Expression::Field { of, name } => {
-                if matches!(of.as_ref(), Expression::This)
-                    && self.unit.fields.iter().any(|held| held.name == *name)
-                {
-                    return self.assign(
-                        &Expression::Name(name.clone()),
-                        operator,
-                        value,
-                        line,
-                        wanted,
-                    );
+                if matches!(of.as_ref(), Expression::This) {
+                    let own = self
+                        .unit
+                        .fields
+                        .iter()
+                        .find(|held| held.name == *name)
+                        .cloned();
+                    if let Some(field) = own {
+                        // Read back through `this` and not by name: in
+                        // `Point(int x) { this.x = x; }` the name is the
+                        // parameter, and that is the whole reason the `this.`
+                        // is written.
+                        let read = Expression::Field {
+                            of: Box::new(Expression::This),
+                            name: name.clone(),
+                        };
+                        return self.assign_to_own_field(
+                            &field, name, operator, value, &read, line, wanted,
+                        );
+                    }
                 }
                 let owner = self.value(of, line)?;
                 let Type::Object(class) = owner.clone() else {
@@ -8683,8 +9471,22 @@ impl Emitter<'_> {
         let began = self.code.len();
         for index in (down_to..pending.len()).rev() {
             self.finallys.truncate(index);
-            for one in &pending[index] {
-                self.statement(one)?;
+            match &pending[index] {
+                Cleanup::Block(body) => {
+                    for one in body {
+                        self.statement(one)?;
+                    }
+                }
+                // A lock is given back on every way out, the same as a
+                // `finally` -- and unlike a `finally` the JVM checks: a method
+                // that returns still holding one is an
+                // IllegalMonitorStateException, not a leak nobody notices.
+                Cleanup::Unlock(slot, what) => {
+                    let (slot, what) = (*slot, what.clone());
+                    self.load(slot, &what);
+                    self.op(0xc3); // monitorexit
+                    self.pops(1);
+                }
             }
         }
         self.finallys = pending;
@@ -9088,11 +9890,23 @@ impl Emitter<'_> {
                 self.op(0xc2); // monitorenter
                 self.pops(1);
 
+                // Every way out of the block gives the lock back, which is why
+                // it goes on the same stack a `finally` uses: a `return` or a
+                // `break` from inside runs it on the way past.
+                let outer = self.finallys.len();
+                self.finallys.push(Cleanup::Unlock(held, found.clone()));
+
+                // What the locals are before the block runs. The handler
+                // covers the block from its first instruction, so a slot the
+                // block declares is not set when the handler is reached -- and
+                // a frame claiming otherwise is one the verifier throws out.
+                let outside = self.slots.clone();
                 let begun = self.code.len();
                 for one in body {
                     self.statement(one)?;
                 }
                 let leaves = body.iter().any(|one| never_completes(&one.node));
+                self.finallys.truncate(outer);
                 if !leaves {
                     self.load(held, &found);
                     self.op(0xc3); // monitorexit
@@ -9107,6 +9921,7 @@ impl Emitter<'_> {
                 let target = self.code.len();
                 self.protect(begun, ended, target, None, self.finallys.len());
                 let throwable = Type::Object("java/lang/Throwable".to_string());
+                self.slots = outside;
                 self.stack_is(vec![Verified::of(&throwable)]);
                 self.a_branch_lands_here();
                 let thrown = self.declare("$thrown", throwable.clone());
@@ -9453,7 +10268,11 @@ fn never_completes(statement: &Statement) -> bool {
         // out. With `->` every arm ends by jumping past the rest, so every one
         // of them has to be checked.
         Statement::Switch { arms, .. } => {
-            if arms.is_empty() || !arms.iter().any(|arm| arm.labels.is_empty()) {
+            if arms.is_empty()
+                || !arms
+                    .iter()
+                    .any(|arm| arm.labels.is_empty() && arm.pattern.is_none())
+            {
                 return false;
             }
             if arms
@@ -9674,12 +10493,13 @@ impl Emitter<'_> {
         for arm in arms {
             let at_here = self.code.len();
             targets.push(at_here);
-            if arm.labels.is_empty() {
+            if arm.labels.is_empty() && arm.pattern.is_none() {
                 default_at = Some(at_here);
             }
             self.set_depth(0);
             self.a_branch_lands_here();
             self.open();
+            self.bind_a_pattern_here(arm)?;
             for one in &arm.body {
                 self.statement(one)?;
             }
@@ -9718,7 +10538,10 @@ impl Emitter<'_> {
         arms: &[Arm],
         line: u32,
     ) -> Result<Type, Diagnostic> {
-        if !arms.iter().any(|arm| arm.labels.is_empty()) {
+        if !arms
+            .iter()
+            .any(|arm| arm.labels.is_empty() && arm.pattern.is_none())
+        {
             return Err(at(
                 "EJ245",
                 line,
@@ -9751,12 +10574,13 @@ impl Emitter<'_> {
         for arm in arms {
             let at_here = self.code.len();
             targets.push(at_here);
-            if arm.labels.is_empty() {
+            if arm.labels.is_empty() && arm.pattern.is_none() {
                 default_at = Some(at_here);
             }
             self.stack_is(beneath.clone());
             self.a_branch_lands_here();
             self.open();
+            self.bind_a_pattern_here(arm)?;
 
             // `case 1 -> 2;` is the value; anything else has to say `yield`.
             let bare = match (arm.arrow, arm.body.len(), arm.body.first()) {
@@ -9861,6 +10685,22 @@ impl Emitter<'_> {
         arms: &[Arm],
         line: u32,
     ) -> Result<Chooser, Diagnostic> {
+        // A pattern anywhere in it makes the whole switch one: the arms are
+        // type tests in the order they were written, not a jump table.
+        if arms.iter().any(|arm| arm.pattern.is_some()) {
+            if !found.is_reference() {
+                return Err(at(
+                    "EJ238",
+                    line,
+                    1,
+                    format!(
+                        "A `switch` with a pattern in it takes an object, and was given a {}.",
+                        found.readable()
+                    ),
+                ));
+            }
+            return Ok(Chooser::Shape);
+        }
         if found.is_int_like() {
             return Ok(Chooser::Integer);
         }
@@ -9906,7 +10746,128 @@ impl Emitter<'_> {
             Chooser::Integer => self.integer_dispatch(arms, line),
             Chooser::Text => self.text_dispatch(arms, line),
             Chooser::Constant(class) => self.constant_dispatch(&class, arms, line),
+            Chooser::Shape => self.shape_dispatch(arms, line),
         }
+    }
+
+    /// A chain of `instanceof`, one per pattern, in the order they were
+    /// written.
+    ///
+    /// `javac` writes an `invokedynamic` to a bootstrap that builds a decision
+    /// tree, which is a call into a class this compilation would have to know
+    /// about and which Android rewrites anyway. The tests themselves are what
+    /// the feature means, so they are written out: first match wins, which is
+    /// the order the language says, and a `when` guard is one more branch on
+    /// the same road.
+    fn shape_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
+        let object = Type::Object("java/lang/Object".to_string());
+        let held = self.declare(PATTERN_SUBJECT, object.clone());
+        self.store(held, &object);
+
+        let mut waiting: Vec<(Pending, usize)> = Vec::new();
+        for (index, arm) in arms.iter().enumerate() {
+            // `case null` answers to the one value no type test ever matches.
+            if arm.labels.iter().any(|one| matches!(one, Expression::Null)) {
+                self.load(held, &object);
+                self.pops(1);
+                waiting.push((self.jump(0xc6), index)); // ifnull
+                continue;
+            }
+            let Some((what, _)) = &arm.pattern else {
+                continue;
+            };
+            let target = self.resolve(what, arm.line)?;
+            if !target.is_reference() {
+                return Err(at(
+                    "EJ238",
+                    arm.line,
+                    arm.column,
+                    format!(
+                        "A `case` pattern names a class or an array, and a {} is neither.",
+                        target.readable()
+                    ),
+                ));
+            }
+            let named = match &target {
+                Type::Object(named) => named.clone(),
+                other => other.descriptor(),
+            };
+            self.load(held, &object);
+            let index_of = self.pool.class(&named);
+            self.op2(0xc1, index_of);
+            self.pops(1);
+            self.pushes(&Type::Boolean);
+            match &arm.guard {
+                None => {
+                    self.pops(1);
+                    waiting.push((self.jump(0x9a), index)); // ifne
+                }
+                Some(guard) => {
+                    // The type has to hold before the guard can be asked, so
+                    // the guard is written after a jump over it.
+                    self.pops(1);
+                    let past = self.jump(0x99); // ifeq: not this shape
+                    self.open();
+                    self.bind_the_pattern(arm, held)?;
+                    let found = self.value(guard, arm.line)?;
+                    if found != Type::Boolean {
+                        return Err(at(
+                            "EJ206",
+                            arm.line,
+                            arm.column,
+                            "A `when` on a `case` wants a boolean.",
+                        ));
+                    }
+                    self.pops(1);
+                    waiting.push((self.jump(0x9a), index)); // ifne
+                    self.close();
+                    self.land(past);
+                    self.a_branch_lands_here();
+                }
+            }
+        }
+        let _ = line;
+        let fallthrough = self.jump(0xa7);
+        Ok(Dispatch::Chain {
+            waiting,
+            fallthrough,
+        })
+    }
+
+    /// Binds an arm's pattern at the top of the arm, where the slot holding
+    /// what the switch is choosing on is still in scope.
+    fn bind_a_pattern_here(&mut self, arm: &Arm) -> Result<(), Diagnostic> {
+        if arm.pattern.is_none() {
+            return Ok(());
+        }
+        let Some(subject) = self.local(PATTERN_SUBJECT).map(|held| held.slot) else {
+            return Ok(());
+        };
+        self.bind_the_pattern(arm, subject)
+    }
+
+    /// Declares the name a pattern gives what it matched, and puts the value
+    /// in it. Called at the top of the arm, where the test has already held.
+    fn bind_the_pattern(&mut self, arm: &Arm, subject: u16) -> Result<(), Diagnostic> {
+        let Some((what, name)) = &arm.pattern else {
+            return Ok(());
+        };
+        let object = Type::Object("java/lang/Object".to_string());
+        let target = self.resolve(what, arm.line)?;
+        self.load(subject, &object);
+        if target.is_reference() {
+            let named = match &target {
+                Type::Object(named) => named.clone(),
+                other => other.descriptor(),
+            };
+            let index = self.pool.class(&named);
+            self.op2(0xc0, index);
+            self.pops(1);
+            self.pushes(&target);
+        }
+        let slot = self.declare(name, target.clone());
+        self.store(slot, &target);
+        Ok(())
     }
 
     /// A chain of `==`, one per constant.
@@ -10129,7 +11090,7 @@ impl Emitter<'_> {
     ) -> Result<(), Diagnostic> {
         let outer = self.finallys.len();
         if let Some(finally) = finally {
-            self.finallys.push(finally.to_vec());
+            self.finallys.push(Cleanup::Block(finally.to_vec()));
         }
 
         let begun = self.code.len();
@@ -10393,6 +11354,9 @@ impl Emitter<'_> {
                 constructor: false,
                 variadic: false,
                 line,
+                bridge: false,
+                annotations: Vec::new(),
+                default_value: None,
             }],
             instance_setup: Vec::new(),
         };
@@ -10463,6 +11427,7 @@ impl Emitter<'_> {
             Expression::New {
                 what: Written::Named(class.clone()),
                 arguments,
+                outer: None,
             }
         } else {
             Expression::Call {
@@ -10504,10 +11469,14 @@ impl Emitter<'_> {
                     static_: false,
                     interface: true,
                     variadic: false,
+                    abstract_: true,
                 });
             }
         }
-        found.retain(|one| !one.static_ && one.name != "<init>");
+        // Only the abstract one counts. An interface with a `default` method
+        // and a `private` one has three methods and exactly one of them is
+        // what a lambda stands for.
+        found.retain(|one| !one.static_ && one.name != "<init>" && one.abstract_);
         match found.len() {
             1 => Ok(found.remove(0)),
             0 => Err(at(
@@ -10635,6 +11604,7 @@ impl Emitter<'_> {
             name: name.to_string(),
             value: None,
             line,
+            annotations: Vec::new(),
         };
         let fill = |name: &str, line: u32| Positioned {
             node: Statement::Express(Expression::Assign {
@@ -10710,6 +11680,9 @@ impl Emitter<'_> {
             constructor: true,
             variadic: false,
             line,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
         }];
         methods.extend(body.methods.iter().cloned());
         fields.extend(body.fields.iter().cloned());
@@ -10735,6 +11708,9 @@ impl Emitter<'_> {
             instance_setup: body.instance_setup.clone(),
             static_setup: Vec::new(),
             outer: outer.clone(),
+            permits: Vec::new(),
+            annotation: false,
+            annotations: Vec::new(),
         });
 
         // And the making of it, here.
@@ -10812,6 +11788,7 @@ impl Emitter<'_> {
                 static_: false,
                 interface: false,
                 variadic: false,
+                abstract_: false,
             }
         } else {
             match self.find_signature(owner, "<init>", arguments.len()) {
@@ -10824,6 +11801,7 @@ impl Emitter<'_> {
                     static_: false,
                     interface: false,
                     variadic: false,
+                    abstract_: false,
                 },
                 None => {
                     return Err(at(
@@ -11064,22 +12042,48 @@ impl Emitter<'_> {
             whole = Type::Array(Box::new(whole));
         }
 
-        // `new int[3][4]` is written as an array of arrays, each made in
-        // turn. `multianewarray` would say it in one instruction, and Dalvik
-        // has no such instruction -- so the loop the JVM would have run
-        // internally is written out, which is also what makes `new int[3][]`
-        // and `new int[3][4]` the same road.
+        if lengths.is_empty() {
+            // The size is already on the stack: `new int[3][]` fills its outer
+            // array from a loop, and each inner one is made with a count the
+            // loop already worked out.
+            self.one_dimension(&whole, line)?;
+            return Ok(whole);
+        }
+        self.allocate(&whole, lengths, line)
+    }
+
+    /// An array of this type, with these lengths, made now.
+    ///
+    /// `new int[3][4]` is written as an array of arrays, each made in turn.
+    /// `multianewarray` would say it in one instruction, and Dalvik has no such
+    /// instruction -- so the loop the JVM would have run internally is written
+    /// out, which is also what makes `new int[3][]` and `new int[3][4]` the
+    /// same road.
+    fn allocate(
+        &mut self,
+        whole: &Type,
+        lengths: &[Expression],
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
         if lengths.len() > 1 {
-            return self.array_of_arrays(&whole, lengths, line);
+            return self.array_of_arrays(whole, lengths, line);
         }
+        let found = self.value(&lengths[0], line)?;
+        self.convert(&found, &Type::Int, line)?;
+        self.one_dimension(whole, line)?;
+        Ok(whole.clone())
+    }
 
-        for length in lengths {
-            let found = self.value(length, line)?;
-            self.convert(&found, &Type::Int, line)?;
-        }
-
+    /// The instruction that makes one array of this type, with the length
+    /// already on the stack.
+    fn one_dimension(&mut self, whole: &Type, line: u32) -> Result<(), Diagnostic> {
         let Type::Array(element) = whole.clone() else {
-            unreachable!("an array was just built")
+            return Err(at(
+                "EJ121",
+                line,
+                1,
+                format!("A {} is not an array.", whole.readable()),
+            ));
         };
         match element.as_ref() {
             Type::Object(name) => {
@@ -11108,11 +12112,9 @@ impl Emitter<'_> {
         // The length goes and the array arrives, which is one slot either way
         // and two different types -- and a frame written after this has to say
         // the second of them.
-        if !lengths.is_empty() {
-            self.pops(1);
-            self.pushes(&whole);
-        }
-        Ok(whole)
+        self.pops(1);
+        self.pushes(whole);
+        Ok(())
     }
 
     /// `new int[3][4]`: an array of three arrays, each of four.
@@ -11129,14 +12131,6 @@ impl Emitter<'_> {
         let Type::Array(inner) = whole.clone() else {
             unreachable!("an array of arrays is an array")
         };
-        let Some(of_inner) = written_for(&inner) else {
-            return Err(at(
-                "EJ121",
-                line,
-                1,
-                "This array holds something that cannot be named.",
-            ));
-        };
 
         self.open();
         // How many, worked out once, because the expression may have an
@@ -11147,9 +12141,7 @@ impl Emitter<'_> {
         self.store(how_many, &Type::Int);
 
         self.load(how_many, &Type::Int);
-        self.new_array(&of_inner, &[], 1, line)?;
-        // `new_array` with no lengths does not write the size, so it is
-        // written here: the count is already on the stack under it.
+        self.one_dimension(whole, line)?;
         let made = self.declare("$made", whole.clone());
         self.store(made, whole);
 
@@ -11167,7 +12159,9 @@ impl Emitter<'_> {
 
         self.load(made, whole);
         self.load(at, &Type::Int);
-        self.new_array(&of_inner, &lengths[1..], 0, line)?;
+        // One inner array, of whatever the rest of the lengths say -- which
+        // may itself be an array of arrays.
+        self.allocate(inner.as_ref(), &lengths[1..], line)?;
         self.op(array_store(&inner));
         self.pops(3);
 
@@ -11266,6 +12260,9 @@ enum Chooser {
     Text,
     /// An enum, named by its class.
     Constant(String),
+    /// `case String s ->`: the arms answer to what the subject *is* rather
+    /// than to what it equals.
+    Shape,
 }
 
 enum Dispatch {
@@ -11320,15 +12317,23 @@ impl Dispatch {
 }
 
 /// A `case` label that has to be a constant integer, read as one.
+/// The value of a constant expression, where it is one an int holds.
+///
+/// Only what a person writes as a constant: a number, a character, a `true`,
+/// and a `-`, `+` or `~` in front of one. A `final` variable holding a
+/// constant is one too in Java; it is not here, because reading one back is a
+/// road this compiler has no reason to open.
 fn constant_int(expression: &Expression) -> Option<i32> {
     match expression {
         Expression::Int(value) => i32::try_from(*value).ok(),
         Expression::Char(value) => Some(i32::from(*value)),
         Expression::Boolean(value) => Some(i32::from(*value)),
-        Expression::Unary {
-            operator: Unary::Negate,
-            of,
-        } => constant_int(of)?.checked_neg(),
+        Expression::Unary { operator, of } => match operator {
+            Unary::Negate => constant_int(of)?.checked_neg(),
+            Unary::Plus => constant_int(of),
+            Unary::Complement => Some(!constant_int(of)?),
+            Unary::Not => None,
+        },
         _ => None,
     }
 }
@@ -11346,6 +12351,56 @@ fn as_a_written_type(expression: &Expression) -> Option<Written> {
         })
     }
     Some(Written::Named(dotted(expression)?))
+}
+
+/// Whether an annotation declared here is one the runtime keeps.
+///
+/// `@Retention(RetentionPolicy.RUNTIME)` on the declaration is what says so.
+/// Without it the default is CLASS, which reflection cannot see -- and an
+/// annotation reflection cannot see is one there is no reason to write into
+/// the file.
+fn kept_at_runtime(unit: &Unit) -> bool {
+    if !unit.annotation {
+        return false;
+    }
+    unit.annotations.iter().any(|held| {
+        held.name.rsplit('.').next() == Some("Retention")
+            && held.values.iter().any(|(_, value)| {
+                written_as_a_path(value)
+                    .is_some_and(|path| path.rsplit('.').next() == Some("RUNTIME"))
+            })
+    })
+}
+
+/// The annotations of the runtime library this compiler knows the retention
+/// of without being handed a class file.
+const KEPT_AT_RUNTIME: &[&str] = &[
+    "java/lang/Deprecated",
+    "java/lang/FunctionalInterface",
+    "java/lang/SafeVarargs",
+    "java/lang/annotation/Documented",
+    "java/lang/annotation/Inherited",
+    "java/lang/annotation/Repeatable",
+    "java/lang/annotation/Retention",
+    "java/lang/annotation/Target",
+];
+
+/// The primitive a box holds, where the type is one of the boxes.
+fn primitive_inside(what: &Type) -> Option<Type> {
+    let Type::Object(named) = what else {
+        return None;
+    };
+    Some(match named.as_str() {
+        "java/lang/Boolean" => Type::Boolean,
+        "java/lang/Byte" => Type::Byte,
+        "java/lang/Short" => Type::Short,
+        "java/lang/Character" => Type::Char,
+        "java/lang/Integer" => Type::Int,
+        "java/lang/Long" => Type::Long,
+        "java/lang/Float" => Type::Float,
+        "java/lang/Double" => Type::Double,
+        _ => return None,
+    })
 }
 
 /// The box a primitive is kept in, which is where its class lives.
@@ -11400,20 +12455,363 @@ fn write_attribute(out: &mut Vec<u8>, name: u16, body: &[u8]) {
 
 /// Compiles one unit into the bytes of a class file.
 /// The access flags a method carries beyond its written modifiers.
-fn method_shape(method: &Method) -> u16 {
+/// The `RuntimeVisibleAnnotations` attribute for whatever carries these, or
+/// nothing when none of them is kept at runtime.
+///
+/// An annotation kept only for the compiler is read and dropped, which is what
+/// `@Override` is for. One kept at runtime is written down, which is what
+/// makes `getAnnotation` answer.
+fn runtime_annotations(
+    pool: &mut Pool,
+    classpath: &Classpath,
+    unit: &Unit,
+    held: &[Annotated],
+) -> Option<(u16, Vec<u8>)> {
+    let mut written = Vec::new();
+    for one in held {
+        let Some(named) = resolve_named(classpath, unit, &one.name) else {
+            continue;
+        };
+        let kept = classpath
+            .get(&named)
+            .map(|known| known.kept_at_runtime)
+            .unwrap_or_else(|| KEPT_AT_RUNTIME.contains(&named.as_str()));
+        if !kept {
+            continue;
+        }
+        let mut body = Vec::new();
+        let descriptor = pool.utf8(&format!("L{named};"));
+        body.extend_from_slice(&descriptor.to_be_bytes());
+        let mut pairs = Vec::new();
+        for (name, value) in &one.values {
+            let Some(encoded) = annotation_value(pool, classpath, unit, value) else {
+                continue;
+            };
+            let index = pool.utf8(name);
+            pairs.push((index, encoded));
+        }
+        body.extend_from_slice(&(pairs.len() as u16).to_be_bytes());
+        for (index, encoded) in pairs {
+            body.extend_from_slice(&index.to_be_bytes());
+            body.extend_from_slice(&encoded);
+        }
+        written.push(body);
+    }
+    if written.is_empty() {
+        return None;
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(&(written.len() as u16).to_be_bytes());
+    for one in written {
+        body.extend_from_slice(&one);
+    }
+    Some((pool.utf8("RuntimeVisibleAnnotations"), body))
+}
+
+/// One `element_value`, which is a tag saying what kind and then the value.
+fn annotation_value(
+    pool: &mut Pool,
+    classpath: &Classpath,
+    unit: &Unit,
+    value: &Expression,
+) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    match value {
+        Expression::Str(text) => {
+            out.push(b's');
+            out.extend_from_slice(&pool.utf8(text).to_be_bytes());
+        }
+        Expression::Boolean(held) => {
+            out.push(b'Z');
+            out.extend_from_slice(&pool.integer(i32::from(*held)).to_be_bytes());
+        }
+        Expression::Char(held) => {
+            out.push(b'C');
+            out.extend_from_slice(&pool.integer(i32::from(*held)).to_be_bytes());
+        }
+        Expression::Long(held) => {
+            out.push(b'J');
+            out.extend_from_slice(&pool.long(*held).to_be_bytes());
+        }
+        Expression::Float(held) => {
+            out.push(b'F');
+            out.extend_from_slice(&pool.float(*held as f32).to_be_bytes());
+        }
+        Expression::Double(held) => {
+            out.push(b'D');
+            out.extend_from_slice(&pool.double(*held).to_be_bytes());
+        }
+        Expression::ClassLiteral { of, .. } => {
+            let named = match of {
+                Written::Named(name) => Type::Object(resolve_named(classpath, unit, name)?),
+                other => shallow_type(classpath, unit, other)?,
+            };
+            out.push(b'c');
+            out.extend_from_slice(&pool.utf8(&named.descriptor()).to_be_bytes());
+        }
+        Expression::ArrayOf { values, .. } => {
+            out.push(b'[');
+            let mut held = Vec::new();
+            for one in values {
+                held.push(annotation_value(pool, classpath, unit, one)?);
+            }
+            out.extend_from_slice(&(held.len() as u16).to_be_bytes());
+            for one in held {
+                out.extend_from_slice(&one);
+            }
+        }
+        other => {
+            // `@Retention(RetentionPolicy.RUNTIME)` and everything shaped like
+            // it: the name of a constant of an enum.
+            if let Some(value) = constant_int(other) {
+                out.push(b'I');
+                out.extend_from_slice(&pool.integer(value).to_be_bytes());
+                return Some(out);
+            }
+            let path = written_as_a_path(other)?;
+            let (before, last) = path.rsplit_once('.')?;
+            let owner = resolve_named(classpath, unit, before)?;
+            out.push(b'e');
+            out.extend_from_slice(&pool.utf8(&format!("L{owner};")).to_be_bytes());
+            out.extend_from_slice(&pool.utf8(last).to_be_bytes());
+        }
+    }
+    Some(out)
+}
+
+/// A written type as the type it stands for, without an emitter.
+fn shallow_type(classpath: &Classpath, unit: &Unit, written: &Written) -> Option<Type> {
+    Some(match written {
+        Written::Void => Type::Void,
+        Written::Boolean => Type::Boolean,
+        Written::Byte => Type::Byte,
+        Written::Short => Type::Short,
+        Written::Char => Type::Char,
+        Written::Int => Type::Int,
+        Written::Long => Type::Long,
+        Written::Float => Type::Float,
+        Written::Double => Type::Double,
+        Written::Array(of) => Type::Array(Box::new(shallow_type(classpath, unit, of)?)),
+        Written::Named(name) => Type::Object(resolve_named(classpath, unit, name)?),
+        Written::Inferred => return None,
+    })
+}
+
+/// The methods nobody wrote that a class needs anyway.
+///
+/// `class Derived extends Base { String held() }` overriding `Object held()`
+/// is two methods in the class file, not one: a call through a `Base`
+/// reference names `()Ljava/lang/Object;` and would otherwise reach `Base`'s
+/// own. The second one is marked bridge and synthetic, takes the supertype's
+/// shape, and does nothing but hand over. The same happens wherever the
+/// supertype's parameters were generic, because erasure made them `Object`.
+fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
+    let resolve = |written: &Written| -> Option<Type> {
+        fn walk(classpath: &Classpath, unit: &Unit, written: &Written) -> Option<Type> {
+            Some(match written {
+                Written::Void => Type::Void,
+                Written::Boolean => Type::Boolean,
+                Written::Byte => Type::Byte,
+                Written::Short => Type::Short,
+                Written::Char => Type::Char,
+                Written::Int => Type::Int,
+                Written::Long => Type::Long,
+                Written::Float => Type::Float,
+                Written::Double => Type::Double,
+                Written::Array(of) => Type::Array(Box::new(walk(classpath, unit, of)?)),
+                Written::Named(name) => Type::Object(resolve_named(classpath, unit, name)?),
+                Written::Inferred => return None,
+            })
+        }
+        walk(classpath, unit, written)
+    };
+
+    // Everything above this class: what it extends, all the way up, and what
+    // it and they implement.
+    let mut above: Vec<String> = Vec::new();
+    let mut waiting: Vec<String> = Vec::new();
+    if let Some(named) = &unit.extends {
+        if let Some(found) = resolve_named(classpath, unit, named) {
+            waiting.push(found);
+        }
+    }
+    for named in &unit.implements {
+        if let Some(found) = resolve_named(classpath, unit, named) {
+            waiting.push(found);
+        }
+    }
+    while let Some(one) = waiting.pop() {
+        if above.contains(&one) || above.len() > 64 {
+            continue;
+        }
+        above.push(one.clone());
+        if let Some(known) = classpath.get(&one) {
+            if let Some(up) = &known.superclass {
+                waiting.push(up.clone());
+            }
+        }
+    }
+
+    let mut made = Vec::new();
+    for method in &unit.methods {
+        if method.constructor || method.modifiers.static_ || method.body.is_none() {
+            continue;
+        }
+        let Some(returns) = resolve(&method.returns) else {
+            continue;
+        };
+        let mut parameters = Vec::new();
+        let mut whole = true;
+        for (written, _) in &method.parameters {
+            match resolve(written) {
+                Some(found) => parameters.push(found),
+                None => whole = false,
+            }
+        }
+        if !whole {
+            continue;
+        }
+
+        for owner in &above {
+            let Some(known) = classpath.get(owner) else {
+                continue;
+            };
+            for candidate in &known.methods {
+                if candidate.name != method.name
+                    || candidate.static_
+                    || candidate.parameters.len() != parameters.len()
+                {
+                    continue;
+                }
+                if candidate.parameters == parameters && candidate.returns == returns {
+                    continue;
+                }
+                // The override has to be one: every parameter the supertype
+                // takes has to reach this one, and what this one gives back
+                // has to be what the supertype promised.
+                let fits = candidate
+                    .parameters
+                    .iter()
+                    .zip(&parameters)
+                    .all(|(theirs, ours)| theirs.is_reference() && ours.is_reference())
+                    && (returns == candidate.returns
+                        || (returns.is_reference() && candidate.returns.is_reference()));
+                if !fits {
+                    continue;
+                }
+                let shape: Vec<(Written, String)> = candidate
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(at, one)| Some((written_for(one)?, format!("$bridge{at}"))))
+                    .collect();
+                if shape.len() != parameters.len() {
+                    continue;
+                }
+                if made.iter().any(|held: &Method| {
+                    held.name == method.name
+                        && held.parameters.len() == shape.len()
+                        && held
+                            .parameters
+                            .iter()
+                            .zip(&shape)
+                            .all(|((a, _), (b, _))| format!("{a:?}") == format!("{b:?}"))
+                }) {
+                    continue;
+                }
+                // The call it hands over to, with each argument cast back to
+                // what the real method takes.
+                let arguments: Vec<Expression> = shape
+                    .iter()
+                    .zip(&method.parameters)
+                    .map(|((_, held), (what, _))| Expression::Cast {
+                        to: what.clone(),
+                        of: Box::new(Expression::Name(held.clone())),
+                    })
+                    .collect();
+                let call = Expression::Call {
+                    on: Some(Box::new(Expression::This)),
+                    super_call: false,
+                    name: method.name.clone(),
+                    arguments,
+                };
+                let body = vec![Positioned {
+                    node: if returns == Type::Void {
+                        Statement::Express(call)
+                    } else {
+                        Statement::Return(Some(call))
+                    },
+                    line: method.line,
+                    column: 1,
+                }];
+                made.push(Method {
+                    modifiers: Modifiers {
+                        public: true,
+                        ..Modifiers::default()
+                    },
+                    returns: match written_for(&candidate.returns) {
+                        Some(found) => found,
+                        None => Written::Void,
+                    },
+                    name: method.name.clone(),
+                    parameters: shape,
+                    body: Some(body),
+                    constructor: false,
+                    variadic: false,
+                    bridge: true,
+                    line: method.line,
+                    annotations: Vec::new(),
+                    default_value: None,
+                });
+            }
+        }
+    }
+    made
+}
+
+fn method_shape(unit: &Unit, method: &Method) -> u16 {
+    let mut flags = 0u16;
+    // ACC_BRIDGE and ACC_SYNTHETIC: nobody wrote this one, and anything
+    // reading the class file should say so rather than reporting a method the
+    // source does not have.
+    if method.bridge {
+        flags |= 0x0040 | 0x1000;
+    }
     // ACC_VARARGS. It changes nothing the JVM does; it is how reflection, and
     // anything reading the class file, knows the last parameter was written
     // with `...` rather than as an array.
     if method.variadic {
-        return 0x0080;
+        flags |= 0x0080;
     }
-    0
+    // A method of an interface with no body is abstract, whether or not
+    // anybody wrote the word -- and one with a body must not be, which is what
+    // `default`, `static` and `private` methods of an interface are.
+    if unit.shape == Shape::Interface && method.body.is_none() && !method.modifiers.static_ {
+        flags |= 0x0400;
+    }
+    flags
 }
 
 /// One unit, and whatever classes its bodies turned out to need.
 pub fn compile_unit(
     unit: &Unit,
     classpath: &Classpath,
+) -> Result<(Vec<u8>, Vec<Unit>), Diagnostic> {
+    compile_unit_in_nest(unit, classpath, &[])
+}
+
+/// One unit, told which classes share a nest with it.
+///
+/// A class and the classes written inside it are one nest, and members of a
+/// nest reach each other's private fields and methods. Saying so is two
+/// attributes: the host lists its members, and each member names its host.
+/// Without them, a lambda written inside a class -- which becomes a class of
+/// its own here -- cannot read the private field it was written next to, and
+/// the JVM says so at run time rather than at compile time.
+pub fn compile_unit_in_nest(
+    unit: &Unit,
+    classpath: &Classpath,
+    nest: &[String],
 ) -> Result<(Vec<u8>, Vec<Unit>), Diagnostic> {
     // An `assert` is guarded by a flag the class initialiser works out once,
     // which is what makes assertions cost nothing where nobody asked for them
@@ -11447,6 +12845,9 @@ pub fn compile_unit(
     };
 
     let mut interfaces = Vec::new();
+    if unit.annotation {
+        interfaces.push("java/lang/annotation/Annotation".to_string());
+    }
     for name in &unit.implements {
         let probe = Emitter::new(
             &mut pool,
@@ -11473,10 +12874,14 @@ pub fn compile_unit(
         let what = probe.resolve(&field.what, field.line)?;
         let name = pool.utf8(&field.name);
         let descriptor = pool.utf8(&what.descriptor());
+        let held = runtime_annotations(&mut pool, classpath, unit, &field.annotations);
         field_bytes.extend_from_slice(&field.modifiers.access_flags(0).to_be_bytes());
         field_bytes.extend_from_slice(&name.to_be_bytes());
         field_bytes.extend_from_slice(&descriptor.to_be_bytes());
-        field_bytes.extend_from_slice(&0u16.to_be_bytes());
+        field_bytes.extend_from_slice(&u16::from(held.is_some()).to_be_bytes());
+        if let Some((name, body)) = held {
+            write_attribute(&mut field_bytes, name, &body);
+        }
     }
 
     // What a field was given, as a statement that gives it.
@@ -11548,6 +12953,9 @@ pub fn compile_unit(
             constructor: false,
             variadic: false,
             line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
         });
     }
     if unit.shape == Shape::Class && !methods.iter().any(|held| held.constructor) {
@@ -11565,9 +12973,16 @@ pub fn compile_unit(
                 constructor: true,
                 variadic: false,
                 line: 1,
+                bridge: false,
+                annotations: Vec::new(),
+                default_value: None,
             },
         );
     }
+
+    // And the ones nobody wrote: a bridge for every override whose supertype
+    // said it in a shape erasure changed.
+    methods.extend(bridges_for(unit, classpath));
 
     let code_name = pool.utf8("Code");
     let mut method_bytes = Vec::new();
@@ -11597,18 +13012,33 @@ pub fn compile_unit(
                 static_: method.modifiers.static_,
                 interface: false,
                 variadic: false,
+                abstract_: false,
             }
             .descriptor();
             let descriptor = pool.utf8(&descriptor);
             method_bytes.extend_from_slice(
                 &method
                     .modifiers
-                    .access_flags(method_shape(method))
+                    .access_flags(method_shape(unit, method))
                     .to_be_bytes(),
             );
+            let held = runtime_annotations(&mut pool, classpath, unit, &method.annotations);
+            // `int order() default 0;` -- what reflection hands back from
+            // `getDefaultValue`.
+            let default_value = method.default_value.as_ref().and_then(|value| {
+                let body = annotation_value(&mut pool, classpath, unit, value)?;
+                Some((pool.utf8("AnnotationDefault"), body))
+            });
+            let how_many = u16::from(held.is_some()) + u16::from(default_value.is_some());
             method_bytes.extend_from_slice(&name.to_be_bytes());
             method_bytes.extend_from_slice(&descriptor.to_be_bytes());
-            method_bytes.extend_from_slice(&0u16.to_be_bytes());
+            method_bytes.extend_from_slice(&how_many.to_be_bytes());
+            if let Some((name, body)) = held {
+                write_attribute(&mut method_bytes, name, &body);
+            }
+            if let Some((name, body)) = default_value {
+                write_attribute(&mut method_bytes, name, &body);
+            }
             written += 1;
             continue;
         };
@@ -11747,6 +13177,7 @@ pub fn compile_unit(
             static_: method.modifiers.static_,
             interface: false,
             variadic: false,
+            abstract_: false,
         }
         .descriptor();
         let descriptor = pool.utf8(&descriptor);
@@ -11754,14 +13185,129 @@ pub fn compile_unit(
         method_bytes.extend_from_slice(
             &method
                 .modifiers
-                .access_flags(method_shape(method))
+                .access_flags(method_shape(unit, method))
                 .to_be_bytes(),
         );
+        let held = runtime_annotations(&mut pool, classpath, unit, &method.annotations);
         method_bytes.extend_from_slice(&name.to_be_bytes());
         method_bytes.extend_from_slice(&descriptor.to_be_bytes());
-        method_bytes.extend_from_slice(&1u16.to_be_bytes());
+        method_bytes.extend_from_slice(&(1 + u16::from(held.is_some())).to_be_bytes());
         write_attribute(&mut method_bytes, code_name, &attribute);
+        if let Some((name, body)) = held {
+            write_attribute(&mut method_bytes, name, &body);
+        }
         written += 1;
+    }
+
+    // -- what the class itself carries, beyond its members.
+    // ACC_SUPER, which every class written since Java 1.1 sets. An interface
+    // sets ACC_INTERFACE and ACC_ABSTRACT instead, and must not set ACC_SUPER.
+    let shape_flags = match unit.shape {
+        Shape::Class => 0x0020u16,
+        // ACC_ANNOTATION as well, for an interface written `@interface`.
+        Shape::Interface if unit.annotation => 0x0200 | 0x0400 | 0x2000,
+        Shape::Interface => 0x0200 | 0x0400,
+        // ACC_ENUM as well, which is how anything reading the file knows the
+        // constants are constants.
+        Shape::Enum => 0x0020 | 0x4000,
+        // ACC_RECORD, and final, because a record cannot be extended.
+        Shape::Record => 0x0020 | 0x0010,
+    };
+    let mut class_attributes: Vec<(u16, Vec<u8>)> = Vec::new();
+    if let Some(held) = runtime_annotations(&mut pool, classpath, unit, &unit.annotations) {
+        class_attributes.push(held);
+    }
+
+    // `sealed` is a list in the class file: the runtime, not the compiler
+    // alone, refuses a class outside it.
+    if !unit.permits.is_empty() {
+        let mut named = Vec::new();
+        for one in &unit.permits {
+            let probe = Emitter::new(
+                &mut pool,
+                classpath,
+                unit,
+                this_class.clone(),
+                true,
+                &mut made,
+            );
+            named.push(probe.resolve_class(one, 1)?);
+        }
+        let mut body = Vec::new();
+        body.extend_from_slice(&(named.len() as u16).to_be_bytes());
+        for one in &named {
+            body.extend_from_slice(&pool.class(one).to_be_bytes());
+        }
+        class_attributes.push((pool.utf8("PermittedSubclasses"), body));
+    }
+
+    // A record says what it holds, in order, so that reflection can hand the
+    // components back and `equals` and `toString` mean what they say.
+    if unit.shape == Shape::Record {
+        let components: Vec<&Field> = unit
+            .fields
+            .iter()
+            .filter(|field| !field.modifiers.static_)
+            .collect();
+        let mut body = Vec::new();
+        body.extend_from_slice(&(components.len() as u16).to_be_bytes());
+        for field in components {
+            let probe = Emitter::new(
+                &mut pool,
+                classpath,
+                unit,
+                this_class.clone(),
+                true,
+                &mut made,
+            );
+            let what = probe.resolve(&field.what, field.line)?;
+            let name = pool.utf8(&field.name);
+            let descriptor = pool.utf8(&what.descriptor());
+            body.extend_from_slice(&name.to_be_bytes());
+            body.extend_from_slice(&descriptor.to_be_bytes());
+            // No attributes of its own: the signature and the annotations a
+            // component can carry are things this compiler does not write.
+            body.extend_from_slice(&0u16.to_be_bytes());
+        }
+        class_attributes.push((pool.utf8("Record"), body));
+    }
+
+    // The nest: who may reach whose private members.
+    match this_class.split_once('$') {
+        Some((host, _)) => {
+            let index = pool.class(host);
+            class_attributes.push((pool.utf8("NestHost"), index.to_be_bytes().to_vec()));
+        }
+        None => {
+            let mine: Vec<&String> = nest
+                .iter()
+                .filter(|held| held.starts_with(&format!("{this_class}$")) && **held != this_class)
+                .collect();
+            if !mine.is_empty() {
+                let mut body = Vec::new();
+                body.extend_from_slice(&(mine.len() as u16).to_be_bytes());
+                for one in mine {
+                    body.extend_from_slice(&pool.class(one).to_be_bytes());
+                }
+                class_attributes.push((pool.utf8("NestMembers"), body));
+            }
+        }
+    }
+
+    // A class written inside another says so, which is how reflection answers
+    // `getSimpleName` and `getEnclosingClass` rather than reading the `$` in
+    // the name and guessing.
+    if let Some((holder, simple)) = this_class.rsplit_once('$') {
+        let inner = pool.class(&this_class);
+        let outer = pool.class(holder);
+        let simple = pool.utf8(simple);
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes());
+        body.extend_from_slice(&inner.to_be_bytes());
+        body.extend_from_slice(&outer.to_be_bytes());
+        body.extend_from_slice(&simple.to_be_bytes());
+        body.extend_from_slice(&unit.modifiers.access_flags(shape_flags).to_be_bytes());
+        class_attributes.push((pool.utf8("InnerClasses"), body));
     }
 
     let this_index = pool.class(&this_class);
@@ -11773,17 +13319,6 @@ pub fn compile_unit(
     out.extend_from_slice(&CLASS_MINOR.to_be_bytes());
     out.extend_from_slice(&CLASS_MAJOR.to_be_bytes());
     pool.write(&mut out);
-    // ACC_SUPER, which every class written since Java 1.1 sets. An interface
-    // sets ACC_INTERFACE and ACC_ABSTRACT instead, and must not set ACC_SUPER.
-    let shape_flags = match unit.shape {
-        Shape::Class => 0x0020u16,
-        Shape::Interface => 0x0200 | 0x0400,
-        // ACC_ENUM as well, which is how anything reading the file knows the
-        // constants are constants.
-        Shape::Enum => 0x0020 | 0x4000,
-        // ACC_RECORD, and final, because a record cannot be extended.
-        Shape::Record => 0x0020 | 0x0010,
-    };
     out.extend_from_slice(&unit.modifiers.access_flags(shape_flags).to_be_bytes());
     out.extend_from_slice(&this_index.to_be_bytes());
     out.extend_from_slice(&super_index.to_be_bytes());
@@ -11795,7 +13330,10 @@ pub fn compile_unit(
     out.extend_from_slice(&field_bytes);
     out.extend_from_slice(&written.to_be_bytes());
     out.extend_from_slice(&method_bytes);
-    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&(class_attributes.len() as u16).to_be_bytes());
+    for (name, body) in &class_attributes {
+        write_attribute(&mut out, *name, body);
+    }
     Ok((out, made))
 }
 
@@ -11870,8 +13408,15 @@ pub fn compile_together(
     // A body can turn out to need a class of its own -- one written where it
     // is used has no name until it is compiled. Those go on the end and are
     // compiled in their turn, and may need classes themselves.
-    let mut out = Vec::new();
-    let mut waiting = declared;
+    //
+    // Which means the full list of classes is not known until everything has
+    // been compiled once, and the nest attributes need that list before
+    // anything is written. So it is compiled twice: the first pass to find out
+    // what there is, the second to write it. The first pass throws its bytes
+    // away, which costs time and is the only way to say something about the
+    // whole that has to be written into each part.
+    let mut nest: Vec<String> = Vec::new();
+    let mut waiting = declared.clone();
     let mut rounds = 0usize;
     while !waiting.is_empty() {
         rounds += 1;
@@ -11885,10 +13430,9 @@ pub fn compile_together(
         }
         let mut next = Vec::new();
         for (label, unit) in &waiting {
-            let name = format!("{}.class", unit.internal_name());
-            let (bytes, made) =
+            nest.push(unit.internal_name());
+            let (_, made) =
                 compile_unit(unit, &together).map_err(|error| named_file(error, label))?;
-            out.push((name, bytes));
             next.extend(made.into_iter().map(|one| (label.clone(), one)));
         }
         for (_, unit) in &next {
@@ -11896,6 +13440,20 @@ pub fn compile_together(
         }
         for (_, unit) in &next {
             together.declare(unit);
+        }
+        waiting = next;
+    }
+
+    let mut out = Vec::new();
+    let mut waiting = declared;
+    while !waiting.is_empty() {
+        let mut next = Vec::new();
+        for (label, unit) in &waiting {
+            let name = format!("{}.class", unit.internal_name());
+            let (bytes, made) = compile_unit_in_nest(unit, &together, &nest)
+                .map_err(|error| named_file(error, label))?;
+            out.push((name, bytes));
+            next.extend(made.into_iter().map(|one| (label.clone(), one)));
         }
         waiting = next;
     }
@@ -13477,7 +15035,7 @@ public class Shaped {
         assert_eq!(name, "com/my/app/Point.class");
         let class = crate::jvm::read(&bytes).expect("and read back");
         assert!(class.access_flags & 0x0010 != 0, "a record is final");
-        assert!(class.interfaces.iter().any(|one| one == "java.lang.Record"));
+        assert_eq!(class.superclass.as_deref(), Some("java.lang.Record"));
 
         let fields: Vec<&str> = class.fields.iter().map(|one| one.name.as_str()).collect();
         assert_eq!(fields, vec!["x", "y"]);
@@ -14108,6 +15666,693 @@ public class Shaped {
         eprintln!(
             "java: arrays written out, two dimensions, boxing, locks, assertions, class \
              literals, varargs and stepping an element -- all verified"
+        );
+    }
+
+    /// Hands a whole compilation to a real JVM and runs its `main`.
+    ///
+    /// Verifying says the class file is well formed. Running says it means
+    /// what the person wrote, which is a different question and the one that
+    /// matters.
+    fn jvm_runs(produced: &[(String, Vec<u8>)], main: &str) -> Option<Result<String, String>> {
+        // A machine can have several JVMs, and the default is often not the
+        // newest. One too old to load a version 69 class file has not
+        // disagreed -- it has not looked -- so keep asking.
+        for java in every_jvm_here() {
+            if let Some(found) = one_jvm_runs(&java, produced, main) {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn one_jvm_runs(
+        java: &str,
+        produced: &[(String, Vec<u8>)],
+        main: &str,
+    ) -> Option<Result<String, String>> {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("omni-run-{}-{mine}", std::process::id()));
+        std::fs::create_dir_all(&directory).ok()?;
+        for (name, bytes) in produced {
+            let path = directory.join(name);
+            std::fs::create_dir_all(path.parent()?).ok()?;
+            std::fs::write(path, bytes).ok()?;
+        }
+        let outcome = std::process::Command::new(java)
+            .args(["-Xverify:all", "-cp", directory.to_str()?, main])
+            .output()
+            .ok()?;
+        std::fs::remove_dir_all(&directory).ok();
+        let printed = String::from_utf8_lossy(&outcome.stdout).into_owned();
+        let complained = String::from_utf8_lossy(&outcome.stderr).into_owned();
+        if complained.contains("UnsupportedClassVersionError") {
+            return None;
+        }
+        if !outcome.status.success() {
+            return Some(Err(format!("{printed}{complained}")));
+        }
+        // Only what the program printed. A launcher that announces its own
+        // options on the way past is not part of the answer.
+        Some(Ok(printed))
+    }
+
+    /// Every shape the language is written in, in one source.
+    ///
+    /// Named at the top of this file as what is taken; here it is, compiled,
+    /// verified by a real JVM, run, and translated to the Dalvik a device
+    /// actually executes.
+    const THE_WHOLE_LANGUAGE: &str = r####"
+package com.my.app;
+
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.util.ArrayList;
+import java.util.List;
+
+// -- an annotation of one's own, kept for the runtime
+@Retention(RetentionPolicy.RUNTIME)
+@interface Marked {
+    String value();
+
+    int order() default 0;
+}
+
+// -- one kept only for the compiler, which must not reach the class file
+@Retention(RetentionPolicy.SOURCE)
+@interface Hint {
+    String value();
+}
+
+// -- enum
+enum Colour {
+    RED,
+    GREEN,
+    BLUE;
+
+    public boolean warm() {
+        return this == RED;
+    }
+}
+
+// -- record
+record Point(int x, int y) {
+    public int sum() {
+        return x + y;
+    }
+}
+
+// -- sealed interface, and what it permits
+sealed interface Shape permits Round, Square {
+    double area();
+}
+
+record Round(double radius) implements Shape {
+    @Override
+    public double area() {
+        return 3.0 * radius * radius;
+    }
+}
+
+non-sealed class Square implements Shape {
+    private final double side;
+
+    Square(double side) {
+        this.side = side;
+    }
+
+    @Override
+    public double area() {
+        return side * side;
+    }
+}
+
+@Marked("class")
+public final class Everything {
+
+    // -- primitive and reference types
+    private boolean flag = true;
+    private byte small = 1;
+    private short shorter = 2;
+    private char letter = 'a';
+    private int count = 3;
+    private long many = 4L;
+    private float part = 5.0f;
+    private double whole = 6.0;
+    private String text = "text";
+    private Object thing = null;
+
+    // -- final, volatile, transient
+    private final int settled = 7;
+    private volatile int shared;
+    private transient int passing;
+    private static int counted;
+
+    // -- static initialization
+    static {
+        counted = 10;
+    }
+
+    // -- instance initialization
+    {
+        shared = 20;
+    }
+
+    public Everything() {
+        passing = 30;
+    }
+
+    // -- generics and wildcards
+    public <T> T first(List<T> of) {
+        return of.get(0);
+    }
+
+    public double total(List<? extends Number> values) {
+        double sum = 0.0;
+        for (Number one : values) {
+            sum += one.doubleValue();
+        }
+        return sum;
+    }
+
+    public void into(List<? super Integer> sink) {
+        sink.add(1);
+    }
+
+    // -- var
+    public int counted() {
+        var list = new ArrayList();
+        list.add("one");
+        var size = list.size();
+        return size;
+    }
+
+    // -- arrays and varargs
+    public int sum(int... values) {
+        int total = 0;
+        for (int one : values) {
+            total += one;
+        }
+        return total;
+    }
+
+    public int[][] grid() {
+        int[][] made = new int[2][3];
+        made[0][0] = 1;
+        return made;
+    }
+
+    // -- boxing and unboxing
+    public Integer boxed(int value) {
+        return value;
+    }
+
+    public int unboxed(Integer value) {
+        return value;
+    }
+
+    // -- text block
+    public String block() {
+        return """
+            one
+            two
+            """;
+    }
+
+    // -- switch expression, and pattern matching for switch
+    public String describe(Object o) {
+        return switch (o) {
+            case String s -> "text " + s.length();
+            case Integer i when i > 10 -> "big " + i;
+            case Integer i -> "number " + i;
+            case null -> "nothing";
+            default -> "something";
+        };
+    }
+
+    public int sized(Object o) {
+        switch (o) {
+            case String s:
+                return s.length();
+            case int[] values:
+                return values.length;
+            default:
+                return -1;
+        }
+    }
+
+    public int shaped(int value) {
+        return switch (value) {
+            case 0 -> 10;
+            case 1, 2 -> 20;
+            default -> {
+                yield value * 2;
+            }
+        };
+    }
+
+    // -- instanceof pattern matching
+    public int measured(Object o) {
+        if (o instanceof String s) {
+            return s.length();
+        }
+        return -1;
+    }
+
+    // -- try-with-resources, multi-catch, checked and unchecked exceptions
+    public String read(AutoCloseable held) throws Exception {
+        try (AutoCloseable open = held) {
+            return "open";
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            return e.getMessage();
+        } finally {
+            counted++;
+        }
+    }
+
+    public String caught() {
+        try {
+            throw new IllegalStateException("no");
+        } catch (RuntimeException e) {
+            return e.getMessage();
+        }
+    }
+
+    // -- assert
+    public void checked(int value) {
+        assert value > 0 : "positive";
+    }
+
+    // -- synchronization
+    public synchronized int guarded() {
+        return counted;
+    }
+
+    public int inABlock(Object lock) {
+        synchronized (lock) {
+            return counted;
+        }
+    }
+
+    // -- lambdas, method references, functional interfaces
+    public Runnable later() {
+        return () -> counted++;
+    }
+
+    public Thing named() {
+        return this::describe;
+    }
+
+    public Thing shorter() {
+        return o -> "lambda " + o;
+    }
+
+    // -- anonymous classes
+    public Runnable anonymous() {
+        return new Runnable() {
+            @Override
+            public void run() {
+                counted++;
+            }
+        };
+    }
+
+    // -- nested and inner classes
+    public static final class Nested {
+        public int value() {
+            return counted;
+        }
+    }
+
+    public final class Inner {
+        public int value() {
+            return count;
+        }
+    }
+
+    @FunctionalInterface
+    public interface Thing {
+        String said(Object o);
+    }
+
+    // -- an interface with default, static and private methods
+    public interface Named {
+        String name();
+
+        default String greeting() {
+            return prefix() + name();
+        }
+
+        static Named of(String text) {
+            return () -> text;
+        }
+
+        private String prefix() {
+            return "hello ";
+        }
+    }
+
+    // -- inheritance and overriding, with a covariant return: a bridge method
+    public static class Base {
+        public Object held() {
+            return "base";
+        }
+    }
+
+    public static class Derived extends Base {
+        @Override
+        public String held() {
+            return "derived";
+        }
+    }
+
+    @Marked(value = "method", order = 2)
+    @Hint("dropped")
+    public String marked() {
+        return "marked";
+    }
+
+    public static void main(String[] args) {
+        Everything held = new Everything();
+        StringBuilder out = new StringBuilder();
+
+        out.append(held.flag).append(' ');
+        out.append(held.small + held.shorter).append(' ');
+        out.append(held.letter).append(' ');
+        out.append(held.count + held.settled).append(' ');
+        out.append(held.many).append(' ');
+        out.append(held.part + held.whole).append(' ');
+        out.append(held.text).append(' ');
+        out.append(held.thing).append(' ');
+        out.append(held.shared).append(' ');
+        out.append(held.passing).append(' ');
+        out.append(counted).append(' ');
+
+        List<String> words = new ArrayList<String>();
+        words.add("one");
+        words.add("two");
+        out.append(held.first(words)).append(' ');
+
+        List<Integer> numbers = new ArrayList<Integer>();
+        numbers.add(1);
+        numbers.add(2);
+        out.append(held.total(numbers)).append(' ');
+        held.into(numbers);
+        out.append(numbers.size()).append(' ');
+
+        out.append(held.counted()).append(' ');
+        out.append(held.sum(1, 2, 3)).append(' ');
+        out.append(held.grid()[0][0]).append(' ');
+        out.append(held.boxed(4)).append(' ');
+        out.append(held.unboxed(5)).append(' ');
+        out.append(held.block().length()).append(' ');
+
+        out.append(held.describe("abc")).append(' ');
+        out.append(held.describe(20)).append(' ');
+        out.append(held.describe(3)).append(' ');
+        out.append(held.describe(null)).append(' ');
+        out.append(held.describe(1.5)).append(' ');
+        out.append(held.sized("abcd")).append(' ');
+        out.append(held.sized(new int[3])).append(' ');
+        out.append(held.shaped(0)).append(' ');
+        out.append(held.shaped(2)).append(' ');
+        out.append(held.shaped(5)).append(' ');
+        out.append(held.measured("abcde")).append(' ');
+        out.append(held.caught()).append(' ');
+
+        held.checked(1);
+        out.append(held.guarded()).append(' ');
+        out.append(held.inABlock(held)).append(' ');
+
+        held.later().run();
+        out.append(held.named().said("x")).append(' ');
+        out.append(held.shorter().said("y")).append(' ');
+        held.anonymous().run();
+        out.append(counted).append(' ');
+
+        out.append(new Nested().value()).append(' ');
+        out.append(held.new Inner().value()).append(' ');
+        out.append(Named.of("world").greeting()).append(' ');
+
+        Base base = new Derived();
+        out.append(base.held()).append(' ');
+
+        out.append(Colour.RED.warm()).append(' ');
+        out.append(Colour.valueOf("BLUE").ordinal()).append(' ');
+        out.append(Colour.values().length).append(' ');
+
+        Point point = new Point(2, 3);
+        out.append(point.x() + point.y()).append(' ');
+        out.append(point.sum()).append(' ');
+
+        Shape shape = new Round(2.0);
+        out.append(shape.area()).append(' ');
+        out.append(new Square(3.0).area()).append(' ');
+
+        out.append(held.marked()).append(' ');
+
+        System.out.println(out.toString());
+    }
+}
+"####;
+
+    #[test]
+    fn the_whole_language_compiles_verifies_and_runs() {
+        let produced = compile(THE_WHOLE_LANGUAGE, &empty()).expect("all of it must compile");
+        let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
+        for wanted in [
+            "com/my/app/Everything.class",
+            "com/my/app/Everything$Nested.class",
+            "com/my/app/Everything$Inner.class",
+            "com/my/app/Everything$Thing.class",
+            "com/my/app/Everything$Named.class",
+            "com/my/app/Everything$Base.class",
+            "com/my/app/Everything$Derived.class",
+            "com/my/app/Colour.class",
+            "com/my/app/Point.class",
+            "com/my/app/Shape.class",
+            "com/my/app/Round.class",
+            "com/my/app/Square.class",
+            "com/my/app/Marked.class",
+            "com/my/app/Hint.class",
+        ] {
+            assert!(
+                names.contains(&wanted),
+                "{wanted} is missing from {names:?}"
+            );
+        }
+        // The lambdas, the method reference and the anonymous class each
+        // become a class of their own, because Android rewrites
+        // `invokedynamic` back into one anyway.
+        assert!(
+            names.iter().filter(|one| one.contains("$1")).count() >= 1,
+            "{names:?}"
+        );
+
+        let read = |file: &str| {
+            let (_, bytes) = produced
+                .iter()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("{file}"));
+            crate::jvm::read(bytes).unwrap_or_else(|why| panic!("{file}: {why:?}"))
+        };
+
+        // -- Java 25 class-file generation
+        let everything = read("com/my/app/Everything.class");
+        assert_eq!(everything.major_version, CLASS_MAJOR);
+        assert_eq!(everything.major_version, 69);
+
+        // -- StackMapTable: every method with a branch in it has one.
+        let described = everything
+            .methods
+            .iter()
+            .find(|one| one.name == "describe")
+            .expect("describe");
+        let code = described.code.as_ref().expect("a body");
+        assert!(code.max_stack > 0);
+
+        // -- synchronized methods, volatile, transient, varargs
+        let guarded = everything
+            .methods
+            .iter()
+            .find(|one| one.name == "guarded")
+            .unwrap();
+        assert!(guarded.access_flags & 0x0020 != 0, "ACC_SYNCHRONIZED");
+        let shared = everything
+            .fields
+            .iter()
+            .find(|one| one.name == "shared")
+            .unwrap();
+        assert!(shared.access_flags & 0x0040 != 0, "ACC_VOLATILE");
+        let passing = everything
+            .fields
+            .iter()
+            .find(|one| one.name == "passing")
+            .unwrap();
+        assert!(passing.access_flags & 0x0080 != 0, "ACC_TRANSIENT");
+        let sum = everything
+            .methods
+            .iter()
+            .find(|one| one.name == "sum")
+            .unwrap();
+        assert!(sum.access_flags & 0x0080 != 0, "ACC_VARARGS");
+
+        // -- static and instance initialization
+        assert!(everything.methods.iter().any(|one| one.name == "<clinit>"));
+
+        // -- generics erasure: `<T> T first(List<T>)` is `(List)Object`.
+        let first = everything
+            .methods
+            .iter()
+            .find(|one| one.name == "first")
+            .unwrap();
+        assert_eq!(first.descriptor, "(Ljava/util/List;)Ljava/lang/Object;");
+
+        // -- bridge methods
+        let derived = read("com/my/app/Everything$Derived.class");
+        let bridge = derived
+            .methods
+            .iter()
+            .find(|one| one.name == "held" && one.descriptor == "()Ljava/lang/Object;")
+            .expect("the bridge the covariant return needs");
+        assert!(bridge.access_flags & 0x0040 != 0, "ACC_BRIDGE");
+        assert!(bridge.access_flags & 0x1000 != 0, "ACC_SYNTHETIC");
+
+        // -- interfaces with default, static and private methods
+        let named = read("com/my/app/Everything$Named.class");
+        let greeting = named
+            .methods
+            .iter()
+            .find(|one| one.name == "greeting")
+            .unwrap();
+        assert!(
+            greeting.access_flags & 0x0400 == 0,
+            "a default is not abstract"
+        );
+        let of = named.methods.iter().find(|one| one.name == "of").unwrap();
+        assert!(of.access_flags & 0x0008 != 0, "a static interface method");
+        let prefix = named
+            .methods
+            .iter()
+            .find(|one| one.name == "prefix")
+            .unwrap();
+        assert!(
+            prefix.access_flags & 0x0002 != 0,
+            "a private interface method"
+        );
+        assert!(prefix.access_flags & 0x0001 == 0, "and not public as well");
+
+        // -- annotations, and the retention that decides what is written down
+        let marked = read("com/my/app/Marked.class");
+        assert!(marked.access_flags & 0x2000 != 0, "ACC_ANNOTATION");
+        assert!(marked
+            .interfaces
+            .iter()
+            .any(|one| one == "java.lang.annotation.Annotation"));
+
+        // -- records and sealed metadata
+        let point = read("com/my/app/Point.class");
+        assert_eq!(point.superclass.as_deref(), Some("java.lang.Record"));
+        assert!(point.access_flags & 0x0010 != 0, "a record is final");
+        let shape = read("com/my/app/Shape.class");
+        assert!(shape.access_flags & 0x0200 != 0, "a sealed interface");
+
+        // -- what the class file carries beyond its members, read from the
+        // -- bytes rather than trusted.
+        let bytes_of = |file: &str| {
+            produced
+                .iter()
+                .find(|(name, _)| name == file)
+                .map(|(_, bytes)| bytes.clone())
+                .unwrap()
+        };
+        let holds = |bytes: &[u8], text: &str| {
+            bytes
+                .windows(text.len())
+                .any(|window| window == text.as_bytes())
+        };
+        assert!(holds(
+            &bytes_of("com/my/app/Shape.class"),
+            "PermittedSubclasses"
+        ));
+        assert!(holds(&bytes_of("com/my/app/Point.class"), "Record"));
+        assert!(holds(
+            &bytes_of("com/my/app/Everything.class"),
+            "RuntimeVisibleAnnotations"
+        ));
+        assert!(holds(
+            &bytes_of("com/my/app/Everything.class"),
+            "NestMembers"
+        ));
+        assert!(holds(
+            &bytes_of("com/my/app/Everything$Nested.class"),
+            "NestHost"
+        ));
+        assert!(holds(
+            &bytes_of("com/my/app/Marked.class"),
+            "AnnotationDefault"
+        ));
+        assert!(holds(
+            &bytes_of("com/my/app/Everything.class"),
+            "StackMapTable"
+        ));
+        // A retention of SOURCE is read and dropped, which is what `@Override`
+        // and `@Hint` are for.
+        assert!(!holds(&bytes_of("com/my/app/Everything.class"), "LHint;"));
+
+        // -- a real JVM verifies every one of them.
+        for (file, bytes) in &produced {
+            let one = file.trim_end_matches(".class");
+            match jvm_verifies(one, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here to verify the whole language");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {file}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+
+        // -- and runs them, which is the only thing that says the code means
+        // -- what was written. The expected line is what `javac` produces for
+        // -- the same source, character for character.
+        match jvm_runs(&produced, "com.my.app.Everything") {
+            None => eprintln!("java: no JVM here to run the whole language"),
+            Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "true 3 a 10 4 11.0 text null 20 30 10 one 3.0 3 1 6 1 4 5 8 \
+                     text 3 big 20 number 3 nothing something 4 3 10 20 10 5 no 10 10 \
+                     text 1 lambda y 12 12 3 hello world derived true 2 3 5 5 12.0 9.0 marked",
+                    "what it printed is not what javac's own build of the same source prints"
+                );
+            }
+        }
+
+        // -- and every one of them reaches Dalvik.
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, bytes)| {
+                let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        if let Some(said) = dexdump_disassembly(&dex) {
+            assert!(said.contains("Everything"));
+        }
+
+        eprintln!(
+            "java: the whole language -- {} classes, verified, run, and into a {} byte dex",
+            produced.len(),
+            dex.len()
         );
     }
 

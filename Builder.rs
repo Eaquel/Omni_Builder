@@ -16526,6 +16526,7 @@ pub mod dalvik {
         fn tries(&self, positions: &[usize]) -> Result<Vec<Try>, Diagnostic> {
             let _ = positions;
             let mut out: Vec<Try> = Vec::new();
+            let mut rows: Vec<(u32, u32, Option<String>, u32)> = Vec::new();
             for (from, to, target, caught) in &self.handlers {
                 let at = |offset: u16| -> Result<u32, Diagnostic> {
                     self.landed
@@ -16547,38 +16548,56 @@ pub mod dalvik {
                     index => Some(format!("L{};", self.class_name(*index, 0)?)),
                 };
 
-                // Two rows over the same stretch are one `try` with two ways
-                // out, in the order the class file listed them -- which is the
-                // order the JVM would have tried them in.
-                match out
-                    .iter_mut()
-                    .find(|held| held.start == start && u32::from(held.units) == end - start)
-                {
-                    Some(held) => held.catches.push((descriptor, handler)),
-                    None => out.push(Try {
+                rows.push((start, end, descriptor, handler));
+            }
+
+            // A class file's exception table is searched in order, so its rows
+            // may overlap and nest: a `catch` inside a `finally` is two rows
+            // over stretches that share a beginning. A Dalvik try table is
+            // searched by address, so its rows must not overlap at all.
+            //
+            // The same thing said the other way: every point in the method is
+            // cut at every boundary any row has, and each piece carries every
+            // handler covering it, in the order the class file listed them --
+            // which is the order the JVM would have tried them in. Pieces that
+            // end up with the same handlers are put back together, so a table
+            // that did not need splitting comes out as it went in.
+            let mut edges: Vec<u32> = Vec::new();
+            for (start, end, _, _) in &rows {
+                edges.push(*start);
+                edges.push(*end);
+            }
+            edges.sort_unstable();
+            edges.dedup();
+
+            for pair in edges.windows(2) {
+                let (start, end) = (pair[0], pair[1]);
+                let mut catches: Vec<(Option<String>, u32)> = Vec::new();
+                for (from, to, descriptor, handler) in &rows {
+                    if *from > start || *to < end {
+                        continue;
+                    }
+                    let held = (descriptor.clone(), *handler);
+                    if catches.contains(&held) {
+                        continue;
+                    }
+                    catches.push(held);
+                }
+                if catches.is_empty() {
+                    continue;
+                }
+                match out.last_mut() {
+                    Some(held)
+                        if held.start + u32::from(held.units) == start
+                            && held.catches == catches =>
+                    {
+                        held.units += (end - start) as u16;
+                    }
+                    _ => out.push(Try {
                         start,
                         units: (end - start) as u16,
-                        catches: vec![(descriptor, handler)],
+                        catches,
                     }),
-                }
-            }
-            // A try_item table has to be sorted by where each range begins, and
-            // the ranges must not overlap: Dalvik finds a handler by searching
-            // the table rather than by taking the first match.
-            out.sort_by_key(|one| one.start);
-            for pair in out.windows(2) {
-                let (before, after) = (&pair[0], &pair[1]);
-                if before.start + u32::from(before.units) > after.start {
-                    return Err(fail(
-                        "ED009",
-                        "Two protected ranges overlap, and Dalvik has no way to say which wins.",
-                    )
-                    .with_context(format!(
-                        "{}..{} and {}..",
-                        before.start,
-                        before.start + u32::from(before.units),
-                        after.start
-                    )));
                 }
             }
             Ok(out)
