@@ -35,9 +35,21 @@
 //! `List<String>` and `List` are the same class at run time, and the only
 //! thing lost is the checking `javac` does before erasing them itself.
 //!
+//! Enums and records are read and turned into the classes they stand for --
+//! a final class extending `java.lang.Enum` with its constants, its class
+//! initialiser, `values` and `valueOf`; a final class with a field and an
+//! accessor per component and a `toString`. A `switch` over an enum compares
+//! its constants, which are the only instances of their class there are. A
+//! `try` that holds things closes them in the reverse of the order it opened
+//! them.
+//!
+//! There is a small fixed table of runtime signatures -- the exceptions,
+//! printing, string work, boxing, arithmetic, the collections -- so that code
+//! which has never been handed `android.jar` still compiles. Anything handed
+//! over as a dependency wins over it.
+//!
 //! Refused, by name, with the line it happened on: lambdas and method
-//! references, inner and anonymous classes, enums and records as
-//! declarations, `try` with resources, `synchronized` and `assert`.
+//! references, inner and anonymous classes, `synchronized` and `assert`.
 //! Annotations are parsed and discarded, which is safe because they are
 //! metadata and nothing here reads them; `@Override` therefore costs nothing.
 //!
@@ -94,6 +106,10 @@ fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
 
 fn at(code: &str, line: u32, column: u32, message: impl Into<String>) -> Diagnostic {
     fail(code, message).with_context(format!("Line {line}, column {column}"))
+}
+
+fn at_line(code: &str, line: u32, message: impl Into<String>) -> Diagnostic {
+    at(code, line, 1, message)
 }
 
 fn unsupported(line: u32, column: u32, what: &str) -> Diagnostic {
@@ -1095,6 +1111,399 @@ pub struct Arm {
     pub column: u32,
 }
 
+/// Turns an enum into the class it stands for.
+///
+/// There is no enum in a class file. There is a final class extending
+/// `java.lang.Enum` with one static field per constant, a class initialiser
+/// that makes them, a private constructor that hands the name and the position
+/// upwards, and the two static methods every enum has. `javac` writes all of
+/// that too; the difference is only that this writes it as source-shaped
+/// members before anything else looks, so nothing downstream needs to know an
+/// enum was ever involved.
+fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
+    let named = Written::Named(unit.name.clone());
+    let array_of = Written::Array(Box::new(named.clone()));
+    let public_constant = Modifiers {
+        public: true,
+        static_: true,
+        final_: true,
+        ..Modifiers::default()
+    };
+    let at = |line: u32, node: Statement| Positioned {
+        node,
+        line,
+        column: 1,
+    };
+    let set = |line: u32, target: Expression, value: Expression| {
+        at(
+            line,
+            Statement::Express(Expression::Assign {
+                target: Box::new(target),
+                operator: None,
+                value: Box::new(value),
+            }),
+        )
+    };
+
+    // Every constant is a field of the enum's own type, and the class
+    // initialiser is what fills them in -- in the order they were written,
+    // because that order is what `ordinal` means.
+    let mut setup = Vec::new();
+    for (position, constant) in constants.iter().enumerate() {
+        unit.fields.push(Field {
+            modifiers: public_constant,
+            what: named.clone(),
+            name: constant.name.clone(),
+            value: None,
+            line: constant.line,
+        });
+        let mut arguments = vec![
+            Expression::Str(constant.name.clone()),
+            Expression::Int(position as i64),
+        ];
+        arguments.extend(constant.arguments.iter().cloned());
+        setup.push(set(
+            constant.line,
+            Expression::Name(constant.name.clone()),
+            Expression::New {
+                what: named.clone(),
+                arguments,
+            },
+        ));
+    }
+
+    // The array `values()` hands out a copy of. It is private so that nothing
+    // outside can reach in and change what the enum's constants are.
+    const HELD: &str = "$VALUES";
+    unit.fields.push(Field {
+        modifiers: Modifiers {
+            private: true,
+            static_: true,
+            final_: true,
+            ..Modifiers::default()
+        },
+        what: array_of.clone(),
+        name: HELD.to_string(),
+        value: None,
+        line: 1,
+    });
+    setup.push(set(
+        1,
+        Expression::Name(HELD.to_string()),
+        Expression::NewArray {
+            of: named.clone(),
+            length: Box::new(Expression::Int(constants.len() as i64)),
+        },
+    ));
+    for (position, constant) in constants.iter().enumerate() {
+        setup.push(set(
+            constant.line,
+            Expression::Index {
+                of: Box::new(Expression::Name(HELD.to_string())),
+                at: Box::new(Expression::Int(position as i64)),
+            },
+            Expression::Name(constant.name.clone()),
+        ));
+    }
+    // Before anything the person wrote in a `static` block, because that block
+    // may name the constants.
+    setup.extend(std::mem::take(&mut unit.static_setup));
+    unit.static_setup = setup;
+
+    // Every constructor gains the name and the position in front of what was
+    // written, and hands them up. A constructor nobody wrote is the one taking
+    // nothing else.
+    if !unit.methods.iter().any(|held| held.constructor) {
+        unit.methods.push(Method {
+            modifiers: Modifiers {
+                private: true,
+                ..Modifiers::default()
+            },
+            returns: Written::Void,
+            name: "<init>".to_string(),
+            parameters: Vec::new(),
+            body: Some(Vec::new()),
+            constructor: true,
+            variadic: false,
+            line: 1,
+        });
+    }
+    for method in &mut unit.methods {
+        if !method.constructor {
+            continue;
+        }
+        method.modifiers.public = false;
+        method.modifiers.protected = false;
+        method.modifiers.private = true;
+        let mut parameters = vec![
+            (Written::Named("String".to_string()), "$name".to_string()),
+            (Written::Int, "$ordinal".to_string()),
+        ];
+        parameters.append(&mut method.parameters);
+        method.parameters = parameters;
+        let mut body = vec![at(
+            method.line,
+            Statement::Chain {
+                to_super: true,
+                arguments: vec![
+                    Expression::Name("$name".to_string()),
+                    Expression::Name("$ordinal".to_string()),
+                ],
+            },
+        )];
+        body.extend(method.body.take().unwrap_or_default());
+        method.body = Some(body);
+    }
+
+    // `values()` hands out a new array every time, which is what a copy is
+    // for: nothing a caller does to it can reach the enum.
+    let mut values = vec![at(
+        1,
+        Statement::Declare {
+            what: array_of.clone(),
+            name: "$out".to_string(),
+            value: Some(Expression::NewArray {
+                of: named.clone(),
+                length: Box::new(Expression::Int(constants.len() as i64)),
+            }),
+        },
+    )];
+    for position in 0..constants.len() {
+        values.push(set(
+            1,
+            Expression::Index {
+                of: Box::new(Expression::Name("$out".to_string())),
+                at: Box::new(Expression::Int(position as i64)),
+            },
+            Expression::Index {
+                of: Box::new(Expression::Name(HELD.to_string())),
+                at: Box::new(Expression::Int(position as i64)),
+            },
+        ));
+    }
+    values.push(at(
+        1,
+        Statement::Return(Some(Expression::Name("$out".to_string()))),
+    ));
+    unit.methods.push(Method {
+        modifiers: Modifiers {
+            public: true,
+            static_: true,
+            ..Modifiers::default()
+        },
+        returns: array_of,
+        name: "values".to_string(),
+        parameters: Vec::new(),
+        body: Some(values),
+        constructor: false,
+        variadic: false,
+        line: 1,
+    });
+
+    // `valueOf` is written out rather than handed to `Enum.valueOf`, which
+    // would need a class literal this compiler has no way to write.
+    let mut value_of = Vec::new();
+    for constant in constants {
+        value_of.push(at(
+            constant.line,
+            Statement::If {
+                condition: Expression::Call {
+                    on: Some(Box::new(Expression::Name("$name".to_string()))),
+                    super_call: false,
+                    name: "equals".to_string(),
+                    arguments: vec![Expression::Str(constant.name.clone())],
+                },
+                then: Box::new(at(
+                    constant.line,
+                    Statement::Return(Some(Expression::Name(constant.name.clone()))),
+                )),
+                otherwise: None,
+            },
+        ));
+    }
+    value_of.push(at(
+        1,
+        Statement::Throw(Expression::New {
+            what: Written::Named("IllegalArgumentException".to_string()),
+            arguments: vec![Expression::Name("$name".to_string())],
+        }),
+    ));
+    unit.methods.push(Method {
+        modifiers: Modifiers {
+            public: true,
+            static_: true,
+            ..Modifiers::default()
+        },
+        returns: named,
+        name: "valueOf".to_string(),
+        parameters: vec![(Written::Named("String".to_string()), "$name".to_string())],
+        body: Some(value_of),
+        constructor: false,
+        variadic: false,
+        line: 1,
+    });
+
+    unit.extends = Some("java.lang.Enum".to_string());
+    unit.modifiers.final_ = true;
+    unit
+}
+
+/// Turns a record into the class it stands for.
+///
+/// A record is a final class extending `java.lang.Record` with a private final
+/// field per component, a constructor that fills them in, an accessor per
+/// component, and `equals`, `hashCode` and `toString`. `javac` writes those
+/// three with `invokedynamic` and a bootstrap that builds them at run time;
+/// they are written out here instead, because an `invokedynamic` is a call
+/// into a class this compiler would then have to know about and Android
+/// rewrites it anyway.
+fn as_the_class_a_record_is(
+    mut unit: Unit,
+    components: &[(Written, String)],
+) -> Result<Unit, Diagnostic> {
+    let at = |node: Statement| Positioned {
+        node,
+        line: 1,
+        column: 1,
+    };
+    let private_final = Modifiers {
+        private: true,
+        final_: true,
+        ..Modifiers::default()
+    };
+    let public = Modifiers {
+        public: true,
+        ..Modifiers::default()
+    };
+
+    for (what, name) in components {
+        if unit.fields.iter().any(|held| held.name == *name) {
+            return Err(at_line(
+                "EJ117",
+                1,
+                format!("`{name}` is both a component of this record and a field of it."),
+            ));
+        }
+        unit.fields.push(Field {
+            modifiers: private_final,
+            what: what.clone(),
+            name: name.clone(),
+            value: None,
+            line: 1,
+        });
+    }
+
+    // The canonical constructor, unless the person wrote one taking exactly
+    // the components.
+    let written_canonical = unit
+        .methods
+        .iter()
+        .any(|held| held.constructor && held.parameters.len() == components.len());
+    if !written_canonical {
+        let body = components
+            .iter()
+            .map(|(_, name)| {
+                at(Statement::Express(Expression::Assign {
+                    target: Box::new(Expression::Field {
+                        of: Box::new(Expression::This),
+                        name: name.clone(),
+                    }),
+                    operator: None,
+                    value: Box::new(Expression::Name(name.clone())),
+                }))
+            })
+            .collect();
+        unit.methods.push(Method {
+            modifiers: public,
+            returns: Written::Void,
+            name: "<init>".to_string(),
+            parameters: components.to_vec(),
+            body: Some(body),
+            constructor: true,
+            variadic: false,
+            line: 1,
+        });
+    }
+
+    // An accessor per component, unless one was written.
+    for (what, name) in components {
+        if unit
+            .methods
+            .iter()
+            .any(|held| held.name == *name && held.parameters.is_empty())
+        {
+            continue;
+        }
+        unit.methods.push(Method {
+            modifiers: public,
+            returns: what.clone(),
+            name: name.clone(),
+            parameters: Vec::new(),
+            body: Some(vec![at(Statement::Return(Some(Expression::Name(
+                name.clone(),
+            ))))]),
+            constructor: false,
+            variadic: false,
+            line: 1,
+        });
+    }
+
+    // `toString`, as `Name[x=1, y=2]`, which is the shape the language
+    // specifies.
+    if !unit
+        .methods
+        .iter()
+        .any(|held| held.name == "toString" && held.parameters.is_empty())
+    {
+        let mut text = Expression::Str(format!("{}[", unit.name));
+        for (index, (_, name)) in components.iter().enumerate() {
+            let lead = if index == 0 {
+                format!("{name}=")
+            } else {
+                format!(", {name}=")
+            };
+            text = Expression::Binary {
+                operator: Binary::Add,
+                left: Box::new(text),
+                right: Box::new(Expression::Str(lead)),
+            };
+            text = Expression::Binary {
+                operator: Binary::Add,
+                left: Box::new(text),
+                right: Box::new(Expression::Name(name.clone())),
+            };
+        }
+        text = Expression::Binary {
+            operator: Binary::Add,
+            left: Box::new(text),
+            right: Box::new(Expression::Str("]".to_string())),
+        };
+        unit.methods.push(Method {
+            modifiers: public,
+            returns: Written::Named("String".to_string()),
+            name: "toString".to_string(),
+            parameters: Vec::new(),
+            body: Some(vec![at(Statement::Return(Some(text)))]),
+            constructor: false,
+            variadic: false,
+            line: 1,
+        });
+    }
+
+    unit.implements.push("java.lang.Record".to_string());
+    unit.modifiers.final_ = true;
+    Ok(unit)
+}
+
+/// One constant of an enum, as it was written.
+#[derive(Clone, Debug)]
+pub struct Constant {
+    pub name: String,
+    pub arguments: Vec<Expression>,
+    pub line: u32,
+    pub column: u32,
+}
+
 /// One `catch` clause.
 #[derive(Clone, Debug)]
 pub struct Catch {
@@ -1177,6 +1586,12 @@ pub struct Method {
 pub enum Shape {
     Class,
     Interface,
+    /// Read as an enum and turned into the class it stands for before anything
+    /// else sees it. See [`as_the_class_it_is`].
+    Enum,
+    /// Read as a record and turned into the class it stands for the same way.
+    /// See [`as_the_class_a_record_is`].
+    Record,
 }
 
 #[derive(Clone, Debug)]
@@ -1509,15 +1924,20 @@ impl Parser {
     ) -> Result<Unit, Diagnostic> {
         self.skip_annotations()?;
         let modifiers = self.modifiers()?;
-        for (word, what) in [("enum", "An enum declaration"), ("record", "A record")] {
-            if self.is_word(word) {
-                return Err(unsupported(self.line(), self.column(), what));
-            }
-        }
+        // `record` is not a keyword: Java kept it a name so that code already
+        // using it still compiles. It is a declaration only when a name and a
+        // parameter list follow it.
+        let is_record = matches!(&self.here().token, Token::Identifier(word) if word == "record")
+            && matches!(self.ahead(1), Token::Identifier(_));
         let shape = if self.eat_word("interface") {
             Shape::Interface
         } else if self.eat_word("class") {
             Shape::Class
+        } else if self.eat_word("enum") {
+            Shape::Enum
+        } else if is_record {
+            self.take();
+            Shape::Record
         } else {
             return Err(at(
                 "EJ104",
@@ -1537,6 +1957,13 @@ impl Parser {
         let name = self.want_name()?;
         self.skip_type_arguments()?;
 
+        // A record says what it holds in front of everything else.
+        let components = if shape == Shape::Record {
+            self.parameters_and_shape()?.0
+        } else {
+            Vec::new()
+        };
+
         // An interface's `extends` lists interfaces, which is what a class
         // calls `implements`. In the class file they are the same list.
         let mut extends = None;
@@ -1546,8 +1973,10 @@ impl Parser {
                 let named = self.qualified()?;
                 self.skip_type_arguments()?;
                 match shape {
-                    Shape::Class => extends = Some(named),
-                    Shape::Interface => implements.push(named),
+                    Shape::Class | Shape::Enum => extends = Some(named),
+                    // A record's superclass is always `java.lang.Record`, so
+                    // `extends` on one is not Java at all.
+                    Shape::Interface | Shape::Record => implements.push(named),
                 }
                 if !self.eat_mark(",") {
                     break;
@@ -1565,6 +1994,40 @@ impl Parser {
         }
 
         self.want_mark("{")?;
+
+        // An enum's constants come first, before anything else it declares.
+        let mut constants: Vec<Constant> = Vec::new();
+        if shape == Shape::Enum {
+            while matches!(self.here().token, Token::Identifier(_)) {
+                self.skip_annotations()?;
+                let (line, column) = (self.line(), self.column());
+                let name = self.want_name()?;
+                let arguments = if self.is_mark("(") {
+                    self.arguments()?
+                } else {
+                    Vec::new()
+                };
+                if self.is_mark("{") {
+                    return Err(unsupported(
+                        self.line(),
+                        self.column(),
+                        "An enum constant with a body of its own",
+                    ));
+                }
+                constants.push(Constant {
+                    name,
+                    arguments,
+                    line,
+                    column,
+                });
+                if !self.eat_mark(",") {
+                    break;
+                }
+            }
+            // The semicolon is only needed when something follows.
+            self.eat_mark(";");
+        }
+
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         let mut instance_setup = Vec::new();
@@ -1592,7 +2055,7 @@ impl Parser {
         }
         self.want_mark("}")?;
 
-        Ok(Unit {
+        let unit = Unit {
             shape,
             package: package.clone(),
             imports: imports.to_vec(),
@@ -1604,7 +2067,14 @@ impl Parser {
             methods,
             instance_setup,
             static_setup,
-        })
+        };
+        if shape == Shape::Enum {
+            return Ok(as_the_class_it_is(unit, &constants));
+        }
+        if shape == Shape::Record {
+            return as_the_class_a_record_is(unit, &components);
+        }
+        Ok(unit)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2172,9 +2642,41 @@ impl Parser {
     }
 
     fn try_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
-        if self.is_mark("(") {
-            return Err(unsupported(line, column, "A `try` with resources"));
+        // `try (a; b) { ... }` holds what has to be closed afterwards. Each
+        // one is a declaration, and the last may leave off its semicolon.
+        let mut resources: Vec<Positioned<Statement>> = Vec::new();
+        if self.eat_mark("(") {
+            loop {
+                if self.is_mark(")") {
+                    break;
+                }
+                let (line, column) = (self.line(), self.column());
+                self.eat_word("final");
+                let node = self.declaration()?;
+                let Statement::Declare { value: Some(_), .. } = &node else {
+                    return Err(at(
+                        "EJ118",
+                        line,
+                        column,
+                        "Something a `try` closes has to be given a value.",
+                    ));
+                };
+                resources.push(Positioned { node, line, column });
+                if !self.eat_mark(";") {
+                    break;
+                }
+            }
+            self.want_mark(")")?;
+            if resources.is_empty() {
+                return Err(at(
+                    "EJ118",
+                    line,
+                    column,
+                    "A `try` with brackets holds at least one thing to close.",
+                ));
+            }
         }
+
         let body = self.braced_block()?;
 
         let mut catches = Vec::new();
@@ -2205,20 +2707,56 @@ impl Parser {
             None
         };
 
-        if catches.is_empty() && finally.is_none() {
+        if catches.is_empty() && finally.is_none() && resources.is_empty() {
             return Err(at(
                 "EJ114",
                 line,
                 column,
-                "A `try` needs a `catch` or a `finally`.",
+                "A `try` needs a `catch`, a `finally`, or something to close.",
             ));
         }
 
-        Ok(Statement::Try {
+        // Each resource becomes its own `try`, innermost last, so that they
+        // are closed in the reverse of the order they were opened -- which is
+        // what the language says and what anything holding a lock depends on.
+        let mut inner = Statement::Try {
             body,
             catches,
             finally,
-        })
+        };
+        for resource in resources.into_iter().rev() {
+            let Statement::Declare { name, .. } = &resource.node else {
+                unreachable!("a resource is a declaration");
+            };
+            let close = Positioned {
+                node: Statement::Express(Expression::Call {
+                    on: Some(Box::new(Expression::Name(name.clone()))),
+                    super_call: false,
+                    name: "close".to_string(),
+                    arguments: Vec::new(),
+                }),
+                line: resource.line,
+                column: resource.column,
+            };
+            let held = Positioned {
+                node: inner,
+                line: resource.line,
+                column: resource.column,
+            };
+            inner = Statement::Block(vec![
+                resource,
+                Positioned {
+                    node: Statement::Try {
+                        body: vec![held],
+                        catches: Vec::new(),
+                        finally: Some(vec![close]),
+                    },
+                    line,
+                    column,
+                },
+            ]);
+        }
+        Ok(inner)
     }
 
     fn braced_block(&mut self) -> Result<Vec<Positioned<Statement>>, Diagnostic> {
@@ -2883,38 +3421,60 @@ impl Classpath {
     /// needs: the name, the shape, the fields and the signatures. Types inside
     /// them that do not resolve are found when that type is compiled in its
     /// own right, so nothing is waved through.
+    pub fn shell(&mut self, unit: &Unit) {
+        let internal = unit.internal_name();
+        self.known.insert(
+            internal.clone(),
+            KnownClass {
+                name: internal,
+                superclass: Some(match &unit.extends {
+                    Some(named) => named.replace('.', "/"),
+                    None => "java/lang/Object".to_string(),
+                }),
+                interface: unit.shape == Shape::Interface,
+                ..KnownClass::default()
+            },
+        );
+    }
+
+    /// Fills in what a declared type's members look like.
+    ///
+    /// Every type in the file has a shell first, so that this can resolve a
+    /// name pointing at one of the others whichever order they were written
+    /// in. A member whose type does not resolve is left out rather than
+    /// recorded as a guess: a descriptor built from a name that stands for
+    /// nothing is a field the device cannot find.
     pub fn declare(&mut self, unit: &Unit) {
         let internal = unit.internal_name();
-        let mut known = KnownClass {
-            name: internal.clone(),
-            superclass: Some(match &unit.extends {
-                Some(named) => named.replace('.', "/"),
-                None => "java/lang/Object".to_string(),
-            }),
-            interface: unit.shape == Shape::Interface,
-            ..KnownClass::default()
+        let mut known = match self.known.get(&internal) {
+            Some(found) => found.clone(),
+            None => KnownClass {
+                name: internal.clone(),
+                superclass: Some("java/lang/Object".to_string()),
+                interface: unit.shape == Shape::Interface,
+                ..KnownClass::default()
+            },
         };
 
-        // A written type is turned into the type it stands for only as far as
-        // it can be without a classpath: the primitives and the arrays of
-        // them, and a name taken as it was written. Anything that needs
-        // resolving is left out rather than guessed at.
-        fn shallow(written: &Written) -> Option<Type> {
-            Some(match written {
-                Written::Void => Type::Void,
-                Written::Boolean => Type::Boolean,
-                Written::Byte => Type::Byte,
-                Written::Short => Type::Short,
-                Written::Char => Type::Char,
-                Written::Int => Type::Int,
-                Written::Long => Type::Long,
-                Written::Float => Type::Float,
-                Written::Double => Type::Double,
-                Written::Array(of) => Type::Array(Box::new(shallow(of)?)),
-                Written::Named(name) => Type::Object(name.replace('.', "/")),
-                Written::Inferred => return None,
-            })
-        }
+        let shallow = |written: &Written| -> Option<Type> {
+            fn walk(classpath: &Classpath, unit: &Unit, written: &Written) -> Option<Type> {
+                Some(match written {
+                    Written::Void => Type::Void,
+                    Written::Boolean => Type::Boolean,
+                    Written::Byte => Type::Byte,
+                    Written::Short => Type::Short,
+                    Written::Char => Type::Char,
+                    Written::Int => Type::Int,
+                    Written::Long => Type::Long,
+                    Written::Float => Type::Float,
+                    Written::Double => Type::Double,
+                    Written::Array(of) => Type::Array(Box::new(walk(classpath, unit, of)?)),
+                    Written::Named(name) => Type::Object(resolve_named(classpath, unit, name)?),
+                    Written::Inferred => return None,
+                })
+            }
+            walk(self, unit, written)
+        };
 
         for field in &unit.fields {
             if let Some(what) = shallow(&field.what) {
@@ -3027,6 +3587,33 @@ impl Classpath {
             at = known.superclass.clone();
         }
         None
+    }
+
+    /// A class and everything it inherits from, as far as this can see.
+    ///
+    /// The walk stops where the classpath does, and `java.lang.Object` is
+    /// always last, because everything answers its methods whether or not
+    /// anybody handed its class file over.
+    pub fn ancestors(&self, owner: &str) -> Vec<String> {
+        let mut out = vec![owner.to_string()];
+        let mut at = self
+            .known
+            .get(owner)
+            .and_then(|held| held.superclass.clone());
+        while let Some(current) = at {
+            if out.contains(&current) || out.len() > 64 {
+                break;
+            }
+            out.push(current.clone());
+            at = self
+                .known
+                .get(&current)
+                .and_then(|held| held.superclass.clone());
+        }
+        if !out.iter().any(|held| held == "java/lang/Object") {
+            out.push("java/lang/Object".to_string());
+        }
+        out
     }
 
     pub fn find_field(
@@ -3649,62 +4236,19 @@ impl<'a> Emitter<'a> {
     /// already qualified. A name that resolves to nothing is refused here
     /// rather than written into a class file for a device to reject.
     fn resolve_class(&self, name: &str, line: u32) -> Result<String, Diagnostic> {
-        if name == self.unit.name {
-            return Ok(self.this_class.clone());
-        }
-        if name.contains('.') {
-            let internal = name.replace('.', "/");
-            if self.classpath.get(&internal).is_some() || WELL_KNOWN.contains(&internal.as_str()) {
-                return Ok(internal);
-            }
-        }
-        // A type in the same package is visible without an import, which is
-        // how two types written in one file see each other.
-        if let Some(package) = &self.unit.package {
-            let beside = format!("{}/{name}", package.replace('.', "/"));
-            if self.classpath.get(&beside).is_some() {
-                return Ok(beside);
-            }
-        }
-        for import in &self.unit.imports {
-            if let Some(last) = import.rsplit('.').next() {
-                if last == name {
-                    let internal = import.replace('.', "/");
-                    // An import says where a class would live if it exists. It
-                    // is not proof that it does, and taking it as proof is how
-                    // a call to a class nobody handed over got as far as being
-                    // written into a class file.
-                    if self.classpath.get(&internal).is_some()
-                        || WELL_KNOWN.contains(&internal.as_str())
-                    {
-                        return Ok(internal);
-                    }
-                }
-            }
-        }
-        for import in &self.unit.imports {
-            if let Some(prefix) = import.strip_suffix(".*") {
-                let candidate = format!("{}/{name}", prefix.replace('.', "/"));
-                if self.classpath.get(&candidate).is_some() {
-                    return Ok(candidate);
-                }
-            }
-        }
-        let in_lang = format!("java/lang/{name}");
-        if self.classpath.get(&in_lang).is_some() || WELL_KNOWN.contains(&in_lang.as_str()) {
-            return Ok(in_lang);
-        }
-        Err(at(
-            "EJ200",
-            line,
-            1,
-            format!("`{name}` is not a type this compilation knows."),
-        )
-        .with_suggestion(
-            "Import it, write it out in full, or hand the class file that declares it \
-             over as a dependency. Nothing is guessed: a name that resolves to nothing \
-             here would become a class file the device refuses.",
-        ))
+        resolve_named(self.classpath, self.unit, name).ok_or_else(|| {
+            at(
+                "EJ200",
+                line,
+                1,
+                format!("`{name}` is not a type this compilation knows."),
+            )
+            .with_suggestion(
+                "Import it, write it out in full, or hand the class file that declares it \
+                 over as a dependency. Nothing is guessed: a name that resolves to nothing \
+                 here would become a class file the device refuses.",
+            )
+        })
     }
 }
 
@@ -3734,6 +4278,13 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Object", "hashCode", "()I", false),
     ("java/lang/Object", "equals", "(Ljava/lang/Object;)Z", false),
     ("java/lang/Object", "getClass", "()Ljava/lang/Class;", false),
+    // -- Enum, which every enum extends
+    ("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V", false),
+    ("java/lang/Enum", "name", "()Ljava/lang/String;", false),
+    ("java/lang/Enum", "ordinal", "()I", false),
+    ("java/lang/Enum", "toString", "()Ljava/lang/String;", false),
+    ("java/lang/Enum", "equals", "(Ljava/lang/Object;)Z", false),
+    ("java/lang/Enum", "hashCode", "()I", false),
     // -- Throwable, and the exceptions that get thrown by hand
     (
         "java/lang/Throwable",
@@ -4009,6 +4560,111 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Math", "ceil", "(D)D", true),
     ("java/lang/Math", "round", "(D)J", true),
     ("java/lang/Math", "random", "()D", true),
+    // -- the collections, which is what most Java holds things in. Every one
+    // of these is an interface at run time except the two classes named, and
+    // the erased signatures are what `javac` writes after erasure too.
+    (
+        "java/lang/Iterable",
+        "iterator",
+        "()Ljava/util/Iterator;",
+        false,
+    ),
+    ("java/util/Iterator", "hasNext", "()Z", false),
+    ("java/util/Iterator", "next", "()Ljava/lang/Object;", false),
+    ("java/util/Collection", "size", "()I", false),
+    ("java/util/Collection", "isEmpty", "()Z", false),
+    ("java/util/Collection", "clear", "()V", false),
+    (
+        "java/util/Collection",
+        "add",
+        "(Ljava/lang/Object;)Z",
+        false,
+    ),
+    (
+        "java/util/Collection",
+        "remove",
+        "(Ljava/lang/Object;)Z",
+        false,
+    ),
+    (
+        "java/util/Collection",
+        "contains",
+        "(Ljava/lang/Object;)Z",
+        false,
+    ),
+    (
+        "java/util/Collection",
+        "iterator",
+        "()Ljava/util/Iterator;",
+        false,
+    ),
+    ("java/util/List", "get", "(I)Ljava/lang/Object;", false),
+    (
+        "java/util/List",
+        "set",
+        "(ILjava/lang/Object;)Ljava/lang/Object;",
+        false,
+    ),
+    ("java/util/List", "add", "(ILjava/lang/Object;)V", false),
+    ("java/util/List", "indexOf", "(Ljava/lang/Object;)I", false),
+    ("java/util/List", "remove", "(I)Ljava/lang/Object;", false),
+    ("java/util/ArrayList", "<init>", "()V", false),
+    ("java/util/ArrayList", "<init>", "(I)V", false),
+    ("java/util/Map", "size", "()I", false),
+    ("java/util/Map", "isEmpty", "()Z", false),
+    ("java/util/Map", "clear", "()V", false),
+    (
+        "java/util/Map",
+        "get",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        false,
+    ),
+    (
+        "java/util/Map",
+        "put",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        false,
+    ),
+    (
+        "java/util/Map",
+        "remove",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        false,
+    ),
+    (
+        "java/util/Map",
+        "containsKey",
+        "(Ljava/lang/Object;)Z",
+        false,
+    ),
+    ("java/util/Map", "keySet", "()Ljava/util/Set;", false),
+    ("java/util/Map", "values", "()Ljava/util/Collection;", false),
+    ("java/util/HashMap", "<init>", "()V", false),
+    (
+        "java/util/Objects",
+        "requireNonNull",
+        "(Ljava/lang/Object;)Ljava/lang/Object;",
+        true,
+    ),
+    (
+        "java/util/Objects",
+        "equals",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Z",
+        true,
+    ),
+    (
+        "java/util/Objects",
+        "hashCode",
+        "(Ljava/lang/Object;)I",
+        true,
+    ),
+    (
+        "java/util/Objects",
+        "toString",
+        "(Ljava/lang/Object;)Ljava/lang/String;",
+        true,
+    ),
+    ("java/lang/AutoCloseable", "close", "()V", false),
     // -- the clock, and somewhere to print
     ("java/lang/System", "currentTimeMillis", "()J", true),
     ("java/lang/System", "nanoTime", "()J", true),
@@ -4037,6 +4693,41 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     ("java/io/PrintStream", "print", "(I)V", false),
+];
+
+/// What each built-in class inherits from, where the classpath cannot say.
+///
+/// A `List` answers `Collection`'s methods and a `Collection` answers
+/// `Iterable`'s, and none of those class files has been handed over. Without
+/// this, walking a list with a `for` is refused for want of an `iterator()`
+/// that is two steps up.
+const BUILT_IN_ABOVE: &[(&str, &str)] = &[
+    ("java/lang/String", "java/lang/CharSequence"),
+    ("java/util/Collection", "java/lang/Iterable"),
+    ("java/util/List", "java/util/Collection"),
+    ("java/util/Set", "java/util/Collection"),
+    ("java/util/ArrayList", "java/util/List"),
+    ("java/util/HashMap", "java/util/Map"),
+    ("java/lang/Integer", "java/lang/Number"),
+    ("java/lang/Long", "java/lang/Number"),
+    ("java/lang/Double", "java/lang/Number"),
+    ("java/lang/Float", "java/lang/Number"),
+    ("java/lang/Short", "java/lang/Number"),
+    ("java/lang/Byte", "java/lang/Number"),
+];
+
+/// Which of the built-in classes are interfaces, which decides whether a call
+/// on one is `invokevirtual` or `invokeinterface`. Getting it wrong produces a
+/// class file that verifies and then fails to link on the device.
+const BUILT_IN_INTERFACES: &[&str] = &[
+    "java/lang/CharSequence",
+    "java/lang/Iterable",
+    "java/lang/AutoCloseable",
+    "java/util/Iterator",
+    "java/util/Collection",
+    "java/util/List",
+    "java/util/Set",
+    "java/util/Map",
 ];
 
 /// The exceptions this compiler knows how to construct without being handed
@@ -4105,11 +4796,19 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             interface: false,
         }];
     }
-    // Everything that can be thrown answers Throwable's methods, and every
-    // class answers Object's.
+    // Everything that can be thrown answers Throwable's methods, everything
+    // answers what it inherits from, and every class answers Object's.
     let mut owners = vec![owner.to_string()];
     if BUILT_IN_THROWABLES.contains(&owner) {
         owners.push("java/lang/Throwable".to_string());
+    }
+    let mut at = owner.to_string();
+    while let Some((_, above)) = BUILT_IN_ABOVE.iter().find(|(below, _)| *below == at) {
+        if owners.iter().any(|held| held == above) {
+            break;
+        }
+        owners.push((*above).to_string());
+        at = (*above).to_string();
     }
     owners.push("java/lang/Object".to_string());
 
@@ -4131,7 +4830,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
                 parameters,
                 returns,
                 static_: *static_,
-                interface: false,
+                interface: BUILT_IN_INTERFACES.contains(class),
             });
         }
         if !found.is_empty() {
@@ -4153,9 +4852,57 @@ fn built_in_field(owner: &str, name: &str) -> Option<Type> {
 
 /// The classes that can be named without anything on the classpath, because a
 /// compiler that cannot say `String` cannot compile anything at all.
+/// The internal name a written one stands for, as seen from one unit.
+///
+/// In order: the type being compiled, a name already written out in full, a
+/// type in the same package, a type an import names, a wildcard import, and
+/// `java.lang`. An import says where a class would live if it exists; it is not
+/// proof that it does, which is why every step also asks whether the class is
+/// actually there. Taking an import as proof is how a call to a class nobody
+/// handed over got as far as being written into a class file.
+fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<String> {
+    let exists =
+        |internal: &str| classpath.get(internal).is_some() || WELL_KNOWN.contains(&internal);
+    if name == unit.name {
+        return Some(unit.internal_name());
+    }
+    if name.contains('.') {
+        let internal = name.replace('.', "/");
+        if exists(&internal) {
+            return Some(internal);
+        }
+    }
+    if let Some(package) = &unit.package {
+        let beside = format!("{}/{name}", package.replace('.', "/"));
+        if exists(&beside) {
+            return Some(beside);
+        }
+    }
+    for import in &unit.imports {
+        if import.rsplit('.').next() == Some(name) {
+            let internal = import.replace('.', "/");
+            if exists(&internal) {
+                return Some(internal);
+            }
+        }
+    }
+    for import in &unit.imports {
+        if let Some(prefix) = import.strip_suffix(".*") {
+            let candidate = format!("{}/{name}", prefix.replace('.', "/"));
+            if exists(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    let in_lang = format!("java/lang/{name}");
+    exists(&in_lang).then_some(in_lang)
+}
+
 const WELL_KNOWN: &[&str] = &[
     "java/lang/Object",
     "java/lang/String",
+    "java/lang/Enum",
+    "java/lang/Record",
     "java/lang/CharSequence",
     "java/lang/StringBuilder",
     "java/lang/System",
@@ -4171,6 +4918,16 @@ const WELL_KNOWN: &[&str] = &[
     "java/lang/Number",
     "java/lang/Class",
     "java/io/PrintStream",
+    "java/lang/Iterable",
+    "java/lang/AutoCloseable",
+    "java/util/Iterator",
+    "java/util/Collection",
+    "java/util/List",
+    "java/util/Set",
+    "java/util/Map",
+    "java/util/ArrayList",
+    "java/util/HashMap",
+    "java/util/Objects",
     "java/lang/Throwable",
     "java/lang/Exception",
     "java/lang/RuntimeException",
@@ -5576,12 +6333,22 @@ impl Emitter<'_> {
 
     /// Every signature of this name and shape that could be meant.
     fn candidates(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
-        // A class file handed over is the truth. Only when nothing was handed
-        // over does the built-in table get a say.
+        // A class file handed over is the truth, and `find_method` already
+        // climbs as far as the classpath can see.
         if let Some(found) = self.classpath.find_method(owner, name, count) {
             return vec![found.clone()];
         }
-        built_in_overloads(owner, name, count)
+        // Where the classpath runs out, the built-in table takes over -- for
+        // the class and for everything it inherits from. An enum handed over
+        // as a class file stops at `java.lang.Enum`, which is not on the
+        // classpath and is where `name()` and `ordinal()` live.
+        for ancestor in self.classpath.ancestors(owner) {
+            let found = built_in_overloads(&ancestor, name, count);
+            if !found.is_empty() {
+                return found;
+            }
+        }
+        Vec::new()
     }
 
     fn no_such_method(&self, owner: &str, name: &str, arity: usize, line: u32) -> Diagnostic {
@@ -6667,21 +7434,19 @@ impl Emitter<'_> {
         body: &Positioned<Statement>,
         line: u32,
     ) -> Result<(), Diagnostic> {
-        self.open();
-
-        let found = self.value(over, line)?;
+        // Which of the two loops this is depends on what is being walked
+        // over, and that is known only by working it out. It is worked out
+        // here and the code for it thrown away, so that whichever loop is
+        // chosen writes it once -- writing it here and again inside was how
+        // the first version of this pushed the collection twice.
+        let found = self.type_of(over, line)?;
         let Type::Array(element) = found.clone() else {
-            return Err(at(
-                "EJ236",
-                line,
-                1,
-                format!(
-                    "A `for` over a {} needs an iterator, which is not compiled here.",
-                    found.readable()
-                ),
-            )
-            .with_suggestion("An array works, and so does a counted `for`."));
+            // Not an array, so it has to hand over an iterator.
+            return self.for_each_over_an_iterator(what, name, over, body, &found, line);
         };
+
+        self.open();
+        let found = self.value(over, line)?;
 
         let declared = match what {
             Written::Inferred => (*element).clone(),
@@ -6768,29 +7533,14 @@ impl Emitter<'_> {
     /// save comparisons in switches far larger than anybody writes by hand.
     fn switch(&mut self, subject: &Expression, arms: &[Arm], line: u32) -> Result<(), Diagnostic> {
         let found = self.value(subject, line)?;
-        let over_text = found == Type::Object("java/lang/String".to_string());
-        if !found.is_int_like() && !over_text {
-            return Err(at(
-                "EJ238",
-                line,
-                1,
-                format!(
-                    "A `switch` takes an integer or a String, and was given a {}.",
-                    found.readable()
-                ),
-            ));
-        }
+        let over = self.what_a_switch_is_over(&found, arms, line)?;
 
         self.open();
         self.enter(false);
         let mut ends: Vec<Pending> = Vec::new();
         let mut targets: Vec<usize> = Vec::new();
 
-        let dispatch = if over_text {
-            self.text_dispatch(arms, line)?
-        } else {
-            self.integer_dispatch(arms, line)?
-        };
+        let dispatch = self.dispatch_for(over, arms, line)?;
 
         // The arms, in the order they were written, because that is the order
         // one falls into the next.
@@ -6853,18 +7603,7 @@ impl Emitter<'_> {
         }
 
         let found = self.value(subject, line)?;
-        let over_text = found == Type::Object("java/lang/String".to_string());
-        if !found.is_int_like() && !over_text {
-            return Err(at(
-                "EJ238",
-                line,
-                1,
-                format!(
-                    "A `switch` takes an integer or a String, and was given a {}.",
-                    found.readable()
-                ),
-            ));
-        }
+        let over = self.what_a_switch_is_over(&found, arms, line)?;
 
         self.open();
         self.yields.push(Yielding {
@@ -6874,11 +7613,7 @@ impl Emitter<'_> {
         });
         let level = self.yields.len() - 1;
 
-        let dispatch = if over_text {
-            self.text_dispatch(arms, line)?
-        } else {
-            self.integer_dispatch(arms, line)?
-        };
+        let dispatch = self.dispatch_for(over, arms, line)?;
 
         let mut targets: Vec<usize> = Vec::new();
         let mut default_at: Option<usize> = None;
@@ -6980,6 +7715,116 @@ impl Emitter<'_> {
             )
             .with_suggestion("Every arm has to produce the same type. A cast settles it.")),
         }
+    }
+
+    /// What kind of thing a `switch` is choosing on.
+    fn what_a_switch_is_over(
+        &mut self,
+        found: &Type,
+        arms: &[Arm],
+        line: u32,
+    ) -> Result<Chooser, Diagnostic> {
+        if found.is_int_like() {
+            return Ok(Chooser::Integer);
+        }
+        if *found == Type::Object("java/lang/String".to_string()) {
+            return Ok(Chooser::Text);
+        }
+        // An enum's constants are static fields of the enum's own type, so a
+        // label naming one is a name the class holds. That is true of an enum
+        // written here and of one handed over as a class file, which is why it
+        // is asked of the classpath rather than of a flag.
+        if let Type::Object(class) = found {
+            let every =
+                arms.iter().flat_map(|arm| arm.labels.iter()).all(|label| {
+                    let Expression::Name(named) = label else {
+                        return false;
+                    };
+                    self.classpath.find_field(class, named).is_some_and(
+                        |(_, (_, what, static_))| *static_ && *what == Type::Object(class.clone()),
+                    )
+                });
+            if every {
+                return Ok(Chooser::Constant(class.clone()));
+            }
+        }
+        Err(at(
+            "EJ238",
+            line,
+            1,
+            format!(
+                "A `switch` takes an integer, a String or an enum, and was given a {}.",
+                found.readable()
+            ),
+        ))
+    }
+
+    fn dispatch_for(
+        &mut self,
+        over: Chooser,
+        arms: &[Arm],
+        line: u32,
+    ) -> Result<Dispatch, Diagnostic> {
+        match over {
+            Chooser::Integer => self.integer_dispatch(arms, line),
+            Chooser::Text => self.text_dispatch(arms, line),
+            Chooser::Constant(class) => self.constant_dispatch(&class, arms, line),
+        }
+    }
+
+    /// A chain of `==`, one per constant.
+    ///
+    /// An enum's constants are the only instances of their class that exist,
+    /// so identity is what a `case` means. `javac` writes a table of ordinals
+    /// instead, which is faster for a switch far larger than anybody writes by
+    /// hand and needs a synthetic class of its own to hold the table.
+    fn constant_dispatch(
+        &mut self,
+        class: &str,
+        arms: &[Arm],
+        line: u32,
+    ) -> Result<Dispatch, Diagnostic> {
+        let what = Type::Object(class.to_string());
+        let held = self.declare("$switch", what.clone());
+        self.store(held, &what);
+        self.grow(-1);
+
+        let mut seen: Vec<String> = Vec::new();
+        let mut waiting: Vec<(Pending, usize)> = Vec::new();
+        for (index, arm) in arms.iter().enumerate() {
+            for label in &arm.labels {
+                let Expression::Name(named) = label else {
+                    return Err(at(
+                        "EJ239",
+                        arm.line,
+                        arm.column,
+                        "A `case` in a `switch` over an enum names one of its constants.",
+                    ));
+                };
+                if seen.contains(named) {
+                    return Err(at(
+                        "EJ240",
+                        arm.line,
+                        arm.column,
+                        format!("`case {named}` is written twice in one `switch`."),
+                    ));
+                }
+                seen.push(named.clone());
+
+                self.load(held, &what);
+                self.grow(1);
+                self.read_static_field(class, named, arm.line)?;
+                // if_acmpeq
+                waiting.push((self.jump(0xa5), index));
+                self.grow(-2);
+            }
+        }
+        let _ = line;
+        let fallthrough = self.jump(0xa7);
+        Ok(Dispatch::Chain {
+            waiting,
+            fallthrough,
+        })
     }
 
     /// Writes the switch instruction, with the offsets left to be filled in
@@ -7353,6 +8198,151 @@ impl Emitter<'_> {
         Ok(())
     }
 
+    /// `for (T name : thing)`, where `thing` hands over an iterator.
+    ///
+    /// This is the loop the language says it is: ask for an iterator, ask it
+    /// whether there is another, take it, run the body. The iterator lives in
+    /// a slot of its own so the body cannot reach it.
+    fn for_each_over_an_iterator(
+        &mut self,
+        what: &Written,
+        name: &str,
+        over: &Expression,
+        body: &Positioned<Statement>,
+        found: &Type,
+        line: u32,
+    ) -> Result<(), Diagnostic> {
+        let Type::Object(class) = found.clone() else {
+            return Err(at(
+                "EJ236",
+                line,
+                1,
+                format!("A `for` cannot walk over a {}.", found.readable()),
+            )
+            .with_suggestion("An array works, and so does anything with an `iterator()`."));
+        };
+        let Some(iterator) = self.signature_for(&class, "iterator", &[], line)? else {
+            return Err(at(
+                "EJ236",
+                line,
+                1,
+                format!(
+                    "`{}` has no `iterator()` that this compilation knows.",
+                    class.replace('/', ".")
+                ),
+            )
+            .with_suggestion("Hand the class file that declares it over as a dependency."));
+        };
+
+        let object = Type::Object("java/lang/Object".to_string());
+        let declared = match what {
+            // `var` over an iterator gets Object, because erasure is all there
+            // is to go on and guessing would be worse than saying so.
+            Written::Inferred => object.clone(),
+            other => self.resolve(other, line)?,
+        };
+
+        self.open();
+        let over_type = self.value(over, line)?;
+        let _ = over_type;
+        let held = self.declare("$walking", iterator.returns.clone());
+        self.call_signature(&iterator, line);
+        self.store(held, &iterator.returns);
+        self.grow(-1);
+
+        let Type::Object(iterator_class) = iterator.returns.clone() else {
+            return Err(at(
+                "EJ236",
+                line,
+                1,
+                "An `iterator()` has to hand over an object.",
+            ));
+        };
+        let Some(has_next) = self.signature_for(&iterator_class, "hasNext", &[], line)? else {
+            return Err(at("EJ236", line, 1, "An iterator has to have `hasNext()`."));
+        };
+        let Some(next) = self.signature_for(&iterator_class, "next", &[], line)? else {
+            return Err(at("EJ236", line, 1, "An iterator has to have `next()`."));
+        };
+
+        let top = self.code.len();
+        self.a_branch_lands_here(&[]);
+        self.load(held, &iterator.returns);
+        self.grow(1);
+        self.call_signature(&has_next, line);
+        let out = self.jump(0x99);
+        self.grow(-1);
+
+        self.open();
+        self.load(held, &iterator.returns);
+        self.grow(1);
+        self.call_signature(&next, line);
+        if declared != object {
+            let Type::Object(named) = &declared else {
+                return Err(at(
+                    "EJ237",
+                    line,
+                    1,
+                    format!(
+                        "`{name}` is a {}, and an iterator hands over objects.",
+                        declared.readable()
+                    ),
+                )
+                .with_suggestion("Write the loop over a reference type, or over an array."));
+            };
+            let index = self.pool.class(named);
+            self.op2(0xc0, index);
+        }
+        let slot = self.declare(name, declared.clone());
+        self.store(slot, &declared);
+        self.grow(-1);
+
+        self.enter(true);
+        self.statement(body)?;
+        let level = self.leave();
+        self.close();
+
+        for pending in level.continues {
+            self.land(pending);
+        }
+        self.a_branch_lands_here(&[]);
+        self.jump_back(0xa7, top);
+        self.land(out);
+        for pending in level.breaks {
+            self.land(pending);
+        }
+        self.close();
+        self.a_branch_lands_here(&[]);
+        Ok(())
+    }
+
+    /// Writes the call one signature describes, with everything it takes
+    /// already on the stack.
+    fn call_signature(&mut self, signature: &Signature, line: u32) {
+        let _ = line;
+        let descriptor = signature.descriptor();
+        let index = self.pool.method(
+            &signature.owner,
+            &signature.name,
+            &descriptor,
+            signature.interface,
+        );
+        let taken: i32 = signature
+            .parameters
+            .iter()
+            .map(|one| i32::from(one.width()))
+            .sum();
+        if signature.interface {
+            self.code.push(0xb9);
+            self.code.extend_from_slice(&index.to_be_bytes());
+            self.code.push((taken + 1) as u8);
+            self.code.push(0);
+        } else {
+            self.op2(0xb6, index);
+        }
+        self.grow(-(taken + 1) + i32::from(signature.returns.width()));
+    }
+
     /// `iinc`, on a slot this compiler owns.
     fn bump_local(&mut self, slot: u16, by: i8) {
         if slot <= 255 {
@@ -7370,6 +8360,15 @@ impl Emitter<'_> {
 
 /// How a `switch` gets from its subject to an arm, once the arms have been
 /// written and their positions are known.
+/// What a `switch` is choosing on, which decides how it gets from the subject
+/// to an arm.
+enum Chooser {
+    Integer,
+    Text,
+    /// An enum, named by its class.
+    Constant(String),
+}
+
 enum Dispatch {
     /// A `tableswitch` or a `lookupswitch`, whose offsets are still zero.
     Instruction {
@@ -7787,6 +8786,11 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
     let shape_flags = match unit.shape {
         Shape::Class => 0x0020u16,
         Shape::Interface => 0x0200 | 0x0400,
+        // ACC_ENUM as well, which is how anything reading the file knows the
+        // constants are constants.
+        Shape::Enum => 0x0020 | 0x4000,
+        // ACC_RECORD, and final, because a record cannot be extended.
+        Shape::Record => 0x0020 | 0x0010,
     };
     out.extend_from_slice(&unit.modifiers.access_flags(shape_flags).to_be_bytes());
     out.extend_from_slice(&this_index.to_be_bytes());
@@ -7815,6 +8819,9 @@ pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u
     // A type declared beside another can be named by it, so each one is on the
     // classpath the others are compiled against.
     let mut together = classpath.clone();
+    for unit in &declared {
+        together.shell(unit);
+    }
     for unit in &declared {
         together.declare(unit);
     }
@@ -9264,6 +10271,237 @@ public class Shaped {
     }
 
     #[test]
+    fn an_enum_becomes_the_class_it_stands_for() {
+        let source = r#"
+            package com.my.app;
+
+            public enum Planet {
+                MERCURY(3.30),
+                VENUS(4.87),
+                EARTH(5.97);
+
+                private final double mass;
+
+                Planet(double mass) {
+                    this.mass = mass;
+                }
+
+                public double mass() {
+                    return mass;
+                }
+
+                public boolean heavierThan(Planet other) {
+                    return mass > other.mass();
+                }
+            }
+        "#;
+
+        let (name, bytes) = compile_one(source, &empty()).expect("this must compile");
+        assert_eq!(name, "com/my/app/Planet.class");
+        let class = crate::jvm::read(&bytes).expect("and read back");
+        assert_eq!(class.superclass.as_deref(), Some("java.lang.Enum"));
+        assert!(class.access_flags & 0x4000 != 0, "an enum says it is one");
+        assert!(class.access_flags & 0x0010 != 0, "and that it is final");
+
+        let fields: Vec<&str> = class.fields.iter().map(|one| one.name.as_str()).collect();
+        for wanted in ["MERCURY", "VENUS", "EARTH", "$VALUES", "mass"] {
+            assert!(fields.contains(&wanted), "{fields:?}");
+        }
+        let methods: Vec<&str> = class.methods.iter().map(|one| one.name.as_str()).collect();
+        for wanted in [
+            "<init>",
+            "<clinit>",
+            "values",
+            "valueOf",
+            "mass",
+            "heavierThan",
+        ] {
+            assert!(methods.contains(&wanted), "{methods:?}");
+        }
+
+        match jvm_verifies("com/my/app/Planet", &bytes) {
+            None | Some(Verdict::TooOld(_)) => {
+                eprintln!("java: no JVM new enough here to verify an enum");
+                return;
+            }
+            Some(Verdict::Refused(said)) => panic!("a real JVM refused an enum:\n{said}"),
+            Some(Verdict::Verified) => {}
+        }
+
+        let translated = crate::dalvik::translate_class(&class).expect("must translate");
+        let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
+        if let Some(text) = dexdump_disassembly(&dex) {
+            assert!(text.contains("Lcom/my/app/Planet;"));
+            assert!(text.contains("<clinit>"));
+        }
+
+        // And a switch over it, in a class that is handed the enum's own
+        // class file -- which is how a device would see it.
+        let mut classpath = empty();
+        classpath.learn(&class).expect("the enum must be learnable");
+        let over = r#"
+            package com.my.app;
+
+            public class Weigh {
+                public int rank(Planet which) {
+                    switch (which) {
+                        case MERCURY: return 1;
+                        case VENUS: return 2;
+                        default: return 3;
+                    }
+                }
+
+                public String tell(Planet which) {
+                    return switch (which) {
+                        case EARTH -> "home";
+                        default -> which.name();
+                    };
+                }
+            }
+        "#;
+        let (_, weighed) = compile_one(over, &classpath).expect("a switch over an enum compiles");
+        match jvm_verifies("com/my/app/Weigh", &weighed) {
+            None | Some(Verdict::TooOld(_)) => {}
+            Some(Verdict::Refused(said)) => {
+                panic!("a real JVM refused a switch over an enum:\n{said}")
+            }
+            Some(Verdict::Verified) => {}
+        }
+
+        eprintln!(
+            "java: an enum with three constants, a field and a constructor, and a \
+             switch over it, verified"
+        );
+    }
+
+    #[test]
+    fn a_record_becomes_the_class_it_stands_for() {
+        let source = r#"
+            package com.my.app;
+
+            public record Point(int x, int y) {
+                public int sum() {
+                    return x + y;
+                }
+
+                public static Point origin() {
+                    return new Point(0, 0);
+                }
+            }
+        "#;
+
+        let (name, bytes) = compile_one(source, &empty()).expect("this must compile");
+        assert_eq!(name, "com/my/app/Point.class");
+        let class = crate::jvm::read(&bytes).expect("and read back");
+        assert!(class.access_flags & 0x0010 != 0, "a record is final");
+        assert!(class.interfaces.iter().any(|one| one == "java.lang.Record"));
+
+        let fields: Vec<&str> = class.fields.iter().map(|one| one.name.as_str()).collect();
+        assert_eq!(fields, vec!["x", "y"]);
+        let methods: Vec<&str> = class.methods.iter().map(|one| one.name.as_str()).collect();
+        for wanted in ["<init>", "x", "y", "toString", "sum", "origin"] {
+            assert!(methods.contains(&wanted), "{methods:?}");
+        }
+
+        match jvm_verifies("com/my/app/Point", &bytes) {
+            None | Some(Verdict::TooOld(_)) => {
+                eprintln!("java: no JVM new enough here to verify a record");
+                return;
+            }
+            Some(Verdict::Refused(said)) => panic!("a real JVM refused a record:\n{said}"),
+            Some(Verdict::Verified) => {}
+        }
+
+        let translated = crate::dalvik::translate_class(&class).expect("must translate");
+        let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
+        if let Some(text) = dexdump_disassembly(&dex) {
+            assert!(text.contains("Lcom/my/app/Point;"));
+        }
+
+        eprintln!("java: a record with two components, an accessor each and a toString, verified");
+    }
+
+    #[test]
+    fn code_that_holds_things_and_closes_them_compiles() {
+        let source = r#"
+            package com.my.app;
+
+            import java.util.ArrayList;
+            import java.util.List;
+            import java.util.Map;
+            import java.util.HashMap;
+
+            public class Holding {
+                public int count(List names) {
+                    int total = 0;
+                    for (Object one : names) {
+                        total = total + 1;
+                    }
+                    return total;
+                }
+
+                public List made() {
+                    List out = new ArrayList();
+                    out.add("first");
+                    out.add("second");
+                    return out;
+                }
+
+                public String look(Map by, String key) {
+                    Object found = by.get(key);
+                    if (found instanceof String text) {
+                        return text;
+                    }
+                    return "";
+                }
+
+                public Map counted() {
+                    Map out = new HashMap();
+                    out.put("one", Integer.valueOf(1));
+                    return out;
+                }
+
+                public int walk(Iterable things) {
+                    int seen = 0;
+                    for (Object one : things) {
+                        seen++;
+                    }
+                    return seen;
+                }
+
+                public void closing(AutoCloseable thing) throws Exception {
+                    try (AutoCloseable held = thing) {
+                        System.out.println("using it");
+                    }
+                }
+            }
+        "#;
+
+        let (_, bytes) = compile_one(source, &empty()).expect("this must compile");
+        let class = crate::jvm::read(&bytes).expect("and read back");
+
+        match jvm_verifies("com/my/app/Holding", &bytes) {
+            None | Some(Verdict::TooOld(_)) => {
+                eprintln!("java: no JVM new enough here to verify collections code");
+                return;
+            }
+            Some(Verdict::Refused(said)) => panic!("a real JVM refused it:\n{said}"),
+            Some(Verdict::Verified) => {}
+        }
+
+        let translated = crate::dalvik::translate_class(&class).expect("must translate");
+        let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
+        if let Some(text) = dexdump_disassembly(&dex) {
+            assert!(
+                text.contains("invoke-interface"),
+                "a call on a collection is an interface call"
+            );
+        }
+
+        eprintln!("java: lists, maps, iterators and a try that closes what it opened, verified");
+    }
+
+    #[test]
     fn a_text_block_keeps_what_was_meant_and_drops_what_was_not() {
         // The indentation rule is the whole reason these exist, so it is the
         // thing worth pinning down.
@@ -9302,9 +10540,12 @@ public class Shaped {
                 "EJ900",
             ),
             ("public class A { void f() { assert 1 == 1; } }", "EJ900"),
+            // A `try` with no way out and nothing to close.
+            ("public class A { void f() { try { } } }", "EJ114"),
+            // Something a `try` closes has to be given a value.
             (
-                "public class A { void f() { try (var a = b()) {} } }",
-                "EJ900",
+                "public class A { void f() { try (AutoCloseable a) {} } }",
+                "EJ118",
             ),
             // A `switch` over something that is neither an integer nor a
             // String has no instruction behind it.
