@@ -48,7 +48,15 @@
 //! gives back a Piece, and the cast that says so is written here the same as
 //! `javac` writes it. The same knowledge says what a method takes --
 //! `Map<String, Named>.put` takes a Named, which is what lets a lambda handed
-//! to it know what it stands for.
+//! to it know what it stands for. A class written here is no different: a
+//! `Box<T>` records which of its parameters each method was written as, so a
+//! call on a `Box<String>` hands back a String.
+//!
+//! A method's own `<T>` is another matter. `javac` works out what T was from
+//! the call and casts to it; this does not infer, so it casts to wherever the
+//! value is going instead -- the same instruction, arrived at from the other
+//! end. Which means `String s = first(list)` is right, and `first(list)` on
+//! its own is an Object until something says otherwise.
 //!
 //! A `switch` over an enum that names every constant, or over a `sealed` type
 //! that names every subtype, answers for everything and needs no `default` --
@@ -898,6 +906,10 @@ pub enum Written {
     /// those away before the class file is written; they are kept this far
     /// because they say what a call on the thing gives back.
     Named(String, Vec<Written>),
+    /// A type parameter of the class this was written in, and what it erases
+    /// to. The number is which one, counting from the left, so that a call on
+    /// a `Box<String>` can put the String back where the `T` was.
+    Variable(usize, Box<Written>),
     Array(Box<Written>),
 }
 
@@ -2330,6 +2342,14 @@ impl Unit {
 
 // ----------------------------------------------------------------- parser
 
+/// One `<...>` worth of type variables, and whether they belong to a class.
+struct TypeFrame {
+    held: Vec<(String, Written)>,
+    /// A class's are numbered and can be put back at a call site; a method's
+    /// are only ever erased.
+    of_a_class: bool,
+}
+
 pub struct Parser {
     tokens: Vec<Spelled>,
     at: usize,
@@ -2345,7 +2365,7 @@ pub struct Parser {
     /// -- that is all a type variable ever is once the class file is written,
     /// and saying it once at the point the name is read means nothing further
     /// in has to know type variables exist.
-    type_variables: Vec<Vec<(String, Written)>>,
+    type_variables: Vec<TypeFrame>,
 }
 
 impl Parser {
@@ -2361,10 +2381,16 @@ impl Parser {
     /// What a name stands for, where it is a type variable in scope.
     fn erased(&self, name: &str) -> Option<Written> {
         self.type_variables.iter().rev().find_map(|frame| {
-            frame
-                .iter()
-                .find(|(held, _)| held == name)
-                .map(|(_, bound)| bound.clone())
+            let at = frame.held.iter().position(|(one, _)| one == name)?;
+            let bound = frame.held[at].1.clone();
+            // A method's own `<T>` has no receiver to take an argument from,
+            // so there is nothing to put back and only the bound is kept. A
+            // class's is numbered, because a `Box<String>` says what its is.
+            if frame.of_a_class {
+                Some(Written::Variable(at, Box::new(bound)))
+            } else {
+                Some(bound)
+            }
         })
     }
 
@@ -2374,7 +2400,7 @@ impl Parser {
     /// is read before the frame is pushed, so a variable cannot stand for
     /// itself. Only the first bound counts: the class file records the erasure,
     /// and the erasure of `A & B` is `A`.
-    fn push_type_parameters(&mut self) -> Result<bool, Diagnostic> {
+    fn push_type_parameters(&mut self, of_a_class: bool) -> Result<bool, Diagnostic> {
         if !self.is_mark("<") {
             return Ok(false);
         }
@@ -2401,7 +2427,10 @@ impl Parser {
             break;
         }
         self.close_type_parameters()?;
-        self.type_variables.push(frame);
+        self.type_variables.push(TypeFrame {
+            held: frame,
+            of_a_class,
+        });
         Ok(true)
     }
 
@@ -2937,8 +2966,9 @@ impl Parser {
             None => self.want_name()?,
         };
         // `class Box<T>`: the type variables stay in scope for the whole body,
-        // which is what makes `T get()` inside it mean `Object get()`.
-        let pushed = self.push_type_parameters()?;
+        // which is what makes `T get()` inside it mean `Object get()` -- and
+        // what lets a call on a `Box<String>` put the String back.
+        let pushed = self.push_type_parameters(true)?;
 
         // A record says what it holds in front of everything else.
         let mut permits: Vec<String> = Vec::new();
@@ -3178,7 +3208,7 @@ impl Parser {
 
         // `<T> void f(...)`: the method's own type parameters, erased like
         // every other one, and in scope until the body ends.
-        let pushed = self.push_type_parameters()?;
+        let pushed = self.push_type_parameters(false)?;
 
         let what = self.written_type()?;
         let name = self.want_name()?;
@@ -4936,6 +4966,12 @@ pub struct Signature {
     /// `private` one still has exactly one method a lambda can be, and this is
     /// what tells them apart.
     pub abstract_: bool,
+    /// Which of the owner's type parameters the return really is, where it is
+    /// one. `T get()` on a `Box<T>` erased to `Object get()`, and this is what
+    /// says a call on a `Box<String>` gives back a String.
+    pub returns_variable: Option<usize>,
+    /// The same, one per parameter.
+    pub parameter_variables: Vec<Option<usize>>,
 }
 
 impl Signature {
@@ -5083,6 +5119,15 @@ impl Classpath {
                 interface: unit.shape == Shape::Interface,
                 variadic: method.variadic,
                 abstract_: method.body.is_none(),
+                // Which of the class's type parameters this was written as,
+                // before it was erased. `T get()` on a `Box<T>` is the first
+                // one, and that is what a call on a `Box<String>` needs.
+                returns_variable: which_variable(&method.returns),
+                parameter_variables: method
+                    .parameters
+                    .iter()
+                    .map(|(what, _)| which_variable(what))
+                    .collect(),
             });
         }
         self.known.insert(internal, known);
@@ -5119,6 +5164,8 @@ impl Classpath {
                 // the `...` somebody wrote.
                 variadic: method.access_flags & 0x0080 != 0,
                 abstract_: method.access_flags & 0x0400 != 0,
+                returns_variable: None,
+                parameter_variables: Vec::new(),
             });
         }
         for field in &class.fields {
@@ -5960,6 +6007,10 @@ impl<'a> Emitter<'a> {
             Written::Float => Type::Float,
             Written::Double => Type::Double,
             Written::Array(of) => Type::Array(Box::new(self.resolve(of, line)?)),
+            // A type variable is what it erases to; which one it was is
+            // written down separately, for the call sites that can put an
+            // argument back where it stood.
+            Written::Variable(_, bound) => self.resolve(bound, line)?,
             Written::Named(name, held) => {
                 let mut arguments = Vec::new();
                 for one in held {
@@ -7402,6 +7453,8 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             interface: false,
             variadic: false,
             abstract_: false,
+            returns_variable: None,
+            parameter_variables: Vec::new(),
         }];
     }
     // Everything that can be thrown answers Throwable's methods, everything
@@ -7441,6 +7494,8 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
                 interface: BUILT_IN_INTERFACES.contains(class),
                 variadic: BUILT_IN_VARIADIC.contains(&(*class, *held_name)),
                 abstract_: BUILT_IN_INTERFACES.contains(class),
+                returns_variable: None,
+                parameter_variables: Vec::new(),
             });
         }
         if !found.is_empty() {
@@ -7483,6 +7538,18 @@ fn written_as_a_path(expression: &Expression) -> Option<String> {
     }
 }
 
+/// Which of the enclosing class's type parameters a written type is, where it
+/// is one of them and nothing else.
+///
+/// `T` is; `List<T>` is not, because putting an argument back inside it would
+/// need more than a cast, and this compiler does not pretend otherwise.
+fn which_variable(written: &Written) -> Option<usize> {
+    match written {
+        Written::Variable(at, _) => Some(*at),
+        _ => None,
+    }
+}
+
 /// A written type as the type it stands for, keeping the arguments it was
 /// written with.
 ///
@@ -7502,6 +7569,7 @@ fn resolve_written(classpath: &Classpath, unit: &Unit, written: &Written) -> Opt
         Written::Float => Type::Float,
         Written::Double => Type::Double,
         Written::Array(of) => Type::Array(Box::new(resolve_written(classpath, unit, of)?)),
+        Written::Variable(_, bound) => resolve_written(classpath, unit, bound)?,
         Written::Named(name, held) => {
             let mut arguments = Vec::new();
             for one in held {
@@ -7782,6 +7850,21 @@ impl Emitter<'_> {
         if found.may_be_given_to(wanted) {
             if !found.is_reference() && !wanted.is_reference() {
                 self.convert(found, wanted, line)?;
+            }
+            // An Object going somewhere with a name gets the cast erasure
+            // implies. A method's own `<T>` is erased to Object with nothing
+            // to put back -- `javac` infers what T was from the call and casts
+            // here; this cannot infer, so it casts to where the value is going,
+            // which is the same instruction for the same reason.
+            if *found == Type::Object("java/lang/Object".to_string(), Vec::new())
+                && *wanted != *found
+            {
+                if let Type::Object(named, _) = wanted {
+                    let index = self.pool.class(named);
+                    self.op2(0xc0, index);
+                    self.pops(1);
+                    self.pushes(wanted);
+                }
             }
             return Ok(true);
         }
@@ -9521,6 +9604,8 @@ impl Emitter<'_> {
                 interface: false,
                 variadic: own.variadic,
                 abstract_: false,
+                returns_variable: None,
+                parameter_variables: Vec::new(),
             };
             let descriptor = signature.descriptor();
 
@@ -9877,18 +9962,24 @@ impl Emitter<'_> {
         line: u32,
     ) -> Result<Type, Diagnostic> {
         let declared = signature.returns.clone();
-        let Some((_, _, which, wrap)) = ELEMENT_RETURN
-            .iter()
-            .find(|(class, name, _, _)| *class == signature.owner && *name == signature.name)
-        else {
-            return Ok(declared);
+        // What the class itself said, where this compilation read it, and what
+        // the built-in table says otherwise.
+        let (which, wrap) = match signature.returns_variable {
+            Some(at) => (at, None),
+            None => match ELEMENT_RETURN
+                .iter()
+                .find(|(class, name, _, _)| *class == signature.owner && *name == signature.name)
+            {
+                Some((_, _, which, wrap)) => (*which, *wrap),
+                None => return Ok(declared),
+            },
         };
-        let Some(argument) = held.get(*which) else {
+        let Some(argument) = held.get(which) else {
             return Ok(declared);
         };
         // `keySet` gives back a Set of the keys, not a key.
         if let Some(around) = wrap {
-            return Ok(Type::Object((*around).to_string(), vec![argument.clone()]));
+            return Ok(Type::Object(around.to_string(), vec![argument.clone()]));
         }
         let Type::Object(named, _) = argument else {
             return Ok(declared);
@@ -10015,6 +10106,8 @@ impl Emitter<'_> {
                     interface: BUILT_IN_INTERFACES.contains(class),
                     variadic: true,
                     abstract_: BUILT_IN_INTERFACES.contains(class),
+                    returns_variable: None,
+                    parameter_variables: Vec::new(),
                 });
             }
             if !found.is_empty() {
@@ -12638,6 +12731,8 @@ impl Emitter<'_> {
                     interface: true,
                     variadic: false,
                     abstract_: true,
+                    returns_variable: None,
+                    parameter_variables: Vec::new(),
                 });
             }
         }
@@ -12958,6 +13053,8 @@ impl Emitter<'_> {
                 interface: false,
                 variadic: false,
                 abstract_: false,
+                returns_variable: None,
+                parameter_variables: Vec::new(),
             }
         } else {
             match self.find_signature(owner, "<init>", arguments.len()) {
@@ -12971,6 +13068,8 @@ impl Emitter<'_> {
                     interface: false,
                     variadic: false,
                     abstract_: false,
+                    returns_variable: None,
+                    parameter_variables: Vec::new(),
                 },
                 None => {
                     return Err(at(
@@ -13558,11 +13657,28 @@ const KEPT_AT_RUNTIME: &[&str] = &[
 
 /// The same signature, with what the receiver was written as put back into it.
 fn as_written(signature: &Signature, held: &[Type]) -> Signature {
-    let Some((_, _, which)) = ELEMENT_PARAMETERS
+    // What the class itself said, where this compilation read it; the built-in
+    // table for the collections, whose sources it has never seen.
+    let mine: Vec<usize>;
+    let which: &[usize] = if signature
+        .parameter_variables
         .iter()
-        .find(|(class, name, _)| *class == signature.owner && *name == signature.name)
-    else {
-        return signature.clone();
+        .any(|one| one.is_some())
+    {
+        mine = signature
+            .parameter_variables
+            .iter()
+            .map(|one| one.unwrap_or(usize::MAX))
+            .collect();
+        &mine
+    } else {
+        match ELEMENT_PARAMETERS
+            .iter()
+            .find(|(class, name, _)| *class == signature.owner && *name == signature.name)
+        {
+            Some((_, _, found)) => found,
+            None => return signature.clone(),
+        }
     };
     let mut shaped = signature.clone();
     for (at, one) in shaped.parameters.iter_mut().enumerate() {
@@ -14228,6 +14344,8 @@ pub fn compile_unit_in_nest(
                 interface: false,
                 variadic: false,
                 abstract_: false,
+                returns_variable: None,
+                parameter_variables: Vec::new(),
             }
             .descriptor();
             let descriptor = pool.utf8(&descriptor);
@@ -14396,6 +14514,8 @@ pub fn compile_unit_in_nest(
             interface: false,
             variadic: false,
             abstract_: false,
+            returns_variable: None,
+            parameter_variables: Vec::new(),
         }
         .descriptor();
         let descriptor = pool.utf8(&descriptor);
@@ -18432,6 +18552,110 @@ public final class Screen extends Activity {
             whole.len(),
             dex.len()
         );
+    }
+
+    /// A generic class of one's own, and what a call on it gives back.
+    ///
+    /// Erasure wrote `Object` where the `T` was. What the thing was written as
+    /// says which T it is, and the cast that says so is the only thing erasure
+    /// leaves behind -- for a class written here exactly as for a `List`.
+    const A_BOX_OF_ONES_OWN: &str = r####"
+import java.util.ArrayList;
+import java.util.List;
+
+class Box<T> {
+    private T held;
+
+    void put(T one) {
+        held = one;
+    }
+
+    T get() {
+        return held;
+    }
+}
+
+interface Shelf {
+    int LIMIT = 3;
+
+    String label();
+}
+
+public class Boxed {
+    private int count;
+
+    private String secret() {
+        return "kept";
+    }
+
+    class Inner {
+        String reach() {
+            return secret() + count;
+        }
+    }
+
+    static String fromABox() {
+        Box<String> one = new Box<String>();
+        one.put("held");
+        String out = one.get();
+        return out + one.get().length();
+    }
+
+    static <T> T firstOf(List<T> given) {
+        return given.get(0);
+    }
+
+    static int chained() {
+        List<List<Integer>> deep = new ArrayList<List<Integer>>();
+        List<Integer> inner = new ArrayList<Integer>();
+        inner.add(7);
+        deep.add(inner);
+        return deep.get(0).get(0);
+    }
+
+    public static void main(String[] args) {
+        Boxed held = new Boxed();
+        held.count = 2;
+        StringBuilder out = new StringBuilder();
+        out.append(fromABox()).append(' ');
+        out.append(chained()).append(' ');
+        List<String> words = new ArrayList<String>();
+        words.add("one");
+        String first = firstOf(words);
+        out.append(first.length()).append(' ');
+        out.append(held.new Inner().reach()).append(' ');
+        out.append(Shelf.LIMIT).append(' ');
+        Shelf shelf = () -> "shelf";
+        out.append(shelf.label()).append(' ');
+        System.out.println(out.toString());
+    }
+}
+"####;
+
+    #[test]
+    fn a_generic_class_of_ones_own_gives_back_what_it_was_written_holding() {
+        let produced = compile(A_BOX_OF_ONES_OWN, &empty()).expect("it must compile");
+        for (file, bytes) in &produced {
+            let one = file.trim_end_matches(".class");
+            match jvm_verifies(one, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here to verify a box");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {file}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+        match jvm_runs(&produced, "Boxed") {
+            None => eprintln!("java: no JVM here to run a box"),
+            Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
+            Some(Ok(said)) => assert_eq!(
+                said.trim(),
+                "held4 7 3 kept2 3 shelf",
+                "what it printed is not what javac's own build of the same source prints"
+            ),
+        }
+        eprintln!("java: a box of one's own gives back what it was written holding");
     }
 
     #[test]
