@@ -16248,9 +16248,8 @@ pub mod dalvik {
         match opcode {
             0xa8 | 0xa9 => "`jsr` or `ret`",
             0xba => "`invokedynamic`",
-            0xc2 | 0xc3 => "`monitorenter` or `monitorexit`",
             0xc4 => "a `wide` instruction",
-            0xc5 => "a multi-dimensional array",
+            0xc5 => "a multi-dimensional array in one instruction",
             0x5a | 0x5b | 0x5d | 0x5e | 0x5f => "a stack shuffle",
             _ => "that instruction",
         }
@@ -17138,6 +17137,21 @@ pub mod dalvik {
                     // goto/16, always, so that every branch is two units and
                     // one pass is enough.
                     self.branch(0x0029, Vec::new(), target);
+                }
+                // monitor-enter and monitor-exit, which is what a
+                // `synchronized` block comes to.
+                0xc2 | 0xc3 => {
+                    let register = self.slot(1);
+                    self.shrink(1)?;
+                    if register > 255 {
+                        return Err(fail(
+                            "ED007",
+                            "A lock needs a register the instruction can name.",
+                        )
+                        .with_context(format!("Register {register}")));
+                    }
+                    let opcode = if opcode == 0xc2 { 0x001du16 } else { 0x001e };
+                    self.push(Insn::raw(vec![opcode | (register << 8)]));
                 }
                 0xaa | 0xab => self.switch(opcode, bytes, start, at)?,
                 0xbf => {

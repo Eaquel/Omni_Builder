@@ -987,7 +987,27 @@ pub enum Expression {
     },
     NewArray {
         of: Written,
-        length: Box<Expression>,
+        /// One per dimension written with a length in it. `new int[3][4]` has
+        /// two; `new int[3][]` has one and is still two-dimensional.
+        lengths: Vec<Expression>,
+        /// How many empty pairs of brackets follow the ones with lengths.
+        empty: usize,
+    },
+    /// `{ 1, 2, 3 }`, with or without `new int[]` in front of it.
+    ArrayOf {
+        of: Option<Written>,
+        values: Vec<Expression>,
+        line: u32,
+    },
+    /// `Foo.class`.
+    ClassLiteral {
+        of: Written,
+        line: u32,
+    },
+    /// `Outer.this`, inside a class that belongs to an instance of `Outer`.
+    OuterThis {
+        of: Written,
+        line: u32,
     },
     Index {
         of: Box<Expression>,
@@ -1129,6 +1149,18 @@ pub enum Statement {
         label: String,
         body: Box<Positioned<Statement>>,
     },
+    /// `synchronized (x) { ... }`: the lock is taken before the block and
+    /// given back after it, however the block is left.
+    Synchronized {
+        on: Expression,
+        body: Vec<Positioned<Statement>>,
+    },
+    /// `assert x;` and `assert x : said;`, which run only where the runtime
+    /// was asked for them.
+    Assert {
+        condition: Expression,
+        said: Option<Expression>,
+    },
     Return(Option<Expression>),
     Break(Option<String>),
     Continue(Option<String>),
@@ -1240,7 +1272,8 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         Expression::Name(HELD.to_string()),
         Expression::NewArray {
             of: named.clone(),
-            length: Box::new(Expression::Int(constants.len() as i64)),
+            lengths: vec![Expression::Int(constants.len() as i64)],
+            empty: 0,
         },
     ));
     for (position, constant) in constants.iter().enumerate() {
@@ -1312,7 +1345,8 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             name: "$out".to_string(),
             value: Some(Expression::NewArray {
                 of: named.clone(),
-                length: Box::new(Expression::Int(constants.len() as i64)),
+                lengths: vec![Expression::Int(constants.len() as i64)],
+                empty: 0,
             }),
         },
     )];
@@ -1620,6 +1654,107 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
     unit
 }
 
+/// The same type with the flag its assertions are guarded by, and the line
+/// that works it out.
+fn with_the_assertion_flag(unit: &Unit) -> Unit {
+    let mut held = unit.clone();
+    held.fields.push(Field {
+        modifiers: Modifiers {
+            static_: true,
+            final_: true,
+            ..Modifiers::default()
+        },
+        what: Written::Boolean,
+        name: ASSERTIONS_OFF.to_string(),
+        value: None,
+        line: 1,
+    });
+    held.static_setup.insert(
+        0,
+        Positioned {
+            node: Statement::Express(Expression::Assign {
+                target: Box::new(Expression::Name(ASSERTIONS_OFF.to_string())),
+                operator: None,
+                value: Box::new(Expression::Unary {
+                    operator: Unary::Not,
+                    of: Box::new(Expression::Call {
+                        on: Some(Box::new(Expression::ClassLiteral {
+                            of: Written::Named(unit.name.clone()),
+                            line: 1,
+                        })),
+                        super_call: false,
+                        name: "desiredAssertionStatus".to_string(),
+                        arguments: Vec::new(),
+                    }),
+                }),
+            }),
+            line: 1,
+            column: 1,
+        },
+    );
+    held
+}
+
+/// Whether anything in this type writes an `assert`.
+fn holds_an_assert(unit: &Unit) -> bool {
+    fn inside(statement: &Statement) -> bool {
+        let mut found = matches!(statement, Statement::Assert { .. });
+        match statement {
+            Statement::Block(held) | Statement::Several(held) => {
+                found = found || held.iter().any(|one| inside(&one.node))
+            }
+            Statement::If {
+                then, otherwise, ..
+            } => {
+                found = found
+                    || inside(&then.node)
+                    || otherwise.as_ref().is_some_and(|one| inside(&one.node))
+            }
+            Statement::While { body, .. }
+            | Statement::DoWhile { body, .. }
+            | Statement::For { body, .. }
+            | Statement::ForEach { body, .. }
+            | Statement::Labelled { body, .. } => found = found || inside(&body.node),
+            Statement::Switch { arms, .. } => {
+                found = found
+                    || arms
+                        .iter()
+                        .any(|arm| arm.body.iter().any(|one| inside(&one.node)))
+            }
+            Statement::Try {
+                body,
+                catches,
+                finally,
+            } => {
+                found = found
+                    || body.iter().any(|one| inside(&one.node))
+                    || catches
+                        .iter()
+                        .any(|catch| catch.body.iter().any(|one| inside(&one.node)))
+                    || finally
+                        .as_ref()
+                        .is_some_and(|held| held.iter().any(|one| inside(&one.node)))
+            }
+            Statement::Synchronized { body, .. } => {
+                found = found || body.iter().any(|one| inside(&one.node))
+            }
+            _ => {}
+        }
+        found
+    }
+
+    unit.methods
+        .iter()
+        .flat_map(|method| method.body.iter().flatten())
+        .chain(unit.instance_setup.iter())
+        .chain(unit.static_setup.iter())
+        .any(|one| inside(&one.node))
+}
+
+/// The field an `assert` is guarded by, which the class initialiser works out
+/// once from what the runtime was asked for.
+const ASSERTIONS_OFF: &str = "$assertionsDisabled";
+
 /// The field a class written where it is used holds its enclosing instance in.
 const OUTER: &str = "$outer";
 
@@ -1801,6 +1936,18 @@ fn walk_statement(statement: &Statement, visit: &mut impl FnMut(&Expression)) {
             }
         }
         Statement::Labelled { body, .. } => walk_statement(&body.node, visit),
+        Statement::Synchronized { on, body } => {
+            visit(on);
+            for one in body {
+                walk_statement(&one.node, visit);
+            }
+        }
+        Statement::Assert { condition, said } => {
+            visit(condition);
+            if let Some(said) = said {
+                visit(said);
+            }
+        }
         Statement::Chain { arguments, .. } => {
             for one in arguments {
                 visit(one);
@@ -1830,7 +1977,17 @@ fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression))
             arguments.iter().for_each(visit);
         }
         Expression::New { arguments, .. } => arguments.iter().for_each(visit),
-        Expression::NewArray { length, .. } => visit(length),
+        Expression::NewArray { lengths, .. } => {
+            for one in lengths {
+                visit(one);
+            }
+        }
+        Expression::ArrayOf { values, .. } => {
+            for one in values {
+                visit(one);
+            }
+        }
+        Expression::ClassLiteral { .. } | Expression::OuterThis { .. } => {}
         Expression::Index { of, at } => {
             visit(of);
             visit(at);
@@ -1922,6 +2079,9 @@ pub struct Modifiers {
     pub static_: bool,
     pub final_: bool,
     pub abstract_: bool,
+    pub synchronized: bool,
+    pub volatile: bool,
+    pub transient: bool,
 }
 
 impl Modifiers {
@@ -1943,6 +2103,15 @@ impl Modifiers {
         }
         if self.final_ {
             flags |= 0x0010;
+        }
+        if self.synchronized {
+            flags |= 0x0020;
+        }
+        if self.volatile {
+            flags |= 0x0040;
+        }
+        if self.transient {
+            flags |= 0x0080;
         }
         if self.abstract_ {
             flags |= 0x0400;
@@ -2176,7 +2345,15 @@ impl Parser {
                 // body. The flag it needs is the absence of ACC_ABSTRACT, so
                 // there is nothing to record beyond having read it.
                 "default" if !matches!(self.ahead(1), Token::Punctuation(":")) => {}
-                "native" | "synchronized" | "transient" | "volatile" | "strictfp" => {
+                // `synchronized` on a method takes the object's own lock
+                // around the whole of it, which is a flag rather than an
+                // instruction. `volatile` and `transient` are flags too.
+                "synchronized" if !matches!(self.ahead(1), Token::Punctuation("(")) => {
+                    found.synchronized = true
+                }
+                "volatile" => found.volatile = true,
+                "transient" => found.transient = true,
+                "native" | "strictfp" => {
                     return Err(unsupported(
                         self.line(),
                         self.column(),
@@ -2628,7 +2805,7 @@ impl Parser {
                 what = Written::Array(Box::new(what));
             }
             let value = if self.eat_mark("=") {
-                Some(self.expression()?)
+                Some(self.value_or_array()?)
             } else {
                 None
             };
@@ -2776,10 +2953,24 @@ impl Parser {
     }
 
     fn statement_node(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
-        for (word, what) in [("synchronized", "`synchronized`"), ("assert", "`assert`")] {
-            if self.is_word(word) {
-                return Err(unsupported(line, column, what));
-            }
+        if self.eat_word("synchronized") {
+            self.want_mark("(")?;
+            let on = self.expression()?;
+            self.want_mark(")")?;
+            let body = self.braced_block()?;
+            return Ok(Statement::Synchronized { on, body });
+        }
+
+        if self.eat_word("assert") {
+            let condition = self.expression()?;
+            let said = if self.eat_mark(":") {
+                Some(self.expression()?)
+            } else {
+                None
+            };
+            self.want_mark(";")?;
+            let _ = column;
+            return Ok(Statement::Assert { condition, said });
         }
 
         // A name and a colon in front of a statement is a label. A colon after
@@ -2951,7 +3142,7 @@ impl Parser {
                 what = Written::Array(Box::new(what));
             }
             let value = if self.eat_mark("=") {
-                Some(self.expression()?)
+                Some(self.value_or_array()?)
             } else {
                 None
             };
@@ -3539,6 +3730,26 @@ impl Parser {
             }
             if self.is_mark(".") {
                 self.take();
+                // `Foo.class` and `Outer.this` name what is in front of the
+                // dot rather than reading something out of it.
+                if self.is_word("class") || self.is_word("this") {
+                    let Some(named) = as_a_written_type(&found) else {
+                        return Err(at(
+                            "EJ122",
+                            self.line(),
+                            self.column(),
+                            "Only a class can be written in front of this.",
+                        ));
+                    };
+                    let literal = self.is_word("class");
+                    self.take();
+                    found = if literal {
+                        Expression::ClassLiteral { of: named, line }
+                    } else {
+                        Expression::OuterThis { of: named, line }
+                    };
+                    continue;
+                }
                 let name = self.want_name()?;
                 if self.is_mark("(") {
                     let arguments = self.arguments()?;
@@ -3579,6 +3790,58 @@ impl Parser {
             break;
         }
         Ok(found)
+    }
+
+    /// A type's name, with any brackets after it left where they are.
+    fn type_name_only(&mut self) -> Result<Written, Diagnostic> {
+        let base = match self.here().token.clone() {
+            Token::Keyword(word) => match Written::of_keyword(word) {
+                Some(one) => {
+                    self.take();
+                    one
+                }
+                None => {
+                    return Err(at(
+                        "EJ103",
+                        self.line(),
+                        self.column(),
+                        format!("A type was expected, and `{word}` was found."),
+                    ))
+                }
+            },
+            _ => Written::Named(self.qualified()?),
+        };
+        self.skip_type_arguments()?;
+        Ok(base)
+    }
+
+    /// `{ a, b, c }`, with a trailing comma allowed because Java allows one.
+    fn array_values(&mut self) -> Result<Vec<Expression>, Diagnostic> {
+        self.want_mark("{")?;
+        let mut found = Vec::new();
+        while !self.is_mark("}") {
+            found.push(self.value_or_array()?);
+            if !self.eat_mark(",") {
+                break;
+            }
+        }
+        self.want_mark("}")?;
+        Ok(found)
+    }
+
+    /// A value, or the values of an array written without `new` in front,
+    /// which takes what it holds from wherever it is going.
+    fn value_or_array(&mut self) -> Result<Expression, Diagnostic> {
+        if self.is_mark("{") {
+            let line = self.line();
+            let values = self.array_values()?;
+            return Ok(Expression::ArrayOf {
+                of: None,
+                values,
+                line,
+            });
+        }
+        self.expression()
     }
 
     fn arguments(&mut self) -> Result<Vec<Expression>, Diagnostic> {
@@ -3693,6 +3956,21 @@ impl Parser {
     fn primary(&mut self) -> Result<Expression, Diagnostic> {
         let (line, column) = (self.line(), self.column());
 
+        // `int.class`. A primitive is the one type that can start an
+        // expression, and only in front of this.
+        if let Token::Keyword(word) = self.here().token {
+            if Written::of_keyword(word).is_some()
+                && matches!(self.ahead(1), Token::Punctuation("."))
+                && matches!(self.ahead(2), Token::Keyword("class"))
+            {
+                let of = Written::of_keyword(word).expect("just checked");
+                self.take();
+                self.take();
+                self.take();
+                return Ok(Expression::ClassLiteral { of, line });
+            }
+        }
+
         if self.is_mark("(") {
             if self.looks_like_lambda() {
                 return self.lambda(line);
@@ -3727,14 +4005,56 @@ impl Parser {
         }
 
         if self.eat_word("new") {
-            let what = self.written_type()?;
+            // The type without the brackets that may follow it, because what
+            // comes after them decides whether they are a size or a list of
+            // values.
+            let held = self.at;
+            let mut what = self.written_type()?;
+            if matches!(what, Written::Array(_)) {
+                self.at = held;
+                what = self.type_name_only()?;
+            }
             if self.is_mark("[") {
-                self.take();
-                let length = self.expression()?;
-                self.want_mark("]")?;
+                // `new int[3]`, `new int[3][4]`, `new int[3][]`, and
+                // `new int[]{ ... }`, which says the values instead of a size.
+                let mut lengths = Vec::new();
+                let mut empty = 0usize;
+                while self.is_mark("[") {
+                    self.take();
+                    if self.eat_mark("]") {
+                        empty += 1;
+                        continue;
+                    }
+                    if empty > 0 {
+                        return Err(at(
+                            "EJ120",
+                            line,
+                            column,
+                            "A size cannot follow an empty pair of brackets.",
+                        ));
+                    }
+                    lengths.push(self.expression()?);
+                    self.want_mark("]")?;
+                }
+                if lengths.is_empty() {
+                    if empty == 0 {
+                        return Err(at("EJ120", line, column, "An array needs a size."));
+                    }
+                    let mut of = what;
+                    for _ in 1..empty {
+                        of = Written::Array(Box::new(of));
+                    }
+                    let values = self.array_values()?;
+                    return Ok(Expression::ArrayOf {
+                        of: Some(of),
+                        values,
+                        line,
+                    });
+                }
                 return Ok(Expression::NewArray {
                     of: what,
-                    length: Box::new(length),
+                    lengths,
+                    empty,
                 });
             }
             let arguments = self.arguments()?;
@@ -3985,6 +4305,9 @@ pub struct Signature {
     pub static_: bool,
     /// Whether the owner is an interface, which decides the invoke opcode.
     pub interface: bool,
+    /// Whether the last parameter was written with `...`, which means a call
+    /// may hand over the elements instead of the array.
+    pub variadic: bool,
 }
 
 impl Signature {
@@ -4122,6 +4445,7 @@ impl Classpath {
                 returns,
                 static_: method.modifiers.static_,
                 interface: unit.shape == Shape::Interface,
+                variadic: false,
             });
         }
         self.known.insert(internal, known);
@@ -4154,6 +4478,9 @@ impl Classpath {
                 returns,
                 static_: method.access_flags & 0x0008 != 0,
                 interface,
+                // ACC_VARARGS, which is the only record a class file keeps of
+                // the `...` somebody wrote.
+                variadic: method.access_flags & 0x0080 != 0,
             });
         }
         for field in &class.fields {
@@ -4495,6 +4822,12 @@ pub enum Verified {
     Null,
     /// `this`, inside a constructor, before the superclass constructor has run.
     UninitializedThis,
+    /// What `new` leaves behind: an object whose constructor has not run yet,
+    /// named by where the `new` is rather than by its class. Until the
+    /// constructor runs it is assignable to nothing, so a frame written
+    /// between the two -- `new Foo(c ? a : b)` -- has to say this and not the
+    /// class.
+    Uninitialized(u16),
     Object(String),
 }
 
@@ -4524,6 +4857,10 @@ impl Verified {
             Verified::Long => out.push(4),
             Verified::Null => out.push(5),
             Verified::UninitializedThis => out.push(6),
+            Verified::Uninitialized(at) => {
+                out.push(8);
+                out.extend_from_slice(&at.to_be_bytes());
+            }
             Verified::Object(name) => {
                 out.push(7);
                 let index = pool.class(name);
@@ -4620,6 +4957,9 @@ struct Emitter<'a> {
     /// The classes this method's body turned out to need, which are compiled
     /// after it. A class written where it is used has no name until here.
     made: &'a mut Vec<Unit>,
+    /// Whether anything in this method wrote an `assert`, which is what
+    /// decides whether the class needs the flag they are guarded by.
+    wants_assertions: bool,
     /// The type the expression about to be written is being handed to, when
     /// that is known. A lambda has no type of its own: which interface it is
     /// depends entirely on where it is going.
@@ -4637,6 +4977,13 @@ struct Emitter<'a> {
     slots: Vec<Verified>,
     /// Everywhere a branch can land, and what is true there.
     frames: Vec<Frame>,
+    /// What is on the operand stack, as the verifier would say it.
+    ///
+    /// Counting it was not enough. A branch inside an expression -- a `?:` in
+    /// the middle of a call's arguments, say -- lands somewhere that already
+    /// has the earlier arguments on the stack, and a frame that says the stack
+    /// is empty there is a claim the verifier checks and rejects.
+    stack: Vec<Verified>,
 }
 
 impl<'a> Emitter<'a> {
@@ -4667,24 +5014,86 @@ impl<'a> Emitter<'a> {
             inlined: Vec::new(),
             pending_label: None,
             yields: Vec::new(),
+            wants_assertions: false,
             expecting: None,
             static_,
             returns: Type::Void,
             slots: Vec::new(),
             frames: Vec::new(),
+            stack: Vec::new(),
         }
     }
 
     // -- the stack, tracked as it goes, because a class file has to declare
     // -- how deep it gets and getting that wrong is a class that will not load.
 
-    fn grow(&mut self, by: i32) {
-        self.depth += by;
+    /// Puts a value of this type on the stack.
+    fn pushes(&mut self, what: &Type) {
+        // A method that returns nothing leaves nothing. Writing a `top` for it
+        // would describe a stack one slot deeper than the one that is there,
+        // and every frame after the call would say so.
+        if *what == Type::Void {
+            return;
+        }
+        let verified = Verified::of(what);
+        if verified.is_wide() {
+            self.stack.push(verified);
+            self.stack.push(Verified::Top);
+        } else {
+            self.stack.push(verified);
+        }
+        self.deepest();
+    }
+
+    /// Puts something on the stack whose type the verifier knows by name
+    /// rather than by the language: `null`, or a `this` not yet constructed.
+    fn pushes_raw(&mut self, what: Verified) {
+        let wide = what.is_wide();
+        self.stack.push(what);
+        if wide {
+            self.stack.push(Verified::Top);
+        }
+        self.deepest();
+    }
+
+    /// `dup`, which is whatever is on top a second time.
+    fn duplicates(&mut self) {
+        self.op(0x59);
+        if let Some(top) = self.stack.last().cloned() {
+            self.stack.push(top);
+        }
+        self.deepest();
+    }
+
+    /// `dup2`, which is the top two slots again.
+    fn duplicates_two(&mut self) {
+        self.op(0x5c);
+        let held = self.stack.len();
+        if held >= 2 {
+            let two = self.stack[held - 2..].to_vec();
+            self.stack.extend(two);
+        }
+        self.deepest();
+    }
+
+    /// Takes this many slots off.
+    fn pops(&mut self, slots: i32) {
+        for _ in 0..slots.max(0) {
+            self.stack.pop();
+        }
+    }
+
+    /// Says the stack is exactly this, which is what entering an exception
+    /// handler does however deep it was before.
+    fn stack_is(&mut self, what: Vec<Verified>) {
+        self.stack = what;
+        self.deepest();
+    }
+
+    fn deepest(&mut self) {
+        self.depth = self.stack.len() as i32;
         if self.depth > self.max_depth {
             self.max_depth = self.depth;
-        }
-        if self.depth < 0 {
-            self.depth = 0;
         }
     }
 
@@ -4715,16 +5124,16 @@ impl<'a> Emitter<'a> {
     /// the branch and therefore knows exactly what is left on it -- and that is
     /// a shorter road to being right than threading a type through every
     /// arithmetic instruction and hoping the two counts never drift apart.
-    fn a_branch_lands_here(&mut self, stack: &[Verified]) {
+    fn a_branch_lands_here(&mut self) {
         let at = self.code.len();
-        let mut locals = self.slots.clone();
+        let mut locals = Self::as_a_frame_says_it(&self.slots);
         while matches!(locals.last(), Some(Verified::Top)) {
             locals.pop();
         }
         let frame = Frame {
             at,
             locals,
-            stack: stack.to_vec(),
+            stack: Self::as_a_frame_says_it(&self.stack),
         };
         match self.frames.iter().position(|held| held.at == at) {
             // Two branches landing on one instruction have to agree, and where
@@ -4736,13 +5145,27 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// The stack, when one value of a known type is on it.
-    fn one_on_the_stack(what: &Type) -> Vec<Verified> {
-        let verified = Verified::of(what);
-        if verified.is_wide() {
-            return vec![verified, Verified::Top];
+    /// The same slots, written the way a frame writes them.
+    ///
+    /// This compiler keeps a long or a double as the two slots it really
+    /// occupies, because that is what `max_stack` and the local numbering are
+    /// counted in. A frame says it once: one `verification_type_info` covers
+    /// both halves, and writing the second half as a `top` of its own would
+    /// describe a stack one slot deeper than the one that is there.
+    fn as_a_frame_says_it(held: &[Verified]) -> Vec<Verified> {
+        let mut said = Vec::with_capacity(held.len());
+        let mut at = 0;
+        while at < held.len() {
+            let one = held[at].clone();
+            let wide = one.is_wide();
+            said.push(one);
+            at += if wide && held.get(at + 1) == Some(&Verified::Top) {
+                2
+            } else {
+                1
+            };
         }
-        vec![verified]
+        said
     }
 
     fn op(&mut self, opcode: u8) {
@@ -4905,6 +5328,14 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Object", "hashCode", "()I", false),
     ("java/lang/Object", "equals", "(Ljava/lang/Object;)Z", false),
     ("java/lang/Object", "getClass", "()Ljava/lang/Class;", false),
+    ("java/lang/Class", "desiredAssertionStatus", "()Z", false),
+    ("java/lang/Class", "getName", "()Ljava/lang/String;", false),
+    (
+        "java/lang/Class",
+        "getSimpleName",
+        "()Ljava/lang/String;",
+        false,
+    ),
     // -- Enum, which every enum extends
     ("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V", false),
     ("java/lang/Enum", "name", "()Ljava/lang/String;", false),
@@ -5031,11 +5462,41 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     ("java/lang/String", "toCharArray", "()[C", false),
+    ("java/lang/String", "<init>", "()V", false),
+    ("java/lang/String", "<init>", "(Ljava/lang/String;)V", false),
+    ("java/lang/String", "<init>", "([C)V", false),
+    ("java/lang/String", "<init>", "([B)V", false),
     ("java/lang/String", "valueOf", "(I)Ljava/lang/String;", true),
     ("java/lang/String", "valueOf", "(J)Ljava/lang/String;", true),
     ("java/lang/String", "valueOf", "(D)Ljava/lang/String;", true),
     ("java/lang/String", "valueOf", "(Z)Ljava/lang/String;", true),
     ("java/lang/String", "valueOf", "(C)Ljava/lang/String;", true),
+    (
+        "java/lang/String",
+        "format",
+        "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
+        true,
+    ),
+    (
+        "java/lang/String",
+        "join",
+        "(Ljava/lang/CharSequence;[Ljava/lang/CharSequence;)Ljava/lang/String;",
+        true,
+    ),
+    (
+        "java/util/Arrays",
+        "asList",
+        "([Ljava/lang/Object;)Ljava/util/List;",
+        true,
+    ),
+    (
+        "java/util/Arrays",
+        "toString",
+        "([Ljava/lang/Object;)Ljava/lang/String;",
+        true,
+    ),
+    ("java/util/Arrays", "sort", "([I)V", true),
+    ("java/util/Arrays", "fill", "([II)V", true),
     (
         "java/lang/String",
         "valueOf",
@@ -5292,6 +5753,13 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         true,
     ),
     ("java/lang/AutoCloseable", "close", "()V", false),
+    ("java/lang/AssertionError", "<init>", "()V", false),
+    (
+        "java/lang/AssertionError",
+        "<init>",
+        "(Ljava/lang/Object;)V",
+        false,
+    ),
     // -- Android, as far as an application's own code touches it.
     //
     // There is no `android.jar` on a phone and there never will be, so the
@@ -5551,6 +6019,15 @@ const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ("java/lang/Byte", "java/lang/Number"),
 ];
 
+/// The built-in methods whose last parameter was written with `...`, so that a
+/// call may hand over the elements instead of the array.
+const BUILT_IN_VARIADIC: &[(&str, &str)] = &[
+    ("java/lang/String", "format"),
+    ("java/lang/String", "join"),
+    ("java/util/Arrays", "asList"),
+    ("java/util/Arrays", "toString"),
+];
+
 /// Which of the built-in classes are interfaces, which decides whether a call
 /// on one is `invokevirtual` or `invokeinterface`. Getting it wrong produces a
 /// class file that verifies and then fails to link on the device.
@@ -5571,6 +6048,7 @@ const BUILT_IN_INTERFACES: &[&str] = &[
 /// their class files. Each takes nothing or a message, which is how they are
 /// almost always thrown.
 const BUILT_IN_THROWABLES: &[&str] = &[
+    "java/lang/AssertionError",
     "java/lang/Throwable",
     "java/lang/Exception",
     "java/lang/RuntimeException",
@@ -5586,6 +6064,7 @@ const BUILT_IN_THROWABLES: &[&str] = &[
     "java/lang/NullPointerException",
     "java/lang/NumberFormatException",
     "java/lang/UnsupportedOperationException",
+    "java/lang/AssertionError",
     "java/io/IOException",
 ];
 
@@ -5631,6 +6110,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             returns: Type::Void,
             static_: false,
             interface: false,
+            variadic: false,
         }];
     }
     // Everything that can be thrown answers Throwable's methods, everything
@@ -5668,6 +6148,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
                 returns,
                 static_: *static_,
                 interface: BUILT_IN_INTERFACES.contains(class),
+                variadic: BUILT_IN_VARIADIC.contains(&(*class, *held_name)),
             });
         }
         if !found.is_empty() {
@@ -5793,6 +6274,7 @@ const WELL_KNOWN: &[&str] = &[
     "java/util/ArrayList",
     "java/util/HashMap",
     "java/util/Objects",
+    "java/util/Arrays",
     "android/app/Activity",
     "android/content/Context",
     "android/content/Intent",
@@ -5819,6 +6301,7 @@ const WELL_KNOWN: &[&str] = &[
     "java/lang/NullPointerException",
     "java/lang/NumberFormatException",
     "java/lang/UnsupportedOperationException",
+    "java/lang/AssertionError",
     "java/io/IOException",
 ];
 
@@ -5844,7 +6327,7 @@ impl Emitter<'_> {
                 }
             }
         }
-        self.grow(1);
+        self.pushes(&Type::Int);
     }
 
     fn push_string(&mut self, text: &str) {
@@ -5854,7 +6337,7 @@ impl Emitter<'_> {
         } else {
             self.op2(0x13, index);
         }
-        self.grow(1);
+        self.pushes(&Type::Object("java/lang/String".to_string()));
     }
 
     fn load(&mut self, slot: u16, what: &Type) {
@@ -5882,7 +6365,7 @@ impl Emitter<'_> {
             self.op(0xc4);
             self.op2(base, slot);
         }
-        self.grow(i32::from(what.width()));
+        self.pushes(what);
     }
 
     /// Writes a value out of the stack and into a slot.
@@ -5909,10 +6392,100 @@ impl Emitter<'_> {
             self.op(0xc4);
             self.op2(base, slot);
         }
-        self.grow(-i32::from(what.width()));
+        self.pops(i32::from(what.width()));
     }
 
     /// Widens what is on the stack, when Java says it happens on its own.
+    /// Makes what is on the stack fit where it is going.
+    ///
+    /// Widening, boxing and unboxing all happen here, and all of them are
+    /// instructions. What comes back is whether it fits at all; the place that
+    /// asked says what is wrong when it does not, because it is the one that
+    /// knows what it was doing.
+    fn fit(&mut self, found: &Type, wanted: &Type, line: u32) -> Result<bool, Diagnostic> {
+        if found.may_be_given_to(wanted) {
+            if !found.is_reference() && !wanted.is_reference() {
+                self.convert(found, wanted, line)?;
+            }
+            return Ok(true);
+        }
+        let Some(now) = self.box_or_unbox(found, wanted) else {
+            return Ok(false);
+        };
+        if !now.is_reference() && !wanted.is_reference() {
+            self.convert(&now, wanted, line)?;
+        }
+        Ok(true)
+    }
+
+    /// Puts a primitive in its box, or takes one out, when that is what the
+    /// place it is going wants.
+    ///
+    /// Java calls this autoboxing and does it silently. Doing it silently is
+    /// the whole point: `list.add(1)` is what people write, and `1` is not an
+    /// object. The instruction is a call -- `Integer.valueOf` one way,
+    /// `intValue` the other -- so it costs what it costs, and nothing here
+    /// pretends otherwise.
+    fn box_or_unbox(&mut self, from: &Type, to: &Type) -> Option<Type> {
+        // A primitive going where an object is wanted.
+        if !from.is_reference() && *from != Type::Void && to.is_reference() {
+            let boxed = boxed_name(from)?;
+            // The box has to be one the place will take: an Integer fits
+            // where an Object or a Number or an Integer is wanted, and
+            // nowhere else.
+            if let Type::Object(named) = to {
+                let fits = named == boxed
+                    || named == "java/lang/Object"
+                    || named == "java/lang/Number"
+                    || named == "java/lang/Comparable"
+                    || named == "java/io/Serializable";
+                if !fits {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+            let descriptor = format!(
+                "({}){}",
+                from.descriptor(),
+                Type::Object(boxed.to_string()).descriptor()
+            );
+            let index = self.pool.method(boxed, "valueOf", &descriptor, false);
+            self.op2(0xb8, index);
+            self.pops(i32::from(from.width()));
+            self.pushes(&Type::Object(boxed.to_string()));
+            return Some(Type::Object(boxed.to_string()));
+        }
+
+        // An object going where a primitive is wanted.
+        if from.is_reference() && !to.is_reference() && *to != Type::Void {
+            let Type::Object(named) = from else {
+                return None;
+            };
+            // What comes out is decided by the box, not by what is wanted:
+            // an Integer unboxes to an int, and the int is then widened the
+            // ordinary way.
+            let (holder, inner) = match named.as_str() {
+                "java/lang/Boolean" => ("booleanValue", Type::Boolean),
+                "java/lang/Byte" => ("byteValue", Type::Byte),
+                "java/lang/Short" => ("shortValue", Type::Short),
+                "java/lang/Character" => ("charValue", Type::Char),
+                "java/lang/Integer" => ("intValue", Type::Int),
+                "java/lang/Long" => ("longValue", Type::Long),
+                "java/lang/Float" => ("floatValue", Type::Float),
+                "java/lang/Double" => ("doubleValue", Type::Double),
+                _ => return None,
+            };
+            let descriptor = format!("(){}", inner.descriptor());
+            let index = self.pool.method(named, holder, &descriptor, false);
+            self.op2(0xb6, index);
+            self.pops(1);
+            self.pushes(&inner);
+            return Some(inner);
+        }
+        None
+    }
+
     fn convert(&mut self, from: &Type, to: &Type, line: u32) -> Result<(), Diagnostic> {
         if from == to || (from.is_int_like() && to.is_int_like()) {
             return Ok(());
@@ -5944,7 +6517,8 @@ impl Emitter<'_> {
             }
         };
         self.op(opcode);
-        self.grow(i32::from(to.width()) - i32::from(from.width()));
+        self.pops(i32::from(from.width()));
+        self.pushes(to);
         Ok(())
     }
 
@@ -5970,7 +6544,7 @@ impl Emitter<'_> {
                     let index = self.pool.long(*value);
                     self.op2(0x14, index);
                 }
-                self.grow(2);
+                self.pushes(&Type::Long);
                 Ok(Type::Long)
             }
             Expression::Float(value) => {
@@ -5980,13 +6554,13 @@ impl Emitter<'_> {
                 } else {
                     self.op2(0x13, index);
                 }
-                self.grow(1);
+                self.pushes(&Type::Float);
                 Ok(Type::Float)
             }
             Expression::Double(value) => {
                 let index = self.pool.double(*value);
                 self.op2(0x14, index);
-                self.grow(2);
+                self.pushes(&Type::Double);
                 Ok(Type::Double)
             }
             Expression::Str(text) => {
@@ -5995,7 +6569,7 @@ impl Emitter<'_> {
             }
             Expression::Null => {
                 self.op(0x01);
-                self.grow(1);
+                self.pushes_raw(Verified::Null);
                 Ok(Type::Object("java/lang/Object".to_string()))
             }
             Expression::This => {
@@ -6038,7 +6612,8 @@ impl Emitter<'_> {
                 let found = self.value(index, line)?;
                 self.convert(&found, &Type::Int, line)?;
                 self.op(array_load(&element));
-                self.grow(i32::from(element.width()) - 2);
+                self.pops(2);
+                self.pushes(&element);
                 Ok(*element)
             }
             Expression::Cast { to, of } => {
@@ -6050,6 +6625,8 @@ impl Emitter<'_> {
                         other => other.descriptor(),
                     });
                     self.op2(0xc0, index);
+                    self.pops(1);
+                    self.pushes(&target);
                     return Ok(target);
                 }
                 // A narrowing cast is written out, unlike a widening one which
@@ -6101,9 +6678,9 @@ impl Emitter<'_> {
                         if found == Type::Long {
                             let index = self.pool.long(-1);
                             self.op2(0x14, index);
-                            self.grow(2);
+                            self.pushes(&Type::Long);
                             self.op(0x83);
-                            self.grow(-2);
+                            self.pops(2);
                             return Ok(Type::Long);
                         }
                         if !found.is_int_like() {
@@ -6116,7 +6693,7 @@ impl Emitter<'_> {
                         }
                         self.push_int(-1);
                         self.op(0x82);
-                        self.grow(-1);
+                        self.pops(1);
                         Ok(Type::Int)
                     }
                     Unary::Not => {
@@ -6133,16 +6710,20 @@ impl Emitter<'_> {
                         }
                         // Turned into a branch, because a boolean on the stack
                         // is an int and there is no instruction that flips one.
+                        self.pops(1);
                         let jump = self.jump(0x99);
-                        self.grow(-1);
+                        let beneath = self.stack.clone();
                         self.push_int(0);
                         let over = self.jump(0xa7);
                         self.land(jump);
-                        self.a_branch_lands_here(&[]);
-                        self.grow(-1);
+                        self.stack_is(beneath.clone());
+                        self.a_branch_lands_here();
                         self.push_int(1);
                         self.land(over);
-                        self.a_branch_lands_here(&[Verified::Integer]);
+                        let mut settled = beneath;
+                        settled.push(Verified::Integer);
+                        self.stack_is(settled);
+                        self.a_branch_lands_here();
                         Ok(Type::Boolean)
                     }
                 }
@@ -6169,14 +6750,18 @@ impl Emitter<'_> {
                         ),
                     ));
                 }
+                self.pops(1);
                 let to_else = self.jump(0x99);
-                self.grow(-1);
-                let depth_before = self.depth;
+                // What is under the two sides. A `?:` written among a call's
+                // arguments has those arguments beneath it, and a frame that
+                // says otherwise is a claim the verifier throws the class out
+                // for.
+                let beneath = self.stack.clone();
                 let taken = self.value(then, line)?;
                 let over = self.jump(0xa7);
                 self.land(to_else);
-                self.a_branch_lands_here(&[]);
-                self.depth = depth_before;
+                self.stack_is(beneath.clone());
+                self.a_branch_lands_here();
                 let other = self.value(otherwise, line)?;
                 self.land(over);
                 let landed = if taken == other || taken.is_reference() {
@@ -6184,7 +6769,15 @@ impl Emitter<'_> {
                 } else {
                     taken.promoted_with(&other).unwrap_or(Type::Int)
                 };
-                self.a_branch_lands_here(&Self::one_on_the_stack(&landed));
+                let mut settled = beneath;
+                let held = Verified::of(&landed);
+                let wide = held.is_wide();
+                settled.push(held);
+                if wide {
+                    settled.push(Verified::Top);
+                }
+                self.stack_is(settled);
+                self.a_branch_lands_here();
                 if taken != other && !taken.is_reference() {
                     let both = taken.promoted_with(&other).ok_or_else(|| {
                         at(
@@ -6228,7 +6821,6 @@ impl Emitter<'_> {
                     let object = Type::Object("java/lang/Object".to_string());
                     let held = self.declare("$tested", object.clone());
                     self.store(held, &object);
-                    self.grow(-1);
 
                     // The name is given `null` before the test, so that both
                     // ways out of the test agree on what is in its slot. Null
@@ -6236,33 +6828,36 @@ impl Emitter<'_> {
                     // one frame for both paths -- and the name is only in
                     // scope where the test passed, so nothing reads it.
                     self.op(0x01);
-                    self.grow(1);
+                    self.pushes_raw(Verified::Null);
                     let slot = self.declare(binding, target.clone());
                     self.store(slot, &target);
-                    self.grow(-1);
 
                     self.load(held, &object);
-                    self.grow(1);
                     let index = self.pool.class(&named);
                     self.op2(0xc1, index);
-                    self.op(0x59);
-                    self.grow(1);
+                    // `instanceof` takes the object and leaves an int, so what
+                    // the frames say is on the stack has to change with it.
+                    self.pops(1);
+                    self.pushes(&Type::Boolean);
+                    self.duplicates();
+                    self.pops(1);
                     let over = self.jump(0x99);
-                    self.grow(-1);
 
                     self.load(held, &object);
-                    self.grow(1);
                     let index = self.pool.class(&named);
                     self.op2(0xc0, index);
+                    self.pops(1);
+                    self.pushes(&target);
                     self.store(slot, &target);
-                    self.grow(-1);
 
                     self.land(over);
-                    self.a_branch_lands_here(&[Verified::Integer]);
+                    self.a_branch_lands_here();
                     return Ok(Type::Boolean);
                 }
                 let index = self.pool.class(&named);
                 self.op2(0xc1, index);
+                self.pops(1);
+                self.pushes(&Type::Boolean);
                 Ok(Type::Boolean)
             }
             Expression::Switch { subject, arms } => self.switch_value(subject, arms, line),
@@ -6284,43 +6879,56 @@ impl Emitter<'_> {
                 name,
                 line: written,
             } => self.method_reference(on, name, *written),
-            Expression::NewArray { of, length } => {
-                let element = self.resolve(of, line)?;
-                let found = self.value(length, line)?;
-                self.convert(&found, &Type::Int, line)?;
-                match &element {
-                    Type::Object(name) => {
-                        let index = self.pool.class(name);
-                        self.op2(0xbd, index);
-                    }
-                    Type::Array(_) => {
-                        let index = self.pool.class(&element.descriptor());
-                        self.op2(0xbd, index);
-                    }
-                    primitive => {
-                        let code = match primitive {
-                            Type::Boolean => 4u8,
-                            Type::Char => 5,
-                            Type::Float => 6,
-                            Type::Double => 7,
-                            Type::Byte => 8,
-                            Type::Short => 9,
-                            Type::Int => 10,
-                            Type::Long => 11,
-                            _ => {
-                                return Err(at(
-                                    "EJ209",
-                                    line,
-                                    1,
-                                    "An array of void is not a thing.",
-                                ))
-                            }
-                        };
-                        self.op1(0xbc, code);
-                    }
-                }
-                Ok(Type::Array(Box::new(element)))
+            Expression::NewArray { of, lengths, empty } => {
+                self.new_array(of, lengths, *empty, line)
             }
+            Expression::ArrayOf {
+                of,
+                values,
+                line: written,
+            } => {
+                let Some(named) = of else {
+                    return Err(at(
+                        "EJ121",
+                        *written,
+                        1,
+                        "There is nothing here saying what this array holds.",
+                    )
+                    .with_suggestion(
+                        "Write `new` and the type in front of it, or give it to something \
+                         declared as an array.",
+                    ));
+                };
+                let element = self.resolve(named, *written)?;
+                self.array_of(&Type::Array(Box::new(element)), values, *written)
+            }
+            Expression::ClassLiteral { of, line: written } => {
+                let what = self.resolve(of, *written)?;
+                let named = match &what {
+                    Type::Object(name) => name.clone(),
+                    Type::Array(_) => what.descriptor(),
+                    // A primitive's class is a static field of its box, which
+                    // is what `int.class` means.
+                    other => {
+                        let boxed = boxed_name(other).ok_or_else(|| {
+                            at("EJ122", *written, 1, "That has no class to name.")
+                        })?;
+                        let index = self.pool.field(boxed, "TYPE", "Ljava/lang/Class;");
+                        self.op2(0xb2, index);
+                        self.pushes(&Type::Object("java/lang/Class".to_string()));
+                        return Ok(Type::Object("java/lang/Class".to_string()));
+                    }
+                };
+                let index = self.pool.class(&named);
+                if index <= 255 {
+                    self.op1(0x12, index as u8);
+                } else {
+                    self.op2(0x13, index);
+                }
+                self.pushes(&Type::Object("java/lang/Class".to_string()));
+                Ok(Type::Object("java/lang/Class".to_string()))
+            }
+            Expression::OuterThis { of, line: written } => self.outer_this(of, *written),
             Expression::New { what, arguments } => self.new_object(what, arguments, line),
             Expression::Call {
                 on,
@@ -6359,7 +6967,7 @@ impl Emitter<'_> {
             let index = self.pool.field(&owner, name, &descriptor);
             if field.modifiers.static_ {
                 self.op2(0xb2, index);
-                self.grow(i32::from(what.width()));
+                self.pushes(&what);
             } else {
                 if self.static_ {
                     return Err(at(
@@ -6371,7 +6979,8 @@ impl Emitter<'_> {
                 }
                 self.load(0, &Type::Object(owner));
                 self.op2(0xb4, index);
-                self.grow(i32::from(what.width()) - 1);
+                self.pops(1);
+                self.pushes(&what);
             }
             return Ok(what);
         }
@@ -6388,11 +6997,12 @@ impl Emitter<'_> {
                 let index = self.pool.field(&holder, name, &descriptor);
                 if static_ {
                     self.op2(0xb2, index);
-                    self.grow(i32::from(what.width()));
+                    self.pushes(&what);
                 } else {
                     self.load(0, &Type::Object(self.this_class.clone()));
                     self.op2(0xb4, index);
-                    self.grow(i32::from(what.width()) - 1);
+                    self.pops(1);
+                    self.pushes(&what);
                 }
                 return Ok(what);
             }
@@ -6407,13 +7017,14 @@ impl Emitter<'_> {
                 if static_ {
                     let index = self.pool.field(&holder, name, &descriptor);
                     self.op2(0xb2, index);
-                    self.grow(i32::from(what.width()));
+                    self.pushes(&what);
                     return Ok(what);
                 }
                 self.reach_the_enclosing_instance(&enclosing)?;
                 let index = self.pool.field(&holder, name, &descriptor);
                 self.op2(0xb4, index);
-                self.grow(i32::from(what.width()) - 1);
+                self.pops(1);
+                self.pushes(&what);
                 return Ok(what);
             }
         }
@@ -6501,10 +7112,9 @@ impl Emitter<'_> {
         }
         if !static_ {
             self.reach_the_enclosing_instance(enclosing)?;
-            self.grow(1);
         }
         let found = self.value_for(value, &what, line)?;
-        if !found.may_be_given_to(&what) {
+        if !self.fit(&found, &what, line)? {
             return Err(at(
                 "EJ228",
                 line,
@@ -6516,17 +7126,14 @@ impl Emitter<'_> {
                 ),
             ));
         }
-        if !found.is_reference() {
-            self.convert(&found, &what, line)?;
-        }
         let descriptor = what.descriptor();
         let index = self.pool.field(&holder, name, &descriptor);
         if static_ {
             self.op2(0xb3, index);
-            self.grow(-i32::from(what.width()));
+            self.pops(i32::from(what.width()));
         } else {
             self.op2(0xb5, index);
-            self.grow(-i32::from(what.width()) - 1);
+            self.pops(i32::from(what.width()) + 1);
         }
         Ok(what)
     }
@@ -6542,6 +7149,8 @@ impl Emitter<'_> {
             .pool
             .field(&self.this_class.clone(), OUTER, &descriptor);
         self.op2(0xb4, index);
+        self.pops(1);
+        self.pushes(&held);
         Ok(())
     }
 
@@ -6591,7 +7200,7 @@ impl Emitter<'_> {
         let descriptor = what.descriptor();
         let index = self.pool.field(&holder, name, &descriptor);
         self.op2(0xb2, index);
-        self.grow(i32::from(what.width()));
+        self.pushes(&what);
         Ok(what)
     }
 
@@ -6599,6 +7208,8 @@ impl Emitter<'_> {
         if let Type::Array(_) = owner {
             if name == "length" {
                 self.op(0xbe);
+                self.pops(1);
+                self.pushes(&Type::Int);
                 return Ok(Type::Int);
             }
         }
@@ -6618,9 +7229,9 @@ impl Emitter<'_> {
                 let descriptor = what.descriptor();
                 let index = self.pool.field(class, name, &descriptor);
                 self.op(0x57);
-                self.grow(-1);
+                self.pops(1);
                 self.op2(0xb2, index);
-                self.grow(i32::from(what.width()));
+                self.pushes(&what);
                 return Ok(what);
             }
             return Err(at(
@@ -6643,12 +7254,13 @@ impl Emitter<'_> {
         if static_ {
             // The object it was read off is not wanted after all.
             self.op(0x57);
-            self.grow(-1);
+            self.pops(1);
             self.op2(0xb2, index);
-            self.grow(i32::from(what.width()));
+            self.pushes(&what);
         } else {
             self.op2(0xb4, index);
-            self.grow(i32::from(what.width()) - 1);
+            self.pops(1);
+            self.pushes(&what);
         }
         Ok(what)
     }
@@ -6672,18 +7284,22 @@ impl Emitter<'_> {
             } else {
                 0x9a
             });
-            self.grow(-1);
+            self.pops(1);
+            let beneath = self.stack.clone();
             let second = self.value(right, line)?;
             if second != Type::Boolean {
                 return Err(at("EJ214", line, 1, "`&&` and `||` want booleans."));
             }
             let over = self.jump(0xa7);
             self.land(shortcut);
-            self.a_branch_lands_here(&[]);
-            self.grow(-1);
+            self.stack_is(beneath.clone());
+            self.a_branch_lands_here();
             self.push_int(i64::from(operator == Binary::OrElse));
             self.land(over);
-            self.a_branch_lands_here(&[Verified::Integer]);
+            let mut settled = beneath;
+            settled.push(Verified::Integer);
+            self.stack_is(settled);
+            self.a_branch_lands_here();
             return Ok(Type::Boolean);
         }
 
@@ -6700,6 +7316,24 @@ impl Emitter<'_> {
         }
 
         let left_type = self.value(left, line)?;
+        self.binary_with(operator, &left_type, right, line)
+    }
+
+    /// The arithmetic half of a binary operator, with the left side already on
+    /// the stack.
+    ///
+    /// `a[i] += x` works the element out once and writes it back, so the left
+    /// side is read before this is reached and cannot be read again. The
+    /// short-circuit operators and string concatenation never get here,
+    /// because neither of them is arithmetic.
+    fn binary_with(
+        &mut self,
+        operator: Binary,
+        left_type: &Type,
+        right: &Expression,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let left_type = left_type.clone();
 
         if matches!(
             operator,
@@ -6717,7 +7351,7 @@ impl Emitter<'_> {
                 _ => 0x7d,
             };
             self.op(opcode);
-            self.grow(-1);
+            self.pops(1);
             return Ok(if long { Type::Long } else { Type::Int });
         }
 
@@ -6767,7 +7401,7 @@ impl Emitter<'_> {
                     _ => 0,
                 };
                 self.op(base + step);
-                self.grow(-i32::from(common.width()));
+                self.pops(i32::from(common.width()));
                 Ok(if common.is_int_like() {
                     Type::Int
                 } else {
@@ -6782,7 +7416,7 @@ impl Emitter<'_> {
                         _ => 0x82,
                     };
                     self.op(base);
-                    self.grow(-1);
+                    self.pops(1);
                     return Ok(if left_type == Type::Boolean {
                         Type::Boolean
                     } else {
@@ -6796,7 +7430,7 @@ impl Emitter<'_> {
                         _ => 0x83,
                     };
                     self.op(base);
-                    self.grow(-2);
+                    self.pops(2);
                     return Ok(Type::Long);
                 }
                 Err(at(
@@ -6817,17 +7451,17 @@ impl Emitter<'_> {
         let opcode = match (common, operator) {
             (Type::Long, _) => {
                 self.op(0x94);
-                self.grow(-3);
+                self.pops(3);
                 None
             }
             (Type::Float, _) => {
                 self.op(0x95);
-                self.grow(-1);
+                self.pops(1);
                 None
             }
             (Type::Double, _) => {
                 self.op(0x97);
-                self.grow(-3);
+                self.pops(3);
                 None
             }
             _ if reference => match operator {
@@ -6854,7 +7488,7 @@ impl Emitter<'_> {
 
         let jump = match opcode {
             Some(code) => {
-                self.grow(-2);
+                self.pops(2);
                 self.jump(code)
             }
             None => {
@@ -6867,18 +7501,24 @@ impl Emitter<'_> {
                     Binary::Greater => 0x9d,
                     _ => 0x9e,
                 };
-                self.grow(-1);
+                self.pops(1);
                 self.jump(code)
             }
         };
+        // Both ways out of the comparison start from the same stack and end
+        // with one more thing on it.
+        let beneath = self.stack.clone();
         self.push_int(0);
         let over = self.jump(0xa7);
         self.land(jump);
-        self.a_branch_lands_here(&[]);
-        self.grow(-1);
+        self.stack_is(beneath.clone());
+        self.a_branch_lands_here();
         self.push_int(1);
         self.land(over);
-        self.a_branch_lands_here(&[Verified::Integer]);
+        let mut settled = beneath;
+        settled.push(Verified::Integer);
+        self.stack_is(settled);
+        self.a_branch_lands_here();
         Ok(Type::Boolean)
     }
 
@@ -6890,18 +7530,7 @@ impl Emitter<'_> {
     /// which is slower than a separate typing pass and cannot disagree with
     /// one.
     fn peek_type(&mut self, expression: &Expression, line: u32) -> Result<Type, Diagnostic> {
-        let code = self.code.len();
-        let depth = self.depth;
-        let max_depth = self.max_depth;
-        let locals = self.locals.len();
-        let next_slot = self.next_slot;
-        let found = self.value(expression, line);
-        self.code.truncate(code);
-        self.depth = depth;
-        self.max_depth = max_depth;
-        self.locals.truncate(locals);
-        self.next_slot = next_slot;
-        found
+        self.type_of(expression, line)
     }
 
     fn concatenate(
@@ -6913,12 +7542,11 @@ impl Emitter<'_> {
         let builder = "java/lang/StringBuilder";
         let index = self.pool.class(builder);
         self.op2(0xbb, index);
-        self.grow(1);
-        self.op(0x59);
-        self.grow(1);
+        self.pushes(&Type::Object(builder.to_string()));
+        self.duplicates();
         let init = self.pool.method(builder, "<init>", "()V", false);
         self.op2(0xb7, init);
-        self.grow(-1);
+        self.pops(1);
 
         for side in [left, right] {
             let what = self.value(side, line)?;
@@ -6937,14 +7565,17 @@ impl Emitter<'_> {
             let descriptor = format!("({taken})Ljava/lang/StringBuilder;");
             let append = self.pool.method(builder, "append", &descriptor, false);
             self.op2(0xb6, append);
-            self.grow(-i32::from(what.width()));
+            self.pops(i32::from(what.width()));
         }
 
         let finish = self
             .pool
             .method(builder, "toString", "()Ljava/lang/String;", false);
         self.op2(0xb6, finish);
-        Ok(Type::Object("java/lang/String".to_string()))
+        let text = Type::Object("java/lang/String".to_string());
+        self.pops(1);
+        self.pushes(&text);
+        Ok(text)
     }
 }
 
@@ -6965,10 +7596,12 @@ impl Emitter<'_> {
             ));
         };
         let index = self.pool.class(&class);
+        // Where the `new` is, because that is the name the verifier knows the
+        // object by until its constructor has run.
+        let made_at = self.code.len() as u16;
         self.op2(0xbb, index);
-        self.grow(1);
-        self.op(0x59);
-        self.grow(1);
+        self.pushes_raw(Verified::Uninitialized(made_at));
+        self.duplicates();
 
         // A class that belongs to an instance is made from one, and the one it
         // is made from is whichever is here. Nobody writes that down.
@@ -6983,7 +7616,6 @@ impl Emitter<'_> {
                 self.load(0, &Type::Object(self.this_class.clone()));
             } else if !self.static_ && self.unit.outer.as_deref() == Some(enclosing.as_str()) {
                 self.reach_the_enclosing_instance(enclosing)?;
-                self.grow(1);
             } else {
                 return Err(at(
                     "EJ252",
@@ -7044,11 +7676,73 @@ impl Emitter<'_> {
         let taken: i32 = read_descriptor(&descriptor)
             .map(|(parameters, _)| parameters.iter().map(|p| i32::from(p.width())).sum())
             .unwrap_or(0);
-        self.grow(-(taken + 1));
+        self.pops(taken + 1);
+        // The constructor has run, so every copy of that object -- the one
+        // left on the stack, and any that was stored away -- is the class it
+        // was made as rather than something waiting to become it.
+        self.now_initialized(made_at, &class);
         Ok(target)
     }
 
+    /// Says the object `new` left at this offset has had its constructor run.
+    fn now_initialized(&mut self, made_at: u16, class: &str) {
+        let settled = Verified::Object(class.to_string());
+        for held in self.stack.iter_mut().chain(self.slots.iter_mut()) {
+            if *held == Verified::Uninitialized(made_at) {
+                *held = settled.clone();
+            }
+        }
+    }
+
     /// Puts arguments on the stack, each converted to what the method wants.
+    /// Writes the arguments a call takes, packing the trailing ones into an
+    /// array where the method was written with `...`.
+    ///
+    /// `String.format("%d", n)` hands over two things and the method takes
+    /// two: a String and an array. Making that array is the whole of what
+    /// varargs is, and it happens here rather than at run time.
+    fn arguments_for_signature(
+        &mut self,
+        signature: &Signature,
+        given: &[Expression],
+        line: u32,
+    ) -> Result<(), Diagnostic> {
+        let wanted = &signature.parameters;
+        if !signature.variadic || wanted.is_empty() {
+            return self.arguments_for(wanted, given, line);
+        }
+        let fixed = wanted.len() - 1;
+        let Some(Type::Array(element)) = wanted.last().cloned() else {
+            return self.arguments_for(wanted, given, line);
+        };
+
+        // Handing over the array itself is still allowed, and is what a call
+        // passing exactly one thing of the right shape means.
+        if given.len() == wanted.len() {
+            if let Some(last) = given.last() {
+                let peeked = self.type_of(last, line)?;
+                if peeked.may_be_given_to(&Type::Array(element.clone())) {
+                    return self.arguments_for(wanted, given, line);
+                }
+            }
+        }
+        if given.len() < fixed {
+            return Err(at(
+                "EJ220",
+                line,
+                1,
+                format!(
+                    "That takes at least {fixed} argument(s) and was given {}.",
+                    given.len()
+                ),
+            ));
+        }
+
+        self.arguments_for(&wanted[..fixed], &given[..fixed], line)?;
+        self.array_of(&Type::Array(element), &given[fixed..], line)?;
+        Ok(())
+    }
+
     fn arguments_for(
         &mut self,
         wanted: &[Type],
@@ -7069,7 +7763,7 @@ impl Emitter<'_> {
         }
         for (want, expression) in wanted.iter().zip(given.iter()) {
             let found = self.value_for(expression, want, line)?;
-            if !found.may_be_given_to(want) {
+            if !self.fit(&found, want, line)? {
                 return Err(at(
                     "EJ221",
                     line,
@@ -7080,9 +7774,6 @@ impl Emitter<'_> {
                         want.readable()
                     ),
                 ));
-            }
-            if !found.is_reference() {
-                self.convert(&found, want, line)?;
             }
         }
         Ok(())
@@ -7119,7 +7810,7 @@ impl Emitter<'_> {
                 return Err(self.no_such_method(&owner, name, arguments.len(), line));
             };
             self.load(0, &Type::Object(self.this_class.clone()));
-            self.arguments_for(&signature.parameters, arguments, line)?;
+            self.arguments_for_signature(&signature, arguments, line)?;
             let descriptor = signature.descriptor();
             let index = self.pool.method(&signature.owner, name, &descriptor, false);
             self.op2(0xb7, index);
@@ -7128,7 +7819,8 @@ impl Emitter<'_> {
                 .iter()
                 .map(|p| i32::from(p.width()))
                 .sum();
-            self.grow(-(taken + 1) + i32::from(signature.returns.width()));
+            self.pops(taken + 1);
+            self.pushes(&signature.returns);
             return Ok(signature.returns);
         }
 
@@ -7167,9 +7859,8 @@ impl Emitter<'_> {
                                 ));
                             }
                             self.load(0, &Type::Object(self.this_class.clone()));
-                            self.grow(1);
                         }
-                        self.arguments_for(&signature.parameters, arguments, line)?;
+                        self.arguments_for_signature(&signature, arguments, line)?;
                         // The call is written against this class, not the one
                         // that declares it, which is what `javac` does and
                         // what lets a subclass override it.
@@ -7187,7 +7878,8 @@ impl Emitter<'_> {
                             .map(|one| i32::from(one.width()))
                             .sum();
                         let popped = taken + i32::from(!signature.static_);
-                        self.grow(-popped + i32::from(signature.returns.width()));
+                        self.pops(popped);
+                        self.pushes(&signature.returns);
                         return Ok(signature.returns);
                     }
                 }
@@ -7197,9 +7889,8 @@ impl Emitter<'_> {
                     {
                         if !signature.static_ {
                             self.reach_the_enclosing_instance(&enclosing)?;
-                            self.grow(1);
                         }
-                        self.arguments_for(&signature.parameters, arguments, line)?;
+                        self.arguments_for_signature(&signature, arguments, line)?;
                         let descriptor = signature.descriptor();
                         let index = self.pool.method(
                             &signature.owner,
@@ -7214,7 +7905,8 @@ impl Emitter<'_> {
                             .map(|one| i32::from(one.width()))
                             .sum();
                         let popped = taken + i32::from(!signature.static_);
-                        self.grow(-popped + i32::from(signature.returns.width()));
+                        self.pops(popped);
+                        self.pushes(&signature.returns);
                         return Ok(signature.returns);
                     }
                 }
@@ -7245,6 +7937,7 @@ impl Emitter<'_> {
                 returns: returns.clone(),
                 static_: own.modifiers.static_,
                 interface: false,
+                variadic: false,
             }
             .descriptor();
 
@@ -7265,7 +7958,8 @@ impl Emitter<'_> {
             self.op2(if own.modifiers.static_ { 0xb8 } else { 0xb6 }, index);
             let taken: i32 = parameters.iter().map(|p| i32::from(p.width())).sum();
             let popped = taken + i32::from(!own.modifiers.static_);
-            self.grow(-popped + i32::from(returns.width()));
+            self.pops(popped);
+            self.pushes(&returns);
             return Ok(returns);
         };
 
@@ -7292,7 +7986,7 @@ impl Emitter<'_> {
                         ),
                     ));
                 }
-                self.arguments_for(&signature.parameters, arguments, line)?;
+                self.arguments_for_signature(&signature, arguments, line)?;
                 let descriptor = signature.descriptor();
                 let index = self.pool.method(&signature.owner, name, &descriptor, false);
                 self.op2(0xb8, index);
@@ -7301,7 +7995,8 @@ impl Emitter<'_> {
                     .iter()
                     .map(|p| i32::from(p.width()))
                     .sum();
-                self.grow(-taken + i32::from(signature.returns.width()));
+                self.pops(taken);
+                self.pushes(&signature.returns);
                 return Ok(signature.returns);
             }
         }
@@ -7318,7 +8013,7 @@ impl Emitter<'_> {
         let Some(signature) = self.signature_for(&owner, name, arguments, line)? else {
             return Err(self.no_such_method(&owner, name, arguments.len(), line));
         };
-        self.arguments_for(&signature.parameters, arguments, line)?;
+        self.arguments_for_signature(&signature, arguments, line)?;
         let descriptor = signature.descriptor();
         let index = self
             .pool
@@ -7333,7 +8028,8 @@ impl Emitter<'_> {
             self.code.extend_from_slice(&index.to_be_bytes());
             self.code.push((taken + 1) as u8);
             self.code.push(0);
-            self.grow(-(taken + 1) + i32::from(signature.returns.width()));
+            self.pops(taken + 1);
+            self.pushes(&signature.returns);
         } else {
             self.op2(0xb6, index);
             let taken: i32 = signature
@@ -7341,7 +8037,8 @@ impl Emitter<'_> {
                 .iter()
                 .map(|p| i32::from(p.width()))
                 .sum();
-            self.grow(-(taken + 1) + i32::from(signature.returns.width()));
+            self.pops(taken + 1);
+            self.pushes(&signature.returns);
         }
         Ok(signature.returns)
     }
@@ -7356,6 +8053,16 @@ impl Emitter<'_> {
         wanted: &Type,
         line: u32,
     ) -> Result<Type, Diagnostic> {
+        // `{1, 2}` is a list of values until something says what it holds.
+        if let Expression::ArrayOf {
+            of: None,
+            values,
+            line: written,
+        } = expression
+        {
+            let values = values.clone();
+            return self.array_of(wanted, &values, *written);
+        }
         self.expecting = Some(wanted.clone());
         let found = self.value(expression, line);
         self.expecting = None;
@@ -7375,11 +8082,15 @@ impl Emitter<'_> {
         let code = self.code.len();
         let depth = self.depth;
         let max_depth = self.max_depth;
+        let stack = self.stack.clone();
         let frames = self.frames.len();
         let locals = self.locals.len();
         let next_slot = self.next_slot;
         let max_slot = self.max_slot;
-        let slots = self.slots.len();
+        // Cloned rather than counted: working the type out may have declared a
+        // local in a slot an outer one already held, and putting the length
+        // back would leave the wrong type named there.
+        let slots = self.slots.clone();
         let handlers = self.handlers.len();
         let inlined = self.inlined.len();
 
@@ -7388,11 +8099,12 @@ impl Emitter<'_> {
         self.code.truncate(code);
         self.depth = depth;
         self.max_depth = max_depth;
+        self.stack = stack;
         self.frames.truncate(frames);
         self.locals.truncate(locals);
         self.next_slot = next_slot;
         self.max_slot = max_slot;
-        self.slots.truncate(slots);
+        self.slots = slots;
         self.handlers.truncate(handlers);
         self.inlined.truncate(inlined);
         found
@@ -7467,7 +8179,60 @@ impl Emitter<'_> {
     }
 
     /// Every signature of this name and shape that could be meant.
+    ///
+    /// A method written with `...` answers to any number of arguments from its
+    /// fixed ones upwards, so counting is not enough to find it.
     fn candidates(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
+        let exact = self.candidates_taking(owner, name, count);
+        if !exact.is_empty() {
+            return exact;
+        }
+        self.variadic_taking(owner, name, count)
+    }
+
+    /// Every variadic signature of this name that could take this many.
+    fn variadic_taking(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
+        let mut found = Vec::new();
+        for ancestor in self.classpath.ancestors(owner) {
+            if let Some(known) = self.classpath.get(&ancestor) {
+                found.extend(
+                    known
+                        .methods
+                        .iter()
+                        .filter(|one| one.name == name && one.variadic)
+                        .cloned(),
+                );
+            }
+            for (class, held, descriptor, static_) in BUILT_IN_METHODS {
+                if *class != ancestor
+                    || *held != name
+                    || !BUILT_IN_VARIADIC.contains(&(*class, *held))
+                {
+                    continue;
+                }
+                let Some((parameters, returns)) = read_descriptor(descriptor) else {
+                    continue;
+                };
+                found.push(Signature {
+                    owner: class.to_string(),
+                    name: name.to_string(),
+                    parameters,
+                    returns,
+                    static_: *static_,
+                    interface: BUILT_IN_INTERFACES.contains(class),
+                    variadic: true,
+                });
+            }
+            if !found.is_empty() {
+                break;
+            }
+        }
+        // The fixed ones have to be handed over; the rest go in the array.
+        found.retain(|one| !one.parameters.is_empty() && one.parameters.len() - 1 <= count);
+        found
+    }
+
+    fn candidates_taking(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
         // A class file handed over is the truth, and `find_method` already
         // climbs as far as the classpath can see.
         if let Some(found) = self.classpath.find_method(owner, name, count) {
@@ -7522,7 +8287,7 @@ impl Emitter<'_> {
                         self.binary(operator, &Expression::Name(name.clone()), value, line)?
                     }
                 };
-                if !found.may_be_given_to(&local.what) {
+                if !self.fit(&found, &local.what, line)? {
                     return Err(at(
                         "EJ228",
                         line,
@@ -7534,12 +8299,9 @@ impl Emitter<'_> {
                         ),
                     ));
                 }
-                if !found.is_reference() {
-                    self.convert(&found, &local.what, line)?;
-                }
                 if wanted {
                     self.op(if local.what.width() == 2 { 0x5c } else { 0x59 });
-                    self.grow(i32::from(local.what.width()));
+                    self.pushes(&local.what);
                 }
                 self.store(local.slot, &local.what);
                 Ok(local.what)
@@ -7587,21 +8349,30 @@ impl Emitter<'_> {
                         self.binary(operator, &Expression::Name(name.clone()), value, line)?
                     }
                 };
-                if !found.is_reference() {
-                    self.convert(&found, &what, line)?;
+                if !self.fit(&found, &what, line)? {
+                    return Err(at(
+                        "EJ228",
+                        line,
+                        1,
+                        format!(
+                            "A {} cannot be put in `{name}`, which is a {}.",
+                            found.readable(),
+                            what.readable()
+                        ),
+                    ));
                 }
                 if wanted {
                     self.op(if what.width() == 2 { 0x5c } else { 0x59 });
-                    self.grow(i32::from(what.width()));
+                    self.pushes(&what);
                 }
                 let descriptor = what.descriptor();
                 let index = self.pool.field(&owner, name, &descriptor);
                 if field.modifiers.static_ {
                     self.op2(0xb3, index);
-                    self.grow(-i32::from(what.width()));
+                    self.pops(i32::from(what.width()));
                 } else {
                     self.op2(0xb5, index);
-                    self.grow(-i32::from(what.width()) - 1);
+                    self.pops(i32::from(what.width()) + 1);
                 }
                 Ok(what)
             }
@@ -7646,7 +8417,7 @@ impl Emitter<'_> {
                 if static_ {
                     // The object it was named through is not wanted.
                     self.op(0x57);
-                    self.grow(-1);
+                    self.pops(1);
                 }
                 if operator.is_some() {
                     return Err(unsupported(
@@ -7670,10 +8441,10 @@ impl Emitter<'_> {
                 let index = self.pool.field(&holder, name, &descriptor);
                 if static_ {
                     self.op2(0xb3, index);
-                    self.grow(-i32::from(what.width()));
+                    self.pops(i32::from(what.width()));
                 } else {
                     self.op2(0xb5, index);
-                    self.grow(-i32::from(what.width()) - 1);
+                    self.pops(i32::from(what.width()) + 1);
                 }
                 Ok(what)
             }
@@ -7684,10 +8455,30 @@ impl Emitter<'_> {
                 };
                 let found = self.value(index, line)?;
                 self.convert(&found, &Type::Int, line)?;
-                if operator.is_some() {
-                    return Err(unsupported(line, 1, "A compound assignment into an array"));
+                if let Some(operator) = operator {
+                    // `a[i] += x` reads the element and writes it back, and
+                    // the array and the index are worked out once. `dup2`
+                    // keeps them for the write while the read uses them.
+                    self.duplicates_two();
+                    self.op(array_load(&element));
+                    self.pops(2);
+                    self.pushes(&element);
+                    let now = self.binary_with(operator, &element, value, line)?;
+                    if !now.is_reference() {
+                        self.convert(&now, &element, line)?;
+                    }
+                    if wanted {
+                        return Err(unsupported(
+                            line,
+                            1,
+                            "Using the value of a compound assignment into an array",
+                        ));
+                    }
+                    self.op(array_store(&element));
+                    self.pops(2 + i32::from(element.width()));
+                    return Ok(*element);
                 }
-                let given = self.value(value, line)?;
+                let given = self.value_for(value, &element, line)?;
                 if !given.is_reference() {
                     self.convert(&given, &element, line)?;
                 }
@@ -7709,7 +8500,7 @@ impl Emitter<'_> {
                     _ => 0x4f,
                 };
                 self.op(opcode);
-                self.grow(-2 - i32::from(element.width()));
+                self.pops(2 + i32::from(element.width()));
                 Ok(*element)
             }
             _ => Err(unsupported(line, 1, "Assigning to that")),
@@ -7725,6 +8516,46 @@ impl Emitter<'_> {
         wanted: bool,
     ) -> Result<Type, Diagnostic> {
         let Expression::Name(name) = target else {
+            if let Expression::Index { .. } = target {
+                if wanted {
+                    return Err(unsupported(
+                        line,
+                        1,
+                        "Using the value of a step on an array element",
+                    ));
+                }
+                return self.assign(
+                    target,
+                    Some(if by > 0 {
+                        Binary::Add
+                    } else {
+                        Binary::Subtract
+                    }),
+                    &Expression::Int(i64::from(by.abs())),
+                    line,
+                    false,
+                );
+            }
+            if let Expression::Field { .. } = target {
+                if wanted {
+                    return Err(unsupported(
+                        line,
+                        1,
+                        "Using the value of a step on another object's field",
+                    ));
+                }
+                return self.assign(
+                    target,
+                    Some(if by > 0 {
+                        Binary::Add
+                    } else {
+                        Binary::Subtract
+                    }),
+                    &Expression::Int(i64::from(by.abs())),
+                    line,
+                    false,
+                );
+            }
             return Err(unsupported(line, 1, "Stepping anything but a name"));
         };
         if let Some(local) = self.local(name) {
@@ -7841,10 +8672,11 @@ impl Emitter<'_> {
     /// Says that the stack is exactly this deep, which is what entering an
     /// exception handler does regardless of how deep it was before.
     fn set_depth(&mut self, depth: i32) {
-        self.depth = depth;
-        if self.depth > self.max_depth {
-            self.max_depth = self.depth;
-        }
+        // Only ever used to say the stack is empty; anything else has to say
+        // what is on it.
+        debug_assert_eq!(depth, 0);
+        self.stack.clear();
+        self.deepest();
     }
 
     /// Adds the exception-table rows protecting one stretch of code, leaving
@@ -7949,14 +8781,13 @@ impl Emitter<'_> {
                     }
                     let slot = self.declare(name, found.clone());
                     self.store(slot, &found);
-                    self.grow(-i32::from(found.width()));
                     return Ok(());
                 }
                 let target = self.resolve(what, line)?;
                 match value {
                     Some(expression) => {
                         let found = self.value_for(expression, &target, line)?;
-                        if !found.may_be_given_to(&target) {
+                        if !self.fit(&found, &target, line)? {
                             return Err(at(
                                 "EJ230",
                                 line,
@@ -7967,9 +8798,6 @@ impl Emitter<'_> {
                                     found.readable()
                                 ),
                             ));
-                        }
-                        if !found.is_reference() {
-                            self.convert(&found, &target, line)?;
                         }
                     }
                     None => {
@@ -8006,11 +8834,11 @@ impl Emitter<'_> {
                     0 => {}
                     1 => {
                         self.op(0x57);
-                        self.grow(-1);
+                        self.pops(1);
                     }
                     _ => {
                         self.op(0x58);
-                        self.grow(-2);
+                        self.pops(2);
                     }
                 }
                 Ok(())
@@ -8032,8 +8860,8 @@ impl Emitter<'_> {
                         ),
                     ));
                 }
+                self.pops(1);
                 let to_else = self.jump(0x99);
-                self.grow(-1);
                 self.statement(then)?;
                 match otherwise {
                     Some(otherwise) => {
@@ -8046,16 +8874,16 @@ impl Emitter<'_> {
                         // over three bytes that do nothing.
                         let over = (!never_completes(&then.node)).then(|| self.jump(0xa7));
                         self.land(to_else);
-                        self.a_branch_lands_here(&[]);
+                        self.a_branch_lands_here();
                         self.statement(otherwise)?;
                         if let Some(over) = over {
                             self.land(over);
-                            self.a_branch_lands_here(&[]);
+                            self.a_branch_lands_here();
                         }
                     }
                     None => {
                         self.land(to_else);
-                        self.a_branch_lands_here(&[]);
+                        self.a_branch_lands_here();
                     }
                 }
                 Ok(())
@@ -8064,26 +8892,26 @@ impl Emitter<'_> {
                 let top = self.code.len();
                 // A loop jumps back here, so the verifier has to be told what
                 // is true at the top as well as after the end.
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 let found = self.value(condition, line)?;
                 if found != Type::Boolean {
                     return Err(at("EJ206", line, 1, "A `while` wants a boolean."));
                 }
+                self.pops(1);
                 let out = self.jump(0x99);
-                self.grow(-1);
                 self.enter(true);
                 self.statement(body)?;
                 let level = self.leave();
                 for pending in level.continues {
                     self.land(pending);
                 }
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 self.jump_back(0xa7, top);
                 self.land(out);
                 for pending in level.breaks {
                     self.land(pending);
                 }
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 Ok(())
             }
             Statement::For {
@@ -8097,15 +8925,15 @@ impl Emitter<'_> {
                     self.statement(one)?;
                 }
                 let top = self.code.len();
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 let out = match condition {
                     Some(condition) => {
                         let found = self.value(condition, line)?;
                         if found != Type::Boolean {
                             return Err(at("EJ206", line, 1, "A `for` condition is a boolean."));
                         }
+                        self.pops(1);
                         let jump = self.jump(0x99);
-                        self.grow(-1);
                         Some(jump)
                     }
                     None => None,
@@ -8116,7 +8944,7 @@ impl Emitter<'_> {
                 for pending in level.continues {
                     self.land(pending);
                 }
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 for expression in step {
                     match expression {
                         Expression::Step { target, by, after } => {
@@ -8135,11 +8963,11 @@ impl Emitter<'_> {
                                 0 => {}
                                 1 => {
                                     self.op(0x57);
-                                    self.grow(-1);
+                                    self.pops(1);
                                 }
                                 _ => {
                                     self.op(0x58);
-                                    self.grow(-2);
+                                    self.pops(2);
                                 }
                             }
                         }
@@ -8152,13 +8980,13 @@ impl Emitter<'_> {
                 for pending in level.breaks {
                     self.land(pending);
                 }
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 self.close();
                 Ok(())
             }
             Statement::DoWhile { body, condition } => {
                 let top = self.code.len();
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 self.enter(true);
                 self.statement(body)?;
                 // `continue` in a `do` block goes to the test, not to the top:
@@ -8168,18 +8996,18 @@ impl Emitter<'_> {
                 for pending in level.continues {
                     self.land(pending);
                 }
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 let found = self.value(condition, line)?;
                 if found != Type::Boolean {
                     return Err(at("EJ206", line, 1, "A `do`/`while` wants a boolean."));
                 }
                 // ifne, so the loop runs again when the condition holds.
                 self.jump_back(0x9a, top);
-                self.grow(-1);
+                self.pops(1);
                 for pending in level.breaks {
                     self.land(pending);
                 }
-                self.a_branch_lands_here(&[]);
+                self.a_branch_lands_here();
                 Ok(())
             }
             Statement::ForEach {
@@ -8209,6 +9037,141 @@ impl Emitter<'_> {
                 self.run_finallys(down_to)?;
                 let jump = self.jump(0xa7);
                 self.yields[level].pending.push(jump);
+                Ok(())
+            }
+            Statement::Synchronized { on, body } => {
+                // The lock is taken, the block runs, and the lock is given
+                // back however the block is left -- including by throwing,
+                // which is what the handler covering the whole of it is for.
+                // A lock not given back is a device that stops.
+                let found = self.value(on, line)?;
+                if !found.is_reference() {
+                    return Err(at(
+                        "EJ253",
+                        line,
+                        1,
+                        format!(
+                            "`synchronized` locks an object, and was given a {}.",
+                            found.readable()
+                        ),
+                    ));
+                }
+                self.open();
+                let held = self.declare("$locked", found.clone());
+                self.duplicates();
+                self.store(held, &found);
+                self.op(0xc2); // monitorenter
+                self.pops(1);
+
+                let begun = self.code.len();
+                for one in body {
+                    self.statement(one)?;
+                }
+                let leaves = body.iter().any(|one| never_completes(&one.node));
+                if !leaves {
+                    self.load(held, &found);
+                    self.op(0xc3); // monitorexit
+                    self.pops(1);
+                }
+                let ended = self.code.len();
+
+                let over = (!leaves).then(|| self.jump(0xa7));
+
+                // Whatever was thrown, the lock is given back and the throw
+                // carries on.
+                let target = self.code.len();
+                self.protect(begun, ended, target, None, self.finallys.len());
+                let throwable = Type::Object("java/lang/Throwable".to_string());
+                self.stack_is(vec![Verified::of(&throwable)]);
+                self.a_branch_lands_here();
+                let thrown = self.declare("$thrown", throwable.clone());
+                self.store(thrown, &throwable);
+                self.load(held, &found);
+                self.op(0xc3);
+                self.pops(1);
+                self.load(thrown, &throwable);
+                self.op(0xbf);
+                self.set_depth(0);
+
+                self.close();
+                if let Some(over) = over {
+                    self.land(over);
+                    self.set_depth(0);
+                    self.a_branch_lands_here();
+                }
+                Ok(())
+            }
+            Statement::Assert { condition, said } => {
+                // `assert` runs only where the runtime was asked for it, which
+                // is what the flag the class initialiser works out is for. On
+                // Android nobody asks, so this is a field read and a branch
+                // that is never taken -- which is exactly what `javac` writes,
+                // and exactly what the person expects.
+                let index = self
+                    .pool
+                    .field(&self.this_class.clone(), ASSERTIONS_OFF, "Z");
+                self.op2(0xb2, index);
+                self.pushes(&Type::Boolean);
+                self.pops(1);
+                let over = self.jump(0x9a); // ifne: off, so skip
+
+                let found = self.value(condition, line)?;
+                if found != Type::Boolean {
+                    return Err(at(
+                        "EJ206",
+                        line,
+                        1,
+                        format!(
+                            "An `assert` wants a boolean and was given a {}.",
+                            found.readable()
+                        ),
+                    ));
+                }
+                self.pops(1);
+                let held = self.jump(0x9a); // ifne: it held, so nothing to do
+
+                let error = self.pool.class("java/lang/AssertionError");
+                self.op2(0xbb, error);
+                self.pushes(&Type::Object("java/lang/AssertionError".to_string()));
+                self.duplicates();
+                let descriptor = match said {
+                    Some(expression) => {
+                        let what = self.value(expression, line)?;
+                        // Every shape of AssertionError's constructor takes
+                        // one thing; which one depends on what was written.
+                        match &what {
+                            Type::Boolean => "(Z)V",
+                            Type::Char => "(C)V",
+                            Type::Int | Type::Byte | Type::Short => {
+                                self.convert(&what, &Type::Int, line)?;
+                                "(I)V"
+                            }
+                            Type::Long => "(J)V",
+                            Type::Float => "(F)V",
+                            Type::Double => "(D)V",
+                            _ => "(Ljava/lang/Object;)V",
+                        }
+                    }
+                    None => "()V",
+                };
+                let init =
+                    self.pool
+                        .method("java/lang/AssertionError", "<init>", descriptor, false);
+                self.op2(0xb7, init);
+                let taken: i32 = read_descriptor(descriptor)
+                    .map(|(parameters, _)| {
+                        parameters.iter().map(|one| i32::from(one.width())).sum()
+                    })
+                    .unwrap_or(0);
+                self.pops(taken + 1);
+                self.op(0xbf);
+                self.set_depth(0);
+
+                self.land(over);
+                self.land(held);
+                self.set_depth(0);
+                self.a_branch_lands_here();
+                self.wants_assertions = true;
                 Ok(())
             }
             Statement::Throw(what) => {
@@ -8253,7 +9216,7 @@ impl Emitter<'_> {
                     for pending in level.breaks {
                         self.land(pending);
                     }
-                    self.a_branch_lands_here(&[]);
+                    self.a_branch_lands_here();
                 }
                 Ok(())
             }
@@ -8305,7 +9268,7 @@ impl Emitter<'_> {
                             ));
                         }
                         let found = self.value_for(expression, &wanted, line)?;
-                        if !found.may_be_given_to(&wanted) {
+                        if !self.fit(&found, &wanted, line)? {
                             return Err(at(
                                 "EJ201",
                                 line,
@@ -8317,9 +9280,6 @@ impl Emitter<'_> {
                                 ),
                             ));
                         }
-                        if !found.is_reference() {
-                            self.convert(&found, &wanted, line)?;
-                        }
                         // The value is worked out before the `finally` runs,
                         // because that is when the expression was written --
                         // but the `finally` needs the stack, so the value
@@ -8327,10 +9287,8 @@ impl Emitter<'_> {
                         if !self.finallys.is_empty() {
                             let held = self.declare("$returning", wanted.clone());
                             self.store(held, &wanted);
-                            self.grow(-i32::from(wanted.width()));
                             self.run_finallys(0)?;
                             self.load(held, &wanted);
-                            self.grow(i32::from(wanted.width()));
                         }
                         let opcode = match &wanted {
                             Type::Long => 0xadu8,
@@ -8340,7 +9298,7 @@ impl Emitter<'_> {
                             _ => 0xac,
                         };
                         self.op(opcode);
-                        self.grow(-i32::from(wanted.width()));
+                        self.pops(i32::from(wanted.width()));
                     }
                 }
                 Ok(())
@@ -8436,6 +9394,11 @@ fn never_completes(statement: &Statement) -> bool {
         Statement::DoWhile { body, condition } => {
             matches!(condition, Expression::Boolean(true)) && !holds_a_break(&body.node)
         }
+        // A lock is taken and given back around the block; what the block does
+        // is what decides whether anything gets past it.
+        Statement::Synchronized { body, .. } => body.iter().any(|one| never_completes(&one.node)),
+        // `assert` is a check, and a check that holds carries on.
+        Statement::Assert { .. } => false,
         // A `try` gets past only if something that could get past it does: the
         // body or one of the handlers. A `finally` that never completes ends
         // it whatever the rest did.
@@ -8611,36 +9574,30 @@ impl Emitter<'_> {
 
         let array = self.declare("$over", found.clone());
         self.store(array, &found);
-        self.grow(-1);
         self.op(0x03);
-        self.grow(1);
+        self.pushes(&Type::Int);
         let index = self.declare("$at", Type::Int);
         self.store(index, &Type::Int);
-        self.grow(-1);
 
         let top = self.code.len();
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         self.load(index, &Type::Int);
-        self.grow(1);
         self.load(array, &found);
-        self.grow(1);
         self.op(0xbe); // arraylength
+        self.pops(2);
         let out = self.jump(0xa2); // if_icmpge
-        self.grow(-2);
 
         self.open();
         self.load(array, &found);
-        self.grow(1);
         self.load(index, &Type::Int);
-        self.grow(1);
         self.op(array_load(&element));
-        self.grow(i32::from(element.width()) - 2);
+        self.pops(2);
+        self.pushes(&element);
         if declared != *element {
             self.convert(&element, &declared, line)?;
         }
         let held = self.declare(name, declared.clone());
         self.store(held, &declared);
-        self.grow(-i32::from(declared.width()));
 
         self.enter(true);
         self.statement(body)?;
@@ -8650,7 +9607,7 @@ impl Emitter<'_> {
         for pending in level.continues {
             self.land(pending);
         }
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         self.bump_local(index, 1);
         self.jump_back(0xa7, top);
         self.land(out);
@@ -8658,7 +9615,7 @@ impl Emitter<'_> {
             self.land(pending);
         }
         self.close();
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         Ok(())
     }
 
@@ -8696,7 +9653,7 @@ impl Emitter<'_> {
                 default_at = Some(at_here);
             }
             self.set_depth(0);
-            self.a_branch_lands_here(&[]);
+            self.a_branch_lands_here();
             self.open();
             for one in &arm.body {
                 self.statement(one)?;
@@ -8719,7 +9676,7 @@ impl Emitter<'_> {
         }
         self.close();
         self.set_depth(0);
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         Ok(())
     }
 
@@ -8759,6 +9716,11 @@ impl Emitter<'_> {
 
         let dispatch = self.dispatch_for(over, arms, line)?;
 
+        // What is under the switch, read after the dispatch rather than
+        // before: dispatching is what takes the subject back off the stack,
+        // and an arm starts from what is left once it has gone.
+        let beneath = self.stack.clone();
+
         let mut targets: Vec<usize> = Vec::new();
         let mut default_at: Option<usize> = None;
         for arm in arms {
@@ -8767,8 +9729,8 @@ impl Emitter<'_> {
             if arm.labels.is_empty() {
                 default_at = Some(at_here);
             }
-            self.set_depth(0);
-            self.a_branch_lands_here(&[]);
+            self.stack_is(beneath.clone());
+            self.a_branch_lands_here();
             self.open();
 
             // `case 1 -> 2;` is the value; anything else has to say `yield`.
@@ -8826,9 +9788,15 @@ impl Emitter<'_> {
                 "No arm of this `switch` produces a value.",
             ));
         };
-        self.set_depth(i32::from(produced.width()));
-        let stack = Emitter::one_on_the_stack(&produced);
-        self.a_branch_lands_here(&stack);
+        let mut settled = beneath;
+        let held = Verified::of(&produced);
+        let wide = held.is_wide();
+        settled.push(held);
+        if wide {
+            settled.push(Verified::Top);
+        }
+        self.stack_is(settled);
+        self.a_branch_lands_here();
         Ok(produced)
     }
 
@@ -8931,7 +9899,6 @@ impl Emitter<'_> {
         let what = Type::Object(class.to_string());
         let held = self.declare("$switch", what.clone());
         self.store(held, &what);
-        self.grow(-1);
 
         let mut seen: Vec<String> = Vec::new();
         let mut waiting: Vec<(Pending, usize)> = Vec::new();
@@ -8956,11 +9923,10 @@ impl Emitter<'_> {
                 seen.push(named.clone());
 
                 self.load(held, &what);
-                self.grow(1);
                 self.read_static_field(class, named, arm.line)?;
                 // if_acmpeq
+                self.pops(2);
                 waiting.push((self.jump(0xa5), index));
-                self.grow(-2);
             }
         }
         let _ = line;
@@ -9011,7 +9977,7 @@ impl Emitter<'_> {
         let table = !keys.is_empty() && span <= 2 * keys.len() as i64 + 8;
 
         self.op(if table { 0xaa } else { 0xab });
-        self.grow(-1);
+        self.pops(1);
         while !self.code.len().is_multiple_of(4) {
             self.code.push(0);
         }
@@ -9059,7 +10025,6 @@ impl Emitter<'_> {
         let text = Type::Object("java/lang/String".to_string());
         let held = self.declare("$switch", text.clone());
         self.store(held, &text);
-        self.grow(-1);
 
         let mut seen: Vec<String> = Vec::new();
         let mut waiting: Vec<(Pending, usize)> = Vec::new();
@@ -9084,15 +10049,14 @@ impl Emitter<'_> {
                 seen.push(value.clone());
 
                 self.load(held, &text);
-                self.grow(1);
                 self.push_string(value);
                 let equals =
                     self.pool
                         .method("java/lang/String", "equals", "(Ljava/lang/Object;)Z", false);
                 self.op2(0xb6, equals);
-                self.grow(-1);
+                self.pops(1);
+                self.pops(1);
                 waiting.push((self.jump(0x9a), index));
-                self.grow(-1);
             }
         }
 
@@ -9101,13 +10065,12 @@ impl Emitter<'_> {
             // to compare it against, so with nothing to compare it against the
             // check is written out.
             self.load(held, &text);
-            self.grow(1);
             let class_of =
                 self.pool
                     .method("java/lang/Object", "getClass", "()Ljava/lang/Class;", false);
             self.op2(0xb6, class_of);
             self.op(0x57);
-            self.grow(-1);
+            self.pops(1);
         }
         let _ = line;
 
@@ -9195,12 +10158,11 @@ impl Emitter<'_> {
                 self.protect(begun, ended, target, Some(name.clone()), outer);
             }
 
-            self.set_depth(1);
-            self.a_branch_lands_here(&[Verified::of(&held)]);
+            self.stack_is(vec![Verified::of(&held)]);
+            self.a_branch_lands_here();
             self.open();
             let slot = self.declare(&catch.name, held.clone());
             self.store(slot, &held);
-            self.grow(-1);
 
             let body_begun = self.code.len();
             for one in &catch.body {
@@ -9225,12 +10187,11 @@ impl Emitter<'_> {
                 self.protect(from, to, target, None, outer);
             }
 
-            self.set_depth(1);
-            self.a_branch_lands_here(&[Verified::of(&throwable)]);
+            self.stack_is(vec![Verified::of(&throwable)]);
+            self.a_branch_lands_here();
             self.open();
             let slot = self.declare("$thrown", throwable.clone());
             self.store(slot, &throwable);
-            self.grow(-1);
 
             let held = std::mem::take(&mut self.finallys);
             self.finallys = held[..outer].to_vec();
@@ -9240,7 +10201,6 @@ impl Emitter<'_> {
             self.finallys = held;
 
             self.load(slot, &throwable);
-            self.grow(1);
             self.op(0xbf);
             self.set_depth(0);
             self.close();
@@ -9259,7 +10219,7 @@ impl Emitter<'_> {
             self.land(pending);
         }
         self.set_depth(0);
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         Ok(())
     }
 
@@ -9518,6 +10478,7 @@ impl Emitter<'_> {
                     returns,
                     static_: false,
                     interface: true,
+                    variadic: false,
                 });
             }
         }
@@ -9758,9 +10719,8 @@ impl Emitter<'_> {
         };
         let index = self.pool.class(&made);
         self.op2(0xbb, index);
-        self.grow(1);
-        self.op(0x59);
-        self.grow(1);
+        self.pushes(&Type::Object(made.clone()));
+        self.duplicates();
 
         let mut descriptor = String::from("(");
         if outer.is_some() {
@@ -9786,7 +10746,7 @@ impl Emitter<'_> {
         let taken: i32 = read_descriptor(&descriptor)
             .map(|(parameters, _)| parameters.iter().map(|one| i32::from(one.width())).sum())
             .unwrap_or(0);
-        self.grow(-(taken + 1));
+        self.pops(taken + 1);
         Ok(target)
     }
 
@@ -9826,6 +10786,7 @@ impl Emitter<'_> {
                 returns: Type::Void,
                 static_: false,
                 interface: false,
+                variadic: false,
             }
         } else {
             match self.find_signature(owner, "<init>", arguments.len()) {
@@ -9837,6 +10798,7 @@ impl Emitter<'_> {
                     returns: Type::Void,
                     static_: false,
                     interface: false,
+                    variadic: false,
                 },
                 None => {
                     return Err(at(
@@ -9856,7 +10818,7 @@ impl Emitter<'_> {
         };
 
         self.load(0, &Type::Object(self.this_class.clone()));
-        self.arguments_for(&signature.parameters, arguments, line)?;
+        self.arguments_for_signature(&signature, arguments, line)?;
         let descriptor = signature.descriptor();
         let index = self.pool.method(owner, "<init>", &descriptor, false);
         self.op2(0xb7, index);
@@ -9865,7 +10827,7 @@ impl Emitter<'_> {
             .iter()
             .map(|one| i32::from(one.width()))
             .sum();
-        self.grow(-(taken + 1));
+        self.pops(taken + 1);
         Ok(())
     }
 
@@ -9919,7 +10881,6 @@ impl Emitter<'_> {
         let held = self.declare("$walking", iterator.returns.clone());
         self.call_signature(&iterator, line);
         self.store(held, &iterator.returns);
-        self.grow(-1);
 
         let Type::Object(iterator_class) = iterator.returns.clone() else {
             return Err(at(
@@ -9937,16 +10898,14 @@ impl Emitter<'_> {
         };
 
         let top = self.code.len();
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         self.load(held, &iterator.returns);
-        self.grow(1);
         self.call_signature(&has_next, line);
+        self.pops(1);
         let out = self.jump(0x99);
-        self.grow(-1);
 
         self.open();
         self.load(held, &iterator.returns);
-        self.grow(1);
         self.call_signature(&next, line);
         if declared != object {
             let Type::Object(named) = &declared else {
@@ -9963,10 +10922,11 @@ impl Emitter<'_> {
             };
             let index = self.pool.class(named);
             self.op2(0xc0, index);
+            self.pops(1);
+            self.pushes(&declared);
         }
         let slot = self.declare(name, declared.clone());
         self.store(slot, &declared);
-        self.grow(-1);
 
         self.enter(true);
         self.statement(body)?;
@@ -9976,14 +10936,14 @@ impl Emitter<'_> {
         for pending in level.continues {
             self.land(pending);
         }
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         self.jump_back(0xa7, top);
         self.land(out);
         for pending in level.breaks {
             self.land(pending);
         }
         self.close();
-        self.a_branch_lands_here(&[]);
+        self.a_branch_lands_here();
         Ok(())
     }
 
@@ -10011,7 +10971,250 @@ impl Emitter<'_> {
         } else {
             self.op2(0xb6, index);
         }
-        self.grow(-(taken + 1) + i32::from(signature.returns.width()));
+        self.pops(taken + 1);
+        self.pushes(&signature.returns);
+    }
+
+    /// `Outer.this`, which is the instance a class written inside another
+    /// belongs to.
+    fn outer_this(&mut self, of: &Written, line: u32) -> Result<Type, Diagnostic> {
+        let wanted = self.resolve(of, line)?;
+        let Type::Object(named) = wanted.clone() else {
+            return Err(at("EJ252", line, 1, "`this` belongs to a class."));
+        };
+        if self.this_class == named {
+            if self.static_ {
+                return Err(at(
+                    "EJ222",
+                    line,
+                    1,
+                    "`this` has no meaning in a static method.",
+                ));
+            }
+            self.load(0, &Type::Object(self.this_class.clone()));
+            return Ok(wanted);
+        }
+        let Some(enclosing) = self.unit.outer.clone() else {
+            return Err(at(
+                "EJ252",
+                line,
+                1,
+                format!(
+                    "This class does not belong to an instance of `{}`.",
+                    named.replace('/', ".")
+                ),
+            ));
+        };
+        if enclosing != named {
+            return Err(at(
+                "EJ252",
+                line,
+                1,
+                format!(
+                    "This class belongs to an instance of `{}`, not of `{}`.",
+                    enclosing.replace('/', "."),
+                    named.replace('/', ".")
+                ),
+            ));
+        }
+        self.reach_the_enclosing_instance(&enclosing)?;
+        Ok(wanted)
+    }
+
+    /// `new int[3]`, `new int[3][4]`, `new String[2][]`.
+    ///
+    /// One dimension is `newarray` or `anewarray`; more than one is
+    /// `multianewarray`, which takes every length at once and is the only
+    /// instruction that does.
+    fn new_array(
+        &mut self,
+        of: &Written,
+        lengths: &[Expression],
+        empty: usize,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let base = self.resolve(of, line)?;
+        let mut whole = base;
+        for _ in 0..lengths.len() + empty {
+            whole = Type::Array(Box::new(whole));
+        }
+
+        // `new int[3][4]` is written as an array of arrays, each made in
+        // turn. `multianewarray` would say it in one instruction, and Dalvik
+        // has no such instruction -- so the loop the JVM would have run
+        // internally is written out, which is also what makes `new int[3][]`
+        // and `new int[3][4]` the same road.
+        if lengths.len() > 1 {
+            return self.array_of_arrays(&whole, lengths, line);
+        }
+
+        for length in lengths {
+            let found = self.value(length, line)?;
+            self.convert(&found, &Type::Int, line)?;
+        }
+
+        let Type::Array(element) = whole.clone() else {
+            unreachable!("an array was just built")
+        };
+        match element.as_ref() {
+            Type::Object(name) => {
+                let index = self.pool.class(name);
+                self.op2(0xbd, index);
+            }
+            held @ Type::Array(_) => {
+                let index = self.pool.class(&held.descriptor());
+                self.op2(0xbd, index);
+            }
+            primitive => {
+                let code = match primitive {
+                    Type::Boolean => 4u8,
+                    Type::Char => 5,
+                    Type::Float => 6,
+                    Type::Double => 7,
+                    Type::Byte => 8,
+                    Type::Short => 9,
+                    Type::Int => 10,
+                    Type::Long => 11,
+                    _ => return Err(at("EJ209", line, 1, "An array of void is not a thing.")),
+                };
+                self.op1(0xbc, code);
+            }
+        }
+        // The length goes and the array arrives, which is one slot either way
+        // and two different types -- and a frame written after this has to say
+        // the second of them.
+        if !lengths.is_empty() {
+            self.pops(1);
+            self.pushes(&whole);
+        }
+        Ok(whole)
+    }
+
+    /// `new int[3][4]`: an array of three arrays, each of four.
+    ///
+    /// The outer one is made, then filled in a loop with the inner ones. Doing
+    /// it here rather than with one instruction is not a workaround: Dalvik
+    /// has no instruction for it, and this is what the JVM does anyway.
+    fn array_of_arrays(
+        &mut self,
+        whole: &Type,
+        lengths: &[Expression],
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let Type::Array(inner) = whole.clone() else {
+            unreachable!("an array of arrays is an array")
+        };
+        let Some(of_inner) = written_for(&inner) else {
+            return Err(at(
+                "EJ121",
+                line,
+                1,
+                "This array holds something that cannot be named.",
+            ));
+        };
+
+        self.open();
+        // How many, worked out once, because the expression may have an
+        // effect and Java runs it once.
+        let counted = self.value(&lengths[0], line)?;
+        self.convert(&counted, &Type::Int, line)?;
+        let how_many = self.declare("$many", Type::Int);
+        self.store(how_many, &Type::Int);
+
+        self.load(how_many, &Type::Int);
+        self.new_array(&of_inner, &[], 1, line)?;
+        // `new_array` with no lengths does not write the size, so it is
+        // written here: the count is already on the stack under it.
+        let made = self.declare("$made", whole.clone());
+        self.store(made, whole);
+
+        self.op(0x03);
+        self.pushes(&Type::Int);
+        let at = self.declare("$at", Type::Int);
+        self.store(at, &Type::Int);
+
+        let top = self.code.len();
+        self.a_branch_lands_here();
+        self.load(at, &Type::Int);
+        self.load(how_many, &Type::Int);
+        self.pops(2);
+        let out = self.jump(0xa2); // if_icmpge
+
+        self.load(made, whole);
+        self.load(at, &Type::Int);
+        self.new_array(&of_inner, &lengths[1..], 0, line)?;
+        self.op(array_store(&inner));
+        self.pops(3);
+
+        self.bump_local(at, 1);
+        self.jump_back(0xa7, top);
+        self.land(out);
+        self.a_branch_lands_here();
+
+        self.load(made, whole);
+        self.close();
+        Ok(whole.clone())
+    }
+
+    /// `{ a, b, c }`: an array of the right size, filled in.
+    fn array_of(
+        &mut self,
+        whole: &Type,
+        values: &[Expression],
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let Type::Array(element) = whole.clone() else {
+            return Err(at(
+                "EJ121",
+                line,
+                1,
+                format!("A {} is not an array.", whole.readable()),
+            ));
+        };
+
+        let of = written_for(&element).ok_or_else(|| {
+            at(
+                "EJ121",
+                line,
+                1,
+                "This array holds something that cannot be named.",
+            )
+        })?;
+        self.new_array(&of, &[Expression::Int(values.len() as i64)], 0, line)?;
+
+        let store = array_store(&element);
+        for (position, value) in values.iter().enumerate() {
+            self.duplicates();
+            self.push_int(position as i64);
+            // An array written inside an array takes what it holds from the
+            // one around it, which is only known here.
+            let found = match value {
+                Expression::ArrayOf {
+                    of: None,
+                    values,
+                    line: written,
+                } => self.array_of(&element, values, *written)?,
+                other => self.value_for(other, &element, line)?,
+            };
+            if !found.may_be_given_to(&element) {
+                return Err(at(
+                    "EJ121",
+                    line,
+                    1,
+                    format!(
+                        "This array holds {} and was given a {}.",
+                        element.readable(),
+                        found.readable()
+                    ),
+                ));
+            }
+            if !found.is_reference() {
+                self.convert(&found, &element, line)?;
+            }
+            self.op(store);
+            self.pops(2 + i32::from(element.width()));
+        }
+        Ok(whole.clone())
     }
 
     /// `iinc`, on a slot this compiler owns.
@@ -10105,6 +11308,51 @@ fn constant_int(expression: &Expression) -> Option<i32> {
     }
 }
 
+/// The type a chain of names in front of `.class` or `.this` was spelling.
+///
+/// `java.util.List.class` parses as a field read of a field read of a name,
+/// because nothing tells the parser it is a type until the `class` arrives.
+fn as_a_written_type(expression: &Expression) -> Option<Written> {
+    fn dotted(expression: &Expression) -> Option<String> {
+        Some(match expression {
+            Expression::Name(name) => name.clone(),
+            Expression::Field { of, name } => format!("{}.{name}", dotted(of)?),
+            _ => return None,
+        })
+    }
+    Some(Written::Named(dotted(expression)?))
+}
+
+/// The box a primitive is kept in, which is where its class lives.
+fn boxed_name(what: &Type) -> Option<&'static str> {
+    Some(match what {
+        Type::Boolean => "java/lang/Boolean",
+        Type::Byte => "java/lang/Byte",
+        Type::Short => "java/lang/Short",
+        Type::Char => "java/lang/Character",
+        Type::Int => "java/lang/Integer",
+        Type::Long => "java/lang/Long",
+        Type::Float => "java/lang/Float",
+        Type::Double => "java/lang/Double",
+        Type::Void => "java/lang/Void",
+        _ => return None,
+    })
+}
+
+/// The instruction that writes one element into an array of this type.
+fn array_store(element: &Type) -> u8 {
+    match element {
+        Type::Long => 0x50,
+        Type::Float => 0x51,
+        Type::Double => 0x52,
+        Type::Byte | Type::Boolean => 0x54,
+        Type::Char => 0x55,
+        Type::Short => 0x56,
+        other if other.is_reference() => 0x53,
+        _ => 0x4f,
+    }
+}
+
 /// The instruction that reads one element out of an array of this type.
 fn array_load(element: &Type) -> u8 {
     match element {
@@ -10142,6 +11390,18 @@ pub fn compile_unit(
     unit: &Unit,
     classpath: &Classpath,
 ) -> Result<(Vec<u8>, Vec<Unit>), Diagnostic> {
+    // An `assert` is guarded by a flag the class initialiser works out once,
+    // which is what makes assertions cost nothing where nobody asked for them
+    // -- and on Android nobody does. It is an ordinary member of the class, so
+    // it is added to the class rather than carried alongside it.
+    let held;
+    let unit = if holds_an_assert(unit) {
+        held = with_the_assertion_flag(unit);
+        &held
+    } else {
+        unit
+    };
+
     let this_class = unit.internal_name();
     let mut pool = Pool::new();
     let mut made: Vec<Unit> = Vec::new();
@@ -10311,6 +11571,7 @@ pub fn compile_unit(
                 returns,
                 static_: method.modifiers.static_,
                 interface: false,
+                variadic: false,
             }
             .descriptor();
             let descriptor = pool.utf8(&descriptor);
@@ -10373,7 +11634,7 @@ pub fn compile_unit(
                     emitter.load(0, &Type::Object(this_class.clone()));
                     let up = emitter.pool.method(&superclass, "<init>", "()V", false);
                     emitter.op2(0xb7, up);
-                    emitter.grow(-1);
+                    emitter.pops(1);
                     Some(true)
                 }
             };
@@ -10460,6 +11721,7 @@ pub fn compile_unit(
             returns,
             static_: method.modifiers.static_,
             interface: false,
+            variadic: false,
         }
         .descriptor();
         let descriptor = pool.utf8(&descriptor);
@@ -10860,10 +12122,6 @@ mod tests {
             (
                 "public class A { class B { } static B f() { return new B(); } }",
                 "EJ252",
-            ),
-            (
-                "public class A { void f() { synchronized (this) { } } }",
-                "EJ900",
             ),
             // A `catch` of a class nobody handed over is a handler for
             // something that might not exist, and the class file would name
@@ -12629,6 +13887,342 @@ public class Shaped {
     }
 
     #[test]
+    fn the_mechanics_ordinary_java_leans_on_all_verify() {
+        // Arrays written out, more than one dimension, boxing, locks,
+        // assertions, class literals, varargs and stepping an array element:
+        // the things a person writes without thinking about them, which is
+        // exactly why every one of them has to be right.
+        let source = r#"
+            package com.my.app;
+
+            public final class Mechanics {
+                private int[] held = {1, 2, 3};
+                private final int[][] grid = new int[3][4];
+                private static final String TAG = "Mechanics";
+
+                public int[] made() {
+                    return new int[]{4, 5, 6};
+                }
+
+                public int[][] table() {
+                    return new int[][]{{1, 2}, {3, 4}};
+                }
+
+                public int corner(int[][] of) {
+                    return of[0][1];
+                }
+
+                public Object boxed(int value) {
+                    return value;
+                }
+
+                public int unboxed(Integer value) {
+                    return value;
+                }
+
+                public void collected(java.util.List into) {
+                    into.add(1);
+                    into.add("two");
+                }
+
+                public synchronized int guardedByTheMethod() {
+                    return held.length;
+                }
+
+                public int guardedByABlock() {
+                    synchronized (this) {
+                        held[0] = held[0] + 1;
+                        return held[0];
+                    }
+                }
+
+                public void checked(int value) {
+                    assert value > 0;
+                    assert value < 100 : "too big";
+                }
+
+                public String named() {
+                    return Mechanics.class.getName() + int.class.getName();
+                }
+
+                public String said(int count) {
+                    return String.format("%s has %d", TAG, Integer.valueOf(count));
+                }
+
+                public void stepped() {
+                    held[0]++;
+                    held[1] += 5;
+                    held[2] -= 2;
+                    grid[0][0]++;
+                }
+
+                public int total() {
+                    int sum = 0;
+                    for (int[] row : grid) {
+                        for (int one : row) {
+                            sum += one;
+                        }
+                    }
+                    return sum;
+                }
+
+                public final class Inside {
+                    public int outerFirst() {
+                        return Mechanics.this.held[0];
+                    }
+                }
+            }
+        "#;
+
+        let produced = compile(source, &empty()).expect("all of this must compile");
+        assert_eq!(produced.len(), 2, "the class and the one inside it");
+
+        let main = crate::jvm::read(&produced[0].1).unwrap();
+        assert!(
+            main.fields
+                .iter()
+                .any(|one| one.name == "$assertionsDisabled"),
+            "an `assert` is guarded by a flag the class works out once"
+        );
+        assert!(
+            main.methods
+                .iter()
+                .any(|one| one.name == "guardedByTheMethod" && one.access_flags & 0x0020 != 0),
+            "a synchronized method says so in its flags"
+        );
+
+        for (name, bytes) in &produced {
+            let simple = name.trim_end_matches(".class");
+            match jvm_verifies(simple, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here to verify {name}");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {name}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+
+        let mut classes = Vec::new();
+        for (_, bytes) in &produced {
+            let class = crate::jvm::read(bytes).unwrap();
+            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+        }
+        let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
+        if let Some(text) = dexdump_disassembly(&dex) {
+            for wanted in [
+                "Lcom/my/app/Mechanics;",
+                "monitor-enter",
+                "monitor-exit",
+                "const-class",
+                "filled-new-array|new-array",
+            ] {
+                let any = wanted.split('|').any(|one| text.contains(one));
+                assert!(any, "dexdump printed no {wanted:?}");
+            }
+        }
+
+        eprintln!(
+            "java: arrays written out, two dimensions, boxing, locks, assertions, class \
+             literals, varargs and stepping an element -- all verified"
+        );
+    }
+
+    #[test]
+    fn a_branch_inside_an_expression_leaves_the_stack_where_the_verifier_expects_it() {
+        // A frame says what is on the stack where a branch lands. A branch
+        // written in the middle of an expression lands somewhere that already
+        // has the rest of the expression under it, and a frame that forgets
+        // that is a claim the verifier throws the class out over. Every shape
+        // that branches without being a statement is here.
+        let source = r#"
+            public class Branchy {
+                public int pick(int a, int b) { return a + b; }
+
+                public int inACall(boolean c) { return pick(7, c ? 1 : 2); }
+
+                public String inAnArgument(boolean c, String s) {
+                    return s.substring(c ? 0 : 1);
+                }
+
+                public boolean between(int x, int low, int high) {
+                    return x >= low && x <= high;
+                }
+
+                public int inASwitch(int i) {
+                    return pick(1, switch (i) { case 0 -> 10; default -> 20; });
+                }
+
+                public int inAnArray(boolean c) {
+                    int[] made = { c ? 1 : 2, 3 };
+                    return made[0];
+                }
+
+                public void checked(int value) {
+                    assert value > 0;
+                    assert value < 100 : "too big";
+                }
+
+                public int measured(Object o) {
+                    if (o instanceof String s) {
+                        return s.length();
+                    }
+                    return -1;
+                }
+
+                // A `new` whose argument branches: between the `new` and the
+                // constructor the verifier holds an "uninitialized" type that
+                // is nothing else, and a frame in between has to say so.
+                public String made(boolean c) {
+                    return new String(c ? "a" : "b");
+                }
+
+                // A branch with a long under it, which is two slots and a
+                // `top` the frame has to name.
+                public long wide(boolean c, long held) {
+                    return held + (c ? 1 : 2);
+                }
+
+                public double alsoWide(boolean c, double held) {
+                    return held * (c ? 1.5 : 2.5);
+                }
+
+                // A field read under a branch, and a branch inside an index.
+                private int[] kept = { 1, 2, 3 };
+
+                public int fromAField(boolean c) {
+                    return kept[c ? 0 : 1];
+                }
+
+                public String joined(boolean c, String s) {
+                    return "x" + (c ? s : "y") + 1;
+                }
+
+                public int nested(boolean a, boolean b) {
+                    return pick(a ? 1 : 2, b ? 3 : 4);
+                }
+
+                public int howMany(boolean c) {
+                    return (c ? kept : new int[0]).length;
+                }
+
+                public Object either(boolean c, Object o) {
+                    return c ? o : this;
+                }
+
+                // A call that leaves nothing, with a branch after it: a frame
+                // written there must not have the return of a void method on
+                // it.
+                public int nothingLeft(boolean c) {
+                    pick(1, 2);
+                    return c ? 1 : 2;
+                }
+
+                public int inALoop(boolean c) {
+                    int sum = 0;
+                    int i = 0;
+                    while (i < (c ? 3 : 4)) {
+                        sum += c ? i : -i;
+                        i++;
+                    }
+                    do {
+                        sum--;
+                    } while (sum > 0);
+                    return sum;
+                }
+
+                public void intoAnArray(boolean c, int[] into) {
+                    into[c ? 0 : 1] = c ? 2 : 3;
+                }
+
+                public int caught(boolean c) {
+                    try {
+                        return pick(c ? 1 : 2, 3);
+                    } catch (RuntimeException e) {
+                        return c ? -1 : -2;
+                    } finally {
+                        pick(0, 0);
+                    }
+                }
+
+                public int labelled(int[][] grid, boolean c) {
+                    int found = -1;
+                    outer:
+                    for (int[] row : grid) {
+                        for (int one : row) {
+                            if (one == (c ? 1 : 2)) {
+                                found = one;
+                                break outer;
+                            }
+                        }
+                    }
+                    return found;
+                }
+
+                public String overText(String s, boolean c) {
+                    switch (s) {
+                        case "a":
+                            return c ? "A" : "b";
+                        default:
+                            return "z";
+                    }
+                }
+
+                public Runnable lambdaWithABranch(boolean c) {
+                    return () -> pick(c ? 1 : 2, 3);
+                }
+
+                public long counted(boolean c) {
+                    long total = 0L;
+                    for (int i = 0; i < (c ? 2 : 3); i++) {
+                        total += c ? 1L : 2L;
+                    }
+                    return total;
+                }
+            }
+        "#;
+        // The lambda becomes a class of its own, and it has to verify too.
+        let produced = compile(source, &empty()).expect("must compile");
+        for (file, bytes) in &produced {
+            let named = file.trim_end_matches(".class");
+            match jvm_verifies(named, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here to verify the branches");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => {
+                    panic!("a real JVM refused {file}:\n{said}")
+                }
+                Some(Verdict::Verified) => {}
+            }
+        }
+
+        // And the same classes go the rest of the way: Dalvik is where they
+        // actually run, and a shape the JVM accepts is no use if the device
+        // refuses it.
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, bytes)| {
+                let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read back {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        if let Some(said) = dexdump_disassembly(&dex) {
+            assert!(said.contains("Branchy"), "dexdump read it back");
+        }
+
+        eprintln!(
+            "java: branches inside expressions verify, across {} classes, and reach a dex",
+            produced.len()
+        );
+    }
+
+    #[test]
     fn a_text_block_keeps_what_was_meant_and_drops_what_was_not() {
         // The indentation rule is the whole reason these exist, so it is the
         // thing worth pinning down.
@@ -12662,11 +14256,6 @@ public class Shaped {
     #[test]
     fn what_is_still_refused_is_refused_by_name() {
         let cases: &[(&str, &str)] = &[
-            (
-                "public class A { void f() { synchronized (this) {} } }",
-                "EJ900",
-            ),
-            ("public class A { void f() { assert 1 == 1; } }", "EJ900"),
             // A `try` with no way out and nothing to close.
             ("public class A { void f() { try { } } }", "EJ114"),
             // Something a `try` closes has to be given a value.
@@ -12791,10 +14380,10 @@ public class Shaped {
                 code: Some(crate::jvm::Code {
                     max_stack: 1,
                     max_locals: 1,
-                    // aconst_null, monitorenter -- and locking is not
-                    // translated, because a monitor this compiler cannot see
-                    // the other end of is a deadlock waiting on a device.
-                    bytes: vec![0x01, 0xc2],
+                    // aconst_null, jsr -- and a subroutine is not translated,
+                    // because Dalvik has no return address to jump back to and
+                    // the type-checking verifier refuses `jsr` anyway.
+                    bytes: vec![0x01, 0xa8, 0x00, 0x03],
                     handlers: Vec::new(),
                 }),
             }],
@@ -12806,7 +14395,7 @@ public class Shaped {
             .expect_err("an instruction it does not know must be refused");
         assert_eq!(refused.code, "ED900");
         assert!(
-            refused.message.contains("monitorenter"),
+            refused.message.contains("jsr"),
             "the refusal has to name it: {}",
             refused.message
         );
