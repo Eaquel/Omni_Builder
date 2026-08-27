@@ -15374,6 +15374,23 @@ pub mod dexwrite {
         }
     }
 
+    /// The signed form, which a catch handler list uses to say whether it ends
+    /// with a row that catches everything.
+    fn sleb128(out: &mut Vec<u8>, mut value: i32) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            // An arithmetic shift, so the sign keeps filling in from the left
+            // and a negative number terminates once every remaining bit is the
+            // sign bit.
+            value >>= 7;
+            let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
+            out.push(if done { byte } else { byte | 0x80 });
+            if done {
+                return;
+            }
+        }
+    }
+
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct MethodRef {
         pub class: String,
@@ -15462,6 +15479,27 @@ pub mod dexwrite {
         pub inputs: u16,
         pub outputs: u16,
         pub instructions: Vec<Insn>,
+        /// The stretches of this method that are inside a `try`, and where
+        /// control goes when something is thrown out of them.
+        pub tries: Vec<Try>,
+    }
+
+    /// One protected stretch of a method.
+    ///
+    /// Dalvik keeps this apart from the instructions, in a table at the end of
+    /// the code item, rather than as instructions of its own. A `try` therefore
+    /// costs nothing at all when nothing is thrown: there is no instruction to
+    /// run when it is entered and none when it is left.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub struct Try {
+        /// Where the protected stretch begins, in code units.
+        pub start: u32,
+        /// How long it is, in code units.
+        pub units: u16,
+        /// What is caught and where it goes, in the order it is tried. A row
+        /// with no descriptor catches everything, and there is at most one of
+        /// those, at the end.
+        pub catches: Vec<(Option<String>, u32)>,
     }
 
     /// A field, named the way a dex file names one.
@@ -15532,6 +15570,7 @@ pub mod dexwrite {
             inputs: 1,
             outputs: 1,
             instructions: Vec::new(),
+            tries: Vec::new(),
         }
     }
 
@@ -15652,6 +15691,16 @@ pub mod dexwrite {
                         Operand::Text(text) => pools.string(text),
                     }
                 }
+                // What a `catch` catches is named in the handler list, which
+                // is not part of the instruction stream and would otherwise
+                // never reach the pools.
+                for one in &method.tries {
+                    for (caught, _) in &one.catches {
+                        if let Some(descriptor) = caught {
+                            pools.kind(descriptor);
+                        }
+                    }
+                }
             }
         }
         for reference in &references {
@@ -15752,6 +15801,31 @@ pub mod dexwrite {
             data.extend_from_slice(&encoded);
         }
 
+        // A prototype with parameters points at a type_list. Writing zero
+        // there instead says the method takes nothing, and then the shorty --
+        // which counts them -- disagrees with the list that is not there. Our
+        // own reader never looked, and dexdump only looks when it is asked to
+        // verify, so every dex this wrote for a method taking an argument was
+        // one a device would have thrown out.
+        let mut parameter_offsets: Vec<u32> = Vec::with_capacity(pools.protos.len());
+        for (_, _, parameters) in &pools.protos {
+            if parameters.is_empty() {
+                parameter_offsets.push(0);
+                continue;
+            }
+            while !(data_off + data.len()).is_multiple_of(4) {
+                data.push(0);
+            }
+            parameter_offsets.push((data_off + data.len()) as u32);
+            data.extend_from_slice(&(parameters.len() as u32).to_le_bytes());
+            for descriptor in parameters {
+                let at = pools.index_of_type(descriptor)? as u16;
+                data.extend_from_slice(&at.to_le_bytes());
+            }
+        }
+        let type_lists = parameter_offsets.iter().filter(|at| **at != 0).count() as u32;
+        let first_type_list = parameter_offsets.iter().copied().find(|at| *at != 0);
+
         let mut code_offsets: Vec<Vec<u32>> = Vec::new();
         for class in classes {
             let mut here = Vec::new();
@@ -15802,14 +15876,77 @@ pub mod dexwrite {
                     instructions.extend_from_slice(&units);
                 }
 
+                // The handler lists come first, because a try_item points at
+                // one by its offset into them and that offset has to be known
+                // before the try_item is written.
+                let mut handler_bytes: Vec<u8> = Vec::new();
+                let mut handler_offsets: Vec<u16> = Vec::new();
+                if !method.tries.is_empty() {
+                    // Two tries that catch the same things in the same order
+                    // share one list, which is what makes a `finally` around a
+                    // dozen statements cost one list rather than a dozen.
+                    let mut distinct: Vec<&Vec<(Option<String>, u32)>> = Vec::new();
+                    for one in &method.tries {
+                        if !distinct.iter().any(|held| **held == one.catches) {
+                            distinct.push(&one.catches);
+                        }
+                    }
+                    uleb128(&mut handler_bytes, distinct.len() as u32);
+                    let mut written: Vec<(usize, u16)> = Vec::new();
+                    for (index, catches) in distinct.iter().enumerate() {
+                        written.push((index, handler_bytes.len() as u16));
+                        let typed = catches.iter().filter(|(what, _)| what.is_some()).count();
+                        let catch_all = catches.iter().find(|(what, _)| what.is_none());
+                        // Positive says "these and nothing else"; zero or
+                        // negative says "these, and then anything".
+                        let size = if catch_all.is_some() {
+                            -(typed as i32)
+                        } else {
+                            typed as i32
+                        };
+                        sleb128(&mut handler_bytes, size);
+                        for (what, address) in catches.iter() {
+                            let Some(descriptor) = what else {
+                                continue;
+                            };
+                            let at = pools.index_of_type(descriptor)?;
+                            uleb128(&mut handler_bytes, at);
+                            uleb128(&mut handler_bytes, *address);
+                        }
+                        if let Some((_, address)) = catch_all {
+                            uleb128(&mut handler_bytes, *address);
+                        }
+                    }
+                    for one in &method.tries {
+                        let which = distinct
+                            .iter()
+                            .position(|held| **held == one.catches)
+                            .unwrap_or(0);
+                        handler_offsets.push(written[which].1);
+                    }
+                }
+
                 data.extend_from_slice(&method.registers.to_le_bytes());
                 data.extend_from_slice(&method.inputs.to_le_bytes());
                 data.extend_from_slice(&method.outputs.to_le_bytes());
-                data.extend_from_slice(&0u16.to_le_bytes());
+                data.extend_from_slice(&(method.tries.len() as u16).to_le_bytes());
                 data.extend_from_slice(&0u32.to_le_bytes());
                 data.extend_from_slice(&(instructions.len() as u32).to_le_bytes());
                 for unit in &instructions {
                     data.extend_from_slice(&unit.to_le_bytes());
+                }
+                if !method.tries.is_empty() {
+                    // A try_item begins with a four-byte field, so an odd
+                    // number of instruction units needs one more to line up.
+                    if !instructions.len().is_multiple_of(2) {
+                        data.extend_from_slice(&0u16.to_le_bytes());
+                    }
+                    for (one, handler) in method.tries.iter().zip(handler_offsets.iter()) {
+                        data.extend_from_slice(&one.start.to_le_bytes());
+                        data.extend_from_slice(&one.units.to_le_bytes());
+                        data.extend_from_slice(&handler.to_le_bytes());
+                    }
+                    data.extend_from_slice(&handler_bytes);
                 }
             }
             code_offsets.push(here);
@@ -15894,6 +16031,9 @@ pub mod dexwrite {
         if !pools.fields.is_empty() {
             map.push((0x0004, pools.fields.len() as u32, field_ids_off as u32));
         }
+        if let Some(first) = first_type_list {
+            map.push((0x1001, type_lists, first));
+        }
         map.sort_by_key(|(_, _, offset)| *offset);
 
         let mut map_bytes = Vec::new();
@@ -15946,10 +16086,10 @@ pub mod dexwrite {
         for descriptor in &pools.types {
             out.extend_from_slice(&pools.index_of_string(descriptor)?.to_le_bytes());
         }
-        for (shorty, return_type, _) in &pools.protos {
+        for (index, (shorty, return_type, _)) in pools.protos.iter().enumerate() {
             out.extend_from_slice(&pools.index_of_string(shorty)?.to_le_bytes());
             out.extend_from_slice(&pools.index_of_type(return_type)?.to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&parameter_offsets[index].to_le_bytes());
         }
         for reference in &pools.fields {
             out.extend_from_slice(&(pools.index_of_type(&reference.class)? as u16).to_le_bytes());
@@ -16024,7 +16164,7 @@ pub mod dexwrite {
 /// method that runs and does the wrong thing, which is the worst outcome
 /// available.
 pub mod dalvik {
-    use crate::dexwrite::{FieldRef, Insn, Method, MethodRef, Operand};
+    use crate::dexwrite::{FieldRef, Insn, Method, MethodRef, Operand, Try};
     use crate::diag::{Diagnostic, Severity};
     use crate::jvm;
     use crate::FailureClass;
@@ -16043,9 +16183,7 @@ pub mod dalvik {
     fn name_of(opcode: u8) -> &'static str {
         match opcode {
             0xa8 | 0xa9 => "`jsr` or `ret`",
-            0xaa | 0xab => "`switch`",
             0xba => "`invokedynamic`",
-            0xbf => "`athrow`",
             0xc2 | 0xc3 => "`monitorenter` or `monitorexit`",
             0xc4 => "a `wide` instruction",
             0xc5 => "a multi-dimensional array",
@@ -16076,6 +16214,26 @@ pub mod dalvik {
         from: usize,
         /// The bytecode offset in the original method.
         target: usize,
+        /// True for the thirty-two bit offsets a switch uses, which take two
+        /// units rather than one.
+        wide: bool,
+    }
+
+    /// A `switch` whose payload has not been written yet.
+    ///
+    /// Dalvik keeps the table of keys and destinations out of line, as a
+    /// payload somewhere else in the method that the switch instruction points
+    /// at. Where that lands is not known until every instruction has been
+    /// written, so the table waits here until it is.
+    struct PendingSwitch {
+        /// Which instruction is the switch, by its position in the list.
+        instruction: usize,
+        /// Contiguous from `first`, or a sorted list of keys.
+        packed: bool,
+        first: i32,
+        keys: Vec<i32>,
+        /// The bytecode offsets each key goes to.
+        targets: Vec<usize>,
     }
 
     pub struct Translator<'a> {
@@ -16084,6 +16242,9 @@ pub mod dalvik {
         /// Where each JVM bytecode offset ended up, in code units.
         landed: std::collections::BTreeMap<usize, usize>,
         fixups: Vec<Fixup>,
+        switches: Vec<PendingSwitch>,
+        /// The method's exception table, as the class file gave it.
+        handlers: Vec<(u16, u16, u16, u16)>,
         stack_base: u16,
         depth: u16,
         max_outputs: u16,
@@ -16109,6 +16270,8 @@ pub mod dalvik {
                 code: Vec::new(),
                 landed: std::collections::BTreeMap::new(),
                 fixups: Vec::new(),
+                switches: Vec::new(),
+                handlers: code.handlers.clone(),
                 stack_base: code.max_locals,
                 depth: 0,
                 max_outputs: 0,
@@ -16146,9 +16309,31 @@ pub mod dalvik {
         /// holds matters only for choosing between `move` and `move-object`,
         /// and the JVM instruction being translated always says which.
         pub fn walk(&mut self, bytes: &[u8]) -> Result<(), Diagnostic> {
+            let entries: Vec<usize> = self
+                .handlers
+                .iter()
+                .map(|(_, _, target, _)| usize::from(*target))
+                .collect();
+
             let mut at = 0usize;
             while at < bytes.len() {
                 self.landed.insert(at, units(&self.code));
+                if entries.contains(&at) {
+                    // A handler is entered with the thrown object where the
+                    // JVM would have left it on the stack. Dalvik has no
+                    // stack, so it is asked for by name, and it has to be the
+                    // first thing the handler does.
+                    let register = self.stack_base;
+                    if register > 255 {
+                        return Err(fail(
+                            "ED007",
+                            "A `catch` needs a register a `move-exception` can name.",
+                        )
+                        .with_context(format!("Register {register}")));
+                    }
+                    self.push(Insn::raw(vec![0x000d | (register << 8)]));
+                    self.depth = 1;
+                }
                 let opcode = bytes[at];
                 let start = at;
                 at += 1;
@@ -16158,8 +16343,11 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// Fills in every branch, now that every destination is known.
-        pub fn finish(mut self) -> Result<Vec<Insn>, Diagnostic> {
+        /// Fills in every branch and lays down every switch payload, now that
+        /// every destination is known.
+        pub fn finish(mut self) -> Result<(Vec<Insn>, Vec<Try>), Diagnostic> {
+            self.lay_down_switch_payloads()?;
+
             // Where each instruction begins, so a fixup can be found by unit.
             let mut positions = Vec::with_capacity(self.code.len());
             let mut running = 0usize;
@@ -16174,6 +16362,26 @@ pub mod dalvik {
                         .with_context(format!("Offset {}", fixup.target)));
                 };
                 let offset = landing as i64 - fixup.from as i64;
+                // Which instruction holds this unit.
+                let Some(index) = positions.iter().rposition(|start| *start <= fixup.unit) else {
+                    return Err(fail("ED005", "A branch is not inside any instruction."));
+                };
+                let inside = fixup.unit - positions[index];
+
+                if fixup.wide {
+                    let offset = offset as i32 as u32;
+                    for (step, unit) in [offset as u16, (offset >> 16) as u16]
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let Some(slot) = self.code[index].units.get_mut(inside + step) else {
+                            return Err(fail("ED005", "A branch is not inside any instruction."));
+                        };
+                        *slot = unit;
+                    }
+                    continue;
+                }
+
                 let Ok(offset) = i16::try_from(offset) else {
                     return Err(fail(
                         "ED004",
@@ -16181,17 +16389,136 @@ pub mod dalvik {
                     )
                     .with_context(format!("Distance: {offset} code units")));
                 };
-                // Which instruction holds this unit.
-                let Some(index) = positions.iter().rposition(|start| *start <= fixup.unit) else {
-                    return Err(fail("ED005", "A branch is not inside any instruction."));
-                };
-                let inside = fixup.unit - positions[index];
                 let Some(slot) = self.code[index].units.get_mut(inside) else {
                     return Err(fail("ED005", "A branch is not inside any instruction."));
                 };
                 *slot = offset as u16;
             }
-            Ok(self.code)
+
+            let tries = self.tries(&positions)?;
+            Ok((self.code, tries))
+        }
+
+        /// Writes each switch's table of keys and destinations at the end of
+        /// the method, and points the switch instruction at it.
+        ///
+        /// The payload has to begin on a four-byte boundary, which for a stream
+        /// of two-byte units means an even one; a `nop` in front of it is how
+        /// that is arranged. The destinations inside it are measured from the
+        /// switch instruction, not from the payload -- so a `nop` moves the
+        /// payload without changing a single one of them.
+        fn lay_down_switch_payloads(&mut self) -> Result<(), Diagnostic> {
+            if self.switches.is_empty() {
+                return Ok(());
+            }
+            let waiting = std::mem::take(&mut self.switches);
+            for one in waiting {
+                let switch_at: usize = self.code[..one.instruction]
+                    .iter()
+                    .map(|held| held.width())
+                    .sum();
+
+                if !units(&self.code).is_multiple_of(2) {
+                    self.push(Insn::raw(vec![0x0000]));
+                }
+                let payload_at = units(&self.code);
+
+                // The switch instruction says how far away its payload is, and
+                // it is the one thirty-two bit branch this compiler writes that
+                // is known outright rather than fixed up later.
+                let away = (payload_at as i64 - switch_at as i64) as i32 as u32;
+                self.code[one.instruction].units[1] = away as u16;
+                self.code[one.instruction].units[2] = (away >> 16) as u16;
+
+                let mut units_out: Vec<u16> = Vec::new();
+                units_out.push(if one.packed { 0x0100 } else { 0x0200 });
+                units_out.push(one.keys.len() as u16);
+                if one.packed {
+                    units_out.push(one.first as u32 as u16);
+                    units_out.push((one.first as u32 >> 16) as u16);
+                } else {
+                    for key in &one.keys {
+                        units_out.push(*key as u32 as u16);
+                        units_out.push((*key as u32 >> 16) as u16);
+                    }
+                }
+                let targets_begin = units_out.len();
+                units_out.extend(std::iter::repeat_n(0u16, one.targets.len() * 2));
+
+                self.push(Insn::raw(units_out));
+                for (index, target) in one.targets.iter().enumerate() {
+                    self.fixups.push(Fixup {
+                        unit: payload_at + targets_begin + index * 2,
+                        from: switch_at,
+                        target: *target,
+                        wide: true,
+                    });
+                }
+            }
+            Ok(())
+        }
+
+        /// The exception table, in the code units it came to rather than the
+        /// bytecode offsets it was written in.
+        fn tries(&self, positions: &[usize]) -> Result<Vec<Try>, Diagnostic> {
+            let _ = positions;
+            let mut out: Vec<Try> = Vec::new();
+            for (from, to, target, caught) in &self.handlers {
+                let at = |offset: u16| -> Result<u32, Diagnostic> {
+                    self.landed
+                        .get(&usize::from(offset))
+                        .map(|found| *found as u32)
+                        .ok_or_else(|| {
+                            fail("ED008", "A handler covers a range that is not there.")
+                                .with_context(format!("Offset {offset}"))
+                        })
+                };
+                let start = at(*from)?;
+                let end = at(*to)?;
+                let handler = at(*target)?;
+                if end <= start {
+                    continue;
+                }
+                let descriptor = match caught {
+                    0 => None,
+                    index => Some(format!("L{};", self.class_name(*index, 0)?)),
+                };
+
+                // Two rows over the same stretch are one `try` with two ways
+                // out, in the order the class file listed them -- which is the
+                // order the JVM would have tried them in.
+                match out
+                    .iter_mut()
+                    .find(|held| held.start == start && u32::from(held.units) == end - start)
+                {
+                    Some(held) => held.catches.push((descriptor, handler)),
+                    None => out.push(Try {
+                        start,
+                        units: (end - start) as u16,
+                        catches: vec![(descriptor, handler)],
+                    }),
+                }
+            }
+            // A try_item table has to be sorted by where each range begins, and
+            // the ranges must not overlap: Dalvik finds a handler by searching
+            // the table rather than by taking the first match.
+            out.sort_by_key(|one| one.start);
+            for pair in out.windows(2) {
+                let (before, after) = (&pair[0], &pair[1]);
+                if before.start + u32::from(before.units) > after.start {
+                    return Err(fail(
+                        "ED009",
+                        "Two protected ranges overlap, and Dalvik has no way to say which wins.",
+                    )
+                    .with_context(format!(
+                        "{}..{} and {}..",
+                        before.start,
+                        before.start + u32::from(before.units),
+                        after.start
+                    )));
+                }
+            }
+            Ok(out)
         }
 
         fn u16_at(bytes: &[u8], at: usize) -> u16 {
@@ -16748,6 +17075,22 @@ pub mod dalvik {
                     // one pass is enough.
                     self.branch(0x0029, Vec::new(), target);
                 }
+                0xaa | 0xab => self.switch(opcode, bytes, start, at)?,
+                0xbf => {
+                    let register = self.slot(1);
+                    self.shrink(1)?;
+                    if register > 255 {
+                        return Err(fail(
+                            "ED007",
+                            "A `throw` needs a register the instruction can name.",
+                        )
+                        .with_context(format!("Register {register}")));
+                    }
+                    self.push(Insn::raw(vec![0x0027 | (register << 8)]));
+                    // Nothing runs on from a throw, and what the stack held is
+                    // not what anything arriving here will find.
+                    self.depth = 0;
+                }
 
                 // -- returns
                 0xac | 0xae => {
@@ -16848,6 +17191,117 @@ pub mod dalvik {
             let offset = Self::u16_at(bytes, *at) as i16;
             *at += 2;
             (start as i64 + i64::from(offset)) as usize
+        }
+
+        /// `tableswitch` and `lookupswitch`.
+        ///
+        /// Both become one Dalvik switch instruction and a payload written at
+        /// the end of the method. The one thing Dalvik does not have is the
+        /// JVM's default destination: a switch that matches nothing simply
+        /// runs on, so the default becomes a `goto` written directly after.
+        fn switch(
+            &mut self,
+            opcode: u8,
+            bytes: &[u8],
+            start: usize,
+            at: &mut usize,
+        ) -> Result<(), Diagnostic> {
+            // Both instructions pad to a four-byte boundary before their
+            // table, measured from the start of the method's code.
+            while !at.is_multiple_of(4) {
+                *at += 1;
+            }
+            let read = |at: &mut usize| -> i32 {
+                let value = i32::from_be_bytes([
+                    *bytes.get(*at).unwrap_or(&0),
+                    *bytes.get(*at + 1).unwrap_or(&0),
+                    *bytes.get(*at + 2).unwrap_or(&0),
+                    *bytes.get(*at + 3).unwrap_or(&0),
+                ]);
+                *at += 4;
+                value
+            };
+
+            let default = read(at);
+            let mut keys: Vec<i32> = Vec::new();
+            let mut targets: Vec<usize> = Vec::new();
+            let packed = opcode == 0xaa;
+            let mut first = 0i32;
+
+            if packed {
+                let low = read(at);
+                let high = read(at);
+                first = low;
+                let span = i64::from(high) - i64::from(low) + 1;
+                if span <= 0 || span > 65_536 {
+                    return Err(
+                        fail("ED012", "A `switch` covers a range this cannot write.")
+                            .with_context(format!("Offset {start}, {low} to {high}")),
+                    );
+                }
+                for value in low..=high {
+                    keys.push(value);
+                    targets.push((start as i64 + i64::from(read(at))) as usize);
+                    if value == high {
+                        break;
+                    }
+                }
+            } else {
+                let pairs = read(at);
+                if !(0..=65_536).contains(&pairs) {
+                    return Err(
+                        fail("ED012", "A `switch` holds more cases than this can write.")
+                            .with_context(format!("Offset {start}, {pairs} cases")),
+                    );
+                }
+                for _ in 0..pairs {
+                    keys.push(read(at));
+                    targets.push((start as i64 + i64::from(read(at))) as usize);
+                }
+            }
+
+            let register = self.slot(1);
+            self.shrink(1)?;
+            if register > 255 {
+                return Err(fail(
+                    "ED007",
+                    "A `switch` needs a register the instruction can name.",
+                )
+                .with_context(format!("Register {register}")));
+            }
+
+            // An empty table is a switch that always takes the default, and
+            // Dalvik has no payload shape for nothing at all.
+            if keys.is_empty() {
+                self.branch(
+                    0x0029,
+                    Vec::new(),
+                    (start as i64 + i64::from(default)) as usize,
+                );
+                return Ok(());
+            }
+
+            let instruction = self.code.len();
+            // packed-switch or sparse-switch, with the payload's distance left
+            // to be filled in once it has been written.
+            self.push(Insn::raw(vec![
+                u16::from(if packed { 0x2bu8 } else { 0x2c }) | (register << 8),
+                0,
+                0,
+            ]));
+            self.switches.push(PendingSwitch {
+                instruction,
+                packed,
+                first,
+                keys,
+                targets,
+            });
+            self.branch(
+                0x0029,
+                Vec::new(),
+                (start as i64 + i64::from(default)) as usize,
+            );
+            Ok(())
         }
 
         fn load_local(&mut self, local: u16, kind: u8, width: u16) {
@@ -17042,6 +17496,7 @@ pub mod dalvik {
                 unit: from + 1,
                 from,
                 target,
+                wide: false,
             });
         }
 
@@ -17150,6 +17605,7 @@ pub mod dalvik {
                 inputs,
                 outputs: 0,
                 instructions: Vec::new(),
+                tries: Vec::new(),
             });
         };
 
@@ -17180,7 +17636,7 @@ pub mod dalvik {
 
         translator.walk(&code.bytes)?;
         let outputs = translator.max_outputs;
-        let instructions = translator.finish()?;
+        let (instructions, tries) = translator.finish()?;
 
         Ok(Method {
             reference,
@@ -17189,6 +17645,7 @@ pub mod dalvik {
             inputs,
             outputs,
             instructions,
+            tries,
         })
     }
 
@@ -27128,7 +27585,7 @@ mod tests {
         })
     }
 
-    fn find_apksigner() -> Option<std::path::PathBuf> {
+    pub(crate) fn find_apksigner() -> Option<std::path::PathBuf> {
         let mut roots: Vec<std::path::PathBuf> = Vec::new();
         for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
             if let Ok(value) = std::env::var(name) {
@@ -29604,6 +30061,7 @@ mod tests {
             outputs: 0,
             // return-void, which is the whole body.
             instructions: vec![super::dexwrite::Insn::raw(vec![0x000e])],
+            tries: Vec::new(),
         }];
         class
     }

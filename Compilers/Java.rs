@@ -7158,6 +7158,15 @@ mod tests {
         assert_eq!(read.class_names(), vec!["com.my.app.Counter"]);
         assert!(crate::dex::integrity(&dex).unwrap().self_consistent());
 
+        // Asking the Android tool to disassemble makes it verify first, which
+        // is the difference between "the bytes are shaped like a dex" and "a
+        // device would load this".
+        if let Some(text) = dexdump_disassembly(&dex) {
+            for wanted in ["Lcom/my/app/Counter;", "sumTo", "iget", "return"] {
+                assert!(text.contains(wanted), "dexdump printed no {wanted:?}");
+            }
+        }
+
         // The same source is the same dex, which is what the compiler contract
         // promises when it says its output is reproducible.
         let (_, again) = compile(source, &empty()).unwrap();
@@ -7170,6 +7179,200 @@ mod tests {
 
         eprintln!(
             "dalvik: java source to a {} byte dex, five methods and two fields, no javac and no d8",
+            dex.len()
+        );
+    }
+
+    /// Runs `dexdump` over a dex, with the disassembly.
+    ///
+    /// The tool is part of the Android build-tools, which are not always here,
+    /// and a missing tool is a fact about the machine rather than a failure.
+    fn dexdump_disassembly(bytes: &[u8]) -> Option<String> {
+        let tool = crate::tests::find_apksigner().and_then(|path| {
+            let found = path.parent()?.join("dexdump");
+            found.is_file().then_some(found)
+        })?;
+
+        let directory = std::env::temp_dir().join(format!("omni-dexdump-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).ok()?;
+        let path = directory.join("classes.dex");
+        std::fs::write(&path, bytes).ok()?;
+        let output = std::process::Command::new(&tool)
+            .args(["-d", path.to_str()?])
+            .output()
+            .ok()?;
+        std::fs::remove_dir_all(&directory).ok();
+        // A tool that is not here is a fact about the machine. A tool that is
+        // here, ran, and refused is a fact about the dex, and it must not be
+        // reported as the first one.
+        assert!(
+            output.status.success(),
+            "dexdump refused a dex this wrote:\n{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    #[test]
+    fn switch_and_try_catch_reach_dalvik_and_dexdump_reads_them_back() {
+        // A `switch` becomes an instruction plus a table written somewhere
+        // else in the method, and a `try` becomes rows in a table that is not
+        // in the instruction stream at all. Both are places where an offset
+        // that is one out produces a dex our own reader still reads. So the
+        // Android tool is asked what it sees.
+        let source = r#"
+            package com.my.app;
+
+            public class Branching {
+                private int seen;
+
+                public int packed(int value) {
+                    switch (value) {
+                        case 0: return 10;
+                        case 1: return 11;
+                        case 2: return 12;
+                        case 3: return 13;
+                        default: return -1;
+                    }
+                }
+
+                public int scattered(int value) {
+                    switch (value) {
+                        case 1: return 1;
+                        case 500: return 2;
+                        case 90000: return 3;
+                        default: return 0;
+                    }
+                }
+
+                public int named(String word) {
+                    switch (word) {
+                        case "yes": return 1;
+                        case "no": return 0;
+                        default: return -1;
+                    }
+                }
+
+                public int guarded(int by) {
+                    try {
+                        return 100 / by;
+                    } catch (ArithmeticException e) {
+                        return -1;
+                    }
+                }
+
+                public int cleanedUp(int by) {
+                    try {
+                        return 100 / by;
+                    } finally {
+                        seen = seen + 1;
+                    }
+                }
+
+                public void refuse(int value) {
+                    if (value < 0) {
+                        throw new IllegalArgumentException("below zero");
+                    }
+                }
+
+                public int stepping(int from) {
+                    int steps = 0;
+                    do {
+                        from = from - 1;
+                        steps++;
+                    } while (from > 0);
+                    return steps;
+                }
+
+                public int over(int[] values) {
+                    int out = 0;
+                    for (int one : values) {
+                        out = out + one;
+                    }
+                    return out;
+                }
+            }
+        "#;
+
+        let (_, class_bytes) = compile(source, &empty()).expect("this must compile");
+        let class = crate::jvm::read(&class_bytes).expect("what was written must read");
+        let translated =
+            crate::dalvik::translate_class(&class).expect("and must translate to Dalvik");
+
+        let with_tries: Vec<&str> = translated
+            .virtual_methods
+            .iter()
+            .filter(|one| !one.tries.is_empty())
+            .map(|one| one.reference.name.as_str())
+            .collect();
+        assert_eq!(
+            with_tries,
+            vec!["guarded", "cleanedUp"],
+            "the two methods with a `try` are the two with a try table"
+        );
+
+        // Every protected range has to be inside the method it belongs to, and
+        // every handler has to point at an instruction that exists.
+        for method in &translated.virtual_methods {
+            let total: u32 = method
+                .instructions
+                .iter()
+                .map(|one| one.width() as u32)
+                .sum();
+            for one in &method.tries {
+                assert!(
+                    one.start + u32::from(one.units) <= total,
+                    "{}: a protected range runs past the end of the method",
+                    method.reference.name
+                );
+                for (_, handler) in &one.catches {
+                    assert!(
+                        *handler < total,
+                        "{}: a handler points past the end of the method",
+                        method.reference.name
+                    );
+                }
+            }
+        }
+
+        let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("our own reader must read it");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        assert!(crate::dex::integrity(&dex).unwrap().self_consistent());
+
+        let Some(text) = dexdump_disassembly(&dex) else {
+            eprintln!("dalvik: no dexdump here, so the tables were not put to the Android tool");
+            return;
+        };
+
+        // The instructions that only exist because of this change.
+        for wanted in [
+            "packed-switch",
+            "sparse-switch",
+            "move-exception",
+            "throw",
+            "catches",
+        ] {
+            assert!(
+                text.contains(wanted),
+                "dexdump printed no {wanted:?} in\n{text}"
+            );
+        }
+        // A payload dexdump could not follow prints as an unknown opcode or a
+        // bad offset, and it says so rather than staying quiet.
+        for wrong in ["<unknown", "bad offset", "unknown opcode", "???"] {
+            assert!(!text.contains(wrong), "dexdump found {wrong:?} in\n{text}");
+        }
+        assert!(
+            text.contains("Lcom/my/app/Branching;"),
+            "dexdump did not find the class"
+        );
+
+        eprintln!(
+            "dalvik: dexdump read back a {} byte dex holding two switch payloads, \
+             a string switch, two try tables and a throw",
             dex.len()
         );
     }
@@ -7803,8 +8006,10 @@ public class Wide {
                 code: Some(crate::jvm::Code {
                     max_stack: 1,
                     max_locals: 1,
-                    // aconst_null, athrow -- and athrow is not translated.
-                    bytes: vec![0x01, 0xbf],
+                    // aconst_null, monitorenter -- and locking is not
+                    // translated, because a monitor this compiler cannot see
+                    // the other end of is a deadlock waiting on a device.
+                    bytes: vec![0x01, 0xc2],
                     handlers: Vec::new(),
                 }),
             }],
@@ -7816,7 +8021,7 @@ public class Wide {
             .expect_err("an instruction it does not know must be refused");
         assert_eq!(refused.code, "ED900");
         assert!(
-            refused.message.contains("athrow"),
+            refused.message.contains("monitorenter"),
             "the refusal has to name it: {}",
             refused.message
         );
