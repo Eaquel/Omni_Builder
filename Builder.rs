@@ -30497,6 +30497,325 @@ public final class MainActivity extends Activity {
     }
 
     #[test]
+    fn a_whole_application_written_in_java_25_becomes_a_package_a_device_takes() {
+        // Everything the compiler learned, in one application, taken the whole
+        // way: written to a project on disk, compiled here, translated here,
+        // packed and signed here, and then handed to the Android tools --
+        // which verify before they will say a word about it.
+        let directory = temp_directory("omni-whole-application");
+        let root = directory.join("Whole");
+        let spec =
+            "package=com.tr.yt;label=Whole;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
+        super::scaffold::create(
+            root.to_str().unwrap(),
+            &super::scaffold::Spec::parse(spec).unwrap(),
+        )
+        .expect("the project must be created");
+
+        let folder = root.join(super::scaffold::JAVA_FOLDER);
+        std::fs::write(
+            folder.join("MainActivity.java"),
+            r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import java.util.ArrayList;
+import java.util.List;
+
+public final class MainActivity extends Activity {
+    private static final String TAG = "Whole";
+    private static int made;
+
+    static {
+        made = 0;
+    }
+
+    private int taps;
+    private String label = "tapped ";
+    private final List seen = new ArrayList();
+    private TextView view;
+
+    {
+        made = made + 1;
+    }
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+
+        LinearLayout holder = new LinearLayout(this);
+        holder.setOrientation(1);
+
+        view = new TextView(this);
+        view.setText(greeting());
+        holder.addView(view);
+
+        Button tap = new Button(this);
+        tap.setText("tap");
+        tap.setOnClickListener(which -> {
+            taps = taps + 1;
+            seen.add(Integer.valueOf(taps));
+            view.setText(describe());
+        });
+        holder.addView(tap);
+
+        Button clear = new Button(this);
+        clear.setText("clear");
+        clear.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View which) {
+                reset();
+                view.setText(greeting());
+            }
+        });
+        holder.addView(clear);
+
+        setContentView(holder);
+        Log.i(TAG, "started, made " + made);
+    }
+
+    private void reset() {
+        taps = 0;
+        seen.clear();
+    }
+
+    private String greeting() {
+        return """
+            Nothing yet.
+            Tap to begin.
+            """;
+    }
+
+    private String describe() {
+        var out = new StringBuilder();
+        out.append(label);
+        out.append(taps);
+        out.append(" (");
+        out.append(Size.of(taps).name());
+        out.append(") ");
+        for (var one : counts()) {
+            out.append(one);
+            out.append(' ');
+        }
+        Point where = new Point(taps, taps * 2);
+        out.append(where.toString());
+        return out.toString();
+    }
+
+    private int[] counts() {
+        int[] found = new int[3];
+        for (int i = 0; i < found.length; i++) {
+            found[i] = i * taps;
+        }
+        return found;
+    }
+
+    public String weigh(int value) {
+        switch (value) {
+            case 0:
+            case 1:
+                return "light";
+            case 2:
+                return "middling";
+            default:
+                return "heavy";
+        }
+    }
+
+    public int scored(Size which) {
+        return switch (which) {
+            case NONE -> 0;
+            case SOME -> 1;
+            default -> 2;
+        };
+    }
+
+    public String guarded(String text) {
+        try {
+            return text.substring(0, 2);
+        } catch (IndexOutOfBoundsException | NullPointerException e) {
+            return "";
+        } finally {
+            taps++;
+        }
+    }
+
+    public int total(int... values) {
+        int sum = 0;
+        for (int one : values) {
+            sum = sum + one;
+        }
+        return sum;
+    }
+
+    public String tell(Object thing) {
+        if (thing instanceof String text) {
+            return text;
+        }
+        return String.valueOf(thing);
+    }
+
+    public void later(Runnable which) {
+        which.run();
+    }
+
+    public void tidy() {
+        later(this::reset);
+    }
+
+    public Ticker ticker() {
+        return new Ticker();
+    }
+
+    /// A class that belongs to an instance, reading what it holds.
+    public final class Ticker {
+        public int next() {
+            taps = taps + 1;
+            return taps;
+        }
+    }
+
+    public static final class Point {
+        private final int x;
+        private final int y;
+
+        public Point(int x, int y) {
+            this.x = x;
+            this.y = y;
+        }
+
+        @Override
+        public String toString() {
+            return "(" + x + ", " + y + ")";
+        }
+    }
+
+    public record Pair(int left, int right) { }
+
+    public enum Size {
+        NONE, SOME, MANY;
+
+        public static Size of(int count) {
+            if (count == 0) {
+                return NONE;
+            }
+            if (count < 5) {
+                return SOME;
+            }
+            return MANY;
+        }
+    }
+
+    public interface Watcher {
+        void changed(int to);
+
+        default String describeChange(int to) {
+            return "now " + to;
+        }
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let project = super::builder::from_project(root.to_str().unwrap())
+            .expect("the whole application must compile");
+        let names: Vec<&str> = project
+            .code
+            .iter()
+            .map(|one| one.descriptor.as_str())
+            .collect();
+        for wanted in [
+            "Lcom/tr/yt/MainActivity;",
+            "Lcom/tr/yt/MainActivity$Ticker;",
+            "Lcom/tr/yt/MainActivity$Point;",
+            "Lcom/tr/yt/MainActivity$Pair;",
+            "Lcom/tr/yt/MainActivity$Size;",
+            "Lcom/tr/yt/MainActivity$Watcher;",
+        ] {
+            assert!(names.contains(&wanted), "{names:?}");
+        }
+        // The lambda and the class written where it is used each became one
+        // more, numbered after the ones with names.
+        assert!(
+            names.len() >= 8,
+            "a lambda and an anonymous class are classes too: {names:?}"
+        );
+
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut sink)
+            .expect("and must pack and sign");
+        assert!(outcome.carries_code);
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let written = directory.join("Whole.apk");
+        std::fs::write(&written, &outcome.package).unwrap();
+
+        // apksigner verifies the signature over the whole package.
+        if let Some(tool) = find_apksigner() {
+            let checked = std::process::Command::new(&tool)
+                .args([
+                    "verify",
+                    "--verbose",
+                    "--min-sdk-version",
+                    &super::compiler::OLDEST_API.to_string(),
+                    written.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&checked.stdout),
+                String::from_utf8_lossy(&checked.stderr)
+            );
+            assert!(checked.status.success(), "apksigner refused it:\n{said}");
+        }
+
+        // And dexdump verifies the code inside it.
+        let read = super::archive::read(&outcome.package, &mut Sink::new()).unwrap();
+        let entry = read.entry("classes.dex").expect("there is a classes.dex");
+        let dex = read.content(&outcome.package, entry).unwrap();
+        if let Some(tool) = find_build_tool("dexdump") {
+            let held = directory.join("classes.dex");
+            std::fs::write(&held, &dex).unwrap();
+            let output = std::process::Command::new(&tool)
+                .args(["-d", held.to_str().unwrap()])
+                .output()
+                .unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "dexdump refused it:\n{said}");
+            for wanted in [
+                "Lcom/tr/yt/MainActivity;",
+                "Lcom/tr/yt/MainActivity$Size;",
+                "packed-switch",
+                "move-exception",
+                "invoke-interface",
+                "$outer",
+            ] {
+                assert!(said.contains(wanted), "dexdump printed no {wanted:?}");
+            }
+        }
+
+        eprintln!(
+            "java: a whole application -- {} classes, a {} byte signed package that \
+             apksigner and dexdump both accept",
+            project.code.len(),
+            outcome.package.len()
+        );
+    }
+
+    #[test]
     fn a_project_is_a_manifest_and_language_folders_and_nothing_else() {
         let directory = temp_directory("omni-scaffold");
         let root = directory.join("MyApp");

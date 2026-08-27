@@ -6017,7 +6017,7 @@ impl Emitter<'_> {
                 // would report that `System` is not visible, which is true and
                 // tells nobody anything.
                 if let Expression::Name(maybe_class) = of.as_ref() {
-                    if self.names_a_class(maybe_class) {
+                    if self.meant_as_a_class(maybe_class) {
                         let owner = self.resolve_class(maybe_class, line)?;
                         return self.read_static_field(&owner, name, line);
                     }
@@ -6431,12 +6431,16 @@ impl Emitter<'_> {
         ))
     }
 
-    /// Whether a bare name in front of a dot stands for a class rather than
-    /// for something holding a value.
+    /// Whether a bare name in front of a dot is meant as a class rather than
+    /// as something holding a value.
     ///
     /// A local, a parameter or a field wins: Java lets a variable shadow a
-    /// class name, and code that does it means the variable.
-    fn names_a_class(&self, name: &str) -> bool {
+    /// class name, and code that does it means the variable. Everything else
+    /// is meant as a class -- whether or not it turns out to be one, because
+    /// saying what is wrong with it as a class is the useful thing. Falling
+    /// through to read it as a value would report that a name is not visible,
+    /// which is true and tells nobody anything.
+    fn meant_as_a_class(&self, name: &str) -> bool {
         if self.local(name).is_some() {
             return false;
         }
@@ -6452,7 +6456,14 @@ impl Emitter<'_> {
         if inherited.is_some() {
             return false;
         }
-        self.resolve_class(name, 1).is_ok()
+        // A class written inside another reads what that one holds, so a name
+        // it holds is a value here even though nothing here declares it.
+        if let Some(enclosing) = &self.unit.outer {
+            if self.classpath.find_field(enclosing, name).is_some() {
+                return false;
+            }
+        }
+        true
     }
 
     /// Writes a value into a field of the class this one was written inside.
@@ -7261,30 +7272,13 @@ impl Emitter<'_> {
         // `something.name(...)`. If `something` is a bare name that is a class
         // rather than a value, this is a static call.
         if let Expression::Name(maybe_class) = on {
-            let inherited = self
-                .unit
-                .extends
-                .clone()
-                .and_then(|parent| self.resolve_class(&parent, line).ok())
-                .and_then(|owner| {
-                    self.classpath
-                        .find_field(&owner, maybe_class)
-                        .map(|(holder, _)| holder.name.clone())
-                });
-            if self.local(maybe_class).is_none()
-                && inherited.is_none()
-                && !self
-                    .unit
-                    .fields
-                    .iter()
-                    .any(|held| held.name == *maybe_class)
-            {
+            if self.meant_as_a_class(maybe_class) {
                 // It is not a value, so it is meant to be a class, and saying
                 // what is wrong with it as a class is the useful thing. Falling
                 // through to read it as a value would report that a name is not
                 // visible, which is true and tells nobody anything.
                 let owner = self.resolve_class(maybe_class, line)?;
-                let Some(signature) = self.find_signature(&owner, name, arguments.len()) else {
+                let Some(signature) = self.signature_for(&owner, name, arguments, line)? else {
                     return Err(self.no_such_method(&owner, name, arguments.len(), line));
                 };
                 if !signature.static_ {
