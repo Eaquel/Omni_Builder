@@ -4665,6 +4665,209 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         true,
     ),
     ("java/lang/AutoCloseable", "close", "()V", false),
+    // -- Android, as far as an application's own code touches it.
+    //
+    // There is no `android.jar` on a phone and there never will be, so the
+    // signatures an application needs to name the platform are here. The
+    // platform provides the implementation; what is wanted at build time is
+    // only the descriptor, because the descriptor is what the dex records and
+    // what the runtime resolves against.
+    (
+        "android/content/Context",
+        "getString",
+        "(I)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "android/content/Context",
+        "getPackageName",
+        "()Ljava/lang/String;",
+        false,
+    ),
+    (
+        "android/content/Context",
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        false,
+    ),
+    ("android/content/Intent", "<init>", "()V", false),
+    (
+        "android/content/Intent",
+        "<init>",
+        "(Ljava/lang/String;)V",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "<init>",
+        "(Landroid/content/Context;Ljava/lang/Class;)V",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "putExtra",
+        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "getStringExtra",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        false,
+    ),
+    ("android/app/Activity", "<init>", "()V", false),
+    (
+        "android/app/Activity",
+        "onCreate",
+        "(Landroid/os/Bundle;)V",
+        false,
+    ),
+    ("android/app/Activity", "onStart", "()V", false),
+    ("android/app/Activity", "onResume", "()V", false),
+    ("android/app/Activity", "onPause", "()V", false),
+    ("android/app/Activity", "onStop", "()V", false),
+    ("android/app/Activity", "onDestroy", "()V", false),
+    ("android/app/Activity", "setContentView", "(I)V", false),
+    (
+        "android/app/Activity",
+        "setContentView",
+        "(Landroid/view/View;)V",
+        false,
+    ),
+    (
+        "android/app/Activity",
+        "findViewById",
+        "(I)Landroid/view/View;",
+        false,
+    ),
+    ("android/app/Activity", "finish", "()V", false),
+    (
+        "android/app/Activity",
+        "setTitle",
+        "(Ljava/lang/CharSequence;)V",
+        false,
+    ),
+    ("android/os/Bundle", "<init>", "()V", false),
+    (
+        "android/os/Bundle",
+        "getInt",
+        "(Ljava/lang/String;)I",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "putInt",
+        "(Ljava/lang/String;I)V",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "getString",
+        "(Ljava/lang/String;)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "putString",
+        "(Ljava/lang/String;Ljava/lang/String;)V",
+        false,
+    ),
+    ("android/view/View", "getId", "()I", false),
+    ("android/view/View", "setVisibility", "(I)V", false),
+    ("android/view/View", "getVisibility", "()I", false),
+    ("android/view/View", "setEnabled", "(Z)V", false),
+    (
+        "android/view/View",
+        "setOnClickListener",
+        "(Landroid/view/View$OnClickListener;)V",
+        false,
+    ),
+    (
+        "android/view/View$OnClickListener",
+        "onClick",
+        "(Landroid/view/View;)V",
+        false,
+    ),
+    (
+        "android/widget/TextView",
+        "setText",
+        "(Ljava/lang/CharSequence;)V",
+        false,
+    ),
+    (
+        "android/widget/TextView",
+        "getText",
+        "()Ljava/lang/CharSequence;",
+        false,
+    ),
+    ("android/widget/TextView", "setTextSize", "(F)V", false),
+    (
+        "android/widget/Button",
+        "setText",
+        "(Ljava/lang/CharSequence;)V",
+        false,
+    ),
+    (
+        "android/widget/LinearLayout",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    (
+        "android/widget/LinearLayout",
+        "setOrientation",
+        "(I)V",
+        false,
+    ),
+    (
+        "android/widget/LinearLayout",
+        "addView",
+        "(Landroid/view/View;)V",
+        false,
+    ),
+    (
+        "android/widget/TextView",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    (
+        "android/widget/Button",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    (
+        "android/widget/Toast",
+        "makeText",
+        "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;",
+        true,
+    ),
+    ("android/widget/Toast", "show", "()V", false),
+    (
+        "android/util/Log",
+        "d",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        true,
+    ),
+    (
+        "android/util/Log",
+        "i",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        true,
+    ),
+    (
+        "android/util/Log",
+        "w",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        true,
+    ),
+    (
+        "android/util/Log",
+        "e",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        true,
+    ),
     // -- the clock, and somewhere to print
     ("java/lang/System", "currentTimeMillis", "()J", true),
     ("java/lang/System", "nanoTime", "()J", true),
@@ -4703,6 +4906,10 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
 /// that is two steps up.
 const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ("java/lang/String", "java/lang/CharSequence"),
+    ("android/app/Activity", "android/content/Context"),
+    ("android/widget/TextView", "android/view/View"),
+    ("android/widget/Button", "android/widget/TextView"),
+    ("android/widget/LinearLayout", "android/view/View"),
     ("java/util/Collection", "java/lang/Iterable"),
     ("java/util/List", "java/util/Collection"),
     ("java/util/Set", "java/util/Collection"),
@@ -4720,6 +4927,7 @@ const BUILT_IN_ABOVE: &[(&str, &str)] = &[
 /// on one is `invokevirtual` or `invokeinterface`. Getting it wrong produces a
 /// class file that verifies and then fails to link on the device.
 const BUILT_IN_INTERFACES: &[&str] = &[
+    "android/view/View$OnClickListener",
     "java/lang/CharSequence",
     "java/lang/Iterable",
     "java/lang/AutoCloseable",
@@ -4871,6 +5079,16 @@ fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<Strin
         if exists(&internal) {
             return Some(internal);
         }
+        // A nested class is written with a dot and named with a dollar:
+        // `View.OnClickListener` is `android/view/View$OnClickListener`. Only
+        // the last dot can be the one that separates them, because a package
+        // never follows a class.
+        if let Some((before, last)) = internal.rsplit_once('/') {
+            let nested = format!("{before}${last}");
+            if exists(&nested) {
+                return Some(nested);
+            }
+        }
     }
     if let Some(package) = &unit.package {
         let beside = format!("{}/{name}", package.replace('.', "/"));
@@ -4928,6 +5146,17 @@ const WELL_KNOWN: &[&str] = &[
     "java/util/ArrayList",
     "java/util/HashMap",
     "java/util/Objects",
+    "android/app/Activity",
+    "android/content/Context",
+    "android/content/Intent",
+    "android/os/Bundle",
+    "android/view/View",
+    "android/view/View$OnClickListener",
+    "android/widget/TextView",
+    "android/widget/Button",
+    "android/widget/LinearLayout",
+    "android/widget/Toast",
+    "android/util/Log",
     "java/lang/Throwable",
     "java/lang/Exception",
     "java/lang/RuntimeException",
@@ -6096,14 +6325,63 @@ impl Emitter<'_> {
                 .find(|held| held.name == name && held.parameters.len() == arguments.len())
                 .cloned();
             let Some(own) = own else {
+                // Not written here, so it comes from above: `setContentView`
+                // inside an activity is the activity's. Looking only at what
+                // this class declares is what made a bare call to an inherited
+                // method a mistake rather than a call.
+                if let Some(parent) = self.unit.extends.clone() {
+                    let owner = self.resolve_class(&parent, line)?;
+                    if let Some(signature) = self.signature_for(&owner, name, arguments, line)? {
+                        if !signature.static_ {
+                            if self.static_ {
+                                return Err(at(
+                                    "EJ225",
+                                    line,
+                                    1,
+                                    format!(
+                                        "`{name}` belongs to an instance and this method \
+                                         is static."
+                                    ),
+                                ));
+                            }
+                            self.load(0, &Type::Object(self.this_class.clone()));
+                            self.grow(1);
+                        }
+                        self.arguments_for(&signature.parameters, arguments, line)?;
+                        // The call is written against this class, not the one
+                        // that declares it, which is what `javac` does and
+                        // what lets a subclass override it.
+                        let owner = if signature.static_ {
+                            signature.owner.clone()
+                        } else {
+                            self.this_class.clone()
+                        };
+                        let descriptor = signature.descriptor();
+                        let index = self.pool.method(&owner, name, &descriptor, false);
+                        self.op2(if signature.static_ { 0xb8 } else { 0xb6 }, index);
+                        let taken: i32 = signature
+                            .parameters
+                            .iter()
+                            .map(|one| i32::from(one.width()))
+                            .sum();
+                        let popped = taken + i32::from(!signature.static_);
+                        self.grow(-popped + i32::from(signature.returns.width()));
+                        return Ok(signature.returns);
+                    }
+                }
                 return Err(at(
                     "EJ224",
                     line,
                     1,
                     format!(
-                        "`{name}` is not a method of this class taking {} argument(s).",
+                        "`{name}` is not a method of this class or of one above it taking \
+                         {} argument(s).",
                         arguments.len()
                     ),
+                )
+                .with_suggestion(
+                    "Hand the class file that declares it over as a dependency, or write \
+                     the method here.",
                 ));
             };
             let mut parameters = Vec::new();

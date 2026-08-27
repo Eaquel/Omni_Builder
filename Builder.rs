@@ -17943,9 +17943,13 @@ pub mod scaffold {
     /// The one machine a project here is built for. See `compiler::Abi`.
     pub const ARM64: &str = "arm64-v8a";
 
+    /// The folder a project's Java lives in, which the builder reads to find
+    /// what to compile.
+    pub const JAVA_FOLDER: &str = "Java";
+
     pub const LANGUAGES: &[(&str, &str)] = &[
         ("kotlin", "Kotlin"),
-        ("java", "Java"),
+        ("java", JAVA_FOLDER),
         ("cpp", "Native"),
         ("rust", "Rust"),
     ];
@@ -23447,7 +23451,68 @@ pub mod builder {
         project.icon = crate::scaffold::icon_bytes(root);
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
+
+        // What the person wrote, compiled, and put in the package instead of
+        // the empty activity `from_manifest` describes. Until this, everything
+        // in the Java folder was carried around and none of it was built.
+        let written = compiled_java(root)?;
+        if !written.is_empty() {
+            project.code = written;
+        }
         Ok(project)
+    }
+
+    /// Every class the project's Java comes to.
+    ///
+    /// The files are compiled together, so that a type written in one can be
+    /// named by another, and each class file is turned into the Dalvik the
+    /// device runs. A project with no Java is not an error: it keeps the
+    /// activity the manifest describes, which is enough to install and launch.
+    pub fn compiled_java(root: &str) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
+        let folder = std::path::Path::new(root).join(crate::scaffold::JAVA_FOLDER);
+        let mut sources = Vec::new();
+        gather_java(&folder, &mut sources);
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        // In a settled order, so that the same project comes to the same
+        // package whatever the filesystem hands back first.
+        sources.sort();
+
+        let classpath = crate::compilers::java::Classpath::new();
+        let mut out = Vec::new();
+        for path in &sources {
+            let text = std::fs::read_to_string(path).map_err(|why| {
+                fail("EB040", "A Java file could not be read.")
+                    .with_context(format!("Path: {}", path.display()))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            let produced = crate::compilers::java::compile(&text, &classpath)
+                .map_err(|error| error.with_context(format!("File: {}", path.display())))?;
+            for (name, bytes) in produced {
+                let class = crate::jvm::read(&bytes)
+                    .map_err(|error| error.with_context(format!("Class: {name}")))?;
+                out.push(
+                    crate::dalvik::translate_class(&class)
+                        .map_err(|error| error.with_context(format!("Class: {name}")))?,
+                );
+            }
+        }
+        Ok(out)
+    }
+
+    fn gather_java(folder: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                gather_java(&path, found);
+            } else if path.extension().is_some_and(|held| held == "java") {
+                found.push(path);
+            }
+        }
     }
 
     pub fn signing_key(path: &str) -> Result<(rsa::PrivateKey, bool), Diagnostic> {
@@ -30261,6 +30326,169 @@ mod tests {
             super::ffi::omni_string_free(raw);
             text
         }
+    }
+
+    #[test]
+    fn the_java_somebody_wrote_is_the_code_the_package_carries() {
+        // The whole way, with nothing hand-built in it: a project on disk, the
+        // Java in its folder, compiled here, translated here, packed here, and
+        // read back by the Android tool.
+        let directory = temp_directory("omni-java-end-to-end");
+        let root = directory.join("Written");
+        let spec =
+            "package=com.tr.yt;label=Written;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
+        let made = super::scaffold::create(
+            root.to_str().unwrap(),
+            &super::scaffold::Spec::parse(spec).unwrap(),
+        )
+        .expect("the project must be created");
+        assert!(!made.files.is_empty());
+
+        // What the person writes, replacing the starter.
+        let source = r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.widget.TextView;
+
+public final class MainActivity extends Activity {
+    private int taps;
+    private String label = "tapped ";
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        TextView view = new TextView(this);
+        view.setText(describe());
+        setContentView(view);
+    }
+
+    private String describe() {
+        StringBuilder out = new StringBuilder();
+        for (int one : counts()) {
+            out.append(one);
+            out.append(' ');
+        }
+        return label + taps + " of " + out.toString();
+    }
+
+    private int[] counts() {
+        int[] found = new int[3];
+        for (int i = 0; i < found.length; i++) {
+            found[i] = i * taps;
+        }
+        return found;
+    }
+
+    public int classify(int value) {
+        switch (value) {
+            case 0: return 10;
+            case 1: return 11;
+            default: return -1;
+        }
+    }
+
+    public String guarded(String text) {
+        try {
+            return text.substring(0, 2);
+        } catch (IndexOutOfBoundsException e) {
+            return "";
+        } finally {
+            taps++;
+        }
+    }
+}
+"#;
+        let written = root
+            .join(super::scaffold::JAVA_FOLDER)
+            .join("MainActivity.java");
+        std::fs::write(&written, source).unwrap();
+
+        // A second file, so that more than one class reaches the package.
+        std::fs::write(
+            root.join(super::scaffold::JAVA_FOLDER).join("Counter.java"),
+            "package com.tr.yt;\n\npublic final class Counter {\n    private int held;\n\n    public int next() {\n        held = held + 1;\n        return held;\n    }\n}\n",
+        )
+        .unwrap();
+
+        let project = super::builder::from_project(root.to_str().unwrap())
+            .expect("the project must load and compile");
+        let names: Vec<&str> = project
+            .code
+            .iter()
+            .map(|one| one.descriptor.as_str())
+            .collect();
+        assert!(
+            names.contains(&"Lcom/tr/yt/MainActivity;"),
+            "the activity somebody wrote has to be the one packed: {names:?}"
+        );
+        assert!(names.contains(&"Lcom/tr/yt/Counter;"), "{names:?}");
+
+        let activity = project
+            .code
+            .iter()
+            .find(|one| one.descriptor == "Lcom/tr/yt/MainActivity;")
+            .unwrap();
+        assert_eq!(activity.superclass, "Landroid/app/Activity;");
+        let methods: Vec<&str> = activity
+            .direct_methods
+            .iter()
+            .chain(activity.virtual_methods.iter())
+            .map(|one| one.reference.name.as_str())
+            .collect();
+        for wanted in [
+            "<init>", "onCreate", "describe", "counts", "classify", "guarded",
+        ] {
+            assert!(methods.contains(&wanted), "{methods:?}");
+        }
+
+        // And the package it comes to is one apksigner and dexdump accept.
+        let key = super::rsa::generate(2048).unwrap();
+        let mut sink = Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut sink)
+            .expect("the package must build");
+        assert!(outcome.carries_code);
+
+        let read = super::archive::read(&outcome.package, &mut Sink::new()).unwrap();
+        let entry = read
+            .entry("classes.dex")
+            .expect("the package carries a classes.dex");
+        let dex = read.content(&outcome.package, entry).unwrap();
+
+        let mut sink = Sink::new();
+        let inside = super::dex::read(&dex, &mut sink).expect("our own reader must read it");
+        assert!(
+            inside.class_names().contains(&"com.tr.yt.MainActivity"),
+            "{:?}",
+            inside.class_names()
+        );
+
+        // Our own reader will read a dex that a device refuses. Asking dexdump
+        // to disassemble makes it verify first, which is the difference.
+        if let Some(tool) = find_build_tool("dexdump") {
+            let written = directory.join("classes.dex");
+            std::fs::write(&written, &dex).unwrap();
+            let output = std::process::Command::new(&tool)
+                .args(["-d", written.to_str().unwrap()])
+                .output()
+                .unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.status.success(), "dexdump refused it:\n{said}");
+            assert!(said.contains("Lcom/tr/yt/MainActivity;"), "{said}");
+            assert!(said.contains("packed-switch"), "the switch is in there");
+            assert!(said.contains("move-exception"), "and so is the catch");
+        }
+
+        eprintln!(
+            "java: a project's own Java, compiled and packed -- {} classes, a {} byte package",
+            project.code.len(),
+            outcome.package.len()
+        );
     }
 
     #[test]
