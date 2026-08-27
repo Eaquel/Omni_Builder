@@ -83,8 +83,13 @@
 //! reflection can read it back, and one kept only for the compiler is read and
 //! dropped -- which is why `@Override` costs nothing.
 //!
-//! `native` is refused by name, with the line it happened on. `strictfp` is
-//! read and ignored, which is what it means since Java 17.
+//! `import static` puts a name from another class in scope without the class
+//! in front of it, for a method or for a constant, one name or all of them.
+//!
+//! `native` is refused by name, with the line it happened on, and so is a
+//! module declaration -- the runtime on a device has no module system, and a
+//! `module-info.class` is a file nothing there would read. `strictfp` is read
+//! and ignored, which is what it means since Java 17.
 //!
 //! # What it targets
 //!
@@ -2284,6 +2289,10 @@ pub struct Unit {
     /// `java.lang.annotation.Annotation` and sets one more flag; the shape is
     /// otherwise the same, which is why it is a flag here rather than a shape.
     pub annotation: bool,
+    /// `import static java.lang.Math.max;` and `import static
+    /// java.lang.Math.*;`, which put a name from another class in scope here
+    /// without the class in front of it.
+    pub static_imports: Vec<String>,
     /// What was written above it.
     pub annotations: Vec<Annotated>,
 }
@@ -2787,18 +2796,21 @@ impl Parser {
         };
 
         let mut imports = Vec::new();
+        let mut static_imports = Vec::new();
         while self.is_word("import") {
             self.take();
-            if self.eat_word("static") {
-                return Err(unsupported(self.line(), self.column(), "A static import"));
-            }
+            let is_static = self.eat_word("static");
             let mut name = self.qualified()?;
             if self.eat_mark(".") {
                 self.want_mark("*")?;
                 name.push_str(".*");
             }
             self.want_mark(";")?;
-            imports.push(name);
+            if is_static {
+                static_imports.push(name);
+            } else {
+                imports.push(name);
+            }
         }
 
         let mut declared = Vec::new();
@@ -2810,6 +2822,11 @@ impl Parser {
             let one = self.declaration_of_a_type(&package, &imports, None, &mut beside)?;
             declared.push(one);
             declared.append(&mut beside);
+            for unit in &mut declared {
+                if unit.static_imports.is_empty() {
+                    unit.static_imports = static_imports.clone();
+                }
+            }
         }
         if declared.is_empty() {
             return Err(at(
@@ -2858,6 +2875,24 @@ impl Parser {
             self.take();
             Shape::Record
         } else {
+            // `module-info.java` is a real Java file and there is nothing on
+            // Android that reads what it says. Refusing it by name beats
+            // writing a class file the device will never look at.
+            if matches!(&self.here().token, Token::Identifier(word) if word == "module")
+                || matches!(&self.here().token, Token::Identifier(word) if word == "open")
+            {
+                return Err(at(
+                    "EJ254",
+                    self.line(),
+                    self.column(),
+                    "A module declaration is not something Android reads.",
+                )
+                .with_suggestion(
+                    "The runtime on a device has no module system: every class is found \
+                     by the class loader that was given it. Packages and imports do all \
+                     the work here.",
+                ));
+            }
             return Err(at(
                 "EJ104",
                 self.line(),
@@ -2868,8 +2903,9 @@ impl Parser {
                 ),
             )
             .with_suggestion(
-                "Enums and records are not compiled here yet. What is and is not taken \
-                 is written at the top of Compilers/Java.rs.",
+                "A file compiled here holds classes, interfaces, enums, records and \
+                 annotation types. What is and is not taken is written at the top of \
+                 Compilers/Java.rs.",
             ));
         };
 
@@ -3016,6 +3052,7 @@ impl Parser {
             permits,
             annotation,
             annotations,
+            static_imports: Vec::new(),
         };
         if shape == Shape::Enum {
             return Ok(as_the_class_it_is(unit, &constants));
@@ -7657,6 +7694,23 @@ impl Emitter<'_> {
         if let Some(what) = self.read_from_a_holder(name, line)? {
             return Ok(what);
         }
+        // `import static java.lang.Integer.MAX_VALUE;` puts a constant here
+        // without the class in front of it.
+        for owner in self.imported_statically(name) {
+            let held = match self.classpath.find_field(&owner, name) {
+                Some((holder, (_, what, true))) => Some((holder.name.clone(), what.clone())),
+                Some(_) => None,
+                None => built_in_field(&owner, name).map(|what| (owner.clone(), what)),
+            };
+            let Some((holder, what)) = held else {
+                continue;
+            };
+            let descriptor = what.descriptor();
+            let index = self.pool.field(&holder, name, &descriptor);
+            self.op2(0xb2, index);
+            self.pushes(&what);
+            return Ok(what);
+        }
 
         Err(at(
             "EJ211",
@@ -7786,6 +7840,29 @@ impl Emitter<'_> {
     /// held privately from the outside, not from the classes written in it.
     /// Which classes those are is what this one's own name says -- `A$B$C` is
     /// written inside `A$B`, which is written inside `A`.
+    /// The classes a `import static` brought a name here from.
+    ///
+    /// `import static java.lang.Math.max` names one thing; `import static
+    /// java.lang.Math.*` names everything the class holds, so both come to the
+    /// same question -- which class to ask.
+    fn imported_statically(&self, name: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for held in &self.unit.static_imports {
+            let Some((owner, last)) = held.rsplit_once('.') else {
+                continue;
+            };
+            if last != "*" && last != name {
+                continue;
+            }
+            if let Some(internal) = resolve_named(self.classpath, self.unit, owner) {
+                if !found.contains(&internal) {
+                    found.push(internal);
+                }
+            }
+        }
+        found
+    }
+
     /// The classes this one is written inside, innermost first.
     ///
     /// `A$B$C` is written inside `A$B`, which is written inside `A`. The name
@@ -8632,6 +8709,30 @@ impl Emitter<'_> {
                         self.pushes(&signature.returns);
                         return Ok(signature.returns);
                     }
+                }
+                // `import static java.lang.Math.max;` puts `max` here without
+                // the class in front of it.
+                for owner in self.imported_statically(name) {
+                    let Some(signature) = self.signature_for(&owner, name, arguments, line)? else {
+                        continue;
+                    };
+                    if !signature.static_ {
+                        continue;
+                    }
+                    self.arguments_for_signature(&signature, arguments, line)?;
+                    let descriptor = signature.descriptor();
+                    let index =
+                        self.pool
+                            .method(&signature.owner, name, &descriptor, signature.interface);
+                    self.op2(0xb8, index);
+                    let taken: i32 = signature
+                        .parameters
+                        .iter()
+                        .map(|one| i32::from(one.width()))
+                        .sum();
+                    self.pops(taken);
+                    self.pushes(&signature.returns);
+                    return Ok(signature.returns);
                 }
                 return Err(at(
                     "EJ224",
@@ -11767,6 +11868,7 @@ impl Emitter<'_> {
             permits: Vec::new(),
             annotation: false,
             annotations: Vec::new(),
+            static_imports: self.unit.static_imports.clone(),
         });
 
         // And the making of it, here.
@@ -16239,6 +16341,36 @@ public final class Everything {
 "####;
 
     #[test]
+    fn a_static_import_puts_a_name_here_without_its_class() {
+        let source = r#"
+            import static java.lang.Math.max;
+            import static java.lang.Math.abs;
+            import static java.lang.Integer.MAX_VALUE;
+            import static java.lang.String.*;
+
+            public class Named {
+                public static void main(String[] args) {
+                    System.out.println(max(3, 7) + " " + abs(-4) + " " + MAX_VALUE
+                        + " " + valueOf(9));
+                }
+            }
+        "#;
+        let produced = compile(source, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Named") {
+            None => eprintln!("java: no JVM here to run a static import"),
+            Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
+            Some(Ok(said)) => assert_eq!(said.trim(), "7 4 2147483647 9"),
+        }
+
+        // A name nobody imported is still refused rather than guessed at.
+        let missing = "public class Named { int f() { return max(1, 2); } }";
+        let refused = compile(missing, &empty()).expect_err("must be refused");
+        assert_eq!(refused.code, "EJ224");
+
+        eprintln!("java: a static import, and what was not imported still refused");
+    }
+
+    #[test]
     fn the_whole_language_compiles_verifies_and_runs() {
         let produced = compile(THE_WHOLE_LANGUAGE, &empty()).expect("all of it must compile");
         let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
@@ -16887,6 +17019,8 @@ public final class Everything {
                 "EJ231",
             ),
             ("public class A { void f() { throw 1; } }", "EJ235"),
+            // A module declaration is Java, and nothing on a device reads it.
+            ("module com.my.app { requires java.base; }", "EJ254"),
             ("public class A { void f() { var a; } }", "EJ234"),
             (
                 "public class A { void f(int i) { for (int one : i) {} } }",
