@@ -12,8 +12,9 @@
 //! worse than one that refuses, because the refusal happens at build time and
 //! the mis-handling happens on somebody's phone.
 //!
-//! Handled: a package and its imports; one top-level class per file, with a
-//! superclass and interfaces; fields with values on them, initialiser blocks
+//! Handled: a package and its imports; the classes and interfaces one file
+//! declares, which may be several and may name each other, with a superclass
+//! and interfaces; fields with values on them, initialiser blocks
 //! -- static and not -- methods, varargs, and constructors that hand off to
 //! `this(...)` or up to `super(...)`; the primitive types, `String`, arrays
 //! and declared types; blocks, local declarations -- several to a line, and
@@ -35,7 +36,7 @@
 //! thing lost is the checking `javac` does before erasing them itself.
 //!
 //! Refused, by name, with the line it happened on: lambdas and method
-//! references, inner and anonymous classes, interfaces, enums and records as
+//! references, inner and anonymous classes, enums and records as
 //! declarations, `try` with resources, `synchronized` and `assert`.
 //! Annotations are parsed and discarded, which is safe because they are
 //! metadata and nothing here reads them; `@Override` therefore costs nothing.
@@ -1167,8 +1168,20 @@ pub struct Method {
     pub line: u32,
 }
 
+/// What kind of type a declaration is.
+///
+/// The JVM has one shape for all of these -- a class file -- and the
+/// differences are access flags, a superclass, and members written by the
+/// compiler rather than by the person.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Shape {
+    Class,
+    Interface,
+}
+
 #[derive(Clone, Debug)]
 pub struct Unit {
+    pub shape: Shape,
     pub package: Option<String>,
     pub imports: Vec<String>,
     pub modifiers: Modifiers,
@@ -1341,6 +1354,10 @@ impl Parser {
                 "static" => found.static_ = true,
                 "final" => found.final_ = true,
                 "abstract" => found.abstract_ = true,
+                // `default` in front of a member is an interface method with a
+                // body. The flag it needs is the absence of ACC_ABSTRACT, so
+                // there is nothing to record beyond having read it.
+                "default" if !matches!(self.ahead(1), Token::Punctuation(":")) => {}
                 "native" | "synchronized" | "transient" | "volatile" | "strictfp" => {
                     return Err(unsupported(
                         self.line(),
@@ -1439,7 +1456,8 @@ impl Parser {
         }
     }
 
-    pub fn unit(&mut self) -> Result<Unit, Diagnostic> {
+    /// Every type a file declares, in the order they were written.
+    pub fn file(&mut self) -> Result<Vec<Unit>, Diagnostic> {
         self.skip_annotations()?;
         let package = if self.eat_word("package") {
             let name = self.qualified()?;
@@ -1464,40 +1482,82 @@ impl Parser {
             imports.push(name);
         }
 
-        let modifiers = self.modifiers()?;
-        for (word, what) in [
-            ("interface", "An interface declaration"),
-            ("enum", "An enum declaration"),
-        ] {
-            if self.is_word(word) {
-                return Err(unsupported(self.line(), self.column(), what));
+        let mut declared = Vec::new();
+        while !matches!(self.here().token, Token::End) {
+            if self.eat_mark(";") {
+                continue;
             }
+            declared.push(self.declaration_of_a_type(&package, &imports)?);
         }
-        if !self.eat_word("class") {
+        if declared.is_empty() {
             return Err(at(
                 "EJ104",
                 self.line(),
                 self.column(),
-                "A file compiled here holds one class.",
+                "This file declares nothing.",
+            )
+            .with_suggestion("A file compiled here holds a class or an interface."));
+        }
+        Ok(declared)
+    }
+
+    /// One `class` or `interface` in a file, which may hold more than one.
+    fn declaration_of_a_type(
+        &mut self,
+        package: &Option<String>,
+        imports: &[String],
+    ) -> Result<Unit, Diagnostic> {
+        self.skip_annotations()?;
+        let modifiers = self.modifiers()?;
+        for (word, what) in [("enum", "An enum declaration"), ("record", "A record")] {
+            if self.is_word(word) {
+                return Err(unsupported(self.line(), self.column(), what));
+            }
+        }
+        let shape = if self.eat_word("interface") {
+            Shape::Interface
+        } else if self.eat_word("class") {
+            Shape::Class
+        } else {
+            return Err(at(
+                "EJ104",
+                self.line(),
+                self.column(),
+                format!(
+                    "A class or an interface was expected, and {} was found.",
+                    self.here().token.describe()
+                ),
             )
             .with_suggestion(
-                "Interfaces, enums and records are not compiled here yet. What is and \
-                 is not taken is written at the top of Compilers/Java.rs.",
+                "Enums and records are not compiled here yet. What is and is not taken \
+                 is written at the top of Compilers/Java.rs.",
             ));
-        }
+        };
 
         let name = self.want_name()?;
         self.skip_type_arguments()?;
 
-        let extends = if self.eat_word("extends") {
-            Some(self.qualified()?)
-        } else {
-            None
-        };
+        // An interface's `extends` lists interfaces, which is what a class
+        // calls `implements`. In the class file they are the same list.
+        let mut extends = None;
         let mut implements = Vec::new();
+        if self.eat_word("extends") {
+            loop {
+                let named = self.qualified()?;
+                self.skip_type_arguments()?;
+                match shape {
+                    Shape::Class => extends = Some(named),
+                    Shape::Interface => implements.push(named),
+                }
+                if !self.eat_mark(",") {
+                    break;
+                }
+            }
+        }
         if self.eat_word("implements") {
             loop {
                 implements.push(self.qualified()?);
+                self.skip_type_arguments()?;
                 if !self.eat_mark(",") {
                     break;
                 }
@@ -1522,6 +1582,7 @@ impl Parser {
                 continue;
             }
             self.member(
+                shape,
                 &name,
                 &mut fields,
                 &mut methods,
@@ -1532,8 +1593,9 @@ impl Parser {
         self.want_mark("}")?;
 
         Ok(Unit {
-            package,
-            imports,
+            shape,
+            package: package.clone(),
+            imports: imports.to_vec(),
             modifiers,
             name,
             extends,
@@ -1548,6 +1610,7 @@ impl Parser {
     #[allow(clippy::too_many_arguments)]
     fn member(
         &mut self,
+        shape: Shape,
         class: &str,
         fields: &mut Vec<Field>,
         methods: &mut Vec<Method>,
@@ -1555,7 +1618,12 @@ impl Parser {
         static_setup: &mut Vec<Positioned<Statement>>,
     ) -> Result<(), Diagnostic> {
         let line = self.line();
-        let modifiers = self.modifiers()?;
+        let mut modifiers = self.modifiers()?;
+        if shape == Shape::Interface {
+            // Every member of an interface is public; a field of one is a
+            // constant. Java lets all of that go unwritten, and most code does.
+            modifiers.public = true;
+        }
 
         for (word, what) in [
             ("class", "A nested class"),
@@ -1610,7 +1678,9 @@ impl Parser {
             let (parameters, variadic) = self.parameters_and_shape()?;
             self.throws()?;
             let body = self.method_body()?;
-            if body.is_none() && !modifiers.abstract_ {
+            // A method of an interface with no body is abstract; anywhere
+            // else, a method with no body is a mistake.
+            if body.is_none() && !modifiers.abstract_ && shape != Shape::Interface {
                 return Err(at(
                     "EJ106",
                     line,
@@ -1656,6 +1726,11 @@ impl Parser {
         }
         self.want_mark(";")?;
         for (what, name, value) in declared {
+            let mut modifiers = modifiers;
+            if shape == Shape::Interface {
+                modifiers.static_ = true;
+                modifiers.final_ = true;
+            }
             fields.push(Field {
                 modifiers,
                 what,
@@ -2617,19 +2692,22 @@ impl Parser {
 }
 
 /// Reads one Java file into the shape the rest of this compiler works on.
-pub fn parse(source: &str) -> Result<Unit, Diagnostic> {
+pub fn parse(source: &str) -> Result<Vec<Unit>, Diagnostic> {
     let tokens = Lexer::new(source).tokens()?;
     let mut parser = Parser::new(tokens);
-    let unit = parser.unit()?;
+    let declared = parser.file()?;
     if !matches!(parser.here().token, Token::End) {
         return Err(at(
-            "EJ110",
+            "EJ116",
             parser.line(),
             parser.column(),
-            "A file compiled here holds one class, and this one carries more after it.",
+            format!(
+                "There is something after the last declaration in this file: {}.",
+                parser.here().token.describe()
+            ),
         ));
     }
-    Ok(unit)
+    Ok(declared)
 }
 
 // ------------------------------------------------------------------ types
@@ -2795,6 +2873,81 @@ pub struct KnownClass {
 impl Classpath {
     pub fn new() -> Classpath {
         Classpath::default()
+    }
+
+    /// Adds what a type declared in this compilation says about itself,
+    /// before it has been compiled.
+    ///
+    /// Two types written in one file can name each other, and neither exists
+    /// as a class file yet. What is recorded here is only what the other one
+    /// needs: the name, the shape, the fields and the signatures. Types inside
+    /// them that do not resolve are found when that type is compiled in its
+    /// own right, so nothing is waved through.
+    pub fn declare(&mut self, unit: &Unit) {
+        let internal = unit.internal_name();
+        let mut known = KnownClass {
+            name: internal.clone(),
+            superclass: Some(match &unit.extends {
+                Some(named) => named.replace('.', "/"),
+                None => "java/lang/Object".to_string(),
+            }),
+            interface: unit.shape == Shape::Interface,
+            ..KnownClass::default()
+        };
+
+        // A written type is turned into the type it stands for only as far as
+        // it can be without a classpath: the primitives and the arrays of
+        // them, and a name taken as it was written. Anything that needs
+        // resolving is left out rather than guessed at.
+        fn shallow(written: &Written) -> Option<Type> {
+            Some(match written {
+                Written::Void => Type::Void,
+                Written::Boolean => Type::Boolean,
+                Written::Byte => Type::Byte,
+                Written::Short => Type::Short,
+                Written::Char => Type::Char,
+                Written::Int => Type::Int,
+                Written::Long => Type::Long,
+                Written::Float => Type::Float,
+                Written::Double => Type::Double,
+                Written::Array(of) => Type::Array(Box::new(shallow(of)?)),
+                Written::Named(name) => Type::Object(name.replace('.', "/")),
+                Written::Inferred => return None,
+            })
+        }
+
+        for field in &unit.fields {
+            if let Some(what) = shallow(&field.what) {
+                known
+                    .fields
+                    .push((field.name.clone(), what, field.modifiers.static_));
+            }
+        }
+        for method in &unit.methods {
+            let mut parameters = Vec::new();
+            let mut whole = true;
+            for (what, _) in &method.parameters {
+                match shallow(what) {
+                    Some(found) => parameters.push(found),
+                    None => whole = false,
+                }
+            }
+            let Some(returns) = shallow(&method.returns) else {
+                continue;
+            };
+            if !whole {
+                continue;
+            }
+            known.methods.push(Signature {
+                owner: internal.clone(),
+                name: method.name.clone(),
+                parameters,
+                returns,
+                static_: method.modifiers.static_,
+                interface: unit.shape == Shape::Interface,
+            });
+        }
+        self.known.insert(internal, known);
     }
 
     /// Adds everything one class file says about itself.
@@ -3503,6 +3656,14 @@ impl<'a> Emitter<'a> {
             let internal = name.replace('.', "/");
             if self.classpath.get(&internal).is_some() || WELL_KNOWN.contains(&internal.as_str()) {
                 return Ok(internal);
+            }
+        }
+        // A type in the same package is visible without an import, which is
+        // how two types written in one file see each other.
+        if let Some(package) = &self.unit.package {
+            let beside = format!("{}/{name}", package.replace('.', "/"));
+            if self.classpath.get(&beside).is_some() {
+                return Ok(beside);
             }
         }
         for import in &self.unit.imports {
@@ -7295,6 +7456,17 @@ fn write_attribute(out: &mut Vec<u8>, name: u16, body: &[u8]) {
 }
 
 /// Compiles one unit into the bytes of a class file.
+/// The access flags a method carries beyond its written modifiers.
+fn method_shape(method: &Method) -> u16 {
+    // ACC_VARARGS. It changes nothing the JVM does; it is how reflection, and
+    // anything reading the class file, knows the last parameter was written
+    // with `...` rather than as an array.
+    if method.variadic {
+        return 0x0080;
+    }
+    0
+}
+
 pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagnostic> {
     let this_class = unit.internal_name();
     let mut pool = Pool::new();
@@ -7373,6 +7545,15 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
     // Methods. A class with no constructor written gets the one Java would
     // have written for it, which calls up into the superclass and returns.
     let mut methods: Vec<Method> = unit.methods.clone();
+    if unit.shape == Shape::Interface {
+        // A method of an interface without a body is abstract, whether or not
+        // anybody wrote it down.
+        for method in &mut methods {
+            if method.body.is_none() {
+                method.modifiers.abstract_ = true;
+            }
+        }
+    }
     if !static_setup.is_empty() {
         methods.push(Method {
             modifiers: Modifiers {
@@ -7388,7 +7569,7 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
             line: 1,
         });
     }
-    if !methods.iter().any(|held| held.constructor) {
+    if unit.shape == Shape::Class && !methods.iter().any(|held| held.constructor) {
         methods.insert(
             0,
             Method {
@@ -7430,7 +7611,12 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
             }
             .descriptor();
             let descriptor = pool.utf8(&descriptor);
-            method_bytes.extend_from_slice(&method.modifiers.access_flags(0).to_be_bytes());
+            method_bytes.extend_from_slice(
+                &method
+                    .modifiers
+                    .access_flags(method_shape(method))
+                    .to_be_bytes(),
+            );
             method_bytes.extend_from_slice(&name.to_be_bytes());
             method_bytes.extend_from_slice(&descriptor.to_be_bytes());
             method_bytes.extend_from_slice(&0u16.to_be_bytes());
@@ -7574,7 +7760,12 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
         .descriptor();
         let descriptor = pool.utf8(&descriptor);
 
-        method_bytes.extend_from_slice(&method.modifiers.access_flags(0).to_be_bytes());
+        method_bytes.extend_from_slice(
+            &method
+                .modifiers
+                .access_flags(method_shape(method))
+                .to_be_bytes(),
+        );
         method_bytes.extend_from_slice(&name.to_be_bytes());
         method_bytes.extend_from_slice(&descriptor.to_be_bytes());
         method_bytes.extend_from_slice(&1u16.to_be_bytes());
@@ -7591,8 +7782,13 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
     out.extend_from_slice(&CLASS_MINOR.to_be_bytes());
     out.extend_from_slice(&CLASS_MAJOR.to_be_bytes());
     pool.write(&mut out);
-    // ACC_SUPER, which every class written since Java 1.1 sets.
-    out.extend_from_slice(&unit.modifiers.access_flags(0x0020).to_be_bytes());
+    // ACC_SUPER, which every class written since Java 1.1 sets. An interface
+    // sets ACC_INTERFACE and ACC_ABSTRACT instead, and must not set ACC_SUPER.
+    let shape_flags = match unit.shape {
+        Shape::Class => 0x0020u16,
+        Shape::Interface => 0x0200 | 0x0400,
+    };
+    out.extend_from_slice(&unit.modifiers.access_flags(shape_flags).to_be_bytes());
     out.extend_from_slice(&this_index.to_be_bytes());
     out.extend_from_slice(&super_index.to_be_bytes());
     out.extend_from_slice(&(interface_indices.len() as u16).to_be_bytes());
@@ -7608,11 +7804,27 @@ pub fn compile_unit(unit: &Unit, classpath: &Classpath) -> Result<Vec<u8>, Diagn
 }
 
 /// Reads Java and writes a class file.
-pub fn compile(source: &str, classpath: &Classpath) -> Result<(String, Vec<u8>), Diagnostic> {
-    let unit = parse(source)?;
-    let name = format!("{}.class", unit.internal_name());
-    let bytes = compile_unit(&unit, classpath)?;
-    Ok((name, bytes))
+/// Every class file one source file comes to.
+///
+/// A file declares one type most of the time and more than one sometimes, and
+/// each of them is a class file of its own -- which is what the JVM has always
+/// required and what `javac` has always done.
+pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
+    let declared = parse(source)?;
+
+    // A type declared beside another can be named by it, so each one is on the
+    // classpath the others are compiled against.
+    let mut together = classpath.clone();
+    for unit in &declared {
+        together.declare(unit);
+    }
+
+    let mut out = Vec::with_capacity(declared.len());
+    for unit in &declared {
+        let name = format!("{}.class", unit.internal_name());
+        out.push((name, compile_unit(unit, &together)?));
+    }
+    Ok(out)
 }
 
 // ------------------------------------------------------- the contract
@@ -7775,9 +7987,15 @@ impl Compiler for JavaCompiler {
                 fail("EJ302", "A Java source file is not text.")
                     .with_context(format!("Path: {}", source.path))
             })?;
-            let (_, class) = compile(&text, &classpath)
+            // One file can declare more than one type, and each of them is a
+            // class file of its own. The name it is offered under is the
+            // class's, not the file's, because two types in one file would
+            // otherwise be offered under the same name.
+            let produced = compile(&text, &classpath)
                 .map_err(|error| error.with_context(format!("File: {}", source.path)))?;
-            session.offer(source.path.clone(), Kind::JvmClass, class)?;
+            for (name, class) in produced {
+                session.offer(name, Kind::JvmClass, class)?;
+            }
         }
 
         session.commit(plan)
@@ -7790,6 +8008,18 @@ mod tests {
 
     fn empty() -> Classpath {
         Classpath::new()
+    }
+
+    /// The one class a source declaring one type comes to.
+    fn compile_one(source: &str, classpath: &Classpath) -> Result<(String, Vec<u8>), Diagnostic> {
+        let mut produced = compile(source, classpath)?;
+        assert_eq!(
+            produced.len(),
+            1,
+            "this source declares one type: {:?}",
+            produced.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+        Ok(produced.remove(0))
     }
 
     #[test]
@@ -7832,7 +8062,7 @@ mod tests {
             }
         "#;
 
-        let (name, bytes) = compile(source, &empty()).expect("this must compile");
+        let (name, bytes) = compile_one(source, &empty()).expect("this must compile");
         assert_eq!(name, "com/my/app/Counted.class");
 
         // Read back with this project's own class reader, which knows nothing
@@ -7863,7 +8093,7 @@ mod tests {
 
         // The same source is the same bytes, which is what the contract
         // promises when it says Always.
-        let (_, again) = compile(source, &empty()).unwrap();
+        let (_, again) = compile_one(source, &empty()).unwrap();
         assert_eq!(bytes, again, "the same source must be the same class file");
 
         eprintln!(
@@ -7877,7 +8107,6 @@ mod tests {
     #[test]
     fn what_it_does_not_compile_it_refuses_by_name_and_line() {
         for (source, expected) in [
-            ("public interface A { }", "EJ900"),
             (
                 "public class A { void f() { Runnable r = () -> {}; } }",
                 "EJ900",
@@ -7895,7 +8124,7 @@ mod tests {
                 "EJ200",
             ),
         ] {
-            let refused = compile(source, &empty())
+            let refused = compile_one(source, &empty())
                 .err()
                 .unwrap_or_else(|| panic!("this must be refused: {source}"));
             assert_eq!(refused.code, expected, "{source}: {}", refused.message);
@@ -7912,7 +8141,7 @@ mod tests {
             ("public class A { void f() { Unknown u = null; } }", "EJ200"),
             ("public class A { void f() { break; } }", "EJ231"),
         ] {
-            let refused = compile(source, &empty()).expect_err("this must be refused");
+            let refused = compile_one(source, &empty()).expect_err("this must be refused");
             assert_eq!(refused.code, expected, "{source}: {}", refused.message);
         }
 
@@ -7934,7 +8163,7 @@ mod tests {
                 }
             }
         "#;
-        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let (_, bytes) = compile_one(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&bytes).expect("what was written must read");
 
         let twice = class.methods.iter().find(|m| m.name == "twice").unwrap();
@@ -7997,7 +8226,7 @@ mod tests {
             }
         "#;
 
-        let (name, class_bytes) = compile(source, &empty()).expect("this must compile");
+        let (name, class_bytes) = compile_one(source, &empty()).expect("this must compile");
         assert_eq!(name, "com/my/app/Counter.class");
 
         let class = crate::jvm::read(&class_bytes).expect("what was written must read");
@@ -8067,7 +8296,7 @@ mod tests {
 
         // The same source is the same dex, which is what the compiler contract
         // promises when it says its output is reproducible.
-        let (_, again) = compile(source, &empty()).unwrap();
+        let (_, again) = compile_one(source, &empty()).unwrap();
         let again = crate::dalvik::translate_class(&crate::jvm::read(&again).unwrap()).unwrap();
         assert_eq!(
             dex,
@@ -8091,7 +8320,12 @@ mod tests {
             found.is_file().then_some(found)
         })?;
 
-        let directory = std::env::temp_dir().join(format!("omni-dexdump-{}", std::process::id()));
+        // Tests run at the same time, so a directory named after the process
+        // alone is a directory two of them write into.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("omni-dexdump-{}-{mine}", std::process::id()));
         std::fs::create_dir_all(&directory).ok()?;
         let path = directory.join("classes.dex");
         std::fs::write(&path, bytes).ok()?;
@@ -8193,7 +8427,7 @@ mod tests {
             }
         "#;
 
-        let (_, class_bytes) = compile(source, &empty()).expect("this must compile");
+        let (_, class_bytes) = compile_one(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&class_bytes).expect("what was written must read");
         let translated =
             crate::dalvik::translate_class(&class).expect("and must translate to Dalvik");
@@ -8442,7 +8676,7 @@ mod tests {
             }
         "#;
 
-        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let (_, bytes) = compile_one(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&bytes).expect("and read back");
         assert_eq!(class.major_version, CLASS_MAJOR, "Java 25 class files");
 
@@ -8649,7 +8883,7 @@ public class Wide {
 }
 ";
 
-        let (name, bytes) = compile(source, &empty()).expect("this must compile");
+        let (name, bytes) = compile_one(source, &empty()).expect("this must compile");
         assert_eq!(name, "Wide.class");
         let class = crate::jvm::read(&bytes).expect("and read back");
         assert_eq!(class.major_version, CLASS_MAJOR);
@@ -8716,7 +8950,7 @@ public class Wide {
                 }
             }
         "#;
-        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let (_, bytes) = compile_one(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&bytes).expect("and read back");
         let code = class
             .methods
@@ -8784,7 +9018,7 @@ public class Wide {
             ("an enhanced for over an array", "public class A { int f(int[] v) { int t = 0; for (int one : v) { t += one; } return t; } }"),
         ];
         for (what, source) in cases {
-            if let Err(refused) = compile(source, &empty()) {
+            if let Err(refused) = compile_one(source, &empty()) {
                 panic!("{what} must compile: {} {}", refused.code, refused.message);
             }
         }
@@ -8884,7 +9118,7 @@ public class Shaped {
 }
 ";
 
-        let (name, bytes) = compile(source, &empty()).expect("this must compile");
+        let (name, bytes) = compile_one(source, &empty()).expect("this must compile");
         assert_eq!(name, "Shaped.class");
         let class = crate::jvm::read(&bytes).expect("and read back");
 
@@ -8929,6 +9163,104 @@ public class Shaped {
              expressions, patterns, varargs and System.out -- {} methods verified",
             class.methods.len()
         );
+    }
+
+    #[test]
+    fn an_interface_and_the_class_that_implements_it_compile_together() {
+        // Two types in one file, naming each other, and neither of them a
+        // class file yet when the other is compiled.
+        let source = r#"
+            package com.my.app;
+
+            interface Shape {
+                int SIDES = 0;
+
+                double area();
+
+                default String describe() {
+                    return "a shape";
+                }
+
+                static Shape none() {
+                    return null;
+                }
+            }
+
+            public class Square implements Shape {
+                private final double side;
+
+                public Square(double side) {
+                    this.side = side;
+                }
+
+                public double area() {
+                    return side * side;
+                }
+
+                public double twice() {
+                    return area() * 2;
+                }
+
+                public String tell(Shape other) {
+                    return other.describe();
+                }
+            }
+        "#;
+
+        let produced = compile(source, &empty()).expect("both must compile");
+        let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["com/my/app/Shape.class", "com/my/app/Square.class"]
+        );
+
+        let shape = crate::jvm::read(&produced[0].1).expect("the interface must read back");
+        assert!(
+            shape.access_flags & 0x0200 != 0,
+            "an interface has to say it is one"
+        );
+        assert!(shape.access_flags & 0x0400 != 0, "and that it is abstract");
+        assert!(
+            shape.methods.iter().any(|one| one.name == "<clinit>"),
+            "a field of an interface is a constant, and constants are set once"
+        );
+        assert!(
+            !shape.methods.iter().any(|one| one.name == "<init>"),
+            "an interface has no constructor"
+        );
+
+        let square = crate::jvm::read(&produced[1].1).expect("the class must read back");
+        assert_eq!(square.interfaces, vec!["com.my.app.Shape"]);
+
+        for (name, bytes) in &produced {
+            let simple = name.trim_end_matches(".class").rsplit('/').next().unwrap();
+            match jvm_verifies(simple, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here to verify {name}");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {name}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+
+        // And both of them reach a device.
+        let mut classes = Vec::new();
+        for (_, bytes) in &produced {
+            let class = crate::jvm::read(bytes).unwrap();
+            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+        }
+        let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
+        if let Some(text) = dexdump_disassembly(&dex) {
+            assert!(text.contains("Lcom/my/app/Shape;"));
+            assert!(text.contains("Lcom/my/app/Square;"));
+            assert!(
+                text.contains("invoke-interface"),
+                "a call on an interface is an interface call"
+            );
+        }
+
+        eprintln!("java: an interface and the class implementing it, from one file, both verified");
     }
 
     #[test]
@@ -9004,7 +9336,7 @@ public class Shaped {
             ),
         ];
         for (source, code) in cases {
-            let error = compile(source, &empty()).expect_err(source);
+            let error = compile_one(source, &empty()).expect_err(source);
             assert_eq!(error.code, *code, "{source}");
         }
     }
@@ -9039,7 +9371,7 @@ public class Shaped {
                 }
             }
         "#;
-        let (_, bytes) = compile(source, &empty()).expect("this must compile");
+        let (_, bytes) = compile_one(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&bytes).expect("and read back");
         let translated = crate::dalvik::translate_class(&class)
             .expect("arrays and floating point must translate");
@@ -9134,7 +9466,7 @@ public class Shaped {
                 public int size;
             }
         "#;
-        let (_, bytes) = compile(library, &empty()).unwrap();
+        let (_, bytes) = compile_one(library, &empty()).unwrap();
         let class = crate::jvm::read(&bytes).unwrap();
         let mut classpath = Classpath::new();
         classpath.learn(&class).unwrap();
@@ -9152,7 +9484,8 @@ public class Shaped {
                 }
             }
         "#;
-        let (name, made) = compile(caller, &classpath).expect("a call it was handed must compile");
+        let (name, made) =
+            compile_one(caller, &classpath).expect("a call it was handed must compile");
         assert_eq!(name, "com/my/app/Caller.class");
         let read = crate::jvm::read(&made).unwrap();
         assert_eq!(read.name, "com.my.app.Caller");

@@ -15557,7 +15557,20 @@ pub mod dexwrite {
         }
     }
 
-    pub fn default_constructor(class: &str) -> Method {
+    /// The constructor a class with none written gets: call the one above,
+    /// return.
+    ///
+    /// The body used to be left empty and filled in by the writer, which meant
+    /// "no instructions" had two meanings -- this, and a method that has no
+    /// body at all. An abstract method then came out with a constructor's body
+    /// and a device refused the file.
+    pub fn default_constructor(class: &str, superclass: &str) -> Method {
+        let up = MethodRef {
+            class: superclass.to_string(),
+            name: "<init>".to_string(),
+            return_type: "V".to_string(),
+            parameters: Vec::new(),
+        };
         Method {
             reference: MethodRef {
                 class: class.to_string(),
@@ -15569,7 +15582,15 @@ pub mod dexwrite {
             registers: 1,
             inputs: 1,
             outputs: 1,
-            instructions: Vec::new(),
+            instructions: vec![
+                // invoke-direct {v0}, superclass.<init>()V
+                Insn::pointing(
+                    vec![(1 << 12) | OP_INVOKE_DIRECT, 0, 0],
+                    1,
+                    Operand::Method(up),
+                ),
+                Insn::raw(vec![OP_RETURN_VOID]),
+            ],
             tries: Vec::new(),
         }
     }
@@ -15839,25 +15860,18 @@ pub mod dexwrite {
         for class in classes {
             let mut here = Vec::new();
             for method in class.methods() {
+                // A method with no instructions is abstract or native: it has
+                // no code item at all, and its entry says so with a zero.
+                if method.instructions.is_empty() {
+                    here.push(0);
+                    continue;
+                }
                 while !(data_off + data.len()).is_multiple_of(4) {
                     data.push(0);
                 }
                 here.push((data_off + data.len()) as u32);
 
                 let mut instructions: Vec<u16> = Vec::new();
-                if method.instructions.is_empty() {
-                    let super_init = MethodRef {
-                        class: class.superclass.clone(),
-                        name: "<init>".to_string(),
-                        return_type: "V".to_string(),
-                        parameters: Vec::new(),
-                    };
-                    let target = pools.index_of_method(&super_init)?;
-                    instructions.push((1 << 12) | OP_INVOKE_DIRECT);
-                    instructions.push(target as u16);
-                    instructions.push(0);
-                    instructions.push(OP_RETURN_VOID);
-                }
                 for instruction in &method.instructions {
                     let mut units = instruction.units.clone();
                     if let Some(at) = instruction.patch {
@@ -16031,8 +16045,16 @@ pub mod dexwrite {
             (0x2002, pools.strings.len() as u32, string_data_offsets[0]),
             (
                 0x2001,
-                code_offsets.iter().map(|list| list.len() as u32).sum(),
-                code_offsets[0][0],
+                code_offsets
+                    .iter()
+                    .map(|list| list.iter().filter(|at| **at != 0).count() as u32)
+                    .sum(),
+                code_offsets
+                    .iter()
+                    .flat_map(|list| list.iter())
+                    .copied()
+                    .find(|at| *at != 0)
+                    .unwrap_or(data_off as u32),
             ),
             (0x2000, classes.len() as u32, class_data_offsets[0]),
             (0x1000, 1, map_off as u32),
@@ -23251,7 +23273,10 @@ pub mod builder {
                 superclass: "Landroid/app/Activity;".to_string(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
-                direct_methods: vec![crate::dexwrite::default_constructor(&descriptor)],
+                direct_methods: vec![crate::dexwrite::default_constructor(
+                    &descriptor,
+                    "Ljava/lang/Object;",
+                )],
                 virtual_methods: Vec::new(),
                 static_fields: Vec::new(),
                 instance_fields: Vec::new(),
@@ -23355,7 +23380,10 @@ pub mod builder {
                 superclass: "Landroid/app/Activity;".to_string(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
-                direct_methods: vec![crate::dexwrite::default_constructor(&descriptor)],
+                direct_methods: vec![crate::dexwrite::default_constructor(
+                    &descriptor,
+                    "Ljava/lang/Object;",
+                )],
                 virtual_methods: Vec::new(),
                 static_fields: Vec::new(),
                 instance_fields: Vec::new(),
@@ -30012,6 +30040,7 @@ mod tests {
             source_file: Some("MainActivity.java".to_string()),
             direct_methods: vec![super::dexwrite::default_constructor(
                 "Lcom/omni/made/MainActivity;",
+                "Ljava/lang/Object;",
             )],
             virtual_methods: Vec::new(),
             static_fields: Vec::new(),
@@ -30030,7 +30059,10 @@ mod tests {
             super::dexwrite::ACC_PUBLIC,
         );
         class.source_file = Some("MainActivity.java".to_string());
-        class.direct_methods = vec![super::dexwrite::default_constructor(descriptor)];
+        class.direct_methods = vec![super::dexwrite::default_constructor(
+            descriptor,
+            "Ljava/lang/Object;",
+        )];
         class.instance_fields = vec![
             super::dexwrite::Field {
                 reference: super::dexwrite::FieldRef {
