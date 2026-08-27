@@ -15693,31 +15693,36 @@ pub mod dexwrite {
                     pools.fields.push(field.reference.clone());
                 }
             }
-            // A constructor calls one above it or one beside it, and nothing
-            // else. Writing a call to some third class's constructor produces
-            // a dex that reads, disassembles, and is refused the moment a
-            // device tries to load it -- which is a long way from here.
+            // The first constructor a constructor calls is the one it hands
+            // off to, and that is either its own class's or its superclass's.
+            // Anything after it is a `new`, which may make whatever it likes.
+            // Writing the wrong class there produces a dex that reads, that
+            // disassembles, and that a device refuses the moment it tries to
+            // load it -- which is a long way from here.
             for method in class.direct_methods.iter() {
                 if method.reference.name != "<init>" {
                     continue;
                 }
-                for instruction in &method.instructions {
-                    let Operand::Method(called) = &instruction.operand else {
-                        continue;
-                    };
-                    if called.name != "<init>" {
-                        continue;
-                    }
-                    if called.class != class.descriptor && called.class != class.superclass {
-                        return Err(fail(
-                            "EW008",
-                            "A constructor calls one that is neither its own class's nor \
-                             its superclass's.",
-                        )
-                        .with_context(format!("Class: {}", class.descriptor))
-                        .with_context(format!("Superclass: {}", class.superclass))
-                        .with_context(format!("Called: {}", called.class)));
-                    }
+                let Some(called) =
+                    method
+                        .instructions
+                        .iter()
+                        .find_map(|instruction| match &instruction.operand {
+                            Operand::Method(called) if called.name == "<init>" => Some(called),
+                            _ => None,
+                        })
+                else {
+                    continue;
+                };
+                if called.class != class.descriptor && called.class != class.superclass {
+                    return Err(fail(
+                        "EW008",
+                        "A constructor hands off to one that is neither its own class's \
+                         nor its superclass's.",
+                    )
+                    .with_context(format!("Class: {}", class.descriptor))
+                    .with_context(format!("Superclass: {}", class.superclass))
+                    .with_context(format!("Hands off to: {}", called.class)));
                 }
             }
 
