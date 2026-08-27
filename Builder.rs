@@ -16331,6 +16331,9 @@ pub mod dalvik {
         handlers: Vec<(u16, u16, u16, u16)>,
         stack_base: u16,
         depth: u16,
+        /// How deep the stack is where a branch lands, recorded by the branch
+        /// that goes there.
+        depth_at: std::collections::BTreeMap<usize, u16>,
         max_outputs: u16,
     }
 
@@ -16358,6 +16361,7 @@ pub mod dalvik {
                 handlers: code.handlers.clone(),
                 stack_base: code.max_locals,
                 depth: 0,
+                depth_at: std::collections::BTreeMap::new(),
                 max_outputs: 0,
             }
         }
@@ -16402,6 +16406,12 @@ pub mod dalvik {
             let mut at = 0usize;
             while at < bytes.len() {
                 self.landed.insert(at, units(&self.code));
+                // Where something jumps here, the depth it jumped with is the
+                // depth here -- whatever the instruction before this one left
+                // behind, which for one that threw is nothing.
+                if let Some(held) = self.depth_at.get(&at) {
+                    self.depth = *held;
+                }
                 if entries.contains(&at) {
                     // A handler is entered with the thrown object where the
                     // JVM would have left it on the stack. Dalvik has no
@@ -17407,6 +17417,11 @@ pub mod dalvik {
                 0,
                 0,
             ]));
+            // Every arm is reached with the stack as it is here, the same as
+            // any other branch.
+            for target in &targets {
+                self.depth_at.entry(*target).or_insert(self.depth);
+            }
             self.switches.push(PendingSwitch {
                 instruction,
                 packed,
@@ -17602,6 +17617,13 @@ pub mod dalvik {
 
         /// A branch, recorded for `finish` to fill in.
         fn branch(&mut self, opcode: u16, registers: Vec<u16>, target: usize) {
+            // How deep the stack is where this jump was taken, which is how
+            // deep it is where the jump lands. A class file that verified says
+            // every road to that instruction agrees, so the first one to say
+            // so is enough -- and it is the only way to know for an
+            // instruction that follows a `throw`, where walking the bytes in
+            // order says nothing at all.
+            self.depth_at.entry(target).or_insert(self.depth);
             let from = units(&self.code);
             let mut first = opcode;
             match registers.len() {
@@ -17752,9 +17774,17 @@ pub mod dalvik {
             local += width_of(parameter);
         }
 
-        translator.walk(&code.bytes)?;
+        // Which method it was is the first thing anybody reading a refusal
+        // wants, and the translator itself only sees bytes.
+        let named = |error: Diagnostic| {
+            error.with_context(format!(
+                "Method: {}.{}{}",
+                class.name, method.name, method.descriptor
+            ))
+        };
+        translator.walk(&code.bytes).map_err(named)?;
         let outputs = translator.max_outputs;
-        let (instructions, tries) = translator.finish()?;
+        let (instructions, tries) = translator.finish().map_err(named)?;
 
         Ok(Method {
             reference,
