@@ -5220,9 +5220,20 @@ impl Classpath {
             interface,
             ..KnownClass::default()
         };
+        // What the class called its type parameters, which is the only place a
+        // class file says so and what a method's `TT;` has to be read against.
+        let named = class
+            .signature
+            .as_deref()
+            .map(type_parameters_of)
+            .unwrap_or_default();
         for method in &class.methods {
             let Some((parameters, returns)) = read_descriptor(&method.descriptor) else {
                 continue;
+            };
+            let (returns_variable, parameter_variables) = match &method.signature {
+                Some(held) if !named.is_empty() => variables_of(held, &named),
+                _ => (None, Vec::new()),
             };
             known.methods.push(Signature {
                 owner: internal.clone(),
@@ -5235,8 +5246,8 @@ impl Classpath {
                 // the `...` somebody wrote.
                 variadic: method.access_flags & 0x0080 != 0,
                 abstract_: method.access_flags & 0x0400 != 0,
-                returns_variable: None,
-                parameter_variables: Vec::new(),
+                returns_variable,
+                parameter_variables,
             });
         }
         for field in &class.fields {
@@ -7644,6 +7655,162 @@ fn written_as_a_path(expression: &Expression) -> Option<String> {
         Expression::Field { of, name } => Some(format!("{}.{name}", written_as_a_path(of)?)),
         _ => None,
     }
+}
+
+/// The names of a class's type parameters, in order, out of its generic
+/// signature.
+///
+/// `<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;` is a `Map`,
+/// and the answer is `["K", "V"]`. Nothing else in a class file says what they
+/// were called.
+fn type_parameters_of(signature: &str) -> Vec<String> {
+    let bytes = signature.as_bytes();
+    if bytes.first() != Some(&b'<') {
+        return Vec::new();
+    }
+    let mut at = 1usize;
+    let mut found = Vec::new();
+    while at < bytes.len() && bytes[at] != b'>' {
+        let began = at;
+        while at < bytes.len() && bytes[at] != b':' {
+            at += 1;
+        }
+        if at >= bytes.len() {
+            return Vec::new();
+        }
+        found.push(signature[began..at].to_string());
+        // The bounds: a class bound that may be empty, then any number of
+        // interface bounds, each behind its own colon.
+        while at < bytes.len() && bytes[at] == b':' {
+            at += 1;
+            if at < bytes.len()
+                && bytes[at] != b':'
+                && bytes[at] != b'>'
+                && skip_generic_type(bytes, &mut at).is_none()
+            {
+                return Vec::new();
+            }
+        }
+    }
+    found
+}
+
+/// Steps over one type in a generic signature, and says which type variable it
+/// was where it was exactly one.
+///
+/// `TT;` is; `Ljava/util/List<TT;>;` is not, because putting an argument back
+/// inside it needs more than a cast.
+fn read_generic_type(bytes: &[u8], at: &mut usize) -> Option<Option<String>> {
+    let began = *at;
+    let held = *bytes.get(*at)?;
+    if held == b'T' {
+        *at += 1;
+        let from = *at;
+        while *bytes.get(*at)? != b';' {
+            *at += 1;
+        }
+        let name = String::from_utf8_lossy(&bytes[from..*at]).into_owned();
+        *at += 1;
+        return Some(Some(name));
+    }
+    skip_generic_type(bytes, at)?;
+    let _ = began;
+    Some(None)
+}
+
+/// Steps over one type in a generic signature without asking what it was.
+fn skip_generic_type(bytes: &[u8], at: &mut usize) -> Option<()> {
+    match *bytes.get(*at)? {
+        b'[' => {
+            *at += 1;
+            skip_generic_type(bytes, at)
+        }
+        b'T' => {
+            while *bytes.get(*at)? != b';' {
+                *at += 1;
+            }
+            *at += 1;
+            Some(())
+        }
+        b'L' => {
+            // A class name, its arguments, and any number of `.Inner` parts,
+            // to the `;` that closes the outermost of them.
+            let mut depth = 0usize;
+            loop {
+                let held = *bytes.get(*at)?;
+                *at += 1;
+                match held {
+                    b'<' => depth += 1,
+                    b'>' => depth = depth.checked_sub(1)?,
+                    b';' if depth == 0 => return Some(()),
+                    _ => {}
+                }
+            }
+        }
+        b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b'V' => {
+            *at += 1;
+            Some(())
+        }
+        // `*`, `+` and `-` are wildcards, which stand for no one type.
+        b'*' => {
+            *at += 1;
+            Some(())
+        }
+        b'+' | b'-' => {
+            *at += 1;
+            skip_generic_type(bytes, at)
+        }
+        _ => None,
+    }
+}
+
+/// What a method's generic signature says its parameters and return really
+/// are, as indices into the class's type parameters.
+fn variables_of(signature: &str, parameters: &[String]) -> (Option<usize>, Vec<Option<usize>>) {
+    let bytes = signature.as_bytes();
+    let mut at = 0usize;
+    // A method may have type parameters of its own. They are skipped: there is
+    // no receiver to take an argument from, so nothing can be put back.
+    if bytes.first() == Some(&b'<') {
+        let mut depth = 0usize;
+        loop {
+            let Some(held) = bytes.get(at) else {
+                return (None, Vec::new());
+            };
+            at += 1;
+            match held {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if bytes.get(at) != Some(&b'(') {
+        return (None, Vec::new());
+    }
+    at += 1;
+    let index = |name: Option<String>| -> Option<usize> {
+        let name = name?;
+        parameters.iter().position(|one| *one == name)
+    };
+    let mut taken = Vec::new();
+    while bytes.get(at) != Some(&b')') {
+        let Some(one) = read_generic_type(bytes, &mut at) else {
+            return (None, Vec::new());
+        };
+        taken.push(index(one));
+    }
+    at += 1;
+    let returns = match read_generic_type(bytes, &mut at) {
+        Some(one) => index(one),
+        None => None,
+    };
+    (returns, taken)
 }
 
 /// Which of the enclosing class's type parameters a written type is, where it
@@ -18925,6 +19092,26 @@ public class Boxed {
                 void later(final Runnable what) {
                     onTheMainThread.postDelayed(what, 500L);
                 }
+
+                // The jar says what its generic classes hand back, and that is
+                // read rather than guessed: `getItem` on an
+                // `ArrayAdapter<String>` is a String, and a `Map<String,
+                // List<Integer>>` gives back a list that gives back an int.
+                String generics() {
+                    List<String> rows = new ArrayList<String>();
+                    rows.add("one");
+                    ArrayAdapter<String> adapter = new ArrayAdapter<String>(
+                        this, android.R.layout.simple_list_item_1, rows);
+                    String first = adapter.getItem(0);
+
+                    Map<String, List<Integer>> deep =
+                        new LinkedHashMap<String, List<Integer>>();
+                    List<Integer> inner = new ArrayList<Integer>();
+                    inner.add(first.length());
+                    deep.put("k", inner);
+                    int back = deep.get("k").get(0);
+                    return first + back + rows.get(0).length();
+                }
             }
         "#;
         let produced = compile(source, &classpath).expect("real Android code must compile");
@@ -19730,9 +19917,11 @@ public class Boxed {
                     bytes: vec![0x01, 0xa8, 0x00, 0x03],
                     handlers: Vec::new(),
                 }),
+                signature: None,
             }],
             attributes: Vec::new(),
             kotlin: None,
+            signature: None,
         };
 
         let refused = crate::dalvik::translate_class(&class)

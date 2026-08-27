@@ -24017,6 +24017,13 @@ pub mod jvm {
         /// and not well enough to turn it into anything else. Translating to
         /// dex needs the code.
         pub code: Option<Code>,
+        /// The generic signature, where the class file carries one.
+        ///
+        /// The descriptor says `(I)Ljava/lang/Object;`, because that is what
+        /// erasure left. This says `(I)TT;` -- that the return is the type
+        /// parameter, which is what a caller with a `List<String>` in its hand
+        /// needs to know.
+        pub signature: Option<String>,
     }
 
     /// A method body as the class file carries it.
@@ -24065,6 +24072,10 @@ pub mod jvm {
         pub methods: Vec<Member>,
         pub attributes: Vec<Attribute>,
         pub kotlin: Option<KotlinMetadata>,
+        /// The generic signature the class was declared with, where it has
+        /// one: `<T:Ljava/lang/Object;>Ljava/lang/Object;` for a `Box<T>`.
+        /// This is the only place the names of its type parameters survive.
+        pub signature: Option<String>,
     }
 
     impl Class {
@@ -24184,6 +24195,7 @@ pub mod jvm {
         bounded(&reader, u64::from(attribute_count), 6, "attribute")?;
         let mut attributes = Vec::with_capacity(attribute_count as usize);
         let mut kotlin = None;
+        let mut signature: Option<String> = None;
         for _ in 0..attribute_count {
             let name_index = reader.u16()?;
             let length = reader.u32()?;
@@ -24191,6 +24203,11 @@ pub mod jvm {
             let content_start = reader.position();
             let content_length = reader.checked_length(u64::from(length))?;
 
+            if attribute_name == "Signature" && content_length == 2 {
+                let content = reader.slice_at(content_start as u64, 2)?;
+                let index = u16::from_be_bytes([content[0], content[1]]);
+                signature = utf8(index, "signature").ok();
+            }
             if attribute_name == "RuntimeVisibleAnnotations" {
                 let content = reader.slice_at(content_start as u64, content_length as u64)?;
                 if let Ok(Some(found)) = read_kotlin_metadata(content, &constants) {
@@ -24217,6 +24234,7 @@ pub mod jvm {
             methods,
             attributes,
             kotlin,
+            signature,
         })
     }
 
@@ -24369,6 +24387,7 @@ pub mod jvm {
             let attribute_count = reader.u16()?;
 
             let mut code = None;
+            let mut signature = None;
             for _ in 0..attribute_count {
                 let attribute_name_index = reader.u16()?;
                 let length = reader.u32()?;
@@ -24379,6 +24398,13 @@ pub mod jvm {
                 if named == "Code" {
                     let content = reader.slice_at(start as u64, length as u64)?;
                     code = read_code(content)?;
+                }
+                // Two bytes, an index into the pool, and the string there is
+                // what was written before erasure got to it.
+                if named == "Signature" && length == 2 {
+                    let content = reader.slice_at(start as u64, 2)?;
+                    let index = u16::from_be_bytes([content[0], content[1]]);
+                    signature = constant_utf8(constants, index, "signature").ok();
                 }
                 reader.skip(length)?;
             }
@@ -24392,6 +24418,7 @@ pub mod jvm {
                     &format!("{what} descriptor"),
                 )?,
                 code,
+                signature,
             });
         }
         Ok(members)
