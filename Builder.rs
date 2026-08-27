@@ -15737,10 +15737,19 @@ pub mod dexwrite {
                 .position(|held| held == descriptor)
                 .unwrap_or(0) as u32
         };
+        // Sorted by return type, then by the argument list read as a
+        // sequence of type indices -- which is lexicographic, so a shorter
+        // list that is a prefix of a longer one comes first. Comparing only
+        // the lengths agrees with that until two prototypes have the same
+        // return type and the same number of arguments, and then the file is
+        // out of order and a device refuses to load it.
+        let argument_order = |parameters: &[String]| -> Vec<u32> {
+            parameters.iter().map(|one| position_of_type(one)).collect()
+        };
         pools.protos.sort_by(|a, b| {
             position_of_type(&a.1)
                 .cmp(&position_of_type(&b.1))
-                .then_with(|| a.2.len().cmp(&b.2.len()))
+                .then_with(|| argument_order(&a.2).cmp(&argument_order(&b.2)))
         });
 
         {
