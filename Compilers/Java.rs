@@ -6748,6 +6748,218 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         true,
     ),
     ("android/widget/Toast", "show", "()V", false),
+    // More of the platform an application touches on its first screen.
+    (
+        "android/app/Activity",
+        "getString",
+        "(I)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "android/content/Context",
+        "getString",
+        "(I)Ljava/lang/String;",
+        false,
+    ),
+    (
+        "android/app/Activity",
+        "onSaveInstanceState",
+        "(Landroid/os/Bundle;)V",
+        false,
+    ),
+    (
+        "android/app/Activity",
+        "onRestoreInstanceState",
+        "(Landroid/os/Bundle;)V",
+        false,
+    ),
+    (
+        "android/app/Activity",
+        "runOnUiThread",
+        "(Ljava/lang/Runnable;)V",
+        false,
+    ),
+    (
+        "android/app/Activity",
+        "startActivityForResult",
+        "(Landroid/content/Intent;I)V",
+        false,
+    ),
+    ("android/app/Activity", "setResult", "(I)V", false),
+    (
+        "android/app/Activity",
+        "getIntent",
+        "()Landroid/content/Intent;",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "putExtra",
+        "(Ljava/lang/String;I)Landroid/content/Intent;",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "putExtra",
+        "(Ljava/lang/String;Z)Landroid/content/Intent;",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "getIntExtra",
+        "(Ljava/lang/String;I)I",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "getBooleanExtra",
+        "(Ljava/lang/String;Z)Z",
+        false,
+    ),
+    (
+        "android/content/Intent",
+        "setAction",
+        "(Ljava/lang/String;)Landroid/content/Intent;",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "containsKey",
+        "(Ljava/lang/String;)Z",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "getBoolean",
+        "(Ljava/lang/String;)Z",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "putBoolean",
+        "(Ljava/lang/String;Z)V",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "getLong",
+        "(Ljava/lang/String;)J",
+        false,
+    ),
+    (
+        "android/os/Bundle",
+        "putLong",
+        "(Ljava/lang/String;J)V",
+        false,
+    ),
+    ("android/view/View", "setId", "(I)V", false),
+    (
+        "android/view/View",
+        "getContext",
+        "()Landroid/content/Context;",
+        false,
+    ),
+    ("android/view/View", "setPadding", "(IIII)V", false),
+    ("android/view/View", "isEnabled", "()Z", false),
+    ("android/view/View", "requestFocus", "()Z", false),
+    ("android/view/View", "setBackgroundColor", "(I)V", false),
+    (
+        "android/view/View",
+        "findViewById",
+        "(I)Landroid/view/View;",
+        false,
+    ),
+    (
+        "android/view/ViewGroup",
+        "addView",
+        "(Landroid/view/View;)V",
+        false,
+    ),
+    ("android/view/ViewGroup", "removeAllViews", "()V", false),
+    ("android/view/ViewGroup", "getChildCount", "()I", false),
+    (
+        "android/view/ViewGroup",
+        "getChildAt",
+        "(I)Landroid/view/View;",
+        false,
+    ),
+    (
+        "android/view/ViewGroup$LayoutParams",
+        "<init>",
+        "(II)V",
+        false,
+    ),
+    (
+        "android/view/View",
+        "setLayoutParams",
+        "(Landroid/view/ViewGroup$LayoutParams;)V",
+        false,
+    ),
+    ("android/widget/LinearLayout", "setGravity", "(I)V", false),
+    ("android/widget/TextView", "setTextColor", "(I)V", false),
+    (
+        "android/widget/TextView",
+        "append",
+        "(Ljava/lang/CharSequence;)V",
+        false,
+    ),
+    ("android/widget/TextView", "setGravity", "(I)V", false),
+    (
+        "android/widget/EditText",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    (
+        "android/widget/EditText",
+        "setHint",
+        "(Ljava/lang/CharSequence;)V",
+        false,
+    ),
+    (
+        "android/widget/ScrollView",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    (
+        "android/widget/FrameLayout",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    (
+        "android/widget/ImageView",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    (
+        "android/widget/ImageView",
+        "setImageResource",
+        "(I)V",
+        false,
+    ),
+    (
+        "android/widget/CheckBox",
+        "<init>",
+        "(Landroid/content/Context;)V",
+        false,
+    ),
+    ("android/widget/CheckBox", "isChecked", "()Z", false),
+    ("android/widget/CheckBox", "setChecked", "(Z)V", false),
+    (
+        "android/util/Log",
+        "e",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        true,
+    ),
+    (
+        "android/util/Log",
+        "w",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+        true,
+    ),
     (
         "android/util/Log",
         "d",
@@ -6858,9 +7070,19 @@ const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ),
     ("java/io/IOException", "java/lang/Exception"),
     ("android/app/Activity", "android/content/Context"),
+    ("android/view/ViewGroup", "android/view/View"),
     ("android/widget/TextView", "android/view/View"),
     ("android/widget/Button", "android/widget/TextView"),
-    ("android/widget/LinearLayout", "android/view/View"),
+    ("android/widget/EditText", "android/widget/TextView"),
+    ("android/widget/CheckBox", "android/widget/Button"),
+    ("android/widget/ImageView", "android/view/View"),
+    ("android/widget/LinearLayout", "android/view/ViewGroup"),
+    ("android/widget/FrameLayout", "android/view/ViewGroup"),
+    ("android/widget/ScrollView", "android/widget/FrameLayout"),
+    (
+        "android/widget/LinearLayout$LayoutParams",
+        "android/view/ViewGroup$LayoutParams",
+    ),
     ("java/util/Collection", "java/lang/Iterable"),
     ("java/util/List", "java/util/Collection"),
     ("java/util/Set", "java/util/Collection"),
@@ -6952,6 +7174,23 @@ const BUILT_IN_FIELDS: &[(&str, &str, &str)] = &[
     ("java/lang/Byte", "MIN_VALUE", "B"),
     ("java/lang/Character", "MAX_VALUE", "C"),
     ("java/lang/Character", "MIN_VALUE", "C"),
+    // The constants an Android application names, which are `static final
+    // int` on the platform's own classes and nothing a compiler can work out.
+    ("android/widget/LinearLayout", "HORIZONTAL", "I"),
+    ("android/widget/LinearLayout", "VERTICAL", "I"),
+    ("android/widget/Toast", "LENGTH_SHORT", "I"),
+    ("android/widget/Toast", "LENGTH_LONG", "I"),
+    ("android/view/View", "VISIBLE", "I"),
+    ("android/view/View", "INVISIBLE", "I"),
+    ("android/view/View", "GONE", "I"),
+    ("android/view/ViewGroup$LayoutParams", "MATCH_PARENT", "I"),
+    ("android/view/ViewGroup$LayoutParams", "WRAP_CONTENT", "I"),
+    ("android/view/Gravity", "CENTER", "I"),
+    ("android/view/Gravity", "START", "I"),
+    ("android/view/Gravity", "END", "I"),
+    ("android/app/Activity", "RESULT_OK", "I"),
+    ("android/app/Activity", "RESULT_CANCELED", "I"),
+    ("android/os/Build$VERSION", "SDK_INT", "I"),
 ];
 
 /// A signature from [`BUILT_IN_METHODS`], if one of them is what was asked
@@ -7183,11 +7422,22 @@ const WELL_KNOWN: &[&str] = &[
     "android/os/Bundle",
     "android/view/View",
     "android/view/View$OnClickListener",
+    "android/view/ViewGroup",
+    "android/view/ViewGroup$LayoutParams",
+    "android/view/Gravity",
     "android/widget/TextView",
     "android/widget/Button",
+    "android/widget/EditText",
+    "android/widget/CheckBox",
+    "android/widget/ImageView",
     "android/widget/LinearLayout",
+    "android/widget/LinearLayout$LayoutParams",
+    "android/widget/FrameLayout",
+    "android/widget/ScrollView",
     "android/widget/Toast",
     "android/util/Log",
+    "android/os/Build",
+    "android/os/Build$VERSION",
     "java/lang/Throwable",
     "java/lang/Exception",
     "java/lang/RuntimeException",
@@ -16917,6 +17167,166 @@ public class Daily {
 
         eprintln!(
             "java: an ordinary afternoon -- {} classes, run, and into a {} byte dex",
+            produced.len(),
+            dex.len()
+        );
+    }
+
+    /// The screen an Android application starts with.
+    ///
+    /// It cannot be run here -- the platform's classes are on a device and not
+    /// on this machine -- so what is checked is that it compiles, that every
+    /// class it comes to reaches Dalvik, and that the dex it lands in reads
+    /// back.
+    const A_FIRST_SCREEN: &str = r####"
+package com.my.app;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.os.Bundle;
+import android.view.View;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class MainActivity extends Activity {
+
+    private static final String TAG = "MainActivity";
+    private static final int LIMIT = 10;
+
+    private int taps;
+    private TextView label;
+    private final List<String> history = new ArrayList<String>();
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+
+        label = new TextView(this);
+        label.setText(getString(R.string.app_name));
+        root.addView(label);
+
+        Button tap = new Button(this);
+        tap.setText("Tap");
+        tap.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                onTapped();
+            }
+        });
+        root.addView(tap);
+
+        Button reset = new Button(this);
+        reset.setText("Reset");
+        reset.setOnClickListener(view -> reset());
+        root.addView(reset);
+
+        setContentView(root);
+    }
+
+    private void onTapped() {
+        taps++;
+        history.add("tap " + taps);
+        if (taps >= LIMIT) {
+            Toast.makeText(this, "enough", Toast.LENGTH_SHORT).show();
+            taps = 0;
+        }
+        label.setText(describe());
+    }
+
+    private void reset() {
+        taps = 0;
+        history.clear();
+        label.setText(describe());
+    }
+
+    private String describe() {
+        StringBuilder out = new StringBuilder();
+        out.append(TAG).append(": ").append(taps);
+        for (String one : history) {
+            out.append('\n').append(one);
+        }
+        return out.toString();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        history.clear();
+    }
+}
+"####;
+
+    const THE_R_BESIDE_IT: &str = r####"
+package com.my.app;
+
+public final class R {
+    public static final class string {
+        public static final int app_name = 2130903040;
+    }
+}
+"####;
+
+    #[test]
+    fn the_screen_an_android_application_starts_with_compiles_and_reaches_a_dex() {
+        let sources = vec![
+            ("MainActivity.java".to_string(), A_FIRST_SCREEN.to_string()),
+            ("R.java".to_string(), THE_R_BESIDE_IT.to_string()),
+        ];
+        let produced = compile_together(&sources, &empty()).expect("an application must compile");
+        let names: Vec<&str> = produced.iter().map(|(name, _)| name.as_str()).collect();
+        assert!(
+            names.contains(&"com/my/app/MainActivity.class"),
+            "{names:?}"
+        );
+        // The listener written out and the one written as a lambda are both
+        // classes of their own.
+        assert!(
+            names
+                .iter()
+                .filter(|one| one.starts_with("com/my/app/MainActivity$"))
+                .count()
+                >= 2,
+            "{names:?}"
+        );
+
+        let activity = produced
+            .iter()
+            .find(|(name, _)| name == "com/my/app/MainActivity.class")
+            .map(|(_, bytes)| crate::jvm::read(bytes).expect("read back"))
+            .expect("the activity");
+        assert_eq!(
+            activity.superclass.as_deref(),
+            Some("android.app.Activity"),
+            "an activity extends the activity, or the device refuses to load it"
+        );
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, bytes)| {
+                let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        if let Some(said) = dexdump_disassembly(&dex) {
+            assert!(said.contains("MainActivity"), "dexdump read it back");
+            assert!(said.contains("onClick"), "{said}");
+        }
+
+        eprintln!(
+            "java: an application's first screen -- {} classes into a {} byte dex",
             produced.len(),
             dex.len()
         );
