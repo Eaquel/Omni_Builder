@@ -10449,23 +10449,31 @@ impl Emitter<'_> {
             other => other,
         };
         let Some(on) = on else {
-            let own = self
+            let mut theirs: Vec<Method> = self
                 .unit
                 .methods
                 .iter()
-                .find(|held| held.name == name && held.parameters.len() == arguments.len())
-                // A method written with `...` answers to any number of
-                // arguments from its fixed ones upwards, so counting is not
-                // enough to find one.
-                .or_else(|| {
-                    self.unit.methods.iter().find(|held| {
+                .filter(|held| held.name == name && held.parameters.len() == arguments.len())
+                .cloned()
+                .collect();
+            // A method written with `...` answers to any number of arguments
+            // from its fixed ones upwards, so counting is not enough to find
+            // one.
+            if theirs.is_empty() {
+                theirs = self
+                    .unit
+                    .methods
+                    .iter()
+                    .filter(|held| {
                         held.name == name
                             && held.variadic
                             && !held.parameters.is_empty()
                             && held.parameters.len() - 1 <= arguments.len()
                     })
-                })
-                .cloned();
+                    .cloned()
+                    .collect();
+            }
+            let own = self.which_one_of_ours(&theirs, arguments, line)?;
             let Some(own) = own else {
                 // Not written here, so it comes from above: `setContentView`
                 // inside an activity is the activity's. Looking only at what
@@ -11009,17 +11017,16 @@ impl Emitter<'_> {
             return Ok(candidates.into_iter().next());
         }
 
-        // A lambda has no type until it has a target, and the target is what
-        // is being chosen here. Where one is handed over, the count is all
-        // there is to go on.
-        if arguments
-            .iter()
-            .any(|one| matches!(one, Expression::Lambda { .. }))
-        {
-            return Ok(candidates.into_iter().next());
-        }
+        // What the arguments say, and which of them say nothing:
+        // `setPositiveButton("yes", (dialog, at) -> ...)` is decided entirely
+        // by the first of them.
+        let anything = how_loosely(arguments);
         let mut given = Vec::with_capacity(arguments.len());
-        for expression in arguments {
+        for (at, expression) in arguments.iter().enumerate() {
+            if anything[at] != Loosely::No {
+                given.push(Type::Object("java/lang/Object".to_string(), Vec::new()));
+                continue;
+            }
             given.push(self.type_of(expression, line)?);
         }
 
@@ -11028,11 +11035,24 @@ impl Emitter<'_> {
         // boxing, and only then one that fits at all -- `append(Integer)` is
         // `append(Object)` and not `append(String)`, and picking the wrong one
         // is a class file the verifier throws out.
+        // Within a round, the nearest one: `append((byte) 200)` is
+        // `append(int)` and not `append(double)`, because a byte reaches both
+        // and one of them is two steps away and the other five. Java calls
+        // this the most specific applicable method; here it is the cheapest
+        // walk from what was handed over to what is wanted.
         for round in 0..3 {
+            let mut best: Option<(u32, &Signature)> = None;
             for candidate in &candidates {
-                if self.could_take(candidate, &given, round) {
-                    return Ok(Some(candidate.clone()));
+                if !self.could_take(candidate, &given, &anything, round) {
+                    continue;
                 }
+                let cost = self.what_it_costs(candidate, &given, &anything);
+                if best.is_none_or(|(held, _)| cost < held) {
+                    best = Some((cost, candidate));
+                }
+            }
+            if let Some((_, found)) = best {
+                return Ok(Some(found.clone()));
             }
         }
         Ok(candidates.into_iter().next())
@@ -11289,6 +11309,104 @@ impl Emitter<'_> {
         found
     }
 
+    /// Which of this class's own methods of that name a call means.
+    ///
+    /// `say(String)`, `say(Integer)` and `say(Object)` all take one argument,
+    /// and taking whichever was written first would answer `object` to all
+    /// three. It is the same question the classpath answers for any other
+    /// class, asked here because a class being compiled answers for itself.
+    fn which_one_of_ours(
+        &mut self,
+        theirs: &[Method],
+        arguments: &[Expression],
+        line: u32,
+    ) -> Result<Option<Method>, Diagnostic> {
+        if theirs.len() <= 1 {
+            return Ok(theirs.first().cloned());
+        }
+        // What each argument says about which of these is meant, and which of
+        // them say nothing at all.
+        let anything = how_loosely(arguments);
+        let mut given = Vec::with_capacity(arguments.len());
+        for (at, one) in arguments.iter().enumerate() {
+            if anything[at] != Loosely::No {
+                given.push(Type::Object("java/lang/Object".to_string(), Vec::new()));
+                continue;
+            }
+            given.push(match self.type_of(one, line) {
+                Ok(found) => found,
+                Err(_) => Type::Object("java/lang/Object".to_string(), Vec::new()),
+            });
+        }
+        let mut shapes = Vec::with_capacity(theirs.len());
+        for held in theirs {
+            let mut parameters = Vec::new();
+            for (what, _) in &held.parameters {
+                parameters.push(self.resolve(what, line)?);
+            }
+            shapes.push(Signature {
+                owner: self.this_class.clone(),
+                name: held.name.clone(),
+                parameters,
+                returns: Type::Void,
+                static_: held.modifiers.static_,
+                interface: false,
+                variadic: held.variadic,
+                abstract_: false,
+                returns_variable: None,
+                parameter_variables: Vec::new(),
+                taken_stands_for: Vec::new(),
+                returns_stands_for: Standing::Fixed,
+            });
+        }
+        for round in 0..3 {
+            let mut best: Option<(u32, usize)> = None;
+            for (at, shape) in shapes.iter().enumerate() {
+                if !self.could_take(shape, &given, &anything, round) {
+                    continue;
+                }
+                let cost = self.what_it_costs(shape, &given, &anything);
+                if best.is_none_or(|(held, _)| cost < held) {
+                    best = Some((cost, at));
+                }
+            }
+            if let Some((_, at)) = best {
+                return Ok(theirs.get(at).cloned());
+            }
+        }
+        Ok(theirs.first().cloned())
+    }
+
+    /// How far the values handed over are from what a signature wants, added
+    /// up. Nothing at all where every one of them is already the right type.
+    fn what_it_costs(&self, candidate: &Signature, given: &[Type], anything: &[Loosely]) -> u32 {
+        let mut total = 0u32;
+        let last = candidate.parameters.len().saturating_sub(1);
+        for (at, have) in given.iter().enumerate() {
+            if anything.get(at) == Some(&Loosely::Anywhere) {
+                continue;
+            }
+            let want = match candidate.parameters.get(at) {
+                Some(found) => found,
+                None => match candidate.parameters.last() {
+                    Some(Type::Array(element)) if candidate.variadic => element.as_ref(),
+                    _ => continue,
+                },
+            };
+            // Past the fixed parameters of a variadic one, each argument is
+            // going into the array rather than into the array's place.
+            let want = match want {
+                Type::Array(element) if candidate.variadic && at >= last => element.as_ref(),
+                other => other,
+            };
+            total = total.saturating_add(how_far(have, want));
+        }
+        // A variadic one is chosen only where nothing else fits, which is what
+        // Java says too: the array has to be built, and building it is work a
+        // fixed signature does not do.
+        total.saturating_add(u32::from(candidate.variadic))
+    }
+
     /// Whether a call handing over these types could be this signature, at one
     /// of three strictnesses: exactly, without boxing, or at all.
     ///
@@ -11296,17 +11414,29 @@ impl Emitter<'_> {
     /// descriptor: the fixed parameters against the first arguments, and the
     /// rest against the element type -- or the array itself, where somebody
     /// handed one over whole.
-    fn could_take(&self, candidate: &Signature, given: &[Type], round: u8) -> bool {
-        let matched = |have: &Type, want: &Type| match round {
-            0 => want == have,
-            1 => self.reaches(have, want),
-            _ => {
-                self.reaches(have, want)
-                    || boxed_name(have)
-                        .map(|boxed| Type::Object(boxed.to_string(), Vec::new()))
-                        .is_some_and(|boxed| self.reaches(&boxed, want))
-                    || primitive_inside(have).is_some_and(|inside| inside.may_be_given_to(want))
-            }
+    fn could_take(
+        &self,
+        candidate: &Signature,
+        given: &[Type],
+        anything: &[Loosely],
+        round: u8,
+    ) -> bool {
+        // What says nothing here still fits, and everything else still
+        // decides: `setNegativeButton("no", null)` is settled by the "no".
+        let matched = |at: usize, have: &Type, want: &Type| match anything.get(at) {
+            Some(Loosely::Anywhere) => true,
+            Some(Loosely::AnyReference) => want.is_reference(),
+            _ => match round {
+                0 => want == have,
+                1 => self.reaches(have, want),
+                _ => {
+                    self.reaches(have, want)
+                        || boxed_name(have)
+                            .map(|boxed| Type::Object(boxed.to_string(), Vec::new()))
+                            .is_some_and(|boxed| self.reaches(&boxed, want))
+                        || primitive_inside(have).is_some_and(|inside| inside.may_be_given_to(want))
+                }
+            },
         };
         if !candidate.variadic {
             return candidate.parameters.len() == given.len()
@@ -11314,7 +11444,8 @@ impl Emitter<'_> {
                     .parameters
                     .iter()
                     .zip(given.iter())
-                    .all(|(want, have)| matched(have, want));
+                    .enumerate()
+                    .all(|(at, (want, have))| matched(at, have, want));
         }
         let fixed = candidate.parameters.len().saturating_sub(1);
         if given.len() < fixed {
@@ -11325,20 +11456,24 @@ impl Emitter<'_> {
             .iter()
             .take(fixed)
             .zip(given.iter())
-            .all(|(want, have)| matched(have, want))
+            .enumerate()
+            .all(|(at, (want, have))| matched(at, have, want))
         {
             return false;
         }
         let Some(last) = candidate.parameters.last() else {
             return false;
         };
-        if given.len() == candidate.parameters.len() && matched(&given[fixed], last) {
+        if given.len() == candidate.parameters.len() && matched(fixed, &given[fixed], last) {
             return true;
         }
         let Type::Array(element) = last else {
             return false;
         };
-        given[fixed..].iter().all(|have| matched(have, element))
+        given[fixed..]
+            .iter()
+            .enumerate()
+            .all(|(at, have)| matched(fixed + at, have, element))
     }
 
     /// Every variadic signature of this name that could take this many.
@@ -12594,10 +12729,18 @@ impl Emitter<'_> {
                         // but the `finally` needs the stack, so the value
                         // waits in a slot of its own until it is time to go.
                         if !self.finallys.is_empty() {
+                            // In a scope of its own: the slot belongs to this
+                            // `return` and to nothing after it. Left open, it
+                            // would be written into the frame of every branch
+                            // target further down the method -- and the paths
+                            // that did not come through here never set it,
+                            // which is a frame the verifier refuses.
+                            self.open();
                             let held = self.declare("$returning", wanted.clone());
                             self.store(held, &wanted);
                             self.run_finallys(0)?;
                             self.load(held, &wanted);
+                            self.close();
                         }
                         let opcode = match &wanted {
                             Type::Long => 0xadu8,
@@ -14276,7 +14419,20 @@ impl Emitter<'_> {
             given.push(self.type_of(argument, line)?);
         }
 
-        let outer = (!self.static_).then(|| self.this_class.clone());
+        // Which instance this one belongs to. A class written inside a class
+        // this compiler wrote -- a lambda inside a lambda, a listener inside a
+        // listener -- belongs to the instance the one around it belongs to,
+        // and not to that one: one `$outer` either way, and a name inside
+        // reaches the class a person actually wrote rather than a chain of
+        // classes nobody did.
+        let inside_a_written_one = self.unit.name.rsplit('$').next().is_some_and(|simple| {
+            !simple.is_empty() && simple.chars().all(|held| held.is_ascii_digit())
+        });
+        let (outer, through_the_one_around) = match () {
+            _ if self.static_ => (None, false),
+            _ if inside_a_written_one => (self.unit.outer.clone(), true),
+            _ => (Some(self.this_class.clone()), false),
+        };
         let index = self.made.len() + 1;
         let name = format!("{}${index}", self.unit.name);
 
@@ -14415,10 +14571,14 @@ impl Emitter<'_> {
         self.duplicates();
 
         let mut descriptor = String::from("(");
-        if outer.is_some() {
-            let this = Type::Object(self.this_class.clone(), Vec::new());
-            self.load(0, &this);
-            descriptor.push_str(&this.descriptor());
+        if let Some(enclosing) = &outer {
+            let held = Type::Object(enclosing.clone(), Vec::new());
+            if through_the_one_around {
+                self.reach_the_enclosing_instance(enclosing)?;
+            } else {
+                self.load(0, &held);
+            }
+            descriptor.push_str(&held.descriptor());
         }
         for local in &captured {
             self.load(local.slot, &local.what);
@@ -15332,6 +15492,61 @@ fn reached_the_same_way_twice(expression: &Expression) -> bool {
         Expression::Field { of, .. } => reached_the_same_way_twice(of),
         _ => false,
     }
+}
+
+/// How loosely one argument may be matched while choosing between two
+/// signatures that both take the right number.
+///
+/// A lambda and a method reference have no type until they have a target, and
+/// the target is what is being chosen -- so they fit wherever they are put and
+/// say nothing. `null` says almost as little: it fits anything that is not a
+/// number.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Loosely {
+    No,
+    Anywhere,
+    AnyReference,
+}
+
+/// What each argument of a call says about which signature is meant.
+fn how_loosely(arguments: &[Expression]) -> Vec<Loosely> {
+    arguments
+        .iter()
+        .map(|one| match one {
+            Expression::Lambda { .. } | Expression::MethodRef { .. } => Loosely::Anywhere,
+            Expression::Null => Loosely::AnyReference,
+            _ => Loosely::No,
+        })
+        .collect()
+}
+
+/// How far one type is from another, for choosing between two signatures that
+/// both fit. Zero is the same type; a number is how many widenings away.
+fn how_far(have: &Type, want: &Type) -> u32 {
+    if have == want {
+        return 0;
+    }
+    if let (Some(from), Some(to)) = (how_wide(have), how_wide(want)) {
+        return to.saturating_sub(from);
+    }
+    match want {
+        // Object takes anything, which is why it is the last resort.
+        Type::Object(named, _) if named == "java/lang/Object" => 50,
+        _ => 10,
+    }
+}
+
+/// Where a primitive sits in the order Java widens along.
+fn how_wide(what: &Type) -> Option<u32> {
+    Some(match what {
+        Type::Byte => 1,
+        Type::Short | Type::Char => 2,
+        Type::Int => 3,
+        Type::Long => 4,
+        Type::Float => 5,
+        Type::Double => 6,
+        _ => return None,
+    })
 }
 
 fn array_store(element: &Type) -> u8 {
@@ -20391,6 +20606,551 @@ public class Last {
         let mut sink = crate::diag::Sink::new();
         crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// The corners: an interface with a `private` method behind a `default`
+    /// one and a generic `static` factory, a class written inside a class
+    /// reaching the private method of the one around it, a `return` inside a
+    /// `try` whose `finally` writes to a parameter, a labelled `continue` out
+    /// of a `switch`, a `do` with a `continue` in it, an array of lists, a
+    /// jagged array, every narrowing cast, both floating-point widths, and a
+    /// pattern with a guard in a `?:`.
+    const THE_CORNERS_OF_IT: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+
+public class Twist {
+
+    interface Maker<T> {
+        T make();
+        private String hidden() { return "hidden"; }
+        default String shown() { return hidden() + "!"; }
+        static <X> Maker<X> of(X one) { return () -> one; }
+    }
+
+    static class Outer {
+        private int secret = 5;
+        private int doubled() { return secret * 2; }
+
+        class Inner {
+            int reach() { return doubled() + secret; }
+        }
+
+        Inner make() { return new Inner(); }
+    }
+
+    static int tricky(int of) {
+        try {
+            if (of == 0) return 1;
+            if (of == 1) throw new RuntimeException("one");
+            return 2;
+        } catch (RuntimeException why) {
+            return 3;
+        } finally {
+            of = -1;
+        }
+    }
+
+    static String loops() {
+        StringBuilder out = new StringBuilder();
+        outer:
+        for (int i = 0; i < 4; i++) {
+            switch (i) {
+                case 0:
+                    out.append('a');
+                    continue outer;
+                case 1:
+                    out.append('b');
+                    break;
+                case 2:
+                    out.append('c');
+                    continue;
+                default:
+                    out.append('d');
+                    break outer;
+            }
+            out.append('.');
+        }
+        int n = 0;
+        do {
+            n++;
+            if (n == 2) continue;
+            out.append(n);
+        } while (n < 4);
+        return out.toString();
+    }
+
+    @SafeVarargs
+    static <T> int howMany(T... items) { return items.length; }
+
+    static String escapes() {
+        return "tab\there\nnew\\slash\"quoteA " + '\n' + '\'' + (int) 'é';
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        Maker<String> maker = Maker.of("made");
+        out.append(maker.make()).append(maker.shown()).append(' ');
+
+        Outer.Inner inner = new Outer().make();
+        out.append(inner.reach()).append(' ');
+
+        out.append(tricky(0)).append(tricky(1)).append(tricky(2)).append(' ');
+        out.append(loops()).append(' ');
+
+        out.append(howMany("a", "b")).append(howMany(new String[] {"a"})).append(' ');
+
+        List<String>[] buckets = new List[2];
+        buckets[0] = new ArrayList<String>();
+        buckets[0].add("in");
+        out.append(buckets[0].get(0)).append(buckets.length).append(' ');
+
+        int[][] jagged = {{1}, {2, 3}, {}};
+        out.append(jagged[1][1]).append(jagged[2].length).append(' ');
+
+        long big = 1L << 62;
+        out.append(big).append(' ').append(Integer.MIN_VALUE).append(' ');
+        out.append(-2147483648).append(' ');
+        out.append((byte) 200).append((short) 70000).append((char) 65).append(' ');
+        out.append(1 / 3.0).append(' ').append(1.0f / 3).append(' ');
+        out.append(0.1 + 0.2).append(' ');
+        out.append(10 % 3).append(-10 % 3).append(' ');
+
+        Iterator<String> walk = Arrays.asList("x", "y").iterator();
+        while (walk.hasNext()) out.append(walk.next());
+        out.append(' ');
+
+        String text = escapes();
+        out.append(text.length()).append(' ');
+
+        Object held = "string";
+        String said = held instanceof String s && s.length() > 3 ? s.substring(0, 3) : "no";
+        out.append(said).append(' ');
+
+        out.append(new Twist().toString().startsWith("com.my.app.Twist@")).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_corners_of_the_language_give_back_what_javac_gives_back() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let produced = compile(THE_CORNERS_OF_IT, &classpath).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Twist") {
+            None => eprintln!("java: no JVM here to run the corners"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "madehidden! 15 132 ab.cd134 21 in2 30 4611686018427387904 \
+                     -2147483648 -2147483648 -564464A 0.3333333333333333 0.33333334 \
+                     0.30000000000000004 1-1 xy 31 str true"
+                );
+                eprintln!("java: the corners of the language, and javac's answer");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// A generic class with a bound and two constructors chained through
+    /// `this(...)`, a switch expression over `null` and patterns with a guard,
+    /// a switch over strings with several labels on an arm and a `yield`, a
+    /// `continue` and a `break` out of a `try` with a `finally`, a `finally`
+    /// that runs on the way out of a throw, a lambda that throws a checked
+    /// exception, three overloads of one name chosen by what is handed over,
+    /// and a `? super` parameter.
+    const THE_EDGES_OF_IT: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Edge {
+
+    static class Node<T extends Comparable<T>> {
+        private final T value;
+        private Node<T> next;
+
+        Node(T value) { this(value, null); }
+        Node(T value, Node<T> next) { this.value = value; this.next = next; }
+
+        Node<T> push(T one) { return new Node<T>(one, this); }
+        T value() { return value; }
+        Node<T> next() { return next; }
+
+        T biggest() {
+            T best = value;
+            for (Node<T> at = next; at != null; at = at.next) {
+                if (at.value.compareTo(best) > 0) best = at.value;
+            }
+            return best;
+        }
+    }
+
+    static String kind(Object of) {
+        return switch (of) {
+            case null -> "null";
+            case Integer i when i > 10 -> "big int";
+            case Integer i -> "int " + i;
+            case String s -> "text " + s.length();
+            default -> "other";
+        };
+    }
+
+    static int weekday(String of) {
+        return switch (of) {
+            case "mon", "tue", "wed", "thu", "fri" -> 1;
+            case "sat", "sun" -> 2;
+            default -> {
+                int n = of.length();
+                yield -n;
+            }
+        };
+    }
+
+    static String cleanly() {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            try {
+                if (i == 1) continue;
+                if (i == 2) break;
+                out.append('a');
+            } finally {
+                out.append(i);
+            }
+        }
+        try {
+            try {
+                throw new IllegalStateException("inner");
+            } finally {
+                out.append('f');
+            }
+        } catch (IllegalStateException why) {
+            out.append(why.getMessage().length());
+        }
+        return out.toString();
+    }
+
+    interface Guessing { int guess() throws Exception; }
+
+    static int attempt(Guessing of) {
+        try {
+            return of.guess();
+        } catch (Exception why) {
+            return -1;
+        }
+    }
+
+    static String say(Object of) { return "object"; }
+    static String say(String of) { return "string"; }
+    static String say(Integer of) { return "integer"; }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        Node<String> chain = new Node<String>("b").push("a").push("c");
+        out.append(chain.value()).append(chain.next().value()).append(chain.biggest()).append(' ');
+
+        out.append(kind(null)).append('/').append(kind(4)).append('/').append(kind(40))
+           .append('/').append(kind("abc")).append('/').append(kind(1.5)).append(' ');
+
+        out.append(weekday("mon")).append(weekday("sun")).append(weekday("later")).append(' ');
+        out.append(cleanly()).append(' ');
+
+        out.append(attempt(() -> 7)).append(' ');
+        out.append(attempt(() -> { throw new Exception("no"); })).append(' ');
+
+        out.append(say("x")).append('/').append(say(5)).append('/').append(say(1.5)).append(' ');
+        out.append(say((Object) "x")).append(' ');
+
+        Map<String, List<Integer>> deep = new HashMap<String, List<Integer>>();
+        deep.put("a", new ArrayList<Integer>(Arrays.asList(1, 2)));
+        deep.get("a").add(3);
+        out.append(deep.get("a").size()).append(deep.get("a").get(2)).append(' ');
+
+        List<? super Integer> wide = new ArrayList<Number>();
+        wide.add(1);
+        out.append(wide.size()).append(' ');
+
+        StringBuilder sum = new StringBuilder();
+        for (Map.Entry<String, List<Integer>> one : deep.entrySet()) {
+            for (Integer held : one.getValue()) sum.append(held);
+        }
+        out.append(sum).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_edges_of_the_language_give_back_what_javac_gives_back() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let produced = compile(THE_EDGES_OF_IT, &classpath).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Edge") {
+            None => eprintln!("java: no JVM here to run the edges"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "cac null/int 4/big int/text 3/other 12-5 a012f5 7 -1 \
+                     string/integer/object object 33 1 123"
+                );
+                eprintln!("java: the edges of the language, and javac's answer");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// The screen somebody actually writes: an activity that keeps a list,
+    /// builds its views in code, watches a text field, shows a dialog from
+    /// inside a lambda that itself takes two more lambdas, reads and writes
+    /// preferences, posts to the main thread, and answers an intent.
+    ///
+    /// Every type in it comes out of `android.jar`. It has no `main`, so what
+    /// is checked is that it compiles, that every class it turns into reaches
+    /// Dalvik, and that the dex our own reader reads back has nothing to say
+    /// about it.
+    const THE_SCREEN_SOMEBODY_WRITES: &str = r####"
+package com.my.app;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Color;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ListView;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Date;
+import java.util.List;
+import java.util.Locale;
+
+public class MainActivity extends Activity {
+
+    private static final String KEPT = "kept.rows";
+
+    private final List<String> rows = new ArrayList<String>();
+    private ArrayAdapter<String> adapter;
+    private EditText field;
+    private TextView counter;
+    private SharedPreferences settings;
+    private final Handler onTheMainThread = new Handler(Looper.getMainLooper());
+
+    @Override
+    protected void onCreate(Bundle saved) {
+        super.onCreate(saved);
+        settings = getSharedPreferences("state", Context.MODE_PRIVATE);
+
+        LinearLayout screen = new LinearLayout(this);
+        screen.setOrientation(LinearLayout.VERTICAL);
+        screen.setPadding(24, 24, 24, 24);
+        screen.setBackgroundColor(Color.WHITE);
+
+        counter = new TextView(this);
+        counter.setTextSize(18f);
+        counter.setGravity(Gravity.CENTER);
+        screen.addView(counter, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        field = new EditText(this);
+        field.setHint("write something");
+        field.addTextChangedListener(new TextWatcher() {
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                counter.setText(s.length() + " letters");
+            }
+            public void afterTextChanged(Editable s) {}
+        });
+        screen.addView(field);
+
+        Button add = new Button(this);
+        add.setText("add");
+        add.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View which) {
+                String said = field.getText().toString().trim();
+                if (said.isEmpty()) {
+                    Toast.makeText(MainActivity.this, "nothing to add", Toast.LENGTH_SHORT).show();
+                    return;
+                }
+                rows.add(stamped(said));
+                Collections.sort(rows);
+                adapter.notifyDataSetChanged();
+                field.setText("");
+                keep();
+            }
+        });
+        screen.addView(add);
+
+        Button clear = new Button(this);
+        clear.setText("clear");
+        clear.setOnClickListener(which -> new AlertDialog.Builder(this)
+            .setTitle("clear everything?")
+            .setPositiveButton("yes", (dialog, at) -> {
+                rows.clear();
+                adapter.notifyDataSetChanged();
+                keep();
+            })
+            .setNegativeButton("no", null)
+            .show());
+        screen.addView(clear);
+
+        ListView list = new ListView(this);
+        adapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, rows);
+        list.setAdapter(adapter);
+        list.setOnItemClickListener(new AdapterView.OnItemClickListener() {
+            @Override
+            public void onItemClick(AdapterView<?> parent, View view, int position, long id) {
+                Toast.makeText(MainActivity.this, rows.get(position), Toast.LENGTH_SHORT).show();
+            }
+        });
+        screen.addView(list, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        setContentView(screen);
+        restore();
+
+        onTheMainThread.postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                counter.setText(rows.size() + " kept");
+            }
+        }, 250L);
+    }
+
+    private String stamped(String said) {
+        SimpleDateFormat when = new SimpleDateFormat("HH:mm", Locale.US);
+        return when.format(new Date()) + "  " + said;
+    }
+
+    private void keep() {
+        StringBuilder joined = new StringBuilder();
+        for (int i = 0; i < rows.size(); i++) {
+            if (i > 0) joined.append('\n');
+            joined.append(rows.get(i));
+        }
+        settings.edit().putString(KEPT, joined.toString()).apply();
+    }
+
+    private void restore() {
+        String held = settings.getString(KEPT, "");
+        rows.clear();
+        if (!held.isEmpty()) {
+            for (String one : held.split("\n")) rows.add(one);
+        }
+        adapter.notifyDataSetChanged();
+        counter.setText(rows.size() + " kept");
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        if (intent != null && intent.getStringExtra("add") != null) {
+            rows.add(stamped(intent.getStringExtra("add")));
+            adapter.notifyDataSetChanged();
+        }
+    }
+}
+"####;
+
+    #[test]
+    fn the_screen_somebody_actually_writes_compiles_and_reaches_a_dex() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let produced = compile(THE_SCREEN_SOMEBODY_WRITES, &classpath).expect("must compile");
+        // The activity, the anonymous classes, and the lambdas -- including
+        // the two written inside another lambda.
+        assert!(produced.len() >= 6, "{:?}", produced.len());
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        if let Some(said) = dexdump_disassembly(&dex) {
+            assert!(said.contains("MainActivity.onCreate"), "{said}");
+        }
+        eprintln!("java: the screen somebody actually writes, all the way to a dex");
     }
 
     #[test]
