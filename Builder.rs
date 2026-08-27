@@ -15693,9 +15693,13 @@ pub mod dexwrite {
                     pools.fields.push(field.reference.clone());
                 }
             }
-            // The first constructor a constructor calls is the one it hands
-            // off to, and that is either its own class's or its superclass's.
-            // Anything after it is a `new`, which may make whatever it likes.
+            // A constructor hands off to one of its own class's or its
+            // superclass's, and every other `<init>` it calls belongs to
+            // something it made itself. Which is which is a matter of
+            // counting: a `new-instance` is waiting for its constructor, so an
+            // `<init>` call with any of those outstanding belongs to one of
+            // them, and the first one with none outstanding is the hand-off.
+            //
             // Writing the wrong class there produces a dex that reads, that
             // disassembles, and that a device refuses the moment it tries to
             // load it -- which is a long way from here.
@@ -15703,15 +15707,32 @@ pub mod dexwrite {
                 if method.reference.name != "<init>" {
                     continue;
                 }
-                let Some(called) =
-                    method
-                        .instructions
-                        .iter()
-                        .find_map(|instruction| match &instruction.operand {
-                            Operand::Method(called) if called.name == "<init>" => Some(called),
-                            _ => None,
-                        })
-                else {
+                let mut waiting = 0usize;
+                let mut handed_off = None;
+                for instruction in &method.instructions {
+                    // new-instance is 0x22, in the low byte of the first unit.
+                    if instruction
+                        .units
+                        .first()
+                        .is_some_and(|one| one & 0xff == 0x22)
+                    {
+                        waiting += 1;
+                        continue;
+                    }
+                    let Operand::Method(called) = &instruction.operand else {
+                        continue;
+                    };
+                    if called.name != "<init>" {
+                        continue;
+                    }
+                    if waiting > 0 {
+                        waiting -= 1;
+                        continue;
+                    }
+                    handed_off = Some(called);
+                    break;
+                }
+                let Some(called) = handed_off else {
                     continue;
                 };
                 if called.class != class.descriptor && called.class != class.superclass {

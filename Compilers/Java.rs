@@ -3268,7 +3268,8 @@ impl Parser {
                 }
                 Token::Punctuation(">") => 1,
                 // The lexer reads `>>` as one shift, and in a type it is two
-                // closing brackets.
+                // closing brackets -- or, in `Map<String, List<T>> held`, one
+                // closing bracket and the start of whatever follows.
                 Token::Punctuation(">>") => 2,
                 Token::Punctuation(">>>") => 3,
                 Token::End => {
@@ -3281,17 +3282,16 @@ impl Parser {
                 }
                 _ => 0,
             };
-            if closes > 0 {
-                if closes > depth {
-                    return Err(at(
-                        "EJ115",
-                        self.line(),
-                        self.column(),
-                        "A type argument list closes more levels than it opened.",
-                    ));
-                }
-                depth -= closes;
+            if closes > depth {
+                // More `>` than there are lists open: the rest of the token
+                // belongs to what comes next, so it is left there.
+                self.tokens[self.at].token = match closes - depth {
+                    1 => Token::Punctuation(">"),
+                    _ => Token::Punctuation(">>"),
+                };
+                return Ok(());
             }
+            depth -= closes;
             self.take();
             if depth == 0 {
                 return Ok(());
@@ -4917,6 +4917,17 @@ impl Classpath {
             },
         };
 
+        // The shell wrote down what the superclass was called; here, with
+        // every type in the compilation already on the classpath, the name it
+        // stands for can be worked out. Leaving it as written is what made
+        // `class TooBig extends Exception` a class whose parent nothing could
+        // find, and `getMessage` on one a method nobody had heard of.
+        if let Some(named) = &unit.extends {
+            if let Some(found) = resolve_named(self, unit, named) {
+                known.superclass = Some(found);
+            }
+        }
+
         let shallow = |written: &Written| -> Option<Type> {
             fn walk(classpath: &Classpath, unit: &Unit, written: &Written) -> Option<Type> {
                 Some(match written {
@@ -6342,7 +6353,189 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ),
     ("java/util/Map", "keySet", "()Ljava/util/Set;", false),
     ("java/util/Map", "values", "()Ljava/util/Collection;", false),
+    ("java/util/Map", "entrySet", "()Ljava/util/Set;", false),
+    (
+        "java/util/Map",
+        "containsValue",
+        "(Ljava/lang/Object;)Z",
+        false,
+    ),
+    (
+        "java/util/Map",
+        "getOrDefault",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        false,
+    ),
+    (
+        "java/util/Map",
+        "putIfAbsent",
+        "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+        false,
+    ),
+    ("java/util/Map", "putAll", "(Ljava/util/Map;)V", false),
+    (
+        "java/util/Map$Entry",
+        "getKey",
+        "()Ljava/lang/Object;",
+        false,
+    ),
+    (
+        "java/util/Map$Entry",
+        "getValue",
+        "()Ljava/lang/Object;",
+        false,
+    ),
+    (
+        "java/util/Collection",
+        "addAll",
+        "(Ljava/util/Collection;)Z",
+        false,
+    ),
+    (
+        "java/util/Collection",
+        "removeAll",
+        "(Ljava/util/Collection;)Z",
+        false,
+    ),
+    (
+        "java/util/Collection",
+        "containsAll",
+        "(Ljava/util/Collection;)Z",
+        false,
+    ),
+    (
+        "java/util/Collection",
+        "toArray",
+        "()[Ljava/lang/Object;",
+        false,
+    ),
+    ("java/util/List", "subList", "(II)Ljava/util/List;", false),
+    (
+        "java/util/List",
+        "lastIndexOf",
+        "(Ljava/lang/Object;)I",
+        false,
+    ),
+    ("java/util/Iterator", "remove", "()V", false),
+    // The collections a person actually writes `new` in front of.
+    ("java/util/ArrayList", "<init>", "()V", false),
+    ("java/util/ArrayList", "<init>", "(I)V", false),
+    (
+        "java/util/ArrayList",
+        "<init>",
+        "(Ljava/util/Collection;)V",
+        false,
+    ),
+    ("java/util/LinkedList", "<init>", "()V", false),
+    (
+        "java/util/LinkedList",
+        "<init>",
+        "(Ljava/util/Collection;)V",
+        false,
+    ),
+    ("java/util/HashSet", "<init>", "()V", false),
+    ("java/util/HashSet", "<init>", "(I)V", false),
+    (
+        "java/util/HashSet",
+        "<init>",
+        "(Ljava/util/Collection;)V",
+        false,
+    ),
+    ("java/util/LinkedHashSet", "<init>", "()V", false),
+    ("java/util/TreeSet", "<init>", "()V", false),
+    (
+        "java/util/TreeSet",
+        "<init>",
+        "(Ljava/util/Collection;)V",
+        false,
+    ),
     ("java/util/HashMap", "<init>", "()V", false),
+    ("java/util/HashMap", "<init>", "(I)V", false),
+    ("java/util/HashMap", "<init>", "(Ljava/util/Map;)V", false),
+    ("java/util/LinkedHashMap", "<init>", "()V", false),
+    ("java/util/TreeMap", "<init>", "()V", false),
+    ("java/util/TreeMap", "<init>", "(Ljava/util/Map;)V", false),
+    // The static helpers beside them.
+    ("java/util/Collections", "sort", "(Ljava/util/List;)V", true),
+    (
+        "java/util/Collections",
+        "sort",
+        "(Ljava/util/List;Ljava/util/Comparator;)V",
+        true,
+    ),
+    (
+        "java/util/Collections",
+        "reverse",
+        "(Ljava/util/List;)V",
+        true,
+    ),
+    (
+        "java/util/Collections",
+        "shuffle",
+        "(Ljava/util/List;)V",
+        true,
+    ),
+    (
+        "java/util/Collections",
+        "max",
+        "(Ljava/util/Collection;)Ljava/lang/Object;",
+        true,
+    ),
+    (
+        "java/util/Collections",
+        "min",
+        "(Ljava/util/Collection;)Ljava/lang/Object;",
+        true,
+    ),
+    (
+        "java/util/Collections",
+        "emptyList",
+        "()Ljava/util/List;",
+        true,
+    ),
+    (
+        "java/util/Collections",
+        "unmodifiableList",
+        "(Ljava/util/List;)Ljava/util/List;",
+        true,
+    ),
+    (
+        "java/util/Collections",
+        "unmodifiableMap",
+        "(Ljava/util/Map;)Ljava/util/Map;",
+        true,
+    ),
+    (
+        "java/util/Comparator",
+        "compare",
+        "(Ljava/lang/Object;Ljava/lang/Object;)I",
+        false,
+    ),
+    (
+        "java/lang/Comparable",
+        "compareTo",
+        "(Ljava/lang/Object;)I",
+        false,
+    ),
+    ("java/util/Arrays", "sort", "([J)V", true),
+    ("java/util/Arrays", "sort", "([D)V", true),
+    ("java/util/Arrays", "sort", "([C)V", true),
+    ("java/util/Arrays", "sort", "([Ljava/lang/Object;)V", true),
+    ("java/util/Arrays", "copyOf", "([II)[I", true),
+    (
+        "java/util/Arrays",
+        "copyOf",
+        "([Ljava/lang/Object;I)[Ljava/lang/Object;",
+        true,
+    ),
+    ("java/util/Arrays", "equals", "([I[I)Z", true),
+    (
+        "java/util/Arrays",
+        "toString",
+        "([I)Ljava/lang/String;",
+        true,
+    ),
+    ("java/util/Arrays", "hashCode", "([I)I", true),
     (
         "java/util/Objects",
         "requireNonNull",
@@ -6617,6 +6810,53 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
 /// that is two steps up.
 const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ("java/lang/String", "java/lang/CharSequence"),
+    ("java/lang/String", "java/lang/Comparable"),
+    ("java/lang/StringBuilder", "java/lang/CharSequence"),
+    // The exceptions, which are a tree like anything else and are asked about
+    // as one: a `catch` of a parent has to accept a child.
+    ("java/lang/Exception", "java/lang/Throwable"),
+    ("java/lang/Error", "java/lang/Throwable"),
+    ("java/lang/RuntimeException", "java/lang/Exception"),
+    ("java/lang/AssertionError", "java/lang/Error"),
+    (
+        "java/lang/ArithmeticException",
+        "java/lang/RuntimeException",
+    ),
+    ("java/lang/ClassCastException", "java/lang/RuntimeException"),
+    (
+        "java/lang/IllegalArgumentException",
+        "java/lang/RuntimeException",
+    ),
+    (
+        "java/lang/IllegalStateException",
+        "java/lang/RuntimeException",
+    ),
+    (
+        "java/lang/IndexOutOfBoundsException",
+        "java/lang/RuntimeException",
+    ),
+    (
+        "java/lang/ArrayIndexOutOfBoundsException",
+        "java/lang/IndexOutOfBoundsException",
+    ),
+    (
+        "java/lang/NullPointerException",
+        "java/lang/RuntimeException",
+    ),
+    (
+        "java/lang/NumberFormatException",
+        "java/lang/IllegalArgumentException",
+    ),
+    (
+        "java/lang/UnsupportedOperationException",
+        "java/lang/RuntimeException",
+    ),
+    ("java/lang/InterruptedException", "java/lang/Exception"),
+    (
+        "java/lang/CloneNotSupportedException",
+        "java/lang/Exception",
+    ),
+    ("java/io/IOException", "java/lang/Exception"),
     ("android/app/Activity", "android/content/Context"),
     ("android/widget/TextView", "android/view/View"),
     ("android/widget/Button", "android/widget/TextView"),
@@ -6625,7 +6865,13 @@ const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ("java/util/List", "java/util/Collection"),
     ("java/util/Set", "java/util/Collection"),
     ("java/util/ArrayList", "java/util/List"),
+    ("java/util/LinkedList", "java/util/List"),
+    ("java/util/HashSet", "java/util/Set"),
+    ("java/util/LinkedHashSet", "java/util/HashSet"),
+    ("java/util/TreeSet", "java/util/Set"),
     ("java/util/HashMap", "java/util/Map"),
+    ("java/util/LinkedHashMap", "java/util/HashMap"),
+    ("java/util/TreeMap", "java/util/Map"),
     ("java/lang/Integer", "java/lang/Number"),
     ("java/lang/Long", "java/lang/Number"),
     ("java/lang/Double", "java/lang/Number"),
@@ -6658,6 +6904,9 @@ const BUILT_IN_INTERFACES: &[&str] = &[
     "java/util/List",
     "java/util/Set",
     "java/util/Map",
+    "java/util/Map$Entry",
+    "java/util/Comparator",
+    "java/lang/Comparable",
 ];
 
 /// The exceptions this compiler knows how to construct without being handed
@@ -6915,9 +7164,19 @@ const WELL_KNOWN: &[&str] = &[
     "java/util/Set",
     "java/util/Map",
     "java/util/ArrayList",
+    "java/util/LinkedList",
+    "java/util/HashSet",
+    "java/util/LinkedHashSet",
+    "java/util/TreeSet",
     "java/util/HashMap",
+    "java/util/LinkedHashMap",
+    "java/util/TreeMap",
+    "java/util/Map$Entry",
+    "java/util/Comparator",
+    "java/util/Collections",
     "java/util/Objects",
     "java/util/Arrays",
+    "java/lang/Comparable",
     "android/app/Activity",
     "android/content/Context",
     "android/content/Intent",
@@ -8637,6 +8896,17 @@ impl Emitter<'_> {
                 .methods
                 .iter()
                 .find(|held| held.name == name && held.parameters.len() == arguments.len())
+                // A method written with `...` answers to any number of
+                // arguments from its fixed ones upwards, so counting is not
+                // enough to find one.
+                .or_else(|| {
+                    self.unit.methods.iter().find(|held| {
+                        held.name == name
+                            && held.variadic
+                            && !held.parameters.is_empty()
+                            && held.parameters.len() - 1 <= arguments.len()
+                    })
+                })
                 .cloned();
             let Some(own) = own else {
                 // Not written here, so it comes from above: `setContentView`
@@ -8754,17 +9024,17 @@ impl Emitter<'_> {
                 parameters.push(self.resolve(what, line)?);
             }
             let returns = self.resolve(&own.returns, line)?;
-            let descriptor = Signature {
+            let signature = Signature {
                 owner: self.this_class.clone(),
                 name: name.to_string(),
                 parameters: parameters.clone(),
                 returns: returns.clone(),
                 static_: own.modifiers.static_,
                 interface: false,
-                variadic: false,
+                variadic: own.variadic,
                 abstract_: false,
-            }
-            .descriptor();
+            };
+            let descriptor = signature.descriptor();
 
             if !own.modifiers.static_ {
                 if self.static_ {
@@ -8777,7 +9047,10 @@ impl Emitter<'_> {
                 }
                 self.load(0, &Type::Object(self.this_class.clone()));
             }
-            self.arguments_for(&parameters, arguments, line)?;
+            // Through the signature rather than the parameter list, because a
+            // method of this class written with `...` packs its trailing
+            // arguments into an array the same as any other.
+            self.arguments_for_signature(&signature, arguments, line)?;
             let owner = self.this_class.clone();
             let inside_an_interface = self.unit.shape == Shape::Interface;
             let index = self
@@ -8810,6 +9083,41 @@ impl Emitter<'_> {
             self.pushes(&returns);
             return Ok(returns);
         };
+
+        // `java.util.Collections.sort(...)`: a class written out in full is a
+        // chain of field reads until the call arrives and says otherwise.
+        if !matches!(on, Expression::Name(_)) {
+            if let Some(path) = written_as_a_path(on) {
+                let head = path.split('.').next().unwrap_or_default();
+                if self.meant_as_a_class(head) {
+                    if let Some(owner) = resolve_named(self.classpath, self.unit, &path) {
+                        if let Some(signature) =
+                            self.signature_for(&owner, name, arguments, line)?
+                        {
+                            if signature.static_ {
+                                self.arguments_for_signature(&signature, arguments, line)?;
+                                let descriptor = signature.descriptor();
+                                let index = self.pool.method(
+                                    &signature.owner,
+                                    name,
+                                    &descriptor,
+                                    signature.interface,
+                                );
+                                self.op2(0xb8, index);
+                                let taken: i32 = signature
+                                    .parameters
+                                    .iter()
+                                    .map(|one| i32::from(one.width()))
+                                    .sum();
+                                self.pops(taken);
+                                self.pushes(&signature.returns);
+                                return Ok(signature.returns);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // `something.name(...)`. If `something` is a bare name that is a class
         // rather than a value, this is a static call.
@@ -9073,37 +9381,53 @@ impl Emitter<'_> {
         if from == to || to == "java/lang/Object" {
             return true;
         }
-        // Everything above it, as far as anything here can see. A class the
-        // classpath has never heard of has one ancestor -- itself -- and the
-        // built-in table is asked for the rest.
-        if self.classpath.ancestors(from).iter().any(|one| one == to) {
-            return true;
-        }
-        let mut at = Some(from.as_str());
-        let mut steps = 0;
-        while let Some(current) = at {
-            if current == to {
-                return true;
-            }
-            steps += 1;
-            if steps > 32 {
+        // Everything above it, as far as anything here can see: what the
+        // classpath was told, and what the built-in table says. A class may
+        // have more than one thing above it -- a superclass and its interfaces
+        // -- so this walks all of them rather than one chain.
+        let mut seen = vec![from.clone()];
+        let mut waiting = vec![from.clone()];
+        while let Some(current) = waiting.pop() {
+            if seen.len() > 64 {
                 break;
             }
-            at = BUILT_IN_ABOVE
-                .iter()
-                .find(|(below, _)| *below == current)
-                .map(|(_, above)| *above);
-        }
-        if let Some(known) = self.classpath.get(from) {
-            if known.interface {
-                return false;
+            let mut above: Vec<String> = self
+                .classpath
+                .ancestors(&current)
+                .into_iter()
+                .filter(|one| *one != current)
+                .collect();
+            above.extend(
+                BUILT_IN_ABOVE
+                    .iter()
+                    .filter(|(below, _)| *below == current)
+                    .map(|(_, held)| (*held).to_string()),
+            );
+            for one in above {
+                if one == *to {
+                    return true;
+                }
+                if !seen.contains(&one) {
+                    seen.push(one.clone());
+                    waiting.push(one);
+                }
             }
         }
         // Neither side is anything this compilation was told about, so the
         // question cannot be answered and the older, looser answer stands.
-        self.classpath.get(from).is_none()
-            && self.classpath.get(to).is_none()
-            && !BUILT_IN_ABOVE.iter().any(|(below, _)| *below == from)
+        !self.a_class_this_knows(from) || !self.a_class_this_knows(to)
+    }
+
+    /// Whether this compilation has been told anything about a class, either
+    /// as a dependency or by the built-in tables.
+    fn a_class_this_knows(&self, name: &str) -> bool {
+        self.classpath.get(name).is_some()
+            || WELL_KNOWN.contains(&name)
+            || BUILT_IN_INTERFACES.contains(&name)
+            || BUILT_IN_THROWABLES.contains(&name)
+            || BUILT_IN_ABOVE
+                .iter()
+                .any(|(below, above)| *below == name || *above == name)
     }
 
     /// Every signature of this name and shape that could be meant.
@@ -9242,10 +9566,22 @@ impl Emitter<'_> {
                 ),
             ));
         }
-        if wanted {
-            self.op(if what.width() == 2 { 0x5c } else { 0x59 });
-            self.pushes(&what);
-        }
+        // `c = (this.x = b)` keeps the value. For a static field a `dup` is
+        // enough; for an instance one the object is underneath it, so the
+        // value goes into a slot and is read back -- which is what Dalvik,
+        // being a register machine with no stack shuffles, needs anyway.
+        self.open();
+        let held = wanted.then(|| {
+            if field.modifiers.static_ {
+                self.op(if what.width() == 2 { 0x5c } else { 0x59 });
+                self.pushes(&what);
+                return None;
+            }
+            let slot = self.declare("$assigned", what.clone());
+            self.store(slot, &what);
+            self.load(slot, &what);
+            Some(slot)
+        });
         let descriptor = what.descriptor();
         let index = self.pool.field(&owner, name, &descriptor);
         if field.modifiers.static_ {
@@ -9255,6 +9591,10 @@ impl Emitter<'_> {
             self.op2(0xb5, index);
             self.pops(i32::from(what.width()) + 1);
         }
+        if let Some(Some(slot)) = held {
+            self.load(slot, &what);
+        }
+        self.close();
         Ok(what)
     }
 
@@ -9544,16 +9884,10 @@ impl Emitter<'_> {
                 return Ok(local.what);
             }
         }
-        // Anything else becomes the assignment it means.
-        let value = Expression::Assign {
-            target: Box::new(target.clone()),
-            operator: Some(if by > 0 {
-                Binary::Add
-            } else {
-                Binary::Subtract
-            }),
-            value: Box::new(Expression::Int(1)),
-        };
+        // Anything else becomes the assignment it means. Written as an
+        // assignment rather than run as one: `held++;` on its own leaves
+        // nothing behind, and evaluating it as a value would leave the new
+        // value on the stack under whatever comes next.
         if after && wanted {
             return Err(unsupported(
                 line,
@@ -9561,11 +9895,22 @@ impl Emitter<'_> {
                 "Using the old value of a stepped field",
             ));
         }
-        self.value(&value, line)?;
+        let operator = if by > 0 {
+            Binary::Add
+        } else {
+            Binary::Subtract
+        };
+        let found = self.assign(
+            target,
+            Some(operator),
+            &Expression::Int(i64::from(by.abs())),
+            line,
+            wanted,
+        )?;
         if !wanted {
             return Ok(Type::Void);
         }
-        Ok(Type::Int)
+        Ok(found)
     }
 }
 
@@ -12373,7 +12718,10 @@ impl Emitter<'_> {
                 } => self.array_of(&element, values, *written)?,
                 other => self.value_for(other, &element, line)?,
             };
-            if !found.may_be_given_to(&element) {
+            // `fit` widens a primitive and puts one in its box where the
+            // array holds objects, which is what `Object[] held = { 1, "a" }`
+            // means and what a varargs call packs.
+            if !self.fit(&found, &element, line)? {
                 return Err(at(
                     "EJ121",
                     line,
@@ -12384,9 +12732,6 @@ impl Emitter<'_> {
                         found.readable()
                     ),
                 ));
-            }
-            if !found.is_reference() {
-                self.convert(&found, &element, line)?;
             }
             self.op(store);
             self.pops(2 + i32::from(element.width()));
@@ -16339,6 +16684,243 @@ public final class Everything {
     }
 }
 "####;
+
+    /// The Java a person writes on an ordinary afternoon.
+    ///
+    /// Not a list of features: an exception of one's own, a `try` that closes
+    /// what it opened, a map read back in order, arithmetic that has to carry,
+    /// a labelled loop, a `finally` that runs after the `return` has decided,
+    /// varargs, a bounded type parameter and a lambda for a generic interface.
+    const AN_ORDINARY_AFTERNOON: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+class TooBig extends Exception {
+    private final int value;
+
+    TooBig(int value) {
+        super("too big: " + value);
+        this.value = value;
+    }
+
+    int value() {
+        return value;
+    }
+}
+
+class Counter implements AutoCloseable {
+    static int closed;
+    private int held;
+
+    int next() {
+        held++;
+        return held;
+    }
+
+    @Override
+    public void close() {
+        closed++;
+    }
+}
+
+interface Named<T> {
+    String name(T of);
+
+    default String twice(T of) {
+        return name(of) + name(of);
+    }
+}
+
+public class Daily {
+
+    private static final Map<String, Integer> AGES = new HashMap<String, Integer>();
+
+    static {
+        AGES.put("a", 1);
+        AGES.put("b", 2);
+    }
+
+    static int checked(int value) throws TooBig {
+        if (value > 10) {
+            throw new TooBig(value);
+        }
+        return value;
+    }
+
+    static String caught(int value) {
+        try {
+            return "ok " + checked(value);
+        } catch (TooBig e) {
+            return e.getMessage() + " " + e.value();
+        }
+    }
+
+    static int closing() {
+        try (Counter one = new Counter(); Counter two = new Counter()) {
+            return one.next() + two.next();
+        }
+    }
+
+    static String mapped() {
+        StringBuilder out = new StringBuilder();
+        List<String> keys = new ArrayList<String>(AGES.keySet());
+        java.util.Collections.sort(keys);
+        for (String key : keys) {
+            out.append(key).append('=').append(AGES.get(key)).append(';');
+        }
+        return out.toString();
+    }
+
+    static long arithmetic(long a, int b) {
+        long total = a * b;
+        total += b;
+        total /= 2;
+        total %= 1000;
+        return total;
+    }
+
+    static double floating(double a, float b) {
+        return a / b + (double) b;
+    }
+
+    static String characters(char at) {
+        switch (at) {
+            case 'a':
+            case 'b':
+                return "early";
+            case 'z':
+                return "late";
+            default:
+                return "middle";
+        }
+    }
+
+    static int labelled(int[][] grid) {
+        int found = 0;
+        outer:
+        for (int i = 0; i < grid.length; i++) {
+            for (int j = 0; j < grid[i].length; j++) {
+                if (grid[i][j] < 0) {
+                    continue outer;
+                }
+                if (grid[i][j] > 100) {
+                    break outer;
+                }
+                found += grid[i][j];
+            }
+        }
+        return found;
+    }
+
+    static String finallyWins() {
+        StringBuilder out = new StringBuilder();
+        try {
+            out.append("try ");
+            return out.toString().trim();
+        } finally {
+            out.append("finally");
+        }
+    }
+
+    static String join(Object... parts) {
+        StringBuilder out = new StringBuilder();
+        for (Object one : parts) {
+            out.append(one).append('|');
+        }
+        return out.toString();
+    }
+
+    static <T extends Comparable<T>> T biggest(List<T> of) {
+        T best = of.get(0);
+        for (T one : of) {
+            if (one.compareTo(best) > 0) {
+                best = one;
+            }
+        }
+        return best;
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+        out.append(caught(3)).append(' ');
+        out.append(caught(30)).append(' ');
+        out.append(closing()).append(' ');
+        out.append(Counter.closed).append(' ');
+        out.append(mapped()).append(' ');
+        out.append(arithmetic(7L, 5)).append(' ');
+        out.append(floating(9.0, 2.0f)).append(' ');
+        out.append(characters('a')).append(' ');
+        out.append(characters('z')).append(' ');
+        out.append(characters('q')).append(' ');
+        out.append(labelled(new int[][] {{1, 2}, {-1, 3}, {4}})).append(' ');
+        out.append(finallyWins()).append(' ');
+        out.append(join(1, "a", 2.5)).append(' ');
+
+        List<String> words = Arrays.asList("pear", "apple", "quince");
+        out.append(biggest(new ArrayList<String>(words))).append(' ');
+
+        Named<Integer> named = value -> "n" + value;
+        out.append(named.twice(4)).append(' ');
+
+        Object[] mixed = {1, "a", 2.5};
+        out.append(mixed.length).append(' ');
+        out.append(String.format("%s-%d", "x", Integer.valueOf(3))).append(' ');
+
+        System.out.println(out.toString());
+    }
+}
+"####;
+
+    #[test]
+    fn the_java_an_ordinary_afternoon_is_written_in_runs() {
+        let produced = compile(AN_ORDINARY_AFTERNOON, &empty()).expect("all of it must compile");
+        for (file, bytes) in &produced {
+            let one = file.trim_end_matches(".class");
+            match jvm_verifies(one, bytes) {
+                None | Some(Verdict::TooOld(_)) => {
+                    eprintln!("java: no JVM new enough here for an ordinary afternoon");
+                    return;
+                }
+                Some(Verdict::Refused(said)) => panic!("a real JVM refused {file}:\n{said}"),
+                Some(Verdict::Verified) => {}
+            }
+        }
+        match jvm_runs(&produced, "com.my.app.Daily") {
+            None => eprintln!("java: no JVM here to run an ordinary afternoon"),
+            Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
+            Some(Ok(said)) => assert_eq!(
+                said.trim(),
+                "ok 3 too big: 30 30 2 2 a=1;b=2; 20 6.5 early late middle 7 try \
+                 1|a|2.5| quince n4n4 3 x-3",
+                "what it printed is not what javac's own build of the same source prints"
+            ),
+        }
+
+        // And to Dalvik, which is where it would actually run.
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, bytes)| {
+                let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+
+        eprintln!(
+            "java: an ordinary afternoon -- {} classes, run, and into a {} byte dex",
+            produced.len(),
+            dex.len()
+        );
+    }
 
     #[test]
     fn a_static_import_puts_a_name_here_without_its_class() {
