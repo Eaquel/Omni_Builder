@@ -5833,6 +5833,51 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "()Ljava/lang/String;",
         false,
     ),
+    // What a class file says about itself, read back by the runtime. These
+    // are what the attributes this compiler writes are for.
+    ("java/lang/Class", "isRecord", "()Z", false),
+    ("java/lang/Class", "isSealed", "()Z", false),
+    ("java/lang/Class", "isEnum", "()Z", false),
+    ("java/lang/Class", "isAnnotation", "()Z", false),
+    ("java/lang/Class", "isInterface", "()Z", false),
+    ("java/lang/Class", "isArray", "()Z", false),
+    ("java/lang/Class", "isPrimitive", "()Z", false),
+    (
+        "java/lang/Class",
+        "isInstance",
+        "(Ljava/lang/Object;)Z",
+        false,
+    ),
+    (
+        "java/lang/Class",
+        "isAssignableFrom",
+        "(Ljava/lang/Class;)Z",
+        false,
+    ),
+    (
+        "java/lang/Class",
+        "getSuperclass",
+        "()Ljava/lang/Class;",
+        false,
+    ),
+    (
+        "java/lang/Class",
+        "getAnnotation",
+        "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;",
+        false,
+    ),
+    (
+        "java/lang/Class",
+        "isAnnotationPresent",
+        "(Ljava/lang/Class;)Z",
+        false,
+    ),
+    (
+        "java/lang/Class",
+        "getPermittedSubclasses",
+        "()[Ljava/lang/Class;",
+        false,
+    ),
     // -- Enum, which every enum extends
     ("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V", false),
     ("java/lang/Enum", "name", "()Ljava/lang/String;", false),
@@ -6796,6 +6841,17 @@ const WELL_KNOWN: &[&str] = &[
     "java/lang/Object",
     "java/lang/String",
     "java/lang/annotation/Annotation",
+    // The annotations an annotation is written with. `@Retention` is not
+    // decoration: the runtime reads it off the annotation's own class file to
+    // decide whether to hand the annotation back, so an annotation type whose
+    // `@Retention` was dropped is one reflection cannot see.
+    "java/lang/annotation/Retention",
+    "java/lang/annotation/RetentionPolicy",
+    "java/lang/annotation/Target",
+    "java/lang/annotation/ElementType",
+    "java/lang/annotation/Documented",
+    "java/lang/annotation/Inherited",
+    "java/lang/annotation/Repeatable",
     "java/lang/Enum",
     "java/lang/Record",
     "java/lang/Runnable",
@@ -13294,20 +13350,53 @@ pub fn compile_unit_in_nest(
         }
     }
 
-    // A class written inside another says so, which is how reflection answers
-    // `getSimpleName` and `getEnclosingClass` rather than reading the `$` in
+    // Classes written inside classes, which is how reflection answers
+    // `getSimpleName` and `getDeclaringClass` rather than reading the `$` in
     // the name and guessing.
-    if let Some((holder, simple)) = this_class.rsplit_once('$') {
-        let inner = pool.class(&this_class);
-        let outer = pool.class(holder);
-        let simple = pool.utf8(simple);
-        let mut body = Vec::new();
-        body.extend_from_slice(&1u16.to_be_bytes());
-        body.extend_from_slice(&inner.to_be_bytes());
-        body.extend_from_slice(&outer.to_be_bytes());
-        body.extend_from_slice(&simple.to_be_bytes());
-        body.extend_from_slice(&unit.modifiers.access_flags(shape_flags).to_be_bytes());
-        class_attributes.push((pool.utf8("InnerClasses"), body));
+    //
+    // Every class in one family writes the same table. It has to: the JVM
+    // looks a class up in its holder's table as well as its own, and the two
+    // disagreeing is an IncompatibleClassChangeError at the moment somebody
+    // asks.
+    {
+        let top = this_class.split('$').next().unwrap_or("").to_string();
+        let mut family: Vec<String> = nest
+            .iter()
+            .filter(|held| held.contains('$') && held.split('$').next() == Some(top.as_str()))
+            .cloned()
+            .collect();
+        if this_class.contains('$') && !family.contains(&this_class) {
+            family.push(this_class.clone());
+        }
+        family.sort();
+        family.dedup();
+        if !family.is_empty() {
+            let mut body = Vec::new();
+            body.extend_from_slice(&(family.len() as u16).to_be_bytes());
+            for one in &family {
+                let (holder, simple) = one.rsplit_once('$').unwrap_or(("", one.as_str()));
+                // A class written where it was used has a number for a name.
+                // It is not a member of anything, and saying it is would make
+                // `getDeclaringClass` answer with a class the source never
+                // wrote.
+                let unnamed = simple.chars().all(|held| held.is_ascii_digit());
+                let inner = pool.class(one);
+                let outer = if unnamed { 0 } else { pool.class(holder) };
+                let named = if unnamed { 0 } else { pool.utf8(simple) };
+                // Only the row naming this class is read for its modifiers,
+                // and that row is written from what this class actually is.
+                let flags = if *one == this_class {
+                    unit.modifiers.access_flags(shape_flags & !0x0020)
+                } else {
+                    0x0001
+                };
+                body.extend_from_slice(&inner.to_be_bytes());
+                body.extend_from_slice(&outer.to_be_bytes());
+                body.extend_from_slice(&named.to_be_bytes());
+                body.extend_from_slice(&flags.to_be_bytes());
+            }
+            class_attributes.push((pool.utf8("InnerClasses"), body));
+        }
     }
 
     let this_index = pool.class(&this_class);
@@ -15769,6 +15858,18 @@ sealed interface Shape permits Round, Square {
     double area();
 }
 
+// -- and a sealed class, which is the same idea about extending
+sealed abstract class Vehicle permits Car {
+    abstract int wheels();
+}
+
+final class Car extends Vehicle {
+    @Override
+    int wheels() {
+        return 4;
+    }
+}
+
 record Round(double radius) implements Shape {
     @Override
     public double area() {
@@ -15945,6 +16046,11 @@ public final class Everything {
         assert value > 0 : "positive";
     }
 
+    // -- strictfp, which every method has been since Java 17
+    public strictfp double exact(double value) {
+        return value * 2.0;
+    }
+
     // -- synchronization
     public synchronized int guarded() {
         return counted;
@@ -16112,6 +16218,20 @@ public final class Everything {
         out.append(new Square(3.0).area()).append(' ');
 
         out.append(held.marked()).append(' ');
+        out.append(held.exact(1.5)).append(' ');
+        out.append(new Car().wheels()).append(' ');
+
+        // -- what the class files say about themselves, read back by the
+        // -- runtime rather than taken on trust
+        out.append(((Marked) Everything.class.getAnnotation(Marked.class)).value()).append(' ');
+        out.append(Everything.class.isAnnotationPresent(Marked.class)).append(' ');
+        out.append(Point.class.isRecord()).append(' ');
+        out.append(Shape.class.isSealed()).append(' ');
+        out.append(Vehicle.class.isSealed()).append(' ');
+        out.append(Colour.class.isEnum()).append(' ');
+        out.append(Marked.class.isAnnotation()).append(' ');
+        out.append(Nested.class.getSimpleName()).append(' ');
+        out.append(Shape.class.getPermittedSubclasses().length).append(' ');
 
         System.out.println(out.toString());
     }
@@ -16137,6 +16257,8 @@ public final class Everything {
             "com/my/app/Square.class",
             "com/my/app/Marked.class",
             "com/my/app/Hint.class",
+            "com/my/app/Vehicle.class",
+            "com/my/app/Car.class",
         ] {
             assert!(
                 names.contains(&wanted),
@@ -16294,6 +16416,16 @@ public final class Everything {
             &bytes_of("com/my/app/Marked.class"),
             "AnnotationDefault"
         ));
+        // An annotation's own `@Retention` has to reach its class file, or the
+        // runtime reads it as one it does not keep and hands nothing back.
+        assert!(holds(
+            &bytes_of("com/my/app/Marked.class"),
+            "RuntimeVisibleAnnotations"
+        ));
+        assert!(holds(
+            &bytes_of("com/my/app/Everything.class"),
+            "InnerClasses"
+        ));
         assert!(holds(
             &bytes_of("com/my/app/Everything.class"),
             "StackMapTable"
@@ -16326,7 +16458,8 @@ public final class Everything {
                     said.trim(),
                     "true 3 a 10 4 11.0 text null 20 30 10 one 3.0 3 1 6 1 4 5 8 \
                      text 3 big 20 number 3 nothing something 4 3 10 20 10 5 no 10 10 \
-                     text 1 lambda y 12 12 3 hello world derived true 2 3 5 5 12.0 9.0 marked",
+                     text 1 lambda y 12 12 3 hello world derived true 2 3 5 5 12.0 9.0 \
+                     marked 3.0 4 class true true true true true true Nested 2",
                     "what it printed is not what javac's own build of the same source prints"
                 );
             }
