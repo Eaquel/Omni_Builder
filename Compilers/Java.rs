@@ -917,6 +917,10 @@ pub enum Written {
     /// to. The number is which one, counting from the left, so that a call on
     /// a `Box<String>` can put the String back where the `T` was.
     Variable(usize, Box<Written>),
+    /// A type parameter of the method itself. There is no receiver to take an
+    /// argument from, so this is worked out from what the call hands over --
+    /// which is why it is kept by name rather than by number.
+    OwnVariable(String, Box<Written>),
     Array(Box<Written>),
 }
 
@@ -1149,6 +1153,9 @@ pub struct Body {
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
     pub instance_setup: Vec<Positioned<Statement>>,
+    /// A `static` block, which a class written where it is used has been
+    /// allowed to hold since Java 16.
+    pub static_setup: Vec<Positioned<Statement>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1266,6 +1273,7 @@ pub struct Arm {
 /// members before anything else looks, so nothing downstream needs to know an
 /// enum was ever involved.
 fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
+    let answering = constants.iter().any(|held| held.body.is_some());
     let named = Written::Named(unit.name.clone(), Vec::new());
     let array_of = Written::Array(Box::new(named.clone()));
     let public_constant = Modifiers {
@@ -1308,14 +1316,27 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             Expression::Int(position as i64),
         ];
         arguments.extend(constant.arguments.iter().cloned());
-        setup.push(set(
-            constant.line,
-            Expression::Name(constant.name.clone()),
-            Expression::New {
+        // A constant that answers differently from the rest is one instance
+        // of a class of its own, which is exactly what a class written where
+        // it is used already is.
+        let made = match &constant.body {
+            Some(body) => Expression::Anonymous {
+                what: named.clone(),
+                arguments,
+                body: Box::new(body.clone()),
+                line: constant.line,
+                column: constant.column,
+            },
+            None => Expression::New {
                 what: named.clone(),
                 arguments,
                 outer: None,
             },
+        };
+        setup.push(set(
+            constant.line,
+            Expression::Name(constant.name.clone()),
+            made,
         ));
     }
 
@@ -1510,7 +1531,10 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
     });
 
     unit.extends = Some("java.lang.Enum".to_string());
-    unit.modifiers.final_ = true;
+    // An enum is final -- unless one of its constants answers for itself, in
+    // which case that constant is a class extending this one and a final
+    // class cannot be extended. That is what `javac` writes too.
+    unit.modifiers.final_ = !answering;
     unit
 }
 
@@ -1523,6 +1547,11 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
 /// they are written out here instead, because an `invokedynamic` is a call
 /// into a class this compiler would then have to know about and Android
 /// rewrites it anyway.
+/// What a record's compact constructor is called until the record becomes a
+/// class. It is not a name anybody can write, which is the point: nothing else
+/// can collide with it and nothing downstream ever sees it.
+const COMPACT: &str = "<compact>";
+
 fn as_the_class_a_record_is(
     mut unit: Unit,
     components: &[(Written, String)],
@@ -1560,6 +1589,16 @@ fn as_the_class_a_record_is(
         });
     }
 
+    // `Circle { ... }` -- the canonical constructor written without saying
+    // again what it takes. What was written runs first, against the component
+    // names as ordinary parameters, and the fields are filled in from whatever
+    // those names hold at the end of it.
+    let compact = unit
+        .methods
+        .iter()
+        .position(|held| held.name == COMPACT)
+        .map(|at| unit.methods.remove(at));
+
     // The canonical constructor, unless the person wrote one taking exactly
     // the components.
     let written_canonical = unit
@@ -1567,21 +1606,34 @@ fn as_the_class_a_record_is(
         .iter()
         .any(|held| held.constructor && held.parameters.len() == components.len());
     if !written_canonical {
-        let body = components
-            .iter()
-            .map(|(_, name)| {
-                at(Statement::Express(Expression::Assign {
-                    target: Box::new(Expression::Field {
-                        of: Box::new(Expression::This),
-                        name: name.clone(),
-                    }),
-                    operator: None,
-                    value: Box::new(Expression::Name(name.clone())),
-                }))
-            })
-            .collect();
+        let mut body: Vec<Positioned<Statement>> = compact
+            .as_ref()
+            .and_then(|held| held.body.clone())
+            .unwrap_or_default();
+        body.extend(components.iter().map(|(_, name)| {
+            at(Statement::Express(Expression::Assign {
+                target: Box::new(Expression::Field {
+                    of: Box::new(Expression::This),
+                    name: name.clone(),
+                }),
+                operator: None,
+                value: Box::new(Expression::Name(name.clone())),
+            }))
+        }));
         unit.methods.push(Method {
-            modifiers: public,
+            // A compact constructor written with no visibility at all is
+            // still the record's canonical one, and that has to be reachable
+            // wherever the record is.
+            modifiers: match &compact {
+                Some(held)
+                    if held.modifiers.public
+                        || held.modifiers.protected
+                        || held.modifiers.private =>
+                {
+                    held.modifiers
+                }
+                _ => public,
+            },
             returns: Written::Void,
             name: "<init>".to_string(),
             parameters: components.to_vec(),
@@ -1628,7 +1680,11 @@ fn as_the_class_a_record_is(
         .iter()
         .any(|held| held.name == "toString" && held.parameters.is_empty())
     {
-        let mut text = Expression::Str(format!("{}[", unit.name));
+        // The simple name, not the one a record written inside a class is
+        // filed under: `Wide.Square` says `Square[side=1.0]`, which is what
+        // the language specifies and what `javac` writes.
+        let simple = unit.name.rsplit('$').next().unwrap_or(&unit.name);
+        let mut text = Expression::Str(format!("{simple}["));
         for (index, (_, name)) in components.iter().enumerate() {
             let lead = if index == 0 {
                 format!("{name}=")
@@ -1666,12 +1722,201 @@ fn as_the_class_a_record_is(
         });
     }
 
+    // `equals`, component by component. Written as a pattern, so there is no
+    // cast to write and no second test: `other instanceof Name it` is the
+    // check and the name for what passed it.
+    const IT: &str = "$it";
+    const OTHER: &str = "$other";
+    if !unit
+        .methods
+        .iter()
+        .any(|held| held.name == "equals" && held.parameters.len() == 1)
+    {
+        let mine = |name: &str| Expression::Field {
+            of: Box::new(Expression::This),
+            name: name.to_string(),
+        };
+        let theirs = |name: &str| Expression::Field {
+            of: Box::new(Expression::Name(IT.to_string())),
+            name: name.to_string(),
+        };
+        let mut same = Expression::Boolean(true);
+        for (what, name) in components {
+            let one = the_same_component(what, mine(name), theirs(name));
+            same = Expression::Binary {
+                operator: Binary::AndAlso,
+                left: Box::new(same),
+                right: Box::new(one),
+            };
+        }
+        let body = vec![
+            at(Statement::If {
+                condition: Expression::Unary {
+                    operator: Unary::Not,
+                    of: Box::new(Expression::InstanceOf {
+                        of: Box::new(Expression::Name(OTHER.to_string())),
+                        what: Written::Named(unit.name.clone(), Vec::new()),
+                        binds: Some(IT.to_string()),
+                    }),
+                },
+                then: Box::new(at(Statement::Return(Some(Expression::Boolean(false))))),
+                otherwise: None,
+            }),
+            at(Statement::Return(Some(same))),
+        ];
+        unit.methods.push(Method {
+            modifiers: public,
+            returns: Written::Boolean,
+            name: "equals".to_string(),
+            parameters: vec![(
+                Written::Named("Object".to_string(), Vec::new()),
+                OTHER.to_string(),
+            )],
+            body: Some(body),
+            constructor: false,
+            variadic: false,
+            line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
+        });
+    }
+
+    // And `hashCode`, which multiplies by 31 and adds, one component at a
+    // time -- the same walk `javac` builds at run time, so two records that
+    // are equal hash the same and usually to the same number.
+    if !unit
+        .methods
+        .iter()
+        .any(|held| held.name == "hashCode" && held.parameters.is_empty())
+    {
+        let mut worked = Expression::Int(0);
+        for (what, name) in components {
+            worked = Expression::Binary {
+                operator: Binary::Add,
+                left: Box::new(Expression::Binary {
+                    operator: Binary::Multiply,
+                    left: Box::new(worked),
+                    right: Box::new(Expression::Int(31)),
+                }),
+                right: Box::new(what_one_component_hashes_to(
+                    what,
+                    Expression::Field {
+                        of: Box::new(Expression::This),
+                        name: name.clone(),
+                    },
+                )),
+            };
+        }
+        unit.methods.push(Method {
+            modifiers: public,
+            returns: Written::Int,
+            name: "hashCode".to_string(),
+            parameters: Vec::new(),
+            body: Some(vec![at(Statement::Return(Some(worked)))]),
+            constructor: false,
+            variadic: false,
+            line: 1,
+            bridge: false,
+            annotations: Vec::new(),
+            default_value: None,
+        });
+    }
+
     // A record *extends* `java.lang.Record`. Written as an interface it would
     // still verify and `Class.isRecord` would answer no, which is the whole
     // point of the shape.
     unit.extends = Some("java.lang.Record".to_string());
     unit.modifiers.final_ = true;
     Ok(unit)
+}
+
+/// Whether two of a record's components are the same, which depends on what
+/// the component is.
+///
+/// A number is compared with `==`, except a floating-point one: `Float.compare`
+/// says that two NaNs are the same and that `0.0` and `-0.0` are not, which is
+/// what a record means by equal and what `==` does not say. A reference is
+/// compared with its own `equals`, and null is only the same as null.
+fn the_same_component(what: &Written, mine: Expression, theirs: Expression) -> Expression {
+    let compared_by = |class: &str| Expression::Binary {
+        operator: Binary::Equal,
+        left: Box::new(Expression::Call {
+            on: Some(Box::new(Expression::Name(class.to_string()))),
+            super_call: false,
+            name: "compare".to_string(),
+            arguments: vec![mine.clone(), theirs.clone()],
+        }),
+        right: Box::new(Expression::Int(0)),
+    };
+    match what {
+        Written::Float => compared_by("Float"),
+        Written::Double => compared_by("Double"),
+        Written::Boolean
+        | Written::Byte
+        | Written::Short
+        | Written::Char
+        | Written::Int
+        | Written::Long => Expression::Binary {
+            operator: Binary::Equal,
+            left: Box::new(mine),
+            right: Box::new(theirs),
+        },
+        _ => Expression::Conditional {
+            condition: Box::new(Expression::Binary {
+                operator: Binary::Equal,
+                left: Box::new(mine.clone()),
+                right: Box::new(Expression::Null),
+            }),
+            then: Box::new(Expression::Binary {
+                operator: Binary::Equal,
+                left: Box::new(theirs.clone()),
+                right: Box::new(Expression::Null),
+            }),
+            otherwise: Box::new(Expression::Call {
+                on: Some(Box::new(mine)),
+                super_call: false,
+                name: "equals".to_string(),
+                arguments: vec![theirs],
+            }),
+        },
+    }
+}
+
+/// What one component of a record contributes to its hash. Every box class
+/// knows how to hash the primitive it holds, and a reference hashes itself --
+/// or to nothing at all, where it is null.
+fn what_one_component_hashes_to(what: &Written, mine: Expression) -> Expression {
+    let hashed_by = |class: &str| Expression::Call {
+        on: Some(Box::new(Expression::Name(class.to_string()))),
+        super_call: false,
+        name: "hashCode".to_string(),
+        arguments: vec![mine.clone()],
+    };
+    match what {
+        Written::Boolean => hashed_by("Boolean"),
+        Written::Byte => hashed_by("Byte"),
+        Written::Short => hashed_by("Short"),
+        Written::Char => hashed_by("Character"),
+        Written::Int => hashed_by("Integer"),
+        Written::Long => hashed_by("Long"),
+        Written::Float => hashed_by("Float"),
+        Written::Double => hashed_by("Double"),
+        _ => Expression::Conditional {
+            condition: Box::new(Expression::Binary {
+                operator: Binary::Equal,
+                left: Box::new(mine.clone()),
+                right: Box::new(Expression::Null),
+            }),
+            then: Box::new(Expression::Int(0)),
+            otherwise: Box::new(Expression::Call {
+                on: Some(Box::new(mine)),
+                super_call: false,
+                name: "hashCode".to_string(),
+                arguments: Vec::new(),
+            }),
+        },
+    }
 }
 
 /// Gives a class written inside another the instance it belongs to.
@@ -2162,6 +2407,10 @@ fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression))
 pub struct Constant {
     pub name: String,
     pub arguments: Vec<Expression>,
+    /// `PLUS { int apply(int a, int b) { return a + b; } }`: one constant that
+    /// answers differently from the rest. It becomes a class of its own,
+    /// extending the enum, and the constant is the one instance of it.
+    pub body: Option<Body>,
     pub line: u32,
     pub column: u32,
 }
@@ -2188,6 +2437,10 @@ pub struct Modifiers {
     pub synchronized: bool,
     pub volatile: bool,
     pub transient: bool,
+    /// `native`: the body is somewhere else, in a library loaded at run time.
+    /// There is nothing to compile and nothing to check -- only the flag, and
+    /// no `Code` attribute, which is what tells the runtime to go looking.
+    pub native_: bool,
     /// `sealed`, which is not an access flag. What it comes to in the class
     /// file is the list of classes allowed to extend this one, and that list
     /// is an attribute rather than a bit.
@@ -2222,6 +2475,9 @@ impl Modifiers {
         }
         if self.transient {
             flags |= 0x0080;
+        }
+        if self.native_ {
+            flags |= 0x0100;
         }
         if self.abstract_ {
             flags |= 0x0400;
@@ -2390,13 +2646,14 @@ impl Parser {
         self.type_variables.iter().rev().find_map(|frame| {
             let at = frame.held.iter().position(|(one, _)| one == name)?;
             let bound = frame.held[at].1.clone();
-            // A method's own `<T>` has no receiver to take an argument from,
-            // so there is nothing to put back and only the bound is kept. A
-            // class's is numbered, because a `Box<String>` says what its is.
+            // A class's is numbered, because a `Box<String>` says what its
+            // is. A method's is kept by name, because what it stands for is
+            // worked out from the arguments and the same name has to be
+            // recognised in each of them.
             if frame.of_a_class {
                 Some(Written::Variable(at, Box::new(bound)))
             } else {
-                Some(bound)
+                Some(Written::OwnVariable(name.to_string(), Box::new(bound)))
             }
         })
     }
@@ -2703,13 +2960,12 @@ impl Parser {
                 // read and nothing is recorded -- which is what a class file
                 // of this version says either way.
                 "strictfp" => {}
-                "native" => {
-                    return Err(unsupported(
-                        self.line(),
-                        self.column(),
-                        format!("`{word}`").as_str(),
-                    ))
-                }
+                // `native` says the body is in a library the application
+                // loads, which is a flag and the absence of a `Code`
+                // attribute. There is nothing else for a compiler to do with
+                // it, and refusing it would refuse every class that reaches
+                // one.
+                "native" => found.native_ = true,
                 _ => break,
             }
             self.take();
@@ -3041,16 +3297,15 @@ impl Parser {
                 } else {
                     Vec::new()
                 };
-                if self.is_mark("{") {
-                    return Err(unsupported(
-                        self.line(),
-                        self.column(),
-                        "An enum constant with a body of its own",
-                    ));
-                }
+                let body = if self.is_mark("{") {
+                    Some(self.written_out_body(line, column, "An enum constant's body")?)
+                } else {
+                    None
+                };
                 constants.push(Constant {
                     name,
                     arguments,
+                    body,
                     line,
                     column,
                 });
@@ -3190,6 +3445,32 @@ impl Parser {
         // The name written is the simple one, whatever the class is called in
         // a file that holds it.
         let simple = class.rsplit('$').next().unwrap_or(class);
+        // A record's canonical constructor may be written without its
+        // parameter list: `Circle { ... }` takes the components, runs what was
+        // written, and then fills the fields in from whatever the names hold
+        // by the end of it. The parameters and the filling are put back where
+        // the record becomes a class.
+        if shape == Shape::Record
+            && matches!(&self.here().token, Token::Identifier(found) if found == simple)
+            && matches!(self.ahead(1), Token::Punctuation("{"))
+        {
+            self.take();
+            let body = self.braced_block()?;
+            methods.push(Method {
+                modifiers,
+                returns: Written::Void,
+                name: COMPACT.to_string(),
+                parameters: Vec::new(),
+                body: Some(body),
+                constructor: true,
+                variadic: false,
+                line,
+                bridge: false,
+                annotations,
+                default_value: None,
+            });
+            return Ok(());
+        }
         if matches!(&self.here().token, Token::Identifier(found) if found == simple)
             && matches!(self.ahead(1), Token::Punctuation("("))
         {
@@ -3236,9 +3517,14 @@ impl Parser {
             } else {
                 self.method_body()?
             };
-            // A method of an interface with no body is abstract; anywhere
-            // else, a method with no body is a mistake.
-            if body.is_none() && !modifiers.abstract_ && shape != Shape::Interface {
+            // A method of an interface with no body is abstract, and a
+            // `native` one has its body in a library; anywhere else, a method
+            // with no body is a mistake.
+            if body.is_none()
+                && !modifiers.abstract_
+                && !modifiers.native_
+                && shape != Shape::Interface
+            {
                 return Err(at(
                     "EJ106",
                     line,
@@ -4180,6 +4466,51 @@ impl Parser {
         Ok(left)
     }
 
+    /// The `{ ... }` of a class written where it is used: an anonymous class,
+    /// or an enum constant that answers differently from the rest.
+    ///
+    /// It is read exactly the way any class body is read, because it is one.
+    /// What it does not have is a name or a shape of its own, and those are
+    /// settled where it is compiled rather than here.
+    fn written_out_body(&mut self, line: u32, column: u32, what: &str) -> Result<Body, Diagnostic> {
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        let mut instance_setup = Vec::new();
+        let mut static_setup = Vec::new();
+        self.want_mark("{")?;
+        while !self.is_mark("}") {
+            if matches!(self.here().token, Token::End) {
+                return Err(at(
+                    "EJ105",
+                    line,
+                    column,
+                    format!("{what} was opened and never closed."),
+                ));
+            }
+            if self.eat_mark(";") {
+                continue;
+            }
+            self.member(
+                Shape::Class,
+                "",
+                &None,
+                &[],
+                &mut fields,
+                &mut methods,
+                &mut instance_setup,
+                &mut static_setup,
+                &mut Vec::new(),
+            )?;
+        }
+        self.want_mark("}")?;
+        Ok(Body {
+            fields,
+            methods,
+            instance_setup,
+            static_setup,
+        })
+    }
+
     fn binary(&mut self, least: u8) -> Result<Expression, Diagnostic> {
         let mut left = self.unary()?;
         loop {
@@ -4368,6 +4699,11 @@ impl Parser {
                     };
                     continue;
                 }
+                // `Optional.<String>empty()`: the method's own type
+                // arguments, written where the call could not work them out.
+                // Erasure throws them away, so reading them is all there is
+                // to do with them.
+                self.skip_type_arguments()?;
                 let name = self.want_name()?;
                 if self.is_mark("(") {
                     let arguments = self.arguments()?;
@@ -4683,51 +5019,11 @@ impl Parser {
                 // A class with no name of its own, written where it is used.
                 // What it holds is read the same way any class body is; the
                 // name and the shape are settled when it is compiled.
-                let mut fields = Vec::new();
-                let mut methods = Vec::new();
-                let mut instance_setup = Vec::new();
-                let mut static_setup = Vec::new();
-                self.want_mark("{")?;
-                while !self.is_mark("}") {
-                    if matches!(self.here().token, Token::End) {
-                        return Err(at(
-                            "EJ105",
-                            line,
-                            column,
-                            "An anonymous class was opened and never closed.",
-                        ));
-                    }
-                    if self.eat_mark(";") {
-                        continue;
-                    }
-                    self.member(
-                        Shape::Class,
-                        "",
-                        &None,
-                        &[],
-                        &mut fields,
-                        &mut methods,
-                        &mut instance_setup,
-                        &mut static_setup,
-                        &mut Vec::new(),
-                    )?;
-                }
-                self.want_mark("}")?;
-                if !static_setup.is_empty() {
-                    return Err(unsupported(
-                        line,
-                        column,
-                        "A `static` block in an anonymous class",
-                    ));
-                }
+                let body = self.written_out_body(line, column, "An anonymous class")?;
                 return Ok(Expression::Anonymous {
                     what,
                     arguments,
-                    body: Box::new(Body {
-                        fields,
-                        methods,
-                        instance_setup,
-                    }),
+                    body: Box::new(body),
                     line,
                     column,
                 });
@@ -4979,6 +5275,11 @@ pub struct Signature {
     pub returns_variable: Option<usize>,
     /// The same, one per parameter.
     pub parameter_variables: Vec<Option<usize>>,
+    /// What each parameter and the return were written as, with the type
+    /// variables still in them. Empty where there were none, which is almost
+    /// every method.
+    pub taken_stands_for: Vec<Standing>,
+    pub returns_stands_for: Standing,
 }
 
 impl Signature {
@@ -5134,7 +5435,7 @@ impl Classpath {
                 static_: method.modifiers.static_,
                 interface: unit.shape == Shape::Interface,
                 variadic: method.variadic,
-                abstract_: method.body.is_none(),
+                abstract_: method.body.is_none() && !method.modifiers.native_,
                 // Which of the class's type parameters this was written as,
                 // before it was erased. `T get()` on a `Box<T>` is the first
                 // one, and that is what a call on a `Box<String>` needs.
@@ -5144,6 +5445,15 @@ impl Classpath {
                     .iter()
                     .map(|(what, _)| which_variable(what))
                     .collect(),
+                // And the whole of what was written, for a method with type
+                // parameters of its own: `<T> T first(List<T> of)` gives back
+                // whatever the list it was handed holds.
+                taken_stands_for: method
+                    .parameters
+                    .iter()
+                    .map(|(what, _)| standing_of(what))
+                    .collect(),
+                returns_stands_for: standing_of(&method.returns),
             });
         }
         self.known.insert(internal, known);
@@ -5235,6 +5545,13 @@ impl Classpath {
                 Some(held) if !named.is_empty() => variables_of(held, &named),
                 _ => (None, Vec::new()),
             };
+            // And the whole of what was written, which is what says
+            // `Arrays.asList("a", "b")` is a list of strings.
+            let (taken_stands_for, returns_stands_for) = method
+                .signature
+                .as_deref()
+                .and_then(|held| standings_of(held, &named))
+                .unwrap_or_default();
             known.methods.push(Signature {
                 owner: internal.clone(),
                 name: method.name.clone(),
@@ -5248,6 +5565,8 @@ impl Classpath {
                 abstract_: method.access_flags & 0x0400 != 0,
                 returns_variable,
                 parameter_variables,
+                taken_stands_for,
+                returns_stands_for,
             });
         }
         for field in &class.fields {
@@ -6129,7 +6448,9 @@ impl<'a> Emitter<'a> {
             // A type variable is what it erases to; which one it was is
             // written down separately, for the call sites that can put an
             // argument back where it stood.
-            Written::Variable(_, bound) => self.resolve(bound, line)?,
+            Written::Variable(_, bound) | Written::OwnVariable(_, bound) => {
+                self.resolve(bound, line)?
+            }
             Written::Named(name, held) => {
                 let mut arguments = Vec::new();
                 for one in held {
@@ -6593,6 +6914,17 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Long", "intValue", "()I", false),
     ("java/lang/Long", "doubleValue", "()D", false),
     ("java/lang/Double", "compare", "(DD)I", true),
+    ("java/lang/Float", "compare", "(FF)I", true),
+    // Every box class hashes the primitive it holds, which is what a record
+    // leans on to hash itself without a bootstrap method.
+    ("java/lang/Boolean", "hashCode", "(Z)I", true),
+    ("java/lang/Byte", "hashCode", "(B)I", true),
+    ("java/lang/Short", "hashCode", "(S)I", true),
+    ("java/lang/Character", "hashCode", "(C)I", true),
+    ("java/lang/Integer", "hashCode", "(I)I", true),
+    ("java/lang/Long", "hashCode", "(J)I", true),
+    ("java/lang/Float", "hashCode", "(F)I", true),
+    ("java/lang/Double", "hashCode", "(D)I", true),
     ("java/lang/Double", "intValue", "()I", false),
     ("java/lang/Double", "isNaN", "()Z", false),
     ("java/lang/Float", "doubleValue", "()D", false),
@@ -7574,6 +7906,8 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             abstract_: false,
             returns_variable: None,
             parameter_variables: Vec::new(),
+            taken_stands_for: Vec::new(),
+            returns_stands_for: Standing::Fixed,
         }];
     }
     // Everything that can be thrown answers Throwable's methods, everything
@@ -7615,6 +7949,8 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
                 abstract_: BUILT_IN_INTERFACES.contains(class),
                 returns_variable: None,
                 parameter_variables: Vec::new(),
+                taken_stands_for: Vec::new(),
+                returns_stands_for: Standing::Fixed,
             });
         }
         if !found.is_empty() {
@@ -7655,6 +7991,246 @@ fn written_as_a_path(expression: &Expression) -> Option<String> {
         Expression::Field { of, name } => Some(format!("{}.{name}", written_as_a_path(of)?)),
         _ => None,
     }
+}
+
+/// A type as it was written, with whatever type variables were in it.
+///
+/// Erasure threw these away and left a descriptor. What is left of them is
+/// enough to say two things: what a call on a `List<String>` gives back, and
+/// what `Arrays.asList("a", "b")` is a list of.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum Standing {
+    /// Nothing in it stands for anything: the descriptor is the whole story.
+    #[default]
+    Fixed,
+    /// A type parameter of the class, by position.
+    OfTheClass(usize),
+    /// A type parameter of the method, by name.
+    OfTheMethod(String),
+    /// A class with arguments, some of which may stand for something.
+    Holding(Vec<Standing>),
+    /// An array of one of these.
+    ArrayOf(Box<Standing>),
+}
+
+impl Standing {
+    /// Whether any of this stands for one of the class's own type parameters,
+    /// which is what the receiver can answer and nothing else can.
+    fn mentions_the_class(&self) -> bool {
+        match self {
+            Standing::OfTheClass(_) => true,
+            Standing::Holding(inside) => inside.iter().any(Standing::mentions_the_class),
+            Standing::ArrayOf(of) => of.mentions_the_class(),
+            _ => false,
+        }
+    }
+
+    fn says_nothing(&self) -> bool {
+        match self {
+            Standing::Fixed => true,
+            Standing::Holding(inside) => inside.iter().all(Standing::says_nothing),
+            Standing::ArrayOf(of) => of.says_nothing(),
+            _ => false,
+        }
+    }
+
+    /// Works out what each of the method's own type variables stands for, by
+    /// laying the shape over the type actually handed across.
+    fn bind(&self, actual: &Type, out: &mut Vec<(String, Type)>) {
+        match self {
+            Standing::OfTheMethod(name) => {
+                if !out.iter().any(|(held, _)| held == name) {
+                    // A type variable never stands for a primitive: erasure
+                    // has nowhere to put one. `listOf(1, 2)` is a list of
+                    // Integer, and the ints go into their boxes on the way.
+                    let actual = match boxed_name(actual) {
+                        Some(boxed) => Type::Object(boxed.to_string(), Vec::new()),
+                        None => actual.clone(),
+                    };
+                    out.push((name.clone(), actual));
+                }
+            }
+            Standing::Holding(inside) => {
+                if let Type::Object(_, arguments) = actual {
+                    for (one, held) in inside.iter().zip(arguments.iter()) {
+                        one.bind(held, out);
+                    }
+                }
+            }
+            Standing::ArrayOf(of) => {
+                if let Type::Array(held) = actual {
+                    of.bind(held, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The type this shape comes to, once the variables are known.
+    fn filled(
+        &self,
+        erased: &Type,
+        of_the_class: &[Type],
+        of_the_method: &[(String, Type)],
+    ) -> Type {
+        match self {
+            Standing::OfTheClass(at) => of_the_class.get(*at).cloned().unwrap_or(erased.clone()),
+            Standing::OfTheMethod(name) => of_the_method
+                .iter()
+                .find(|(held, _)| held == name)
+                .map(|(_, what)| what.clone())
+                .unwrap_or(erased.clone()),
+            Standing::Holding(inside) => {
+                let Type::Object(named, _) = erased else {
+                    return erased.clone();
+                };
+                let object = Type::Object("java/lang/Object".to_string(), Vec::new());
+                let arguments = inside
+                    .iter()
+                    .map(|one| one.filled(&object, of_the_class, of_the_method))
+                    .collect();
+                Type::Object(named.clone(), arguments)
+            }
+            Standing::ArrayOf(of) => match erased {
+                Type::Array(held) => {
+                    Type::Array(Box::new(of.filled(held, of_the_class, of_the_method)))
+                }
+                _ => erased.clone(),
+            },
+            Standing::Fixed => erased.clone(),
+        }
+    }
+}
+
+/// What a written type stands for, for a member of a class being compiled here.
+fn standing_of(written: &Written) -> Standing {
+    match written {
+        Written::Variable(at, _) => Standing::OfTheClass(*at),
+        Written::OwnVariable(name, _) => Standing::OfTheMethod(name.clone()),
+        Written::Array(of) => {
+            let inside = standing_of(of);
+            if inside.says_nothing() {
+                Standing::Fixed
+            } else {
+                Standing::ArrayOf(Box::new(inside))
+            }
+        }
+        Written::Named(_, arguments) if !arguments.is_empty() => {
+            let inside: Vec<Standing> = arguments.iter().map(standing_of).collect();
+            if inside.iter().all(Standing::says_nothing) {
+                Standing::Fixed
+            } else {
+                Standing::Holding(inside)
+            }
+        }
+        _ => Standing::Fixed,
+    }
+}
+
+/// What one type in a generic signature stands for, stepping over it as it goes.
+fn standing_in(bytes: &[u8], at: &mut usize, of_the_class: &[String]) -> Option<Standing> {
+    match *bytes.get(*at)? {
+        b'T' => {
+            *at += 1;
+            let from = *at;
+            while *bytes.get(*at)? != b';' {
+                *at += 1;
+            }
+            let name = String::from_utf8_lossy(&bytes[from..*at]).into_owned();
+            *at += 1;
+            Some(match of_the_class.iter().position(|one| *one == name) {
+                Some(held) => Standing::OfTheClass(held),
+                None => Standing::OfTheMethod(name),
+            })
+        }
+        b'[' => {
+            *at += 1;
+            let inside = standing_in(bytes, at, of_the_class)?;
+            Some(if inside.says_nothing() {
+                Standing::Fixed
+            } else {
+                Standing::ArrayOf(Box::new(inside))
+            })
+        }
+        b'L' => {
+            // The class name, then its arguments if it has any, then whatever
+            // `.Inner` parts follow, to the `;` that closes it.
+            let mut inside: Vec<Standing> = Vec::new();
+            loop {
+                match *bytes.get(*at)? {
+                    b'<' => {
+                        *at += 1;
+                        while *bytes.get(*at)? != b'>' {
+                            // `? extends T` and `? super T` still say which
+                            // variable is meant; `?` on its own says nothing.
+                            if matches!(*bytes.get(*at)?, b'+' | b'-') {
+                                *at += 1;
+                                inside.push(standing_in(bytes, at, of_the_class)?);
+                                continue;
+                            }
+                            if *bytes.get(*at)? == b'*' {
+                                *at += 1;
+                                inside.push(Standing::Fixed);
+                                continue;
+                            }
+                            inside.push(standing_in(bytes, at, of_the_class)?);
+                        }
+                        *at += 1;
+                    }
+                    b';' => {
+                        *at += 1;
+                        break;
+                    }
+                    _ => *at += 1,
+                }
+            }
+            Some(if inside.iter().all(Standing::says_nothing) {
+                Standing::Fixed
+            } else {
+                Standing::Holding(inside)
+            })
+        }
+        _ => {
+            skip_generic_type(bytes, at)?;
+            Some(Standing::Fixed)
+        }
+    }
+}
+
+/// What a method's generic signature says its parameters and return stand for.
+fn standings_of(signature: &str, of_the_class: &[String]) -> Option<(Vec<Standing>, Standing)> {
+    let bytes = signature.as_bytes();
+    let mut at = 0usize;
+    // A method's own type parameters are declared in front. Their names come
+    // out of the types themselves, so the declaration is only stepped over.
+    if bytes.first() == Some(&b'<') {
+        let mut depth = 0usize;
+        loop {
+            let held = *bytes.get(at)?;
+            at += 1;
+            match held {
+                b'<' => depth += 1,
+                b'>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if bytes.get(at) != Some(&b'(') {
+        return None;
+    }
+    at += 1;
+    let mut taken = Vec::new();
+    while *bytes.get(at)? != b')' {
+        taken.push(standing_in(bytes, &mut at, of_the_class)?);
+    }
+    at += 1;
+    let returns = standing_in(bytes, &mut at, of_the_class)?;
+    Some((taken, returns))
 }
 
 /// The names of a class's type parameters, in order, out of its generic
@@ -7844,7 +8420,9 @@ fn resolve_written(classpath: &Classpath, unit: &Unit, written: &Written) -> Opt
         Written::Float => Type::Float,
         Written::Double => Type::Double,
         Written::Array(of) => Type::Array(Box::new(resolve_written(classpath, unit, of)?)),
-        Written::Variable(_, bound) => resolve_written(classpath, unit, bound)?,
+        Written::Variable(_, bound) | Written::OwnVariable(_, bound) => {
+            resolve_written(classpath, unit, bound)?
+        }
         Written::Named(name, held) => {
             let mut arguments = Vec::new();
             for one in held {
@@ -8220,6 +8798,95 @@ impl Emitter<'_> {
         None
     }
 
+    /// What the two sides of `?:` both come to.
+    ///
+    /// Java works this out before either side runs, and so does this: a number
+    /// and its box come to the number, two numbers come to the wider of them,
+    /// a `null` comes to whatever it is written beside, and two classes come
+    /// to whichever of them the other reaches -- or to Object, where neither
+    /// does.
+    fn what_both_sides_come_to(
+        &mut self,
+        then: &Expression,
+        otherwise: &Expression,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        // `null` has no type of its own; it is whatever it stands beside.
+        if matches!(then, Expression::Null) {
+            return self.peek_type(otherwise, line);
+        }
+        if matches!(otherwise, Expression::Null) {
+            return self.peek_type(then, line);
+        }
+        let here = self.peek_type(then, line)?;
+        let there = self.peek_type(otherwise, line)?;
+        if here == there {
+            return Ok(here);
+        }
+        let object = Type::Object("java/lang/Object".to_string(), Vec::new());
+        let inside = |what: &Type| match what.is_reference() {
+            true => primitive_inside(what),
+            false => Some(what.clone()),
+        };
+        // A number on at least one side, and something a number can be got
+        // out of on the other: both come out of their boxes and are promoted.
+        if !here.is_reference() || !there.is_reference() {
+            if let (Some(one), Some(two)) = (inside(&here), inside(&there)) {
+                if one == two {
+                    return Ok(one);
+                }
+                if one == Type::Boolean || two == Type::Boolean {
+                    return Ok(object);
+                }
+                return Ok(one.promoted_with(&two).unwrap_or(Type::Int));
+            }
+            // A number beside something that is not one at all: the number
+            // goes in its box and both are objects.
+            return Ok(object);
+        }
+        if self.reaches(&there, &here) {
+            return Ok(here);
+        }
+        if self.reaches(&here, &there) {
+            return Ok(there);
+        }
+        Ok(object)
+    }
+
+    /// The cast a compound assignment has hiding inside it.
+    ///
+    /// `c += 1` on a char is `c = (char) (c + 1)`, and that cast is the whole
+    /// reason a char may be stepped at all: `+` promoted it to an int and the
+    /// int has to come back. Every compound assignment has one, which is also
+    /// what makes `b += 200` legal on a byte and `l += 1.5` legal on a long.
+    fn narrowed_by_the_operator(
+        &mut self,
+        found: &Type,
+        wanted: &Type,
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        if found == wanted || found.is_reference() || wanted.is_reference() {
+            return Ok(found.clone());
+        }
+        // `convert` leaves two int-like types alone, because storing an int in
+        // a byte local needs no instruction. Here it does: the value came out
+        // of an operator and may not fit.
+        let narrowing = match (found, wanted) {
+            (from, Type::Byte) if from.is_int_like() => Some(0x91u8),
+            (from, Type::Char) if from.is_int_like() => Some(0x92),
+            (from, Type::Short) if from.is_int_like() => Some(0x93),
+            _ => None,
+        };
+        if let Some(opcode) = narrowing {
+            self.op(opcode);
+            self.pops(i32::from(found.width()));
+            self.pushes(wanted);
+            return Ok(wanted.clone());
+        }
+        self.convert(found, wanted, line)?;
+        Ok(wanted.clone())
+    }
+
     fn convert(&mut self, from: &Type, to: &Type, line: u32) -> Result<(), Diagnostic> {
         if from == to || (from.is_int_like() && to.is_int_like()) {
             return Ok(());
@@ -8497,24 +9164,49 @@ impl Emitter<'_> {
                     ));
                 }
                 self.pops(1);
+                // Both sides have to leave the same thing behind, because the
+                // frame where they meet says one thing and the verifier
+                // believes it. `held > 3 ? boxed : 0` is an int on one side
+                // and an Integer on the other, and Java's answer is the int --
+                // so the box is opened on the way, not claimed away.
+                let landed = self.what_both_sides_come_to(then, otherwise, line)?;
                 let to_else = self.jump(0x99);
                 // What is under the two sides. A `?:` written among a call's
                 // arguments has those arguments beneath it, and a frame that
                 // says otherwise is a claim the verifier throws the class out
                 // for.
                 let beneath = self.stack.clone();
-                let taken = self.value(then, line)?;
+                let taken = self.value_for(then, &landed, line)?;
+                if !self.fit(&taken, &landed, line)? {
+                    return Err(at(
+                        "EJ207",
+                        line,
+                        1,
+                        format!(
+                            "The two sides of `?:` are a {} and a {}.",
+                            taken.readable(),
+                            landed.readable()
+                        ),
+                    ));
+                }
                 let over = self.jump(0xa7);
                 self.land(to_else);
                 self.stack_is(beneath.clone());
                 self.a_branch_lands_here();
-                let other = self.value(otherwise, line)?;
+                let other = self.value_for(otherwise, &landed, line)?;
+                if !self.fit(&other, &landed, line)? {
+                    return Err(at(
+                        "EJ207",
+                        line,
+                        1,
+                        format!(
+                            "The two sides of `?:` are a {} and a {}.",
+                            taken.readable(),
+                            other.readable()
+                        ),
+                    ));
+                }
                 self.land(over);
-                let landed = if taken == other || taken.is_reference() {
-                    taken.clone()
-                } else {
-                    taken.promoted_with(&other).unwrap_or(Type::Int)
-                };
                 let mut settled = beneath;
                 let held = Verified::of(&landed);
                 let wide = held.is_wide();
@@ -8524,22 +9216,7 @@ impl Emitter<'_> {
                 }
                 self.stack_is(settled);
                 self.a_branch_lands_here();
-                if taken != other && !taken.is_reference() {
-                    let both = taken.promoted_with(&other).ok_or_else(|| {
-                        at(
-                            "EJ207",
-                            line,
-                            1,
-                            format!(
-                                "The two sides of `?:` are a {} and a {}.",
-                                taken.readable(),
-                                other.readable()
-                            ),
-                        )
-                    })?;
-                    return Ok(both);
-                }
-                Ok(taken)
+                Ok(landed)
             }
             Expression::InstanceOf { of, what, binds } => {
                 let found = self.value(of, line)?;
@@ -9198,6 +9875,23 @@ impl Emitter<'_> {
     ) -> Result<Type, Diagnostic> {
         let left_type = left_type.clone();
 
+        // `o.name += x` and `a[i] += x` on strings do reach here, and they are
+        // the one case where the left side cannot be read a second time: the
+        // field or the element was read to get here, and reading it again
+        // would read it after the write. It goes into a slot instead, and the
+        // builder is written the ordinary way on top of whatever the write is
+        // still holding underneath.
+        if operator == Binary::Add
+            && left_type == Type::Object("java/lang/String".to_string(), Vec::new())
+        {
+            self.open();
+            let slot = self.declare("$left", left_type.clone());
+            self.store(slot, &left_type);
+            let text = self.concatenate(&Expression::Name("$left".to_string()), right, line)?;
+            self.close();
+            return Ok(text);
+        }
+
         if matches!(
             operator,
             Binary::ShiftLeft | Binary::ShiftRight | Binary::UnsignedShiftRight
@@ -9692,6 +10386,11 @@ impl Emitter<'_> {
         arguments: &[Expression],
         line: u32,
     ) -> Result<Type, Diagnostic> {
+        // Where this call's answer is going, before writing the arguments
+        // takes that over. A generic method whose arguments say nothing about
+        // its own type variables -- `Collectors.groupingBy(Person::age)` --
+        // has only this to go on, and it is what `javac` uses too.
+        let going = self.expecting.clone();
         // `super.name(...)`: an exact call on the superclass, not a virtual one.
         if super_call {
             if self.static_ {
@@ -9715,9 +10414,22 @@ impl Emitter<'_> {
                 return Err(self.no_such_method(&owner, name, arguments.len(), line));
             };
             self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
-            self.arguments_for_signature(&signature, arguments, line)?;
+            let first = with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+            let given = self.what_was_handed_over(&first, arguments, line)?;
+            let shaped = with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+            self.arguments_for_signature(&shaped, arguments, line)?;
             let descriptor = signature.descriptor();
-            let index = self.pool.method(&signature.owner, name, &descriptor, false);
+            // Written against the superclass, whichever class above it
+            // declared the method. `super.shout()` where `shout` is a
+            // `default` method two steps up is still a call on the
+            // superclass: an `invokespecial` naming the interface is only
+            // legal where that interface is one this class implements
+            // directly, and the JVM refuses the rest.
+            let through = self
+                .classpath
+                .get(&owner)
+                .is_some_and(|known| known.interface);
+            let index = self.pool.method(&owner, name, &descriptor, through);
             self.op2(0xb7, index);
             let taken: i32 = signature
                 .parameters
@@ -9776,7 +10488,12 @@ impl Emitter<'_> {
                             }
                             self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
                         }
-                        self.arguments_for_signature(&signature, arguments, line)?;
+                        let first =
+                            with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+                        let given = self.what_was_handed_over(&first, arguments, line)?;
+                        let shaped =
+                            with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+                        self.arguments_for_signature(&shaped, arguments, line)?;
                         // The call is written against this class, not the one
                         // that declares it, which is what `javac` does and
                         // what lets a subclass override it.
@@ -9796,7 +10513,13 @@ impl Emitter<'_> {
                         let popped = taken + i32::from(!signature.static_);
                         self.pops(popped);
                         self.pushes(&signature.returns);
-                        return Ok(signature.returns);
+                        return self.what_it_really_gives_back(
+                            &signature,
+                            &[],
+                            &given,
+                            going.as_ref(),
+                            line,
+                        );
                     }
                 }
                 if let Some(enclosing) = self.unit.outer.clone() {
@@ -9806,7 +10529,12 @@ impl Emitter<'_> {
                         if !signature.static_ {
                             self.reach_the_enclosing_instance(&enclosing)?;
                         }
-                        self.arguments_for_signature(&signature, arguments, line)?;
+                        let first =
+                            with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+                        let given = self.what_was_handed_over(&first, arguments, line)?;
+                        let shaped =
+                            with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+                        self.arguments_for_signature(&shaped, arguments, line)?;
                         let descriptor = signature.descriptor();
                         let index = self.pool.method(
                             &signature.owner,
@@ -9823,7 +10551,13 @@ impl Emitter<'_> {
                         let popped = taken + i32::from(!signature.static_);
                         self.pops(popped);
                         self.pushes(&signature.returns);
-                        return Ok(signature.returns);
+                        return self.what_it_really_gives_back(
+                            &signature,
+                            &[],
+                            &given,
+                            going.as_ref(),
+                            line,
+                        );
                     }
                 }
                 // `import static java.lang.Math.max;` puts `max` here without
@@ -9835,7 +10569,11 @@ impl Emitter<'_> {
                     if !signature.static_ {
                         continue;
                     }
-                    self.arguments_for_signature(&signature, arguments, line)?;
+                    let first = with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+                    let given = self.what_was_handed_over(&first, arguments, line)?;
+                    let shaped =
+                        with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+                    self.arguments_for_signature(&shaped, arguments, line)?;
                     let descriptor = signature.descriptor();
                     let index =
                         self.pool
@@ -9848,7 +10586,49 @@ impl Emitter<'_> {
                         .sum();
                     self.pops(taken);
                     self.pushes(&signature.returns);
-                    return Ok(signature.returns);
+                    return self.what_it_really_gives_back(
+                        &signature,
+                        &[],
+                        &given,
+                        going.as_ref(),
+                        line,
+                    );
+                }
+                // And a class written inside another -- including one this
+                // compiler wrote for a lambda -- can call what that one holds
+                // statically, whether or not it kept an instance of it.
+                for holder in self.holders() {
+                    let Some(signature) = self.signature_for(&holder, name, arguments, line)?
+                    else {
+                        continue;
+                    };
+                    if !signature.static_ {
+                        continue;
+                    }
+                    let first = with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+                    let given = self.what_was_handed_over(&first, arguments, line)?;
+                    let shaped =
+                        with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+                    self.arguments_for_signature(&shaped, arguments, line)?;
+                    let descriptor = signature.descriptor();
+                    let index =
+                        self.pool
+                            .method(&signature.owner, name, &descriptor, signature.interface);
+                    self.op2(0xb8, index);
+                    let taken: i32 = signature
+                        .parameters
+                        .iter()
+                        .map(|one| i32::from(one.width()))
+                        .sum();
+                    self.pops(taken);
+                    self.pushes(&signature.returns);
+                    return self.what_it_really_gives_back(
+                        &signature,
+                        &[],
+                        &given,
+                        going.as_ref(),
+                        line,
+                    );
                 }
                 return Err(at(
                     "EJ224",
@@ -9879,8 +10659,22 @@ impl Emitter<'_> {
                 interface: false,
                 variadic: own.variadic,
                 abstract_: false,
-                returns_variable: None,
-                parameter_variables: Vec::new(),
+                // What was written before erasure. A method of this class is
+                // no less generic for being written here: `mapped(rows, one ->
+                // one.name())` has to hand the lambda the row type, and this
+                // is the only place that knows it.
+                returns_variable: which_variable(&own.returns),
+                parameter_variables: own
+                    .parameters
+                    .iter()
+                    .map(|(what, _)| which_variable(what))
+                    .collect(),
+                taken_stands_for: own
+                    .parameters
+                    .iter()
+                    .map(|(what, _)| standing_of(what))
+                    .collect(),
+                returns_stands_for: standing_of(&own.returns),
             };
             let descriptor = signature.descriptor();
 
@@ -9898,7 +10692,10 @@ impl Emitter<'_> {
             // Through the signature rather than the parameter list, because a
             // method of this class written with `...` packs its trailing
             // arguments into an array the same as any other.
-            self.arguments_for_signature(&signature, arguments, line)?;
+            let first = with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+            let given = self.what_was_handed_over(&first, arguments, line)?;
+            let shaped = with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+            self.arguments_for_signature(&shaped, arguments, line)?;
             let owner = self.this_class.clone();
             let inside_an_interface = self.unit.shape == Shape::Interface;
             let index = self
@@ -9929,7 +10726,7 @@ impl Emitter<'_> {
             let popped = taken + i32::from(!own.modifiers.static_);
             self.pops(popped);
             self.pushes(&returns);
-            return Ok(returns);
+            return self.what_it_really_gives_back(&signature, &[], &given, going.as_ref(), line);
         };
 
         // `java.util.Collections.sort(...)`: a class written out in full is a
@@ -9943,7 +10740,20 @@ impl Emitter<'_> {
                             self.signature_for(&owner, name, arguments, line)?
                         {
                             if signature.static_ {
-                                self.arguments_for_signature(&signature, arguments, line)?;
+                                let first = with_what_the_arguments_say(
+                                    &signature,
+                                    &[],
+                                    &[],
+                                    going.as_ref(),
+                                );
+                                let given = self.what_was_handed_over(&first, arguments, line)?;
+                                let shaped = with_what_the_arguments_say(
+                                    &signature,
+                                    &[],
+                                    &given,
+                                    going.as_ref(),
+                                );
+                                self.arguments_for_signature(&shaped, arguments, line)?;
                                 let descriptor = signature.descriptor();
                                 let index = self.pool.method(
                                     &signature.owner,
@@ -9959,7 +10769,13 @@ impl Emitter<'_> {
                                     .sum();
                                 self.pops(taken);
                                 self.pushes(&signature.returns);
-                                return Ok(signature.returns);
+                                return self.what_it_really_gives_back(
+                                    &signature,
+                                    &[],
+                                    &given,
+                                    going.as_ref(),
+                                    line,
+                                );
                             }
                         }
                     }
@@ -9990,7 +10806,10 @@ impl Emitter<'_> {
                         ),
                     ));
                 }
-                self.arguments_for_signature(&signature, arguments, line)?;
+                let first = with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+                let given = self.what_was_handed_over(&first, arguments, line)?;
+                let shaped = with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+                self.arguments_for_signature(&shaped, arguments, line)?;
                 let descriptor = signature.descriptor();
                 // A `static` method of an interface is still a method of an
                 // interface, and the constant pool has a different entry for
@@ -10006,7 +10825,13 @@ impl Emitter<'_> {
                     .sum();
                 self.pops(taken);
                 self.pushes(&signature.returns);
-                return Ok(signature.returns);
+                return self.what_it_really_gives_back(
+                    &signature,
+                    &[],
+                    &given,
+                    going.as_ref(),
+                    line,
+                );
             }
         }
 
@@ -10027,6 +10852,12 @@ impl Emitter<'_> {
         // takes a Named, and a lambda handed to it has to know that or it has
         // nothing to be.
         let shaped = as_written(&signature, &held);
+        // What each argument really is, for a method with type parameters of
+        // its own. Worked out only where there are any, because working it out
+        // means writing the code for each argument and throwing it away.
+        let first = with_what_the_arguments_say(&shaped, &held, &[], going.as_ref());
+        let given = self.what_was_handed_over(&first, arguments, line)?;
+        let shaped = with_what_the_arguments_say(&shaped, &held, &given, going.as_ref());
         self.arguments_for_signature(&shaped, arguments, line)?;
         // The descriptor is the erased one either way, because that is the
         // method the class file names.
@@ -10059,7 +10890,7 @@ impl Emitter<'_> {
         // `List<Piece>.get` is declared to give back an Object, because that is
         // what erasure left of it. What the list was written as says otherwise,
         // and the cast that says so is what `javac` writes here too.
-        self.what_it_really_gives_back(&signature, &held, line)
+        self.what_it_really_gives_back(&signature, &held, &given, going.as_ref(), line)
     }
 
     /// Writes an expression that is going somewhere known.
@@ -10199,23 +11030,7 @@ impl Emitter<'_> {
         // is a class file the verifier throws out.
         for round in 0..3 {
             for candidate in &candidates {
-                let fits = candidate
-                    .parameters
-                    .iter()
-                    .zip(given.iter())
-                    .all(|(want, have)| match round {
-                        0 => want == have,
-                        1 => self.reaches(have, want),
-                        _ => {
-                            self.reaches(have, want)
-                                || boxed_name(have)
-                                    .map(|boxed| Type::Object(boxed.to_string(), Vec::new()))
-                                    .is_some_and(|boxed| self.reaches(&boxed, want))
-                                || primitive_inside(have)
-                                    .is_some_and(|inside| inside.may_be_given_to(want))
-                        }
-                    });
-                if fits {
+                if self.could_take(candidate, &given, round) {
                     return Ok(Some(candidate.clone()));
                 }
             }
@@ -10234,9 +11049,51 @@ impl Emitter<'_> {
         &mut self,
         signature: &Signature,
         held: &[Type],
+        given: &[Type],
+        going: Option<&Type>,
         line: u32,
     ) -> Result<Type, Diagnostic> {
         let declared = signature.returns.clone();
+        // A method with type parameters of its own: what they stand for comes
+        // from what was handed over, and from where the answer is going.
+        if !signature.returns_stands_for.says_nothing() {
+            let bound = what_the_call_says(signature, given, going);
+            if !bound.is_empty() {
+                let found = signature.returns_stands_for.filled(&declared, held, &bound);
+                // The same class with its arguments filled in needs no cast --
+                // it already is one. A different class does: that is where the
+                // descriptor said Object and the call says otherwise.
+                if found == declared {
+                    return Ok(found);
+                }
+                return self.cast_to(found, declared);
+            }
+        }
+        // What the receiver was written as, put back into a return that was
+        // written with the class's own type parameters. `List<String>.stream()`
+        // is a `Stream<String>` and `Map<K, V>.entrySet()` is a
+        // `Set<Map.Entry<K, V>>`; the erased descriptor says neither, and the
+        // generic signature the class file carries says both.
+        if !held.is_empty() && signature.returns_stands_for.mentions_the_class() {
+            let found = signature.returns_stands_for.filled(&declared, held, &[]);
+            if found == declared {
+                return Ok(found);
+            }
+            return self.cast_to(found, declared);
+        }
+        // `entrySet` hands back a set of entries, and each entry holds both of
+        // the map's arguments.
+        if !held.is_empty() {
+            if let Some((_, _, around, inside)) = ELEMENT_ENTRIES
+                .iter()
+                .find(|(class, name, _, _)| *class == signature.owner && *name == signature.name)
+            {
+                return Ok(Type::Object(
+                    (*around).to_string(),
+                    vec![Type::Object((*inside).to_string(), held.to_vec())],
+                ));
+            }
+        }
         // What the class itself said, where this compilation read it, and what
         // the built-in table says otherwise.
         let (which, wrap) = match signature.returns_variable {
@@ -10256,7 +11113,72 @@ impl Emitter<'_> {
         if let Some(around) = wrap {
             return Ok(Type::Object(around.to_string(), vec![argument.clone()]));
         }
-        let Type::Object(named, _) = argument else {
+        let _ = line;
+        self.cast_to(argument.clone(), declared)
+    }
+
+    /// What each argument is, where the method has type parameters whose
+    /// meaning depends on it. An empty answer everywhere else, because working
+    /// this out costs writing the code for every argument and throwing it
+    /// away.
+    fn what_was_handed_over(
+        &mut self,
+        signature: &Signature,
+        arguments: &[Expression],
+        line: u32,
+    ) -> Result<Vec<Type>, Diagnostic> {
+        // Worth working out where either end of the signature stands for
+        // something: the return, so the caller is handed the right type, or a
+        // parameter, so a lambda written for it knows what it compares.
+        if signature.returns_stands_for.says_nothing()
+            && signature
+                .taken_stands_for
+                .iter()
+                .all(Standing::says_nothing)
+        {
+            return Ok(Vec::new());
+        }
+        let mut given = Vec::with_capacity(arguments.len());
+        // Where this call's own answer was going, kept so it can be put back:
+        // each argument is worked out against where *it* is going, which is
+        // what the parameter says.
+        let outside = self.expecting.take();
+        let last = signature.parameters.len().saturating_sub(1);
+        for (at, one) in arguments.iter().enumerate() {
+            // A lambda has no type until it has a target, and the target is
+            // what is being worked out. It says nothing here.
+            if matches!(
+                one,
+                Expression::Lambda { .. } | Expression::MethodRef { .. }
+            ) {
+                given.push(Type::Object("java/lang/Object".to_string(), Vec::new()));
+                continue;
+            }
+            // A call written as an argument works its own type variables out
+            // against where it is going, and where it is going is this
+            // parameter -- not this call's own answer, which is one step
+            // further out. Anything past the last of a variadic one is going
+            // into the array, so it is going where the elements go.
+            self.expecting = match signature.parameters.get(at.min(last)) {
+                Some(Type::Array(element)) if signature.variadic && at >= last => {
+                    Some((**element).clone())
+                }
+                Some(found) if at <= last => Some(found.clone()),
+                _ => None,
+            };
+            match self.type_of(one, line) {
+                Ok(found) => given.push(found),
+                Err(_) => given.push(Type::Object("java/lang/Object".to_string(), Vec::new())),
+            }
+        }
+        self.expecting = outside;
+        Ok(given)
+    }
+
+    /// Puts the cast erasure implies in front of a value the descriptor called
+    /// an Object.
+    fn cast_to(&mut self, found: Type, declared: Type) -> Result<Type, Diagnostic> {
+        let Type::Object(named, _) = &found else {
             return Ok(declared);
         };
         // Casting to Object is what it already is, and writing the instruction
@@ -10264,12 +11186,11 @@ impl Emitter<'_> {
         if named == "java/lang/Object" {
             return Ok(declared);
         }
-        let _ = line;
         let index = self.pool.class(named);
         self.op2(0xc0, index);
         self.pops(1);
-        self.pushes(argument);
-        Ok(argument.clone())
+        self.pushes(&found);
+        Ok(found)
     }
 
     /// Whether a value of one type may be handed where another is wanted,
@@ -10282,6 +11203,19 @@ impl Emitter<'_> {
     /// all -- one of the built-in names, say -- the old answer stands, because
     /// refusing what cannot be checked would refuse working code.
     fn reaches(&self, have: &Type, want: &Type) -> bool {
+        // An array is reached by an array of something that reaches its
+        // element, and by nothing else. `Type::may_be_given_to` says any
+        // reference reaches any reference, and that is how a `Comparable`
+        // handed to `StringBuilder.append` came to pick `append(char[])`.
+        if let Type::Array(to) = want {
+            return match have {
+                Type::Array(from) => from == to || self.reaches(from, to),
+                _ => false,
+            };
+        }
+        if matches!(have, Type::Array(_)) {
+            return matches!(want, Type::Object(named, _) if named == "java/lang/Object");
+        }
         let (Type::Object(from, _), Type::Object(to, _)) = (have, want) else {
             return have.may_be_given_to(want);
         };
@@ -10342,11 +11276,69 @@ impl Emitter<'_> {
     /// A method written with `...` answers to any number of arguments from its
     /// fixed ones upwards, so counting is not enough to find it.
     fn candidates(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
-        let exact = self.candidates_taking(owner, name, count);
-        if !exact.is_empty() {
-            return exact;
+        let mut found = self.candidates_taking(owner, name, count);
+        // A variadic one belongs here even where a fixed one takes the same
+        // number: `String.format` has a three-parameter form whose first is a
+        // Locale, and `format("%s:%d", a, b)` is not that one. Which it is is
+        // settled by what the arguments are, not by how many there are.
+        for one in self.variadic_taking(owner, name, count) {
+            if !found.iter().any(|held| held.parameters == one.parameters) {
+                found.push(one);
+            }
         }
-        self.variadic_taking(owner, name, count)
+        found
+    }
+
+    /// Whether a call handing over these types could be this signature, at one
+    /// of three strictnesses: exactly, without boxing, or at all.
+    ///
+    /// A variadic one is checked as it is written rather than as its
+    /// descriptor: the fixed parameters against the first arguments, and the
+    /// rest against the element type -- or the array itself, where somebody
+    /// handed one over whole.
+    fn could_take(&self, candidate: &Signature, given: &[Type], round: u8) -> bool {
+        let matched = |have: &Type, want: &Type| match round {
+            0 => want == have,
+            1 => self.reaches(have, want),
+            _ => {
+                self.reaches(have, want)
+                    || boxed_name(have)
+                        .map(|boxed| Type::Object(boxed.to_string(), Vec::new()))
+                        .is_some_and(|boxed| self.reaches(&boxed, want))
+                    || primitive_inside(have).is_some_and(|inside| inside.may_be_given_to(want))
+            }
+        };
+        if !candidate.variadic {
+            return candidate.parameters.len() == given.len()
+                && candidate
+                    .parameters
+                    .iter()
+                    .zip(given.iter())
+                    .all(|(want, have)| matched(have, want));
+        }
+        let fixed = candidate.parameters.len().saturating_sub(1);
+        if given.len() < fixed {
+            return false;
+        }
+        if !candidate
+            .parameters
+            .iter()
+            .take(fixed)
+            .zip(given.iter())
+            .all(|(want, have)| matched(have, want))
+        {
+            return false;
+        }
+        let Some(last) = candidate.parameters.last() else {
+            return false;
+        };
+        if given.len() == candidate.parameters.len() && matched(&given[fixed], last) {
+            return true;
+        }
+        let Type::Array(element) = last else {
+            return false;
+        };
+        given[fixed..].iter().all(|have| matched(have, element))
     }
 
     /// Every variadic signature of this name that could take this many.
@@ -10383,6 +11375,8 @@ impl Emitter<'_> {
                     abstract_: BUILT_IN_INTERFACES.contains(class),
                     returns_variable: None,
                     parameter_variables: Vec::new(),
+                    taken_stands_for: Vec::new(),
+                    returns_stands_for: Standing::Fixed,
                 });
             }
             if !found.is_empty() {
@@ -10464,7 +11458,10 @@ impl Emitter<'_> {
         }
         let found = match operator {
             None => self.value_for(value, &what, line)?,
-            Some(operator) => self.binary(operator, read, value, line)?,
+            Some(operator) => {
+                let now = self.binary(operator, read, value, line)?;
+                self.narrowed_by_the_operator(&now, &what, line)?
+            }
         };
         if !self.fit(&found, &what, line)? {
             return Err(at(
@@ -10526,7 +11523,9 @@ impl Emitter<'_> {
                 let found = match operator {
                     None => self.value_for(value, &local.what, line)?,
                     Some(operator) => {
-                        self.binary(operator, &Expression::Name(name.clone()), value, line)?
+                        let now =
+                            self.binary(operator, &Expression::Name(name.clone()), value, line)?;
+                        self.narrowed_by_the_operator(&now, &local.what, line)?
                     }
                 };
                 if !self.fit(&found, &local.what, line)? {
@@ -10611,14 +11610,36 @@ impl Emitter<'_> {
                         );
                     }
                 }
-                let owner = self.value(of, line)?;
-                let Type::Object(class, _) = owner.clone() else {
-                    return Err(at(
-                        "EJ212",
-                        line,
-                        1,
-                        format!("A {} has no fields.", owner.readable()),
-                    ));
+                // `Counter.made = 1` is a static field of a class, not a
+                // field of a value called `Counter`, and the same goes for
+                // `Outer.Inner.made`. Both are tried as a class before the
+                // left side is worked out as a value, which is what reading
+                // one does.
+                let named = match of.as_ref() {
+                    Expression::Name(maybe) if self.meant_as_a_class(maybe) => {
+                        Some(self.resolve_class(maybe, line)?)
+                    }
+                    other => written_as_a_path(other)
+                        .filter(|path| {
+                            self.meant_as_a_class(path.split('.').next().unwrap_or_default())
+                        })
+                        .and_then(|path| resolve_named(self.classpath, self.unit, &path)),
+                };
+                let through_a_value = named.is_none();
+                let class = match named {
+                    Some(named) => named,
+                    None => {
+                        let owner = self.value(of, line)?;
+                        let Type::Object(class, _) = owner.clone() else {
+                            return Err(at(
+                                "EJ212",
+                                line,
+                                1,
+                                format!("A {} has no fields.", owner.readable()),
+                            ));
+                        };
+                        class
+                    }
                 };
                 let Some((holder, (_, what, static_))) = self.classpath.find_field(&class, name)
                 else {
@@ -10636,31 +11657,73 @@ impl Emitter<'_> {
                     ));
                 };
                 let (holder, what, static_) = (holder.name.clone(), what.clone(), *static_);
-                if static_ {
+                if static_ && through_a_value {
                     // The object it was named through is not wanted.
                     self.op(0x57);
                     self.pops(1);
                 }
-                if operator.is_some() {
-                    return Err(unsupported(
+                if !static_ && !through_a_value {
+                    return Err(at(
+                        "EJ210",
                         line,
                         1,
-                        "A compound assignment into a field of another object",
-                    ));
-                }
-                let found = self.value(value, line)?;
-                if !found.is_reference() {
-                    self.convert(&found, &what, line)?;
-                }
-                if wanted {
-                    return Err(unsupported(
-                        line,
-                        1,
-                        "Using the value of an assignment into another object's field",
+                        format!(
+                            "`{name}` belongs to an instance of `{}`, and this names \
+                             the class.",
+                            class.replace('/', ".")
+                        ),
                     ));
                 }
                 let descriptor = what.descriptor();
                 let index = self.pool.field(&holder, name, &descriptor);
+                let found = match operator {
+                    None => self.value_for(value, &what, line)?,
+                    // `o.f += x` reads the field and writes it back, and the
+                    // object is worked out once: the `dup` keeps it for the
+                    // write while the read is spending it.
+                    Some(operator) => {
+                        if static_ {
+                            self.op2(0xb2, index);
+                            self.pushes(&what);
+                        } else {
+                            self.duplicates();
+                            self.op2(0xb4, index);
+                            self.pops(1);
+                            self.pushes(&what);
+                        }
+                        let now = self.binary_with(operator, &what, value, line)?;
+                        self.narrowed_by_the_operator(&now, &what, line)?
+                    }
+                };
+                if !self.fit(&found, &what, line)? {
+                    return Err(at(
+                        "EJ228",
+                        line,
+                        1,
+                        format!(
+                            "A {} cannot be put in `{name}`, which is a {}.",
+                            found.readable(),
+                            what.readable()
+                        ),
+                    ));
+                }
+                // `c = (o.f = b)` keeps the value. For a static field a `dup`
+                // is enough; for an instance one the object is underneath it,
+                // so the value goes into a slot and is read back -- which is
+                // what Dalvik, being a register machine with no stack
+                // shuffles, needs anyway.
+                self.open();
+                let held = wanted.then(|| {
+                    if static_ {
+                        self.op(if what.width() == 2 { 0x5c } else { 0x59 });
+                        self.pushes(&what);
+                        return None;
+                    }
+                    let slot = self.declare("$assigned", what.clone());
+                    self.store(slot, &what);
+                    self.load(slot, &what);
+                    Some(slot)
+                });
                 if static_ {
                     self.op2(0xb3, index);
                     self.pops(i32::from(what.width()));
@@ -10668,6 +11731,10 @@ impl Emitter<'_> {
                     self.op2(0xb5, index);
                     self.pops(i32::from(what.width()) + 1);
                 }
+                if let Some(Some(slot)) = held {
+                    self.load(slot, &what);
+                }
+                self.close();
                 Ok(what)
             }
             Expression::Index { of, at: index } => {
@@ -10677,52 +11744,42 @@ impl Emitter<'_> {
                 };
                 let found = self.value(index, line)?;
                 self.convert(&found, &Type::Int, line)?;
-                if let Some(operator) = operator {
+                match operator {
                     // `a[i] += x` reads the element and writes it back, and
                     // the array and the index are worked out once. `dup2`
                     // keeps them for the write while the read uses them.
-                    self.duplicates_two();
-                    self.op(array_load(&element));
-                    self.pops(2);
-                    self.pushes(&element);
-                    let now = self.binary_with(operator, &element, value, line)?;
-                    if !now.is_reference() {
-                        self.convert(&now, &element, line)?;
+                    Some(operator) => {
+                        self.duplicates_two();
+                        self.op(array_load(&element));
+                        self.pops(2);
+                        self.pushes(&element);
+                        let now = self.binary_with(operator, &element, value, line)?;
+                        self.narrowed_by_the_operator(&now, &element, line)?;
                     }
-                    if wanted {
-                        return Err(unsupported(
-                            line,
-                            1,
-                            "Using the value of a compound assignment into an array",
-                        ));
+                    None => {
+                        let given = self.value_for(value, &element, line)?;
+                        if !given.is_reference() {
+                            self.convert(&given, &element, line)?;
+                        }
                     }
-                    self.op(array_store(&element));
-                    self.pops(2 + i32::from(element.width()));
-                    return Ok(*element);
                 }
-                let given = self.value_for(value, &element, line)?;
-                if !given.is_reference() {
-                    self.convert(&given, &element, line)?;
-                }
-                if wanted {
-                    return Err(unsupported(
-                        line,
-                        1,
-                        "Using the value of an array assignment",
-                    ));
-                }
-                let opcode = match *element {
-                    Type::Long => 0x50u8,
-                    Type::Float => 0x51,
-                    Type::Double => 0x52,
-                    Type::Byte | Type::Boolean => 0x54,
-                    Type::Char => 0x55,
-                    Type::Short => 0x56,
-                    ref other if other.is_reference() => 0x53,
-                    _ => 0x4f,
-                };
-                self.op(opcode);
+                // `c = (a[i] = b)` keeps the value. The array and the index
+                // are underneath it, so the value goes into a slot and is
+                // read back rather than shuffled -- Dalvik is a register
+                // machine and has no instruction for the shuffle.
+                self.open();
+                let held = wanted.then(|| {
+                    let slot = self.declare("$assigned", (*element).clone());
+                    self.store(slot, &element);
+                    self.load(slot, &element);
+                    slot
+                });
+                self.op(array_store(&element));
                 self.pops(2 + i32::from(element.width()));
+                if let Some(slot) = held {
+                    self.load(slot, &element);
+                }
+                self.close();
                 Ok(*element)
             }
             _ => Err(unsupported(line, 1, "Assigning to that")),
@@ -10737,92 +11794,87 @@ impl Emitter<'_> {
         line: u32,
         wanted: bool,
     ) -> Result<Type, Diagnostic> {
-        let Expression::Name(name) = target else {
-            if let Expression::Index { .. } = target {
-                if wanted {
-                    return Err(unsupported(
-                        line,
-                        1,
-                        "Using the value of a step on an array element",
-                    ));
+        // `iinc` steps a local in place, which is the whole reason
+        // `for (int i = 0; i < n; i++)` costs three bytes.
+        if let Expression::Name(name) = target {
+            if let Some(local) = self.local(name) {
+                if local.what.is_int_like() {
+                    if wanted && after {
+                        self.load(local.slot, &local.what);
+                    }
+                    self.code.push(0x84);
+                    self.code.push(local.slot as u8);
+                    self.code.push(by as i8 as u8);
+                    if wanted && !after {
+                        self.load(local.slot, &local.what);
+                    }
+                    return Ok(local.what);
                 }
-                return self.assign(
-                    target,
-                    Some(if by > 0 {
-                        Binary::Add
-                    } else {
-                        Binary::Subtract
-                    }),
-                    &Expression::Int(i64::from(by.abs())),
-                    line,
-                    false,
-                );
             }
-            if let Expression::Field { .. } = target {
-                if wanted {
-                    return Err(unsupported(
-                        line,
-                        1,
-                        "Using the value of a step on another object's field",
-                    ));
-                }
-                return self.assign(
-                    target,
-                    Some(if by > 0 {
-                        Binary::Add
-                    } else {
-                        Binary::Subtract
-                    }),
-                    &Expression::Int(i64::from(by.abs())),
-                    line,
-                    false,
-                );
-            }
-            return Err(unsupported(line, 1, "Stepping anything but a name"));
-        };
-        if let Some(local) = self.local(name) {
-            if local.what.is_int_like() {
-                if wanted && after {
-                    self.load(local.slot, &local.what);
-                }
-                // `iinc` steps a local in place, which is the whole reason
-                // `for (int i = 0; i < n; i++)` costs three bytes.
-                self.code.push(0x84);
-                self.code.push(local.slot as u8);
-                self.code.push(by as i8 as u8);
-                if wanted && !after {
-                    self.load(local.slot, &local.what);
-                }
-                return Ok(local.what);
-            }
-        }
-        // Anything else becomes the assignment it means. Written as an
-        // assignment rather than run as one: `held++;` on its own leaves
-        // nothing behind, and evaluating it as a value would leave the new
-        // value on the stack under whatever comes next.
-        if after && wanted {
-            return Err(unsupported(
-                line,
-                1,
-                "Using the old value of a stepped field",
-            ));
         }
         let operator = if by > 0 {
             Binary::Add
         } else {
             Binary::Subtract
         };
-        let found = self.assign(
-            target,
-            Some(operator),
-            &Expression::Int(i64::from(by.abs())),
-            line,
-            wanted,
-        )?;
-        if !wanted {
-            return Ok(Type::Void);
+        let stepped = Expression::Int(i64::from(by.abs()));
+        // `held++;` on its own leaves nothing behind, and `++held` as a value
+        // leaves the new one: both are the assignment they mean.
+        if !wanted || !after {
+            let found = self.assign(target, Some(operator), &stepped, line, wanted)?;
+            return Ok(if wanted { found } else { Type::Void });
         }
-        Ok(found)
+        // `x = held++` hands back what was there before it stepped. Whatever
+        // the target is reached through is reached once -- `a[at()]++` calls
+        // `at` one time, not three -- so anything that is not a plain name
+        // goes into a slot of its own, and the read, the step and the write
+        // are all written against those slots.
+        self.open();
+        let target = self.reached_once(target, line)?;
+        let was = self.value(&target, line)?;
+        let slot = self.declare("$was", was.clone());
+        self.store(slot, &was);
+        self.assign(&target, Some(operator), &stepped, line, false)?;
+        self.load(slot, &was);
+        self.close();
+        Ok(was)
+    }
+
+    /// The same target, with everything it is reached through worked out and
+    /// put in a slot, so that reading it and writing it back does not work it
+    /// out twice.
+    ///
+    /// A name, a `this` and a dotted path are left alone: working one of those
+    /// out twice is the same as working it out once, and a slot for it would
+    /// only make the method longer.
+    fn reached_once(&mut self, target: &Expression, line: u32) -> Result<Expression, Diagnostic> {
+        match target {
+            Expression::Index { of, at } => Ok(Expression::Index {
+                of: Box::new(self.put_in_a_slot(of, "$of", line)?),
+                at: Box::new(self.put_in_a_slot(at, "$at", line)?),
+            }),
+            Expression::Field { of, name } => Ok(Expression::Field {
+                of: Box::new(self.put_in_a_slot(of, "$of", line)?),
+                name: name.clone(),
+            }),
+            other => Ok(other.clone()),
+        }
+    }
+
+    /// One part of such a target: worked out, stored, and named by its slot.
+    fn put_in_a_slot(
+        &mut self,
+        part: &Expression,
+        called: &str,
+        line: u32,
+    ) -> Result<Expression, Diagnostic> {
+        if reached_the_same_way_twice(part) {
+            return Ok(part.clone());
+        }
+        let what = self.value(part, line)?;
+        let slot = self.declare(called, what.clone());
+        self.store(slot, &what);
+        Ok(Expression::Name(called.to_string()))
     }
 }
 
@@ -12794,7 +13846,7 @@ impl Emitter<'_> {
                  the class out.",
             ));
         };
-        let Type::Object(named, _) = target.clone() else {
+        let Type::Object(named, holds) = target.clone() else {
             return Err(at(
                 "EJ250",
                 line,
@@ -12803,7 +13855,13 @@ impl Emitter<'_> {
             ));
         };
 
+        // What the interface was written holding is what its one method takes:
+        // a `Comparator<String>` compares strings, whatever the erased
+        // descriptor says. Without this the names a lambda gives its
+        // parameters are all Object, and `left.compareTo(right)` is a method
+        // nobody has heard of.
         let single = self.the_one_method_of(&named, line)?;
+        let single = as_written(&single, &holds);
         if single.parameters.len() != parameters.len() {
             return Err(at(
                 "EJ251",
@@ -12876,6 +13934,7 @@ impl Emitter<'_> {
             unreachable!("void is nameable")
         };
         let made = Body {
+            static_setup: Vec::new(),
             fields: Vec::new(),
             methods: vec![Method {
                 modifiers: Modifiers {
@@ -12925,7 +13984,7 @@ impl Emitter<'_> {
                  argument, a declared variable, or what a method returns.",
             ));
         };
-        let Type::Object(named, _) = target else {
+        let Type::Object(named, holds) = target else {
             return Err(at(
                 "EJ250",
                 line,
@@ -12934,6 +13993,10 @@ impl Emitter<'_> {
             ));
         };
         let single = self.the_one_method_of(&named, line)?;
+        // What the interface was written holding is what its one method takes,
+        // which is the whole reason `String::length` can stand for a
+        // `Function<String, Integer>` and not for a `Function<Object, Object>`.
+        let single = as_written(&single, &holds);
 
         // One name per thing the interface hands over, and the call is handed
         // exactly those, in order.
@@ -12968,6 +14031,17 @@ impl Emitter<'_> {
                 arguments,
                 outer: None,
             }
+        } else if self.called_on_the_first_one_handed_over(on, name, arguments.len()) {
+            // `String::length` written where a `Function<String, Integer>` is
+            // wanted: the class is not the receiver, the first thing handed
+            // over is, and the rest are the call's arguments.
+            let receiver = arguments.remove(0);
+            Expression::Call {
+                on: Some(Box::new(receiver)),
+                super_call: false,
+                name: name.to_string(),
+                arguments,
+            }
         } else {
             Expression::Call {
                 on: Some(Box::new(on.clone())),
@@ -12982,12 +14056,72 @@ impl Emitter<'_> {
             line,
             column: 1,
         }];
-        self.expecting = Some(Type::Object(named, Vec::new()));
+        self.expecting = Some(Type::Object(named, holds));
         self.lambda(&parameters, &body, true, line)
+    }
+
+    /// Whether `Type::method` means the method of whatever is handed over
+    /// first, rather than a static method of the class.
+    ///
+    /// `Integer::parseInt` is a static call; `String::length` is not, and the
+    /// two are written identically. What tells them apart is which one the
+    /// class actually has: a static taking everything the interface hands
+    /// over, or an instance method taking one fewer.
+    fn called_on_the_first_one_handed_over(
+        &mut self,
+        on: &Expression,
+        name: &str,
+        handed: usize,
+    ) -> bool {
+        if handed == 0 {
+            return false;
+        }
+        let Expression::Name(maybe) = on else {
+            return false;
+        };
+        if !self.meant_as_a_class(maybe) {
+            return false;
+        }
+        let Ok(owner) = self.resolve_class(maybe, 1) else {
+            return false;
+        };
+        if self
+            .candidates(&owner, name, handed)
+            .iter()
+            .any(|one| one.static_)
+        {
+            return false;
+        }
+        self.candidates(&owner, name, handed - 1)
+            .iter()
+            .any(|one| !one.static_)
     }
 
     /// The one method an interface has, which is what a lambda stands for.
     fn the_one_method_of(&self, named: &str, line: u32) -> Result<Signature, Diagnostic> {
+        // A lambda stands for an interface and nothing else. `Object` is the
+        // one that turns up, because it is what a return type or a declaration
+        // says when it says nothing, and it does declare methods -- so without
+        // asking this first, `getClass` would be offered as the thing the
+        // lambda is.
+        let an_interface = match self.classpath.get(named) {
+            Some(known) => known.interface,
+            None => BUILT_IN_INTERFACES.contains(&named),
+        };
+        if !an_interface {
+            return Err(at(
+                "EJ250",
+                line,
+                1,
+                format!(
+                    "`{}` is a class, and a lambda can only stand for an interface.",
+                    named.replace('/', ".")
+                ),
+            )
+            .with_suggestion(
+                "A lambda takes its type from what it is handed to. Name the interface                  it stands for, or write the class out.",
+            ));
+        }
         let mut found: Vec<Signature> = Vec::new();
         if let Some(known) = self.classpath.get(named) {
             found.extend(known.methods.iter().cloned());
@@ -13011,13 +14145,28 @@ impl Emitter<'_> {
                     abstract_: true,
                     returns_variable: None,
                     parameter_variables: Vec::new(),
+                    taken_stands_for: Vec::new(),
+                    returns_stands_for: Standing::Fixed,
                 });
             }
         }
         // Only the abstract one counts. An interface with a `default` method
         // and a `private` one has three methods and exactly one of them is
         // what a lambda stands for.
-        found.retain(|one| !one.static_ && one.name != "<init>" && one.abstract_);
+        //
+        // And a method that redeclares one of Object's does not count either.
+        // `Comparator` declares `equals` so that its documentation can say
+        // something about it; every object already has one, so there is
+        // nothing there for a lambda to be.
+        found.retain(|one| {
+            !one.static_
+                && one.name != "<init>"
+                && one.abstract_
+                && !matches!(
+                    (one.name.as_str(), one.parameters.len()),
+                    ("equals", 1) | ("hashCode", 0) | ("toString", 0)
+                )
+        });
         match found.len() {
             1 => Ok(found.remove(0)),
             0 => Err(at(
@@ -13247,7 +14396,7 @@ impl Emitter<'_> {
             fields,
             methods,
             instance_setup: body.instance_setup.clone(),
-            static_setup: Vec::new(),
+            static_setup: body.static_setup.clone(),
             outer: outer.clone(),
             permits: Vec::new(),
             annotation: false,
@@ -13333,6 +14482,8 @@ impl Emitter<'_> {
                 abstract_: false,
                 returns_variable: None,
                 parameter_variables: Vec::new(),
+                taken_stands_for: Vec::new(),
+                returns_stands_for: Standing::Fixed,
             }
         } else {
             match self.find_signature(owner, "<init>", arguments.len()) {
@@ -13348,6 +14499,8 @@ impl Emitter<'_> {
                     abstract_: false,
                     returns_variable: None,
                     parameter_variables: Vec::new(),
+                    taken_stands_for: Vec::new(),
+                    returns_stands_for: Standing::Fixed,
                 },
                 None => {
                     return Err(at(
@@ -13933,8 +15086,104 @@ const KEPT_AT_RUNTIME: &[&str] = &[
     "java/lang/annotation/Target",
 ];
 
+/// The same signature, with what the arguments say its own type parameters
+/// stand for put back into its parameters.
+///
+/// `Collections.sort(rows, ...)` where `rows` is a `List<String>` is a sort
+/// with a `Comparator<String>`, and the lambda written for it compares
+/// strings. Nothing else says so: the descriptor was erased and the receiver
+/// is a class with no arguments at all.
+fn with_what_the_arguments_say(
+    signature: &Signature,
+    held: &[Type],
+    given: &[Type],
+    going: Option<&Type>,
+) -> Signature {
+    if signature
+        .taken_stands_for
+        .iter()
+        .all(Standing::says_nothing)
+    {
+        return signature.clone();
+    }
+    let bound = what_the_call_says(signature, given, going);
+    if bound.is_empty() {
+        return signature.clone();
+    }
+    let mut shaped = signature.clone();
+    for (at, one) in shaped.parameters.iter_mut().enumerate() {
+        let Some(shape) = signature.taken_stands_for.get(at) else {
+            continue;
+        };
+        *one = shape.filled(one, held, &bound);
+    }
+    shaped
+}
+
+/// What a generic method's own type variables stand for at one call.
+///
+/// The arguments say first, because that is what a person reading the call
+/// sees. Where they say nothing -- `Collectors.groupingBy(Person::age)` hands
+/// over a method reference, which has no type until it has a target -- where
+/// the answer is going says the rest, which is the same road `javac` takes.
+fn what_the_call_says(
+    signature: &Signature,
+    given: &[Type],
+    going: Option<&Type>,
+) -> Vec<(String, Type)> {
+    let mut bound: Vec<(String, Type)> = Vec::new();
+    let fixed = signature.taken_stands_for.len().saturating_sub(1);
+    for (shape, actual) in signature.taken_stands_for.iter().zip(given.iter()) {
+        shape.bind(actual, &mut bound);
+    }
+    // `asList("a", "b")` hands over the elements, not the array. Where the
+    // last parameter was written with `...`, what it holds is bound against
+    // each of them.
+    if signature.variadic && given.len() > fixed {
+        if let Some(Standing::ArrayOf(inside)) = signature.taken_stands_for.last() {
+            let trailing = &given[fixed..];
+            let handed_the_array = trailing.len() == 1 && matches!(trailing[0], Type::Array(_));
+            if !handed_the_array {
+                for actual in trailing {
+                    inside.bind(actual, &mut bound);
+                }
+            }
+        }
+    }
+    if let Some(going) = going {
+        signature.returns_stands_for.bind(going, &mut bound);
+    }
+    // Nothing is learned from a variable that only stands for Object, which is
+    // what it erased to in the first place.
+    bound.retain(|(_, what)| *what != Type::Object("java/lang/Object".to_string(), Vec::new()));
+    bound
+}
+
 /// The same signature, with what the receiver was written as put back into it.
 fn as_written(signature: &Signature, held: &[Type]) -> Signature {
+    // What the class file's own generic signature said, where it carried one.
+    // This is the whole of what was written, so it can say things a single
+    // index cannot: `Stream<T>.map` takes a `Function<? super T, ? extends
+    // R>`, and a method reference written for it has to know that its
+    // receiver is a T.
+    if !held.is_empty()
+        && signature
+            .taken_stands_for
+            .iter()
+            .any(Standing::mentions_the_class)
+    {
+        let mut shaped = signature.clone();
+        for (at, one) in shaped.parameters.iter_mut().enumerate() {
+            let Some(shape) = signature.taken_stands_for.get(at) else {
+                continue;
+            };
+            if !shape.mentions_the_class() {
+                continue;
+            }
+            *one = shape.filled(one, held, &[]);
+        }
+        return shaped;
+    }
     // What the class itself said, where this compilation read it; the built-in
     // table for the collections, whose sources it has never seen.
     let mine: Vec<usize>;
@@ -14009,6 +15258,9 @@ const ELEMENT_RETURN: &[(&str, &str, usize, Option<&str>)] = &[
     ("java/util/Map", "putIfAbsent", 1, None),
     ("java/util/Map", "keySet", 0, Some("java/util/Set")),
     ("java/util/Map", "values", 1, Some("java/util/Collection")),
+    ("java/util/Map$Entry", "getKey", 0, None),
+    ("java/util/Map$Entry", "getValue", 1, None),
+    ("java/util/Map$Entry", "setValue", 1, None),
     (
         "java/util/Collection",
         "iterator",
@@ -14022,6 +15274,19 @@ const ELEMENT_RETURN: &[(&str, &str, usize, Option<&str>)] = &[
         Some("java/util/Iterator"),
     ),
 ];
+
+/// Built-in methods that hand back a collection of something built out of the
+/// receiver's type arguments.
+///
+/// `Map<K, V>.entrySet()` is a `Set<Map.Entry<K, V>>` -- two classes deep,
+/// which is one more than the table above can say, and the shape every walk
+/// over a map goes through.
+const ELEMENT_ENTRIES: &[(&str, &str, &str, &str)] = &[(
+    "java/util/Map",
+    "entrySet",
+    "java/util/Set",
+    "java/util/Map$Entry",
+)];
 
 /// The primitive a box holds, where the type is one of the boxes.
 fn primitive_inside(what: &Type) -> Option<Type> {
@@ -14058,6 +15323,17 @@ fn boxed_name(what: &Type) -> Option<&'static str> {
 }
 
 /// The instruction that writes one element into an array of this type.
+/// Whether working an expression out twice is the same as working it out
+/// once. A name, a `this`, a dotted path and a written-down number all are;
+/// a call, an assignment or a step is not.
+fn reached_the_same_way_twice(expression: &Expression) -> bool {
+    match expression {
+        Expression::This | Expression::Name(_) | Expression::Int(_) => true,
+        Expression::Field { of, .. } => reached_the_same_way_twice(of),
+        _ => false,
+    }
+}
+
 fn array_store(element: &Type) -> u8 {
     match element {
         Type::Long => 0x50,
@@ -14624,6 +15900,8 @@ pub fn compile_unit_in_nest(
                 abstract_: false,
                 returns_variable: None,
                 parameter_variables: Vec::new(),
+                taken_stands_for: Vec::new(),
+                returns_stands_for: Standing::Fixed,
             }
             .descriptor();
             let descriptor = pool.utf8(&descriptor);
@@ -14794,6 +16072,8 @@ pub fn compile_unit_in_nest(
             abstract_: false,
             returns_variable: None,
             parameter_variables: Vec::new(),
+            taken_stands_for: Vec::new(),
+            returns_stands_for: Standing::Fixed,
         }
         .descriptor();
         let descriptor = pool.utf8(&descriptor);
@@ -14824,8 +16104,16 @@ pub fn compile_unit_in_nest(
         Shape::Interface if unit.annotation => 0x0200 | 0x0400 | 0x2000,
         Shape::Interface => 0x0200 | 0x0400,
         // ACC_ENUM as well, which is how anything reading the file knows the
-        // constants are constants.
-        Shape::Enum => 0x0020 | 0x4000,
+        // constants are constants. And ACC_ABSTRACT where the enum left a
+        // method for its constants to answer: nobody writes `abstract enum`,
+        // the bodiless method is what says so.
+        Shape::Enum => {
+            let left_open = unit
+                .methods
+                .iter()
+                .any(|held| held.body.is_none() && !held.modifiers.static_);
+            0x0020 | 0x4000 | if left_open { 0x0400 } else { 0 }
+        }
         // ACC_RECORD, and final, because a record cannot be extended.
         Shape::Record => 0x0020 | 0x0010,
     };
@@ -17994,6 +19282,1117 @@ public class Daily {
 }
 "####;
 
+    /// Every place a value can be assigned into, and every way a value can be
+    /// taken back out of the assignment: a field of another object, a static
+    /// field named through its class, an element of an array, wide ones,
+    /// strings, and `++` on all of them in front and behind.
+    ///
+    /// The last of these is why `a[at(1)]++` is here: the index is worked out
+    /// once, not once per read and once per write, and only counting the calls
+    /// says so.
+    const EVERY_PLACE_A_VALUE_GOES: &str = r####"
+public class Sides {
+
+    static class Held {
+        int count;
+        long wide;
+        String name = "";
+        static int made;
+    }
+
+    static int calls;
+
+    int mine;
+    static int ours;
+
+    static int at(int of) {
+        calls++;
+        return of;
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        // Into another object's field.
+        Held held = new Held();
+        held.count = 5;
+        out.append(held.count).append(' ');
+        held.count += 3;
+        out.append(held.count).append(' ');
+        int taken = (held.count = 11);
+        out.append(taken).append(' ');
+        int again = (held.count += 4);
+        out.append(again).append(' ');
+        out.append(held.count++).append(' ');
+        out.append(held.count).append(' ');
+        out.append(++held.count).append(' ');
+        out.append(held.count--).append(' ');
+        out.append(held.count).append(' ');
+
+        // Wide ones too.
+        held.wide = 7L;
+        long wide = (held.wide += 2L);
+        out.append(wide).append(' ');
+        out.append(held.wide++).append(' ');
+        out.append(held.wide).append(' ');
+
+        // A string field, compound.
+        held.name += "ab";
+        held.name += "cd";
+        out.append(held.name).append(' ');
+
+        // Static through the class name.
+        Held.made = 2;
+        Held.made += 3;
+        out.append(Held.made++).append(' ');
+        out.append(Held.made).append(' ');
+        out.append((Held.made = 20)).append(' ');
+        out.append((Held.made += 1)).append(' ');
+
+        // Into an array.
+        int[] numbers = new int[4];
+        numbers[0] = 1;
+        numbers[1] += 2;
+        int one = (numbers[2] = 9);
+        out.append(one).append(' ');
+        int two = (numbers[2] += 1);
+        out.append(two).append(' ');
+        out.append(numbers[2]++).append(' ');
+        out.append(numbers[2]).append(' ');
+        out.append(++numbers[2]).append(' ');
+        out.append(numbers[2]--).append(' ');
+        out.append(numbers[2]).append(' ');
+
+        long[] wides = new long[2];
+        wides[1] = 4L;
+        long third = (wides[1] += 6L);
+        out.append(third).append(' ');
+        out.append(wides[1]++).append(' ');
+        out.append(wides[1]).append(' ');
+
+        String[] words = new String[2];
+        words[0] = "x";
+        words[0] += "y";
+        out.append(words[0]).append(' ');
+        out.append((words[1] = "z")).append(' ');
+
+        // Worked out once, not three times.
+        calls = 0;
+        int[] counted = new int[3];
+        counted[at(1)]++;
+        out.append(calls).append(' ').append(counted[1]).append(' ');
+        calls = 0;
+        int fourth = counted[at(1)]++;
+        out.append(calls).append(' ').append(fourth).append(' ').append(counted[1]).append(' ');
+
+        // Own fields, read back as values.
+        Sides sides = new Sides();
+        sides.mine = 3;
+        out.append(sides.mine++).append(' ');
+        out.append(sides.mine).append(' ');
+        ours = 1;
+        out.append(ours++).append(' ');
+        out.append(ours).append(' ');
+        out.append(sides.through()).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+
+    String through() {
+        int was = mine++;
+        int now = ++mine;
+        mine += 10;
+        int kept = (mine = 100);
+        return was + "/" + now + "/" + mine + "/" + kept;
+    }
+}
+"####;
+
+    #[test]
+    fn every_place_a_value_can_be_assigned_into_gives_back_what_java_gives_back() {
+        let produced = compile(EVERY_PLACE_A_VALUE_GOES, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Sides") {
+            None => eprintln!("java: no JVM here to run the assignments"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "5 8 11 15 15 16 17 17 16 9 9 10 abcd 5 6 20 21 9 10 10 11 12 12 11 \
+                     10 10 11 xy z 1 1 1 1 2 3 4 1 2 4/6/100/100"
+                );
+                eprintln!("java: every place a value goes, and every value one gives back");
+            }
+        }
+
+        // And all of it reaches Dalvik, which has no stack to shuffle and has
+        // to be handed every one of these as registers.
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        if let Some(said) = dexdump_disassembly(&dex) {
+            assert!(said.contains("Sides.main"), "{said}");
+        }
+    }
+
+    /// An enum whose constants answer for themselves, and a `native` method,
+    /// which is a flag and no body at all.
+    ///
+    /// A constant with a body is a class of its own extending the enum, and
+    /// `values()`, `ordinal()`, `valueOf` and a `switch` all have to go on
+    /// working across the three of them.
+    const AN_ENUM_THAT_ANSWERS_FOR_ITSELF: &str = r####"
+public class Ops {
+    enum Op {
+        PLUS("+") {
+            @Override int apply(int a, int b) { return a + b; }
+        },
+        TIMES("*") {
+            @Override int apply(int a, int b) { return a * b; }
+            @Override String shown() { return "times"; }
+        },
+        MINUS("-");
+
+        private final String mark;
+        Op(String mark) { this.mark = mark; }
+        int apply(int a, int b) { return a - b; }
+        String shown() { return mark; }
+    }
+
+    enum Sign {
+        UP { int of() { return 1; } },
+        DOWN { int of() { return -1; } };
+        abstract int of();
+    }
+
+    public native int fromTheLibrary(int of);
+    static native String named();
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+        for (Op one : Op.values()) {
+            out.append(one).append(' ').append(one.ordinal()).append(' ')
+               .append(one.shown()).append(' ').append(one.apply(6, 3)).append(' ');
+        }
+        out.append(Op.valueOf("TIMES").apply(2, 5)).append(' ');
+        switch (Op.PLUS) {
+            case PLUS: out.append("p"); break;
+            default: out.append("?");
+        }
+        out.append(' ').append(Sign.UP.of() + Sign.DOWN.of());
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn an_enum_whose_constants_answer_for_themselves_runs() {
+        let produced = compile(AN_ENUM_THAT_ANSWERS_FOR_ITSELF, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Ops") {
+            None => eprintln!("java: no JVM here to run an enum that answers for itself"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "PLUS 0 + 9 TIMES 1 times 18 MINUS 2 - 3 10 p 0"
+                );
+                eprintln!("java: an enum whose constants answer for themselves");
+            }
+        }
+
+        // And all of it reaches Dalvik: the classes the constants turned into,
+        // and the two methods with no body at all.
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// The Java somebody writes when they are not thinking about the compiler:
+    /// a sealed interface and two records, a generic class of one's own that
+    /// can be walked with a for-each, a generic method with a bound, varargs,
+    /// try-with-resources over two things, a multi-catch with a `finally`, a
+    /// switch on a String and a switch over a sealed type, a text block, a
+    /// labelled break, and the arithmetic that has caught every compiler once.
+    ///
+    /// The answer is `javac`'s, word for word.
+    const AN_ORDINARY_PROGRAM: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Wide {
+
+    sealed interface Shape permits Circle, Square { double area(); }
+    record Circle(double radius) implements Shape {
+        Circle {
+            if (radius < 0) throw new IllegalArgumentException("negative");
+        }
+        public double area() { return 3.0 * radius * radius; }
+    }
+    record Square(double side) implements Shape {
+        public double area() { return side * side; }
+    }
+
+    static class Bag<T> implements Iterable<T> {
+        private final List<T> held = new ArrayList<T>();
+        Bag<T> put(T one) { held.add(one); return this; }
+        T at(int index) { return held.get(index); }
+        int size() { return held.size(); }
+        public Iterator<T> iterator() { return held.iterator(); }
+    }
+
+    static <T extends Comparable<T>> T biggest(List<T> of) {
+        T best = of.get(0);
+        for (T one : of) {
+            if (one.compareTo(best) > 0) best = one;
+        }
+        return best;
+    }
+
+    @SafeVarargs
+    static <T> List<T> listOf(T... items) {
+        List<T> out = new ArrayList<T>();
+        for (T one : items) out.add(one);
+        return out;
+    }
+
+    static class Closed implements AutoCloseable {
+        private final StringBuilder log;
+        private final String name;
+        Closed(StringBuilder log, String name) { this.log = log; this.name = name; }
+        public void close() { log.append("close:").append(name).append(' '); }
+    }
+
+    static String describe(Shape shape) {
+        return switch (shape) {
+            case Circle c -> "circle " + (int) c.area();
+            case Square s -> "square " + (int) s.area();
+        };
+    }
+
+    static String word(String of) {
+        switch (of) {
+            case "a": return "first";
+            case "b": return "second";
+            default: return "other";
+        }
+    }
+
+    static int digits(int of) {
+        int count = 0;
+        do { count++; of /= 10; } while (of != 0);
+        return count;
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        Bag<String> bag = new Bag<String>().put("one").put("two").put("three");
+        for (String one : bag) out.append(one.length());
+        out.append(' ').append(bag.at(1).toUpperCase()).append(' ');
+
+        List<Integer> numbers = listOf(3, 9, 4);
+        out.append(biggest(numbers)).append(' ');
+        out.append(biggest(listOf("pear", "apple"))).append(' ');
+
+        out.append(describe(new Circle(2.0))).append(' ');
+        out.append(describe(new Square(3.0))).append(' ');
+        out.append(new Circle(2.0).equals(new Circle(2.0))).append(' ');
+        out.append(new Square(1.0)).append(' ');
+
+        try (Closed a = new Closed(out, "a"); Closed b = new Closed(out, "b")) {
+            out.append("body ");
+        }
+
+        try {
+            throw new IllegalStateException("no");
+        } catch (IllegalStateException | IllegalArgumentException why) {
+            out.append(why.getMessage()).append(' ');
+        } finally {
+            out.append("done ");
+        }
+
+        out.append(word("a")).append(' ').append(word("z")).append(' ');
+        out.append(digits(1234)).append(' ');
+
+        int[] raw = {5, 1, 4};
+        Arrays.sort(raw);
+        out.append(Arrays.toString(raw)).append(' ');
+        int[] more = Arrays.copyOf(raw, 5);
+        out.append(more.length).append(' ');
+
+        Map<String, List<Integer>> grouped = new LinkedHashMap<String, List<Integer>>();
+        grouped.put("odd", listOf(1, 3));
+        grouped.put("even", listOf(2, 4));
+        for (Map.Entry<String, List<Integer>> one : grouped.entrySet()) {
+            out.append(one.getKey()).append('=').append(one.getValue().size()).append(' ');
+        }
+
+        Map<String, Integer> counts = new HashMap<String, Integer>();
+        counts.put("x", 1);
+        counts.put("x", counts.get("x") + 1);
+        out.append(counts.get("x")).append(' ');
+
+        String joined = String.join("-", "a", "b", "c");
+        out.append(joined).append(' ').append(joined.split("-").length).append(' ');
+        out.append(String.format("%s:%d", "n", 7)).append(' ');
+
+        String text = """
+            kept
+            lines""";
+        out.append(text.replace('\n', '|')).append(' ');
+
+        char letter = 'a';
+        letter += 2;
+        out.append(letter).append(' ').append((int) letter).append(' ');
+        out.append(7 / 2).append(' ').append(7 % 2).append(' ').append(1 << 10).append(' ');
+        out.append(Integer.MAX_VALUE + 1).append(' ');
+        out.append(Long.toString(1L << 40)).append(' ');
+        out.append(Math.max(2.5, 1.5)).append(' ');
+
+        outer:
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                if (j == 1) continue outer;
+                if (i == 2) break outer;
+                out.append(i).append(j);
+            }
+        }
+        out.append(' ');
+
+        Runnable job = () -> out.append("ran ");
+        job.run();
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn an_ordinary_program_gives_back_exactly_what_javac_gives_back() {
+        let produced = compile(AN_ORDINARY_PROGRAM, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Wide") {
+            None => eprintln!("java: no JVM here to run an ordinary program"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "335 TWO 9 pear circle 12 square 9 true Square[side=1.0] body close:b \
+                     close:a no done first other 4 [1, 4, 5] 5 odd=2 even=2 2 a-b-c 3 \
+                     n:7 kept|lines c 99 3 1 1024 -2147483648 1099511627776 2.5 0010 ran"
+                );
+                eprintln!("java: an ordinary program, and the answer javac gives");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// The other half of what a person writes: an abstract class with an
+    /// interface above it and a `default` method reached through `super`, a
+    /// generic method of one's own handed a lambda, method references of all
+    /// three kinds -- static, bound, and the unbound one whose receiver is the
+    /// first thing handed over -- `java.util.function`, `Optional`, a class
+    /// written inside a class and made through an instance of it, a pattern
+    /// in an `if`, and a `?:` with a box on one side and a number on the
+    /// other.
+    ///
+    /// It is compiled against the platform jar, because that is what a person
+    /// has, and the answer is `javac`'s.
+    const THE_OTHER_HALF_OF_IT: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+
+public class More {
+
+    interface Named { String name(); default String shout() { return name().toUpperCase(); } }
+
+    static abstract class Animal implements Named, Comparable<Animal> {
+        private final String called;
+        protected Animal(String called) { this.called = called; }
+        public String name() { return called; }
+        abstract String sound();
+        public int compareTo(Animal other) { return called.compareTo(other.called); }
+        @Override public String toString() { return name() + ":" + sound(); }
+    }
+
+    static class Dog extends Animal {
+        Dog(String called) { super(called); }
+        String sound() { return "woof"; }
+        @Override public String shout() { return "DOG " + super.shout(); }
+    }
+
+    static class Cat extends Animal {
+        Cat(String called) { super(called); }
+        String sound() { return "meow"; }
+    }
+
+    class Inner {
+        int doubled() { return held * 2; }
+    }
+
+    private int held = 21;
+
+    static <A, B> List<B> mapped(List<A> from, Function<A, B> with) {
+        List<B> out = new ArrayList<B>();
+        for (A one : from) out.add(with.apply(one));
+        return out;
+    }
+
+    static <T> List<T> kept(List<T> from, Predicate<T> when) {
+        List<T> out = new ArrayList<T>();
+        for (T one : from) if (when.test(one)) out.add(one);
+        return out;
+    }
+
+    static String twice(Supplier<String> of) { return of.get() + of.get(); }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        List<Animal> animals = new ArrayList<Animal>();
+        animals.add(new Dog("rex"));
+        animals.add(new Cat("ada"));
+        Collections.sort(animals);
+        out.append(animals).append(' ');
+        out.append(animals.get(0).shout()).append(' ');
+        out.append(animals.get(1).shout()).append(' ');
+
+        List<String> names = mapped(animals, a -> a.name());
+        out.append(names).append(' ');
+        List<Integer> lengths = mapped(names, String::length);
+        out.append(lengths).append(' ');
+        out.append(kept(lengths, n -> n > 3)).append(' ');
+
+        BiFunction<Integer, Integer, Integer> add = (a, b) -> a + b;
+        out.append(add.apply(2, 3)).append(' ');
+        out.append(twice(() -> "ab")).append(' ');
+
+        Function<String, String> upper = String::toUpperCase;
+        out.append(upper.apply("q")).append(' ');
+        Supplier<ArrayList<String>> fresh = ArrayList::new;
+        out.append(fresh.get().size()).append(' ');
+
+        Optional<String> maybe = Optional.of("here");
+        out.append(maybe.isPresent()).append(' ').append(maybe.get()).append(' ');
+        out.append(Optional.<String>empty().orElse("none")).append(' ');
+
+        Set<String> unique = new HashSet<String>(Arrays.asList("a", "b", "a"));
+        out.append(unique.size()).append(' ');
+
+        TreeMap<String, Integer> sorted = new TreeMap<String, Integer>();
+        sorted.put("b", 2);
+        sorted.put("a", 1);
+        out.append(sorted.firstKey()).append(sorted.get("b")).append(' ');
+
+        More outer = new More();
+        More.Inner inner = outer.new Inner();
+        out.append(inner.doubled()).append(' ');
+
+        int[] from = {1, 2, 3, 4};
+        int[] into = new int[4];
+        System.arraycopy(from, 0, into, 0, 4);
+        out.append(Arrays.toString(into)).append(' ');
+
+        StringBuilder built = new StringBuilder("abc");
+        built.insert(0, "-").reverse();
+        out.append(built).append(' ').append(built.length()).append(' ');
+
+        Object thing = names;
+        if (thing instanceof List<?> list) out.append(list.size()).append(' ');
+
+        Integer boxed = 5;
+        int back = boxed;
+        Integer either = back > 3 ? boxed : 0;
+        out.append(either + back).append(' ');
+
+        out.append(String.valueOf(new char[] {'x', 'y'})).append(' ');
+        out.append("a,b,,c".split(",").length).append(' ');
+        out.append("  pad ".trim()).append(' ');
+        out.append("abc".indexOf('b')).append(' ');
+        out.append("abc".substring(1)).append(' ');
+        out.append("%d-%s".formatted(4, "z")).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_other_half_of_ordinary_java_gives_back_what_javac_gives_back() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let produced = compile(THE_OTHER_HALF_OF_IT, &classpath).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.More") {
+            None => eprintln!("java: no JVM here to run the other half"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "[ada:meow, rex:woof] ADA DOG REX [ada, rex] [3, 3] [] 5 abab Q 0 \
+                     true here none 2 a2 42 [1, 2, 3, 4] cba- 4 2 10 xy 4 pad 1 bc 4-z"
+                );
+                eprintln!("java: the other half of ordinary Java, and javac's answer");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// A generic interface with a class behind it, a checked exception of
+    /// one's own carrying a cause, a sealed hierarchy read with a guarded
+    /// pattern switch, a wildcard parameter, a `static` block, an interface
+    /// constant, a switch over chars that falls through, long arithmetic,
+    /// arrays of arrays, a queue, an anonymous comparator, and every bitwise
+    /// operator there is.
+    const THE_THIRD_HALF_OF_IT: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Random;
+
+public class Third {
+
+    interface Store<K, V> {
+        void keep(K key, V value);
+        V find(K key);
+        int size();
+    }
+
+    static class Memory<K, V> implements Store<K, V> {
+        private final Map<K, V> held = new HashMap<K, V>();
+        public void keep(K key, V value) { held.put(key, value); }
+        public V find(K key) { return held.get(key); }
+        public int size() { return held.size(); }
+    }
+
+    static class TooBig extends Exception {
+        private final int was;
+        TooBig(int was, Throwable why) { super("too big: " + was, why); this.was = was; }
+        int was() { return was; }
+    }
+
+    static int checked(int of) throws TooBig {
+        if (of > 10) {
+            try {
+                throw new IllegalStateException("root");
+            } catch (IllegalStateException why) {
+                throw new TooBig(of, why);
+            }
+        }
+        return of;
+    }
+
+    sealed interface Note permits Text, Number_, Nothing {}
+    record Text(String body) implements Note {}
+    record Number_(int value) implements Note {}
+    record Nothing() implements Note {}
+
+    static String read(Note note) {
+        return switch (note) {
+            case Text t when t.body().isEmpty() -> "empty";
+            case Text t -> "text:" + t.body();
+            case Number_ n -> "number:" + n.value();
+            case Nothing ignored -> "nothing";
+        };
+    }
+
+    static int total(List<? extends Number> of) {
+        int sum = 0;
+        for (Number one : of) sum += one.intValue();
+        return sum;
+    }
+
+    static final int START;
+    static { START = 7; }
+
+    interface Limits { int MAX = 99; }
+
+    static String describe(char of) {
+        switch (of) {
+            case 'a':
+            case 'b':
+                return "early";
+            case 'z':
+                return "late";
+            default:
+                return "middle";
+        }
+    }
+
+    static long fib(int n) {
+        long a = 0;
+        long b = 1;
+        for (int i = 0; i < n; i++) {
+            long next = a + b;
+            a = b;
+            b = next;
+        }
+        return a;
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        Store<String, Integer> store = new Memory<String, Integer>();
+        store.keep("a", 1);
+        store.keep("b", 2);
+        out.append(store.size()).append(store.find("b")).append(' ');
+
+        try {
+            checked(20);
+        } catch (TooBig why) {
+            out.append(why.getMessage()).append('/').append(why.was()).append('/')
+               .append(why.getCause().getMessage()).append(' ');
+        }
+        out.append(checked(3)).append(' ');
+
+        out.append(read(new Text("hi"))).append(' ');
+        out.append(read(new Text(""))).append(' ');
+        out.append(read(new Number_(4))).append(' ');
+        out.append(read(new Nothing())).append(' ');
+
+        out.append(total(Arrays.asList(1, 2, 3))).append(' ');
+        out.append(START).append(Limits.MAX).append(' ');
+        out.append(describe('a')).append(describe('z')).append(describe('q')).append(' ');
+        out.append(fib(20)).append(' ');
+
+        int[][] grid = new int[3][3];
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) grid[i][j] = i * j;
+        }
+        out.append(Arrays.deepToString(grid)).append(' ');
+
+        String[][] words = {{"a", "b"}, {"c"}};
+        out.append(words[0][1]).append(words[1].length).append(' ');
+
+        Queue<String> queue = new LinkedList<String>();
+        queue.add("first");
+        queue.add("second");
+        out.append(queue.poll()).append(queue.size()).append(' ');
+
+        List<String> rows = new ArrayList<String>(Arrays.asList("bb", "a", "ccc"));
+        Collections.sort(rows, new Comparator<String>() {
+            public int compare(String left, String right) {
+                return Integer.compare(left.length(), right.length());
+            }
+        });
+        out.append(rows).append(' ');
+        Collections.reverse(rows);
+        out.append(rows).append(' ');
+
+        Random random = new Random(42);
+        int first = random.nextInt(100);
+        out.append(first >= 0 && first < 100).append(' ');
+
+        out.append(Math.abs(-3)).append(Math.min(2, 5)).append((int) Math.pow(2, 5)).append(' ');
+        out.append(Integer.parseInt("42") + Long.parseLong("8")).append(' ');
+        out.append(Integer.toBinaryString(5)).append(' ');
+        out.append(Double.parseDouble("1.5") * 2).append(' ');
+        out.append((5 & 3) + "" + (5 | 3) + (5 ^ 3) + (~5) + (-7 >>> 28)).append(' ');
+
+        StringBuilder chain = new StringBuilder();
+        for (String one : rows) chain.append(one).append('|');
+        out.append(chain.toString()).append(' ');
+
+        int counter = 0;
+        while (true) {
+            counter++;
+            if (counter >= 3) break;
+        }
+        out.append(counter).append(' ');
+
+        assert counter == 3 : "counter";
+
+        String result = counter > 2 ? counter > 5 ? "big" : "mid" : "small";
+        out.append(result).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn a_generic_interface_a_checked_exception_and_a_sealed_switch_all_run() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let produced = compile(THE_THIRD_HALF_OF_IT, &classpath).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Third") {
+            None => eprintln!("java: no JVM here to run it"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "22 too big: 20/20/root 3 text:hi empty number:4 nothing 6 799 \
+                     earlylatemiddle 6765 [[0, 0, 0], [0, 1, 2], [0, 2, 4]] b1 first1 \
+                     [a, bb, ccc] [ccc, bb, a] true 3232 50 101 3.0 176-615 ccc|bb|a| 3 mid"
+                );
+                eprintln!("java: a generic interface, a checked exception, a sealed switch");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// Streams, which is where a compiler's type inference either holds or
+    /// does not.
+    ///
+    /// `map(String::toUpperCase)` only knows its receiver is a String because
+    /// the stream was written holding one; `collect(Collectors.groupingBy(
+    /// Person::age, Collectors.mapping(Person::name, Collectors.toList())))`
+    /// knows nothing from its arguments at all -- every type in it comes from
+    /// where the answer is going, three calls further out.
+    const STREAMS_AND_WHAT_THEY_INFER: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+
+public class Flow {
+
+    record Person(String name, int age) {}
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        List<String> words = Arrays.asList("pear", "fig", "apple", "fig");
+
+        List<String> upper = words.stream()
+            .map(String::toUpperCase)
+            .collect(Collectors.toList());
+        out.append(upper).append(' ');
+
+        List<String> longOnes = words.stream()
+            .filter(one -> one.length() > 3)
+            .distinct()
+            .sorted()
+            .collect(Collectors.toList());
+        out.append(longOnes).append(' ');
+
+        out.append(words.stream().mapToInt(String::length).sum()).append(' ');
+        out.append(words.stream().anyMatch(one -> one.startsWith("a"))).append(' ');
+        out.append(words.stream().count()).append(' ');
+        out.append(String.join(",", words)).append(' ');
+
+        List<Person> people = new ArrayList<Person>();
+        people.add(new Person("ada", 36));
+        people.add(new Person("bob", 41));
+        people.add(new Person("cy", 36));
+
+        Map<Integer, List<String>> byAge = people.stream()
+            .collect(Collectors.groupingBy(Person::age,
+                Collectors.mapping(Person::name, Collectors.toList())));
+        out.append(byAge).append(' ');
+
+        out.append(people.stream().mapToInt(Person::age).max().getAsInt()).append(' ');
+        out.append(people.stream().map(Person::name).collect(Collectors.joining("-"))).append(' ');
+
+        out.append(IntStream.range(0, 5).map(i -> i * i).sum()).append(' ');
+        out.append(Stream.of("x", "y").collect(Collectors.toList())).append(' ');
+
+        List<String> nonNull = Arrays.asList("a", null, "b").stream()
+            .filter(Objects::nonNull)
+            .collect(Collectors.toList());
+        out.append(nonNull).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn a_stream_worked_from_end_to_end_gives_back_what_javac_gives_back() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let produced = compile(STREAMS_AND_WHAT_THEY_INFER, &classpath).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Flow") {
+            None => eprintln!("java: no JVM here to run a stream"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "[PEAR, FIG, APPLE, FIG] [apple, pear] 15 true 4 pear,fig,apple,fig \
+                     {36=[ada, cy], 41=[bob]} 41 ada-bob-cy 30 [x, y] [a, b]"
+                );
+                eprintln!("java: a stream, worked out end to end");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// A generic interface with a generic `default` method, an enum with a
+    /// field and an `EnumMap`, a generic class holding an `Object[]` and
+    /// handing out an anonymous iterator over it, a `synchronized` method and
+    /// a `synchronized` block, a thread, recursion, `Object...`, and a lambda
+    /// written inside a loop over a local it captures.
+    const THE_REST_OF_WHAT_IS_WRITTEN: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.NoSuchElementException;
+import java.util.concurrent.atomic.AtomicInteger;
+
+public class Last {
+
+    interface Visitor<T, R> {
+        R see(T one);
+        default <X> R afterMapping(X from, Visitor<X, T> first) { return see(first.see(from)); }
+    }
+
+    enum Level implements Comparable<Level> {
+        LOW(1), HIGH(2);
+        private final int weight;
+        Level(int weight) { this.weight = weight; }
+        int weight() { return weight; }
+    }
+
+    static class Counted<T> implements Iterable<T> {
+        private final Object[] held;
+        private int size;
+
+        Counted(int room) { held = new Object[room]; }
+
+        Counted<T> add(T one) { held[size++] = one; return this; }
+
+        @SuppressWarnings("unchecked")
+        T at(int index) { return (T) held[index]; }
+
+        public Iterator<T> iterator() {
+            return new Iterator<T>() {
+                private int at;
+                public boolean hasNext() { return at < size; }
+                public T next() {
+                    if (!hasNext()) throw new NoSuchElementException();
+                    return at(at++);
+                }
+            };
+        }
+    }
+
+    static final AtomicInteger SEEN = new AtomicInteger();
+
+    static synchronized void note() { SEEN.incrementAndGet(); }
+
+    static int factorial(int of) { return of <= 1 ? 1 : of * factorial(of - 1); }
+
+    static String join(Object... parts) {
+        StringBuilder out = new StringBuilder();
+        for (Object one : parts) out.append(one).append('.');
+        return out.toString();
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        Counted<String> counted = new Counted<String>(3).add("a").add("bb");
+        for (String one : counted) out.append(one).append(one.length());
+        out.append(' ').append(counted.at(1).toUpperCase()).append(' ');
+
+        Visitor<String, Integer> size = one -> one.length();
+        out.append(size.see("abcd")).append(' ');
+        Visitor<Integer, String> text = one -> "<" + one + ">";
+        out.append(text.afterMapping("xyz", size)).append(' ');
+
+        EnumMap<Level, String> levels = new EnumMap<Level, String>(Level.class);
+        levels.put(Level.HIGH, "up");
+        levels.put(Level.LOW, "down");
+        out.append(levels).append(' ');
+        out.append(Level.LOW.compareTo(Level.HIGH)).append(Level.HIGH.weight()).append(' ');
+
+        Runnable job = new Runnable() {
+            public void run() { note(); note(); }
+        };
+        Thread thread = new Thread(job);
+        thread.start();
+        thread.join();
+        out.append(SEEN.get()).append(' ');
+
+        synchronized (Last.class) {
+            note();
+        }
+        out.append(SEEN.get()).append(' ');
+
+        out.append(factorial(5)).append(' ');
+        out.append(join(1, "two", 3.0)).append(' ');
+        out.append(join()).append('|').append(' ');
+
+        List<Level> order = new ArrayList<Level>(Arrays.asList(Level.HIGH, Level.LOW));
+        Collections.sort(order);
+        out.append(order).append(' ');
+
+        int[] copy = Arrays.copyOfRange(new int[] {1, 2, 3, 4}, 1, 3);
+        out.append(Arrays.toString(copy)).append(' ');
+
+        Object[] mixed = {1, "a", 2.5, null, true};
+        out.append(Arrays.toString(mixed)).append(' ');
+
+        StringBuilder nested = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            final int held = i;
+            Runnable inner = () -> nested.append(held);
+            inner.run();
+        }
+        out.append(nested).append(' ');
+
+        out.append(new Last().hashCode() != 0).append(' ');
+        out.append("abc".equals(new String("abc"))).append(' ');
+        out.append(Integer.valueOf(5).equals(5)).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn an_iterator_a_thread_and_a_lambda_in_a_loop_all_run() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let produced = compile(THE_REST_OF_WHAT_IS_WRITTEN, &classpath).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Last") {
+            None => eprintln!("java: no JVM here to run it"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "a1bb2 BB 4 <3> {LOW=down, HIGH=up} -12 2 3 120 1.two.3.0. | \
+                     [LOW, HIGH] [2, 3] [1, a, 2.5, null, true] 012 true true true"
+                );
+                eprintln!("java: an iterator, a thread, and a lambda written in a loop");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
     #[test]
     fn the_java_an_ordinary_afternoon_is_written_in_runs() {
         let produced = compile(AN_ORDINARY_AFTERNOON, &empty()).expect("all of it must compile");
@@ -19134,6 +21533,105 @@ public class Boxed {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
 
         eprintln!("java: {learned} classes from the platform, and code that imports what it likes");
+    }
+
+    /// The plain Java a person writes on an ordinary afternoon, against the
+    /// library the platform hands them: `Arrays.asList`, `Objects`,
+    /// `Collections.sort` with a lambda and with an anonymous class,
+    /// `Collections.max`, a `Map.Entry` walked out of a `HashMap`. None of it
+    /// is in this compiler's own table -- every signature here is read out of
+    /// the jar, generic signature and all, and the lambda handed to
+    /// `Collections.sort(List<T>, Comparator<? super T>)` only knows it
+    /// compares strings because the first argument said so.
+    ///
+    /// The answer is `javac`'s: `3 x pear 1 applepear`.
+    #[test]
+    fn the_java_a_person_writes_against_a_library_gets_the_same_answer_javac_gets() {
+        let Some(platform) = crate::builder::platform_jar() else {
+            eprintln!("java: no android.jar on this machine");
+            return;
+        };
+        let bytes = std::fs::read(&platform).expect("the platform jar");
+        let mut classpath = empty();
+        classpath.learn_jar(&bytes).expect("must be read");
+
+        let source = r#"
+            package com.my.app;
+
+            import java.util.ArrayList;
+            import java.util.Arrays;
+            import java.util.Collections;
+            import java.util.Comparator;
+            import java.util.HashMap;
+            import java.util.List;
+            import java.util.Map;
+            import java.util.Objects;
+
+            public class Daily {
+
+                static int viaAsList() {
+                    return Arrays.asList("a", "bb", "ccc").get(2).length();
+                }
+
+                static String viaRequireNonNull(String held) {
+                    return Objects.requireNonNull(held).trim();
+                }
+
+                static void sortWithAnAnonymousClass(List<String> rows) {
+                    Collections.sort(rows, new Comparator<String>() {
+                        @Override
+                        public int compare(String left, String right) {
+                            return left.compareTo(right);
+                        }
+                    });
+                }
+
+                static void sortWithALambda(List<String> rows) {
+                    Collections.sort(rows, (left, right) -> left.compareTo(right));
+                }
+
+                static String biggest(List<String> rows) {
+                    return Collections.max(rows);
+                }
+
+                static int mapped() {
+                    Map<String, Integer> held = new HashMap<String, Integer>();
+                    held.put("a", 1);
+                    for (Map.Entry<String, Integer> one : held.entrySet()) {
+                        if (one.getKey().equals("a")) {
+                            return one.getValue();
+                        }
+                    }
+                    return -1;
+                }
+
+                static String joined(List<String> rows) {
+                    StringBuilder out = new StringBuilder();
+                    for (String one : rows) {
+                        out.append(one);
+                    }
+                    return out.toString();
+                }
+
+                public static void main(String[] args) {
+                    List<String> rows = new ArrayList<String>(Arrays.asList("pear", "apple"));
+                    sortWithAnAnonymousClass(rows);
+                    sortWithALambda(rows);
+                    System.out.println(
+                        viaAsList() + " " + viaRequireNonNull(" x ") + " " + biggest(rows)
+                            + " " + mapped() + " " + joined(rows));
+                }
+            }
+        "#;
+        let produced = compile(source, &classpath).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Daily") {
+            None => eprintln!("java: no JVM here to run an ordinary afternoon's Java"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(said.trim(), "3 x pear 1 applepear");
+                eprintln!("java: an ordinary afternoon's Java, against the platform jar, ran");
+            }
+        }
     }
 
     #[test]
