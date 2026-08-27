@@ -15693,6 +15693,34 @@ pub mod dexwrite {
                     pools.fields.push(field.reference.clone());
                 }
             }
+            // A constructor calls one above it or one beside it, and nothing
+            // else. Writing a call to some third class's constructor produces
+            // a dex that reads, disassembles, and is refused the moment a
+            // device tries to load it -- which is a long way from here.
+            for method in class.direct_methods.iter() {
+                if method.reference.name != "<init>" {
+                    continue;
+                }
+                for instruction in &method.instructions {
+                    let Operand::Method(called) = &instruction.operand else {
+                        continue;
+                    };
+                    if called.name != "<init>" {
+                        continue;
+                    }
+                    if called.class != class.descriptor && called.class != class.superclass {
+                        return Err(fail(
+                            "EW008",
+                            "A constructor calls one that is neither its own class's nor \
+                             its superclass's.",
+                        )
+                        .with_context(format!("Class: {}", class.descriptor))
+                        .with_context(format!("Superclass: {}", class.superclass))
+                        .with_context(format!("Called: {}", called.class)));
+                    }
+                }
+            }
+
             // Anything the code points at has to be in the pools too, or the
             // index filled in later would be an index into nothing.
             for method in class.methods() {
@@ -23273,9 +23301,12 @@ pub mod builder {
                 superclass: "Landroid/app/Activity;".to_string(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
+                // Up into the superclass, which for an activity is the
+                // activity: a constructor calling Object's instead would be a
+                // class the device refuses to load.
                 direct_methods: vec![crate::dexwrite::default_constructor(
                     &descriptor,
-                    "Ljava/lang/Object;",
+                    "Landroid/app/Activity;",
                 )],
                 virtual_methods: Vec::new(),
                 static_fields: Vec::new(),
@@ -23380,9 +23411,12 @@ pub mod builder {
                 superclass: "Landroid/app/Activity;".to_string(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
+                // Up into the superclass, which for an activity is the
+                // activity: a constructor calling Object's instead would be a
+                // class the device refuses to load.
                 direct_methods: vec![crate::dexwrite::default_constructor(
                     &descriptor,
-                    "Ljava/lang/Object;",
+                    "Landroid/app/Activity;",
                 )],
                 virtual_methods: Vec::new(),
                 static_fields: Vec::new(),
@@ -30040,7 +30074,7 @@ mod tests {
             source_file: Some("MainActivity.java".to_string()),
             direct_methods: vec![super::dexwrite::default_constructor(
                 "Lcom/omni/made/MainActivity;",
-                "Ljava/lang/Object;",
+                "Landroid/app/Activity;",
             )],
             virtual_methods: Vec::new(),
             static_fields: Vec::new(),
@@ -30061,7 +30095,7 @@ mod tests {
         class.source_file = Some("MainActivity.java".to_string());
         class.direct_methods = vec![super::dexwrite::default_constructor(
             descriptor,
-            "Ljava/lang/Object;",
+            "Landroid/app/Activity;",
         )];
         class.instance_fields = vec![
             super::dexwrite::Field {
