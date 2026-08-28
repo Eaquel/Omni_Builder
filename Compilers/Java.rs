@@ -3300,7 +3300,7 @@ impl Parser {
                 continue;
             }
             let mut beside = Vec::new();
-            let one = self.declaration_of_a_type(&package, &imports, None, &mut beside)?;
+            let one = self.declaration_of_a_type(&package, &imports, None, false, &mut beside)?;
             declared.push(one);
             declared.append(&mut beside);
             for unit in &mut declared {
@@ -3330,10 +3330,18 @@ impl Parser {
         package: &Option<String>,
         imports: &[String],
         inside: Option<&str>,
+        inside_an_interface: bool,
         beside: &mut Vec<Unit>,
     ) -> Result<Unit, Diagnostic> {
         self.skip_annotations()?;
-        let modifiers = self.modifiers()?;
+        let mut modifiers = self.modifiers()?;
+        // Everything written inside an interface is public whether or not
+        // anybody wrote the word, and that includes a type. Left as it was
+        // written, a class in one package could not reach a record declared in
+        // an interface in another.
+        if inside_an_interface {
+            modifiers.public = true;
+        }
         let annotations = self.take_annotations();
         // `record` is not a keyword: Java kept it a name so that code already
         // using it still compiles. It is a declaration only when a name and a
@@ -3545,7 +3553,10 @@ impl Parser {
         // instance of it. An enum, a record and an interface never do, which
         // is why they are settled above.
         if let Some(holder) = inside {
-            if !modifiers.static_ && shape == Shape::Class {
+            // A class written inside an interface is static whether or not
+            // anybody wrote the word: an interface has no instance for it to
+            // belong to.
+            if !modifiers.static_ && shape == Shape::Class && !inside_an_interface {
                 return Ok(belonging_to_an_instance(unit, holder, package));
             }
         }
@@ -3595,7 +3606,13 @@ impl Parser {
         if nested {
             self.at = began;
             let mut theirs = Vec::new();
-            let one = self.declaration_of_a_type(package, imports, Some(class), &mut theirs)?;
+            let one = self.declaration_of_a_type(
+                package,
+                imports,
+                Some(class),
+                shape == Shape::Interface,
+                &mut theirs,
+            )?;
             beside.push(one);
             beside.append(&mut theirs);
             return Ok(());
@@ -3964,7 +3981,8 @@ impl Parser {
                 let package = self.package.clone();
                 let imports = self.imports.clone();
                 let mut beside = Vec::new();
-                let one = self.declaration_of_a_type(&package, &imports, None, &mut beside)?;
+                let one =
+                    self.declaration_of_a_type(&package, &imports, None, false, &mut beside)?;
                 let mut made = vec![one];
                 made.append(&mut beside);
                 return Ok(Statement::Locally(made));
@@ -12983,6 +13001,11 @@ impl Emitter<'_> {
 
         let common = if left_type.is_reference() || right_peeked.is_reference() {
             left_type.clone()
+        } else if left_type == Type::Boolean && right_peeked == Type::Boolean {
+            // Two booleans have `==`, `!=`, `&`, `|` and `^` between them, and
+            // none of those is arithmetic -- so there is nothing to promote
+            // them to and the JVM compares them as the ints they are.
+            Type::Boolean
         } else {
             left_type.promoted_with(&right_peeked).ok_or_else(|| {
                 at(
@@ -15472,12 +15495,20 @@ impl Emitter<'_> {
                 // A loop jumps back here, so the verifier has to be told what
                 // is true at the top as well as after the end.
                 self.a_branch_lands_here();
-                let found = self.value(condition, line)?;
-                if found != Type::Boolean {
-                    return Err(at("EJ206", line, 1, "A `while` wants a boolean."));
-                }
-                self.pops(1);
-                let out = self.jump(0x99);
+                // `while (true)` has no test and no way out but a `break`.
+                // Writing the test anyway leaves a jump to the end of the
+                // method, and a branch target past the last instruction is a
+                // frame the verifier asks for and nobody can write.
+                let out = if matches!(condition, Expression::Boolean(true)) {
+                    None
+                } else {
+                    let found = self.value(condition, line)?;
+                    if found != Type::Boolean {
+                        return Err(at("EJ206", line, 1, "A `while` wants a boolean."));
+                    }
+                    self.pops(1);
+                    Some(self.jump(0x99))
+                };
                 self.enter(true);
                 self.statement(body)?;
                 let level = self.leave();
@@ -15486,11 +15517,20 @@ impl Emitter<'_> {
                 }
                 self.a_branch_lands_here();
                 self.jump_back(0xa7, top);
-                self.land(out);
+                let leaves = !level.breaks.is_empty() || out.is_some();
+                if let Some(out) = out {
+                    self.land(out);
+                }
                 for pending in level.breaks {
                     self.land(pending);
                 }
-                self.a_branch_lands_here();
+                // Nothing lands after a loop nobody leaves, and nothing after
+                // it runs either.
+                if leaves {
+                    self.a_branch_lands_here();
+                } else {
+                    self.reachable = false;
+                }
                 Ok(())
             }
             Statement::For {
@@ -19917,12 +19957,13 @@ pub fn compile_unit_in_nest(
         let frames = emitter.frames;
         let handlers = emitter.handlers;
 
-        // A frame at the very start says nothing: the verifier already knows
-        // what a method is entered with. One past the end is not a place
-        // anything can land.
+        // One past the end is not a place anything can land. The very start
+        // is: a method whose first statement is a loop is jumped back to at
+        // offset zero, and the verifier wants the frame there written down
+        // even though it says what entering the method already said.
         let frames: Vec<Frame> = frames
             .into_iter()
-            .filter(|frame| frame.at > 0 && frame.at < code.len())
+            .filter(|frame| frame.at < code.len())
             .collect();
         let table = stack_map_table(&frames, &mut pool);
         let table_name = table.as_ref().map(|_| pool.utf8("StackMapTable"));
@@ -25757,6 +25798,287 @@ public class Modern {
                      string6 42 0 x1 2/21 3"
                 );
                 eprintln!("java: what Java gained since, and javac's answer");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// A program in four files, in two packages, which is the shape real code
+    /// comes in: a sealed interface holding records and classes of its own, a
+    /// checked exception carrying where it happened, a reader with a loop at
+    /// the top of a method and a `while (true)` in the middle of one, and a
+    /// switch over the sealed type in the other package.
+    const A_PROGRAM_IN_FOUR_FILES: &[(&str, &str)] = &[
+        (
+            "com/my/app/Main.java",
+            r####"
+package com.my.app;
+
+import com.my.app.parts.Node;
+import com.my.app.parts.Reader;
+import com.my.app.parts.Reading;
+
+public class Main {
+
+    static String depth(Node one) {
+        return switch (one) {
+            case Node.Table t -> "table:" + t.size();
+            case Node.Row r -> "row:" + r.size();
+            case Node.Text t -> "text:" + t.value().length();
+            case Node.Number n -> "number:" + n.written();
+            case Node.Bool b -> "bool:" + b.value();
+            case Node.Nothing ignored -> "nothing";
+        };
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        String source = "{\"name\":\"omni\",\"count\":3,\"real\":1.5,\"ok\":true,"
+            + "\"none\":null,\"rows\":[1,2,{\"deep\":[true]}]}";
+        Node held = new Reader(source).read();
+        out.append(held.written()).append(' ');
+        out.append(depth(held)).append(' ');
+
+        Node.Table table = (Node.Table) held;
+        out.append(depth(table.get("name"))).append('/')
+           .append(depth(table.get("count"))).append('/')
+           .append(depth(table.get("rows"))).append(' ');
+
+        Node.Row rows = (Node.Row) table.get("rows");
+        out.append(depth(rows.at(2))).append(' ');
+
+        try {
+            new Reader("{\"a\":}").read();
+            out.append("no");
+        } catch (Reading why) {
+            out.append(why.getMessage()).append('/').append(why.at());
+        }
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####,
+        ),
+        (
+            "com/my/app/parts/Node.java",
+            r####"
+package com.my.app.parts;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+public sealed interface Node permits Node.Text, Node.Number, Node.Bool, Node.Nothing, Node.Row, Node.Table {
+
+    String written();
+
+    record Text(String value) implements Node {
+        public String written() { return "\"" + value + "\""; }
+    }
+
+    record Number(double value) implements Node {
+        public String written() {
+            return value == Math.rint(value) ? String.valueOf((long) value) : String.valueOf(value);
+        }
+    }
+
+    record Bool(boolean value) implements Node {
+        public String written() { return String.valueOf(value); }
+    }
+
+    record Nothing() implements Node {
+        public String written() { return "null"; }
+    }
+
+    final class Row implements Node {
+        private final List<Node> held = new ArrayList<Node>();
+        public Row add(Node one) { held.add(one); return this; }
+        public int size() { return held.size(); }
+        public Node at(int index) { return held.get(index); }
+        public String written() {
+            StringBuilder out = new StringBuilder("[");
+            for (int i = 0; i < held.size(); i++) {
+                if (i > 0) out.append(',');
+                out.append(held.get(i).written());
+            }
+            return out.append(']').toString();
+        }
+    }
+
+    final class Table implements Node {
+        private final Map<String, Node> held = new LinkedHashMap<String, Node>();
+        public Table put(String key, Node one) { held.put(key, one); return this; }
+        public Node get(String key) { return held.get(key); }
+        public int size() { return held.size(); }
+        public String written() {
+            StringBuilder out = new StringBuilder("{");
+            boolean first = true;
+            for (Map.Entry<String, Node> one : held.entrySet()) {
+                if (!first) out.append(',');
+                first = false;
+                out.append('"').append(one.getKey()).append("\":").append(one.getValue().written());
+            }
+            return out.append('}').toString();
+        }
+    }
+}
+"####,
+        ),
+        (
+            "com/my/app/parts/Reader.java",
+            r####"
+package com.my.app.parts;
+
+public final class Reader {
+    private final String text;
+    private int at;
+
+    public Reader(String text) { this.text = text; }
+
+    public Node read() throws Reading {
+        Node found = value();
+        skip();
+        if (at != text.length()) throw new Reading("something after the end", at);
+        return found;
+    }
+
+    private void skip() {
+        while (at < text.length() && Character.isWhitespace(text.charAt(at))) at++;
+    }
+
+    private Node value() throws Reading {
+        skip();
+        if (at >= text.length()) throw new Reading("nothing here", at);
+        char here = text.charAt(at);
+        switch (here) {
+            case '{': return table();
+            case '[': return row();
+            case '"': return new Node.Text(quoted());
+            case 't': case 'f': return new Node.Bool(word());
+            case 'n':
+                expect("null");
+                return new Node.Nothing();
+            default: return new Node.Number(number());
+        }
+    }
+
+    private void expect(String what) throws Reading {
+        if (!text.startsWith(what, at)) throw new Reading("expected " + what, at);
+        at += what.length();
+    }
+
+    private boolean word() throws Reading {
+        if (text.startsWith("true", at)) { at += 4; return true; }
+        expect("false");
+        return false;
+    }
+
+    private String quoted() throws Reading {
+        expect("\"");
+        StringBuilder out = new StringBuilder();
+        while (at < text.length() && text.charAt(at) != '"') {
+            out.append(text.charAt(at));
+            at++;
+        }
+        expect("\"");
+        return out.toString();
+    }
+
+    private double number() throws Reading {
+        int from = at;
+        if (at < text.length() && text.charAt(at) == '-') at++;
+        while (at < text.length() && (Character.isDigit(text.charAt(at)) || text.charAt(at) == '.')) {
+            at++;
+        }
+        if (from == at) throw new Reading("not a number", at);
+        return Double.parseDouble(text.substring(from, at));
+    }
+
+    private Node.Row row() throws Reading {
+        expect("[");
+        Node.Row out = new Node.Row();
+        skip();
+        if (at < text.length() && text.charAt(at) == ']') { at++; return out; }
+        while (true) {
+            out.add(value());
+            skip();
+            if (at < text.length() && text.charAt(at) == ',') { at++; continue; }
+            expect("]");
+            return out;
+        }
+    }
+
+    private Node.Table table() throws Reading {
+        expect("{");
+        Node.Table out = new Node.Table();
+        skip();
+        if (at < text.length() && text.charAt(at) == '}') { at++; return out; }
+        while (true) {
+            skip();
+            String key = quoted();
+            skip();
+            expect(":");
+            out.put(key, value());
+            skip();
+            if (at < text.length() && text.charAt(at) == ',') { at++; continue; }
+            expect("}");
+            return out;
+        }
+    }
+}
+"####,
+        ),
+        (
+            "com/my/app/parts/Reading.java",
+            r####"
+package com.my.app.parts;
+
+public class Reading extends Exception {
+    private final int at;
+
+    public Reading(String said, int at) {
+        super(said + " at " + at);
+        this.at = at;
+    }
+
+    public int at() { return at; }
+}
+"####,
+        ),
+    ];
+
+    #[test]
+    fn a_program_in_four_files_and_two_packages_runs() {
+        let sources: Vec<(String, String)> = A_PROGRAM_IN_FOUR_FILES
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), (*text).to_string()))
+            .collect();
+        let produced = compile_together(&sources, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Main") {
+            None => eprintln!("java: no JVM here to run four files"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "{\"name\":\"omni\",\"count\":3,\"real\":1.5,\"ok\":true,\"none\":null,\
+                     \"rows\":[1,2,{\"deep\":[true]}]} table:6 text:4/number:3/row:3 \
+                     table:1 not a number at 5/5"
+                );
+                eprintln!("java: four files, two packages, and javac's answer");
             }
         }
 
