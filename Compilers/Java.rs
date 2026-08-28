@@ -1057,6 +1057,10 @@ pub enum Expression {
         super_call: bool,
         name: String,
         arguments: Vec<Expression>,
+        /// `Box.<String>empty()`: the method's own type arguments, written out
+        /// where the call has no other way of saying them. Empty everywhere
+        /// else, which is almost every call.
+        held: Vec<Written>,
     },
     New {
         what: Written,
@@ -1443,6 +1447,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
     for method in &mut unit.methods {
@@ -1522,6 +1527,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         bridge: false,
         annotations: Vec::new(),
         default_value: None,
+        own_variables: Vec::new(),
     });
 
     // `valueOf` is written out rather than handed to `Enum.valueOf`, which
@@ -1534,6 +1540,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
                 condition: Expression::Call {
                     on: Some(Box::new(Expression::Name("$name".to_string()))),
                     super_call: false,
+                    held: Vec::new(),
                     name: "equals".to_string(),
                     arguments: vec![Expression::Str(constant.name.clone())],
                 },
@@ -1572,6 +1579,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         bridge: false,
         annotations: Vec::new(),
         default_value: None,
+        own_variables: Vec::new(),
     });
 
     unit.extends = Some("java.lang.Enum".to_string());
@@ -1688,6 +1696,7 @@ fn as_the_class_a_record_is(
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
 
@@ -1714,6 +1723,7 @@ fn as_the_class_a_record_is(
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
 
@@ -1763,6 +1773,7 @@ fn as_the_class_a_record_is(
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
 
@@ -1827,6 +1838,7 @@ fn as_the_class_a_record_is(
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
 
@@ -1868,6 +1880,7 @@ fn as_the_class_a_record_is(
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
 
@@ -1892,6 +1905,7 @@ fn the_same_component(what: &Written, mine: Expression, theirs: Expression) -> E
         left: Box::new(Expression::Call {
             on: Some(Box::new(Expression::Name(class.to_string()))),
             super_call: false,
+            held: Vec::new(),
             name: "compare".to_string(),
             arguments: vec![mine.clone(), theirs.clone()],
         }),
@@ -1924,6 +1938,7 @@ fn the_same_component(what: &Written, mine: Expression, theirs: Expression) -> E
             otherwise: Box::new(Expression::Call {
                 on: Some(Box::new(mine)),
                 super_call: false,
+                held: Vec::new(),
                 name: "equals".to_string(),
                 arguments: vec![theirs],
             }),
@@ -1938,6 +1953,7 @@ fn what_one_component_hashes_to(what: &Written, mine: Expression) -> Expression 
     let hashed_by = |class: &str| Expression::Call {
         on: Some(Box::new(Expression::Name(class.to_string()))),
         super_call: false,
+        held: Vec::new(),
         name: "hashCode".to_string(),
         arguments: vec![mine.clone()],
     };
@@ -1960,6 +1976,7 @@ fn what_one_component_hashes_to(what: &Written, mine: Expression) -> Expression 
             otherwise: Box::new(Expression::Call {
                 on: Some(Box::new(mine)),
                 super_call: false,
+                held: Vec::new(),
                 name: "hashCode".to_string(),
                 arguments: Vec::new(),
             }),
@@ -2012,6 +2029,7 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
     for method in &mut unit.methods {
@@ -2078,6 +2096,7 @@ fn with_the_assertion_flag(unit: &Unit) -> Unit {
                             line: 1,
                         })),
                         super_call: false,
+                        held: Vec::new(),
                         name: "desiredAssertionStatus".to_string(),
                         arguments: Vec::new(),
                     }),
@@ -2691,6 +2710,9 @@ pub struct Method {
     /// `int order() default 0;` inside an `@interface`: what this element is
     /// when nobody says otherwise.
     pub default_value: Option<Expression>,
+    /// The method's own type parameters, in the order they were written.
+    /// `<K, V> Map<K, V> of(K key, V value)` records `["K", "V"]`.
+    pub own_variables: Vec<String>,
     pub line: u32,
 }
 
@@ -3699,6 +3721,7 @@ impl Parser {
                 bridge: false,
                 annotations,
                 default_value: None,
+                own_variables: Vec::new(),
             });
             return Ok(());
         }
@@ -3721,6 +3744,7 @@ impl Parser {
                 bridge: false,
                 annotations,
                 default_value: None,
+                own_variables: Vec::new(),
             });
             return Ok(());
         }
@@ -3763,6 +3787,17 @@ impl Parser {
                     format!("`{name}` has no body and is not abstract."),
                 ));
             }
+            // What it called its own type parameters, read before they go
+            // out of scope. A call writing them out in front of the name is
+            // writing these, in this order.
+            let own_variables = if pushed {
+                self.type_variables
+                    .last()
+                    .map(|frame| frame.held.iter().map(|(name, _)| name.clone()).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             self.pop_type_parameters(pushed);
             methods.push(Method {
                 modifiers,
@@ -3776,6 +3811,7 @@ impl Parser {
                 bridge: false,
                 annotations,
                 default_value,
+                own_variables,
             });
             return Ok(());
         }
@@ -4631,6 +4667,7 @@ impl Parser {
                 node: Statement::Express(Expression::Call {
                     on: Some(Box::new(Expression::Name(name.clone()))),
                     super_call: false,
+                    held: Vec::new(),
                     name: "close".to_string(),
                     arguments: Vec::new(),
                 }),
@@ -5045,6 +5082,7 @@ impl Parser {
                         Expression::Call {
                             on: None,
                             super_call: true,
+                            held: Vec::new(),
                             name,
                             arguments: self.arguments()?,
                         }
@@ -5067,6 +5105,7 @@ impl Parser {
                     found = Expression::Call {
                         on: Some(Box::new(found)),
                         super_call: true,
+                        held: Vec::new(),
                         name,
                         arguments,
                     };
@@ -5086,16 +5125,18 @@ impl Parser {
                     continue;
                 }
                 // `Optional.<String>empty()`: the method's own type
-                // arguments, written where the call could not work them out.
-                // Erasure throws them away, so reading them is all there is
-                // to do with them.
-                self.skip_type_arguments()?;
+                // arguments, written where the call cannot work them out.
+                // Erasure throws them away in the class file, and they are
+                // kept here because nothing else in such a call says what the
+                // answer holds.
+                let witness = self.type_arguments()?;
                 let name = self.want_name()?;
                 if self.is_mark("(") {
                     let arguments = self.arguments()?;
                     found = Expression::Call {
                         on: Some(Box::new(found)),
                         super_call: false,
+                        held: witness,
                         name,
                         arguments,
                     };
@@ -5480,6 +5521,7 @@ impl Parser {
                     return Ok(Expression::Call {
                         on: None,
                         super_call: false,
+                        held: Vec::new(),
                         name,
                         arguments,
                     });
@@ -5709,6 +5751,14 @@ pub struct Signature {
     /// every method.
     pub taken_stands_for: Vec<Standing>,
     pub returns_stands_for: Standing,
+    /// The method's own type parameters, in the order they were written.
+    /// `<K, V> Map<K, V> of(K key, V value)` records `["K", "V"]`, which is
+    /// what a call writing them out is writing out.
+    pub own_variables: Vec<String>,
+    /// What a call wrote in front of the name: `Box.<String>empty()` says U is
+    /// a String where nothing else in the call says anything at all. Empty
+    /// everywhere else, which is almost every call.
+    pub witnessed: Vec<(String, Type)>,
 }
 
 impl Signature {
@@ -5955,6 +6005,8 @@ impl Classpath {
                     .map(|(what, _)| standing_of(what))
                     .collect(),
                 returns_stands_for: standing_of(&method.returns),
+                own_variables: method.own_variables.clone(),
+                witnessed: Vec::new(),
             });
         }
         self.known.insert(internal, known);
@@ -6053,6 +6105,14 @@ impl Classpath {
                 .as_deref()
                 .and_then(|held| standings_of(held, &named))
                 .unwrap_or_default();
+            // A method's own type parameters are written in front of its
+            // signature the same way a class's are, and a call that writes
+            // them out is writing these.
+            let own_variables = method
+                .signature
+                .as_deref()
+                .map(type_parameters_of)
+                .unwrap_or_default();
             known.methods.push(Signature {
                 owner: internal.clone(),
                 name: method.name.clone(),
@@ -6068,6 +6128,8 @@ impl Classpath {
                 parameter_variables,
                 taken_stands_for,
                 returns_stands_for,
+                own_variables,
+                witnessed: Vec::new(),
             });
         }
         for field in &class.fields {
@@ -8540,6 +8602,8 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             parameter_variables: Vec::new(),
             taken_stands_for: Vec::new(),
             returns_stands_for: Standing::Fixed,
+            own_variables: Vec::new(),
+            witnessed: Vec::new(),
         }];
     }
     // Everything that can be thrown answers Throwable's methods, everything
@@ -8583,6 +8647,8 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
                 parameter_variables: Vec::new(),
                 taken_stands_for: Vec::new(),
                 returns_stands_for: Standing::Fixed,
+                own_variables: Vec::new(),
+                witnessed: Vec::new(),
             });
         }
         if !found.is_empty() {
@@ -9443,7 +9509,18 @@ public class Integer extends Number implements Comparable<Integer> {
     public static native int signum(int value);
     public static native int bitCount(int value);
     public static native int highestOneBit(int value);
+    public static native int lowestOneBit(int value);
+    public static native int numberOfLeadingZeros(int value);
+    public static native int numberOfTrailingZeros(int value);
     public static native int reverse(int value);
+    public static native int reverseBytes(int value);
+    public static native int rotateLeft(int value, int by);
+    public static native int rotateRight(int value, int by);
+    public static native int divideUnsigned(int left, int right);
+    public static native int remainderUnsigned(int left, int right);
+    public static native long toUnsignedLong(int value);
+    public static native String toUnsignedString(int value);
+    public static native int decode(String held);
 }
 
 public class Long extends Number implements Comparable<Long> {
@@ -9464,6 +9541,18 @@ public class Long extends Number implements Comparable<Long> {
     public static native long sum(long left, long right);
     public static native int signum(long value);
     public static native int bitCount(long value);
+    public static native long highestOneBit(long value);
+    public static native long lowestOneBit(long value);
+    public static native int numberOfLeadingZeros(long value);
+    public static native int numberOfTrailingZeros(long value);
+    public static native long reverse(long value);
+    public static native long reverseBytes(long value);
+    public static native long rotateLeft(long value, int by);
+    public static native long rotateRight(long value, int by);
+    public static native String toOctalString(long value);
+    public static native long parseLong(String held, int radix);
+    public static native String toString(long value, int radix);
+    public static native Long valueOf(String held);
 }
 
 public class Short extends Number implements Comparable<Short> {
@@ -9604,8 +9693,35 @@ public class Math {
     public static native double toDegrees(double value);
     public static native int floorDiv(int left, int right);
     public static native int floorMod(int left, int right);
+    public static native long floorDiv(long left, long right);
+    public static native long floorMod(long left, long right);
     public static native int addExact(int left, int right);
+    public static native long addExact(long left, long right);
+    public static native int subtractExact(int left, int right);
+    public static native long subtractExact(long left, long right);
     public static native int multiplyExact(int left, int right);
+    public static native long multiplyExact(long left, long right);
+    public static native int negateExact(int value);
+    public static native int toIntExact(long value);
+    public static native int incrementExact(int value);
+    public static native int decrementExact(int value);
+    public static native double signum(double value);
+    public static native double ulp(double value);
+    public static native double nextUp(double value);
+    public static native double nextDown(double value);
+    public static native double copySign(double value, double sign);
+    public static native double asin(double value);
+    public static native double acos(double value);
+    public static native double atan(double value);
+    public static native double sinh(double value);
+    public static native double cosh(double value);
+    public static native double tanh(double value);
+    public static native double expm1(double value);
+    public static native double log1p(double value);
+    public static native double fma(double a, double b, double c);
+    public static native int clamp(int value, int low, int high);
+    public static native long clamp(long value, long low, long high);
+    public static native double clamp(double value, double low, double high);
 }
 
 public class System {
@@ -12872,7 +12988,8 @@ impl Emitter<'_> {
                 super_call,
                 name,
                 arguments,
-            } => self.call(on.as_deref(), *super_call, name, arguments, line),
+                held,
+            } => self.call(on.as_deref(), *super_call, name, arguments, held, line),
             Expression::Assign {
                 target,
                 operator,
@@ -13964,6 +14081,8 @@ impl Emitter<'_> {
                     parameter_variables: Vec::new(),
                     taken_stands_for: Vec::new(),
                     returns_stands_for: Standing::Fixed,
+                    own_variables: Vec::new(),
+                    witnessed: Vec::new(),
                 })
             }
             None => self
@@ -14113,6 +14232,7 @@ impl Emitter<'_> {
         super_call: bool,
         name: &str,
         arguments: &[Expression],
+        held: &[Written],
         line: u32,
     ) -> Result<Type, Diagnostic> {
         // Where this call's answer is going, before writing the arguments
@@ -14146,7 +14266,9 @@ impl Emitter<'_> {
                     self.resolve_class(&parent, line)?
                 }
             };
-            let Some(signature) = self.signature_for(&owner, name, arguments, line)? else {
+            let Some(signature) =
+                self.signature_written_out(&owner, name, arguments, held, line)?
+            else {
                 return Err(self.no_such_method(&owner, name, arguments.len(), line));
             };
             self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
@@ -14221,7 +14343,9 @@ impl Emitter<'_> {
                 // method a mistake rather than a call.
                 if let Some(parent) = self.unit.extends.clone() {
                     let owner = self.resolve_class(&parent, line)?;
-                    if let Some(signature) = self.signature_for(&owner, name, arguments, line)? {
+                    if let Some(signature) =
+                        self.signature_written_out(&owner, name, arguments, held, line)?
+                    {
                         if !signature.static_ {
                             if self.static_ {
                                 return Err(at(
@@ -14272,7 +14396,7 @@ impl Emitter<'_> {
                 }
                 for enclosing in self.the_classes_around() {
                     if let Some(signature) =
-                        self.signature_for(&enclosing, name, arguments, line)?
+                        self.signature_written_out(&enclosing, name, arguments, held, line)?
                     {
                         if !signature.static_ {
                             self.reach_the_enclosing_instance(&enclosing)?;
@@ -14324,7 +14448,9 @@ impl Emitter<'_> {
                 // `import static java.lang.Math.max;` puts `max` here without
                 // the class in front of it.
                 for owner in self.imported_statically(name) {
-                    let Some(signature) = self.signature_for(&owner, name, arguments, line)? else {
+                    let Some(signature) =
+                        self.signature_written_out(&owner, name, arguments, held, line)?
+                    else {
                         continue;
                     };
                     if !signature.static_ {
@@ -14361,7 +14487,9 @@ impl Emitter<'_> {
                 // `java.lang.Object`, which is behind every class whether or
                 // not anybody wrote `extends`.
                 let mine = self.this_class.clone();
-                if let Some(signature) = self.signature_for(&mine, name, arguments, line)? {
+                if let Some(signature) =
+                    self.signature_written_out(&mine, name, arguments, held, line)?
+                {
                     if !signature.static_ {
                         if self.static_ {
                             return Err(at(
@@ -14422,7 +14550,8 @@ impl Emitter<'_> {
                 // compiler wrote for a lambda -- can call what that one holds
                 // statically, whether or not it kept an instance of it.
                 for holder in self.holders() {
-                    let Some(signature) = self.signature_for(&holder, name, arguments, line)?
+                    let Some(signature) =
+                        self.signature_written_out(&holder, name, arguments, held, line)?
                     else {
                         continue;
                     };
@@ -14499,6 +14628,8 @@ impl Emitter<'_> {
                     .map(|(what, _)| standing_of(what))
                     .collect(),
                 returns_stands_for: standing_of(&own.returns),
+                own_variables: Vec::new(),
+                witnessed: Vec::new(),
             };
             let descriptor = signature.descriptor();
 
@@ -14561,7 +14692,7 @@ impl Emitter<'_> {
                 if self.meant_as_a_class(head) {
                     if let Some(owner) = resolve_named(self.classpath, self.unit, &path) {
                         if let Some(signature) =
-                            self.signature_for(&owner, name, arguments, line)?
+                            self.signature_written_out(&owner, name, arguments, held, line)?
                         {
                             if signature.static_ {
                                 let first = with_what_the_arguments_say(
@@ -14616,7 +14747,9 @@ impl Emitter<'_> {
                 // through to read it as a value would report that a name is not
                 // visible, which is true and tells nobody anything.
                 let owner = self.resolve_class(maybe_class, line)?;
-                let Some(signature) = self.signature_for(&owner, name, arguments, line)? else {
+                let Some(signature) =
+                    self.signature_written_out(&owner, name, arguments, held, line)?
+                else {
                     return Err(self.no_such_method(&owner, name, arguments.len(), line));
                 };
                 if !signature.static_ {
@@ -14663,7 +14796,7 @@ impl Emitter<'_> {
         if matches!(owner_type, Type::Array(_)) {
             return self.call_on_an_array(&owner_type, name, arguments, line);
         }
-        let Type::Object(owner, held) = owner_type.clone() else {
+        let Type::Object(owner, on_the_receiver) = owner_type.clone() else {
             return Err(at(
                 "EJ226",
                 line,
@@ -14671,7 +14804,8 @@ impl Emitter<'_> {
                 format!("A {} has no methods to call.", owner_type.readable()),
             ));
         };
-        let Some(signature) = self.signature_for(&owner, name, arguments, line)? else {
+        let Some(signature) = self.signature_written_out(&owner, name, arguments, held, line)?
+        else {
             return Err(self.no_such_method(&owner, name, arguments.len(), line));
         };
         // What the receiver was written as says what its methods take, which
@@ -14683,8 +14817,13 @@ impl Emitter<'_> {
         // written holding is what counts: a `People extends Store<String,
         // Person>` reaches `Store.sorted(Comparator<V>)` and the V there is a
         // Person, which only the `extends` says.
-        let held = self.classpath.seen_from(&owner, &held, &signature.owner);
-        let shaped = as_written(&signature, &held);
+        let held = self
+            .classpath
+            .seen_from(&owner, &on_the_receiver, &signature.owner);
+        let mut shaped = as_written(&signature, &held);
+        // `as_written` builds a fresh signature from what the receiver holds,
+        // and what the call wrote out is not the receiver's to say.
+        shaped.witnessed = signature.witnessed.clone();
         // What each argument really is, for a method with type parameters of
         // its own. Worked out only where there are any, because working it out
         // means writing the code for each argument and throwing it away.
@@ -14830,6 +14969,34 @@ impl Emitter<'_> {
     /// alone gets the first of them, which is the String one, and then
     /// printing a number is refused. So the arguments are typed first and the
     /// candidate that accepts them is the one written.
+    /// The same, with what the call wrote out in front of the name put back
+    /// into the signature it chose.
+    ///
+    /// `Box.<String>empty()` is the only thing in that call that says what U
+    /// is: there are no arguments to say it and, where it is written in the
+    /// middle of a chain, nothing it is going to either.
+    fn signature_written_out(
+        &mut self,
+        owner: &str,
+        name: &str,
+        arguments: &[Expression],
+        held: &[Written],
+        line: u32,
+    ) -> Result<Option<Signature>, Diagnostic> {
+        let Some(mut found) = self.signature_for(owner, name, arguments, line)? else {
+            return Ok(None);
+        };
+        if held.is_empty() || found.own_variables.is_empty() {
+            return Ok(Some(found));
+        }
+        let mut witnessed = Vec::new();
+        for (name, written) in found.own_variables.iter().zip(held.iter()) {
+            witnessed.push((name.clone(), self.resolve(written, line)?));
+        }
+        found.witnessed = witnessed;
+        Ok(Some(found))
+    }
+
     fn signature_for(
         &mut self,
         owner: &str,
@@ -15306,6 +15473,8 @@ impl Emitter<'_> {
                 parameter_variables: Vec::new(),
                 taken_stands_for: Vec::new(),
                 returns_stands_for: Standing::Fixed,
+                own_variables: Vec::new(),
+                witnessed: Vec::new(),
             });
         }
         for round in 0..3 {
@@ -15469,6 +15638,8 @@ impl Emitter<'_> {
                     parameter_variables: Vec::new(),
                     taken_stands_for: Vec::new(),
                     returns_stands_for: Standing::Fixed,
+                    own_variables: Vec::new(),
+                    witnessed: Vec::new(),
                 });
             }
             if !found.is_empty() {
@@ -18212,6 +18383,7 @@ impl Emitter<'_> {
                 bridge: false,
                 annotations: Vec::new(),
                 default_value: None,
+                own_variables: Vec::new(),
             }],
             instance_setup: Vec::new(),
         };
@@ -18296,6 +18468,7 @@ impl Emitter<'_> {
             Expression::Call {
                 on: Some(Box::new(receiver)),
                 super_call: false,
+                held: Vec::new(),
                 name: name.to_string(),
                 arguments,
             }
@@ -18303,6 +18476,7 @@ impl Emitter<'_> {
             Expression::Call {
                 on: Some(Box::new(on.clone())),
                 super_call: false,
+                held: Vec::new(),
                 name: name.to_string(),
                 arguments,
             }
@@ -18506,6 +18680,8 @@ impl Emitter<'_> {
                     parameter_variables: Vec::new(),
                     taken_stands_for: Vec::new(),
                     returns_stands_for: Standing::Fixed,
+                    own_variables: Vec::new(),
+                    witnessed: Vec::new(),
                 });
             }
             found.retain(counts);
@@ -18780,6 +18956,7 @@ impl Emitter<'_> {
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         }];
         methods.extend(body.methods.iter().cloned());
         fields.extend(body.fields.iter().cloned());
@@ -19014,6 +19191,7 @@ impl Emitter<'_> {
                 bridge: false,
                 annotations: Vec::new(),
                 default_value: None,
+                own_variables: Vec::new(),
             });
         }
         for method in &mut made.methods {
@@ -19109,6 +19287,7 @@ impl Emitter<'_> {
             let reach = Expression::Call {
                 on: Some(Box::new(Expression::Name(named.clone()))),
                 super_call: false,
+                held: Vec::new(),
                 name: component.clone(),
                 arguments: Vec::new(),
             };
@@ -19280,6 +19459,8 @@ impl Emitter<'_> {
                 parameter_variables: Vec::new(),
                 taken_stands_for: Vec::new(),
                 returns_stands_for: Standing::Fixed,
+                own_variables: Vec::new(),
+                witnessed: Vec::new(),
             }
         } else {
             match self.find_signature(owner, "<init>", arguments.len()) {
@@ -19297,6 +19478,8 @@ impl Emitter<'_> {
                     parameter_variables: Vec::new(),
                     taken_stands_for: Vec::new(),
                     returns_stands_for: Standing::Fixed,
+                    own_variables: Vec::new(),
+                    witnessed: Vec::new(),
                 },
                 None => {
                     return Err(at(
@@ -19366,11 +19549,24 @@ impl Emitter<'_> {
         };
 
         let object = Type::Object("java/lang/Object".to_string(), Vec::new());
+        // What it hands out, read where it is written down. A `List<String>`
+        // says so on the receiver; a `class Counter implements
+        // Iterable<Integer>` says it on the `implements`, and the class is
+        // the only place that says it at all.
+        let holds = match arguments.first() {
+            Some(found) if *found != object => Some(found.clone()),
+            _ => self
+                .classpath
+                .seen_from(&class, &arguments, "java/lang/Iterable")
+                .into_iter()
+                .next()
+                .filter(|found| *found != object),
+        };
         let declared = match what {
             // `for (var one : list)` takes what the list was written as
             // holding. Where nothing was written, erasure is all there is to
             // go on and Object is what it says.
-            Written::Inferred => arguments.first().cloned().unwrap_or(object.clone()),
+            Written::Inferred => holds.clone().unwrap_or(object.clone()),
             other => self.resolve(other, line)?,
         };
 
@@ -19967,6 +20163,15 @@ fn what_the_call_says(
     // Nothing is learned from a variable that only stands for Object, which is
     // what it erased to in the first place.
     bound.retain(|(_, what)| *what != Type::Object("java/lang/Object".to_string(), Vec::new()));
+    // And what the call wrote out in front of the name wins over all of it,
+    // because a person writing `Box.<String>empty()` is saying what nothing
+    // else in the call can.
+    for (name, what) in &signature.witnessed {
+        match bound.iter_mut().find(|(held, _)| held == name) {
+            Some((_, before)) => *before = what.clone(),
+            None => bound.push((name.clone(), what.clone())),
+        }
+    }
     bound
 }
 
@@ -20507,6 +20712,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                 let call = Expression::Call {
                     on: Some(Box::new(Expression::This)),
                     super_call: false,
+                    held: Vec::new(),
                     name: method.name.clone(),
                     arguments,
                 };
@@ -20537,6 +20743,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     line: method.line,
                     annotations: Vec::new(),
                     default_value: None,
+                    own_variables: Vec::new(),
                 });
             }
         }
@@ -20736,6 +20943,7 @@ pub fn compile_unit_in_nest(
             bridge: false,
             annotations: Vec::new(),
             default_value: None,
+            own_variables: Vec::new(),
         });
     }
     if unit.shape == Shape::Class && !methods.iter().any(|held| held.constructor) {
@@ -20756,6 +20964,7 @@ pub fn compile_unit_in_nest(
                 bridge: false,
                 annotations: Vec::new(),
                 default_value: None,
+                own_variables: Vec::new(),
             },
         );
     }
@@ -20797,6 +21006,8 @@ pub fn compile_unit_in_nest(
                 parameter_variables: Vec::new(),
                 taken_stands_for: Vec::new(),
                 returns_stands_for: Standing::Fixed,
+                own_variables: Vec::new(),
+                witnessed: Vec::new(),
             }
             .descriptor();
             let descriptor = pool.utf8(&descriptor);
@@ -20974,6 +21185,8 @@ pub fn compile_unit_in_nest(
             parameter_variables: Vec::new(),
             taken_stands_for: Vec::new(),
             returns_stands_for: Standing::Fixed,
+            own_variables: Vec::new(),
+            witnessed: Vec::new(),
         }
         .descriptor();
         let descriptor = pool.utf8(&descriptor);
@@ -27029,6 +27242,202 @@ public class Reading extends Exception {
 "####,
         ),
     ];
+
+    /// The Java a person writes today: `var` almost everywhere, the diamond on
+    /// every `new`, an interface with a constant and a `static` and a
+    /// `private static`, an enum implementing it, a record with a compact
+    /// constructor implementing `Comparable` and put in a sorted set, a
+    /// generic class with a static factory called with the type written out,
+    /// an anonymous `Iterator<>` walked by a `for` that knows what it hands
+    /// out because the class says so, a `switch` inside a `switch`
+    /// expression, `Arrays` filled and searched and compared, the bit and
+    /// floor arithmetic, lambdas made in a loop, an exception with a cause,
+    /// and a builder edited in place.
+    const THE_JAVA_A_PERSON_WRITES_TODAY: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.TreeSet;
+import java.util.function.Function;
+
+public class Modern {
+
+    interface Sized {
+        int SMALL = 1;
+        int size();
+        static Sized of(int n) { return () -> n; }
+        static String describe(Sized one) { return tag(one) + one.size(); }
+        private static String tag(Sized one) { return one.size() > SMALL ? "big" : "small"; }
+    }
+
+    enum Colour implements Sized {
+        RED, GREEN, BLUE;
+        public int size() { return ordinal() + 1; }
+    }
+
+    record Point(int x, int y) implements Comparable<Point> {
+        Point {
+            if (x < 0) throw new IllegalArgumentException("x");
+        }
+        public int compareTo(Point other) { return Integer.compare(x * x + y * y, other.x * other.x + other.y * other.y); }
+        static Point origin() { return new Point(0, 0); }
+    }
+
+    static class Box<T> {
+        private final List<T> held = new ArrayList<>();
+        static <U> Box<U> empty() { return new Box<>(); }
+        Box<T> with(T one) { held.add(one); return this; }
+        List<T> all() { return held; }
+        <R> Box<R> mapped(Function<T, R> by) {
+            Box<R> out = new Box<>();
+            for (T one : held) out.with(by.apply(one));
+            return out;
+        }
+    }
+
+    static class Counter implements Iterable<Integer> {
+        final int upto;
+        Counter(int upto) { this.upto = upto; }
+        public Iterator<Integer> iterator() {
+            return new Iterator<>() {
+                int at = 0;
+                public boolean hasNext() { return at < upto; }
+                public Integer next() { return at++; }
+            };
+        }
+    }
+
+    static final Map<Integer, Long> REMEMBERED = new HashMap<>();
+
+    static long fib(int n) {
+        if (n < 2) return n;
+        Long had = REMEMBERED.get(n);
+        if (had != null) return had;
+        long made = fib(n - 1) + fib(n - 2);
+        REMEMBERED.put(n, made);
+        return made;
+    }
+
+    static String pick(String word) {
+        return switch (word) {
+            case "a", "b" -> {
+                String inner = switch (word.length()) {
+                    case 1 -> "one";
+                    default -> "more";
+                };
+                yield word + inner;
+            }
+            case "long" -> "L";
+            default -> "?";
+        };
+    }
+
+    public static void main(String[] args) {
+        var out = new StringBuilder();
+
+        out.append(Sized.describe(Sized.of(5))).append(Sized.describe(() -> 1)).append(' ');
+        for (var c : Colour.values()) out.append(c).append(c.size());
+        out.append('/').append(Sized.describe(Colour.BLUE)).append(' ');
+
+        var points = new TreeSet<Point>();
+        points.add(new Point(3, 4));
+        points.add(new Point(1, 1));
+        points.add(Point.origin());
+        out.append(points).append(points.first()).append(' ');
+        try {
+            new Point(-1, 0);
+        } catch (IllegalArgumentException e) {
+            out.append("refused").append(e.getMessage());
+        }
+        out.append(' ');
+        out.append(new Point(1, 2).equals(new Point(1, 2))).append(new Point(1, 2).hashCode() == new Point(1, 2).hashCode()).append(' ');
+
+        var box = Box.<String>empty().with("a").with("bb");
+        out.append(box.all()).append(box.mapped(String::length).all()).append(' ');
+
+        var total = 0;
+        for (var n : new Counter(5)) total += n;
+        out.append(total).append(' ');
+
+        out.append(fib(50)).append('/').append(REMEMBERED.size()).append(' ');
+
+        out.append(pick("a")).append(pick("long")).append(pick("zz")).append(' ');
+
+        var grid = new int[3][3];
+        for (var row : grid) Arrays.fill(row, 7);
+        grid[1][1] = 0;
+        out.append(Arrays.deepToString(grid))
+           .append(Arrays.equals(grid[0], grid[2]))
+           .append(Arrays.equals(grid[0], grid[1])).append(' ');
+
+        var sorted = new int[] {1, 3, 5, 7, 9};
+        out.append(Arrays.binarySearch(sorted, 7)).append('/').append(Arrays.binarySearch(sorted, 4)).append(' ');
+
+        out.append(Math.floorMod(-7, 3)).append('/').append(Math.floorDiv(-7, 3)).append('/')
+           .append(Integer.rotateLeft(1, 3)).append('/').append(Long.bitCount(255L)).append('/')
+           .append(Integer.bitCount(7)).append('/').append(Integer.reverse(1)).append(' ');
+
+        var made = new ArrayList<Function<Integer, Integer>>();
+        for (var i = 1; i <= 3; i++) {
+            final var by = i;
+            made.add(n -> n * by);
+        }
+        for (var one : made) out.append(one.apply(10)).append(',');
+        out.append(' ');
+
+        Object[] things = {"text", 1, new int[] {1}};
+        for (var one : things) {
+            out.append(one instanceof String ? "s" : one instanceof int[] ? "a" : "o");
+        }
+        out.append(' ');
+
+        try {
+            try {
+                throw new IllegalStateException("root");
+            } catch (IllegalStateException e) {
+                throw new RuntimeException("wrapped", e);
+            }
+        } catch (RuntimeException e) {
+            out.append(e.getMessage()).append('<').append(e.getCause().getMessage());
+        }
+        out.append(' ');
+
+        var maybe = Optional.ofNullable(REMEMBERED.get(999));
+        out.append(maybe.isPresent()).append(maybe.orElse(-1L)).append(' ');
+
+        var text = new StringBuilder("hello");
+        text.setCharAt(0, 'H');
+        text.setLength(4);
+        out.append(text).append(text.indexOf("el")).append(String.valueOf(new char[] {'!', '?'}));
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_java_a_person_writes_today_gives_back_what_javac_gives_back() {
+        let produced = compile(THE_JAVA_A_PERSON_WRITES_TODAY, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Modern") {
+            None => eprintln!("java: no JVM here to run the Java a person writes today"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "big5small1 RED1GREEN2BLUE3/big3 [Point[x=0, y=0], Point[x=1, \
+                     y=1], Point[x=3, y=4]]Point[x=0, y=0] refusedx truetrue \
+                     [a, bb][1, 2] 10 12586269025/49 aoneL? [[7, 7, 7], [7, 0, \
+                     7], [7, 7, 7]]truefalse 3/-3 2/-3/8/8/3/-2147483648 10,20,30, \
+                     soa wrapped<root false-1 Hell1!?"
+                );
+                eprintln!("java: the Java a person writes today, and javac's answer");
+            }
+        }
+    }
 
     /// What a program leans on the library for: a checked exception declared
     /// and caught, two resources where the second throws on the way out and
