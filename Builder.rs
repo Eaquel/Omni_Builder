@@ -24595,6 +24595,9 @@ pub mod jvm {
         /// parameter, which is what a caller with a `List<String>` in its hand
         /// needs to know.
         pub signature: Option<String>,
+        /// What it says it throws, the way a person writes them. This is what
+        /// makes a call to it a call that has to be caught or declared.
+        pub throws: Vec<String>,
     }
 
     /// A method body as the class file carries it.
@@ -24959,6 +24962,7 @@ pub mod jvm {
 
             let mut code = None;
             let mut signature = None;
+            let mut throws: Vec<String> = Vec::new();
             for _ in 0..attribute_count {
                 let attribute_name_index = reader.u16()?;
                 let length = reader.u32()?;
@@ -24977,6 +24981,24 @@ pub mod jvm {
                     let index = u16::from_be_bytes([content[0], content[1]]);
                     signature = constant_utf8(constants, index, "signature").ok();
                 }
+                // A count, and then one class-pool index per exception. This
+                // is what a `throws` comes to, and the only place a class file
+                // records one.
+                if named == "Exceptions" && length >= 2 {
+                    let content = reader.slice_at(start as u64, length as u64)?;
+                    let how_many = usize::from(u16::from_be_bytes([content[0], content[1]]));
+                    for at in 0..how_many {
+                        let Some(pair) = content.get(2 + at * 2..4 + at * 2) else {
+                            break;
+                        };
+                        let index = u16::from_be_bytes([pair[0], pair[1]]);
+                        if let Some(Constant::Class(name)) = constants.get(usize::from(index)) {
+                            if let Ok(named) = constant_utf8(constants, *name, "thrown class") {
+                                throws.push(named);
+                            }
+                        }
+                    }
+                }
                 reader.skip(length)?;
             }
 
@@ -24990,6 +25012,7 @@ pub mod jvm {
                 )?,
                 code,
                 signature,
+                throws,
             });
         }
         Ok(members)

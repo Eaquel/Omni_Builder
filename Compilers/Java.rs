@@ -5858,6 +5858,9 @@ pub struct Signature {
     /// a String where nothing else in the call says anything at all. Empty
     /// everywhere else, which is almost every call.
     pub witnessed: Vec<(String, Type)>,
+    /// What it says it throws, as internal names. This is what makes a call to
+    /// it a call that has to be caught or declared.
+    pub throws: Vec<String>,
 }
 
 impl Signature {
@@ -6114,6 +6117,14 @@ impl Classpath {
                 returns_stands_for: standing_of(&method.returns),
                 own_variables: method.own_variables.clone(),
                 witnessed: Vec::new(),
+                // What it says it throws, as the names the classpath knows
+                // them by. One this compilation cannot resolve is left out
+                // rather than guessed at.
+                throws: method
+                    .throws
+                    .iter()
+                    .filter_map(|one| resolve_named(self, unit, one))
+                    .collect(),
             });
         }
         self.known.insert(internal, known);
@@ -6237,6 +6248,11 @@ impl Classpath {
                 returns_stands_for,
                 own_variables,
                 witnessed: Vec::new(),
+                throws: method
+                    .throws
+                    .iter()
+                    .map(|one| one.replace('.', "/"))
+                    .collect(),
             });
         }
         for field in &class.fields {
@@ -6807,6 +6823,12 @@ struct Emitter<'a> {
     /// Where each statement began and the line it was written on, which
     /// becomes the `LineNumberTable` the runtime prints traces from.
     lines: Vec<(u16, u16)>,
+    /// What the `catch` clauses around here take, innermost last. A checked
+    /// exception thrown inside one of these is answered for.
+    caught: Vec<Vec<String>>,
+    /// What the method being written says it throws. Everything checked that
+    /// can happen in it has to be in here or in a `catch` around it.
+    said_to_throw: Vec<String>,
     /// The loops and switches this is inside, innermost last.
     levels: Vec<Level>,
     /// The `finally` bodies that have to run before control leaves where it
@@ -6910,6 +6932,8 @@ impl<'a> Emitter<'a> {
             stack: Vec::new(),
             reachable: true,
             lines: Vec::new(),
+            caught: Vec::new(),
+            said_to_throw: Vec::new(),
         }
     }
 
@@ -8284,6 +8308,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             returns_stands_for: Standing::Fixed,
             own_variables: Vec::new(),
             witnessed: Vec::new(),
+            throws: Vec::new(),
         }];
     }
     // Everything that can be thrown answers Throwable's methods, everything
@@ -8329,6 +8354,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
                 returns_stands_for: Standing::Fixed,
                 own_variables: Vec::new(),
                 witnessed: Vec::new(),
+                throws: Vec::new(),
             });
         }
         if !found.is_empty() {
@@ -9005,8 +9031,8 @@ public class Object {
     public native Class getClass();
     public native void notify();
     public native void notifyAll();
-    public native void wait();
-    public native void wait(long millis);
+    public native void wait() throws java.lang.InterruptedException ;
+    public native void wait(long millis) throws java.lang.InterruptedException ;
 }
 
 public interface CharSequence {
@@ -9030,13 +9056,13 @@ public interface Runnable {
 }
 
 public interface AutoCloseable {
-    void close();
+    void close() throws java.lang.Exception ;
 }
 
 public interface Cloneable { }
 
 public interface Appendable {
-    Appendable append(CharSequence held);
+    Appendable append(CharSequence held) throws java.io.IOException ;
 }
 
 public class String implements CharSequence, Comparable<String> {
@@ -9045,10 +9071,10 @@ public class String implements CharSequence, Comparable<String> {
     public native String(char[] value);
     public native String(char[] value, int offset, int count);
     public native String(byte[] value);
-    public native String(byte[] value, String charset);
-    public native String(byte[] value, java.nio.charset.Charset charset);
+    public native String(byte[] value, String charset) throws java.io.UnsupportedEncodingException ;
+    public native String(byte[] value, java.nio.charset.Charset charset) throws java.io.UnsupportedEncodingException ;
     public native String(byte[] value, int offset, int count);
-    public native String(byte[] value, int offset, int count, String charset);
+    public native String(byte[] value, int offset, int count, String charset) throws java.io.UnsupportedEncodingException ;
     public native String(StringBuilder held);
     public native int length();
     public native boolean isEmpty();
@@ -9086,8 +9112,8 @@ public class String implements CharSequence, Comparable<String> {
     public native int compareToIgnoreCase(String other);
     public native char[] toCharArray();
     public native byte[] getBytes();
-    public native byte[] getBytes(String charset);
-    public native byte[] getBytes(java.nio.charset.Charset charset);
+    public native byte[] getBytes(String charset) throws java.io.UnsupportedEncodingException ;
+    public native byte[] getBytes(java.nio.charset.Charset charset) throws java.io.UnsupportedEncodingException ;
     public native String stripLeading();
     public native String stripTrailing();
     public native boolean contentEquals(CharSequence other);
@@ -9174,13 +9200,13 @@ public class Integer extends Number implements Comparable<Integer> {
     public static final int MIN_VALUE;
     public static final int SIZE;
     public static final int BYTES;
-    public native Integer(int value);
+    public native Integer(int value) throws java.lang.NumberFormatException ;
     public native int intValue();
     public native int compareTo(Integer other);
-    public static native Integer valueOf(int value);
-    public static native Integer valueOf(String held);
-    public static native int parseInt(String held);
-    public static native int parseInt(String held, int radix);
+    public static native Integer valueOf(int value) throws java.lang.NumberFormatException ;
+    public static native Integer valueOf(String held) throws java.lang.NumberFormatException ;
+    public static native int parseInt(String held) throws java.lang.NumberFormatException ;
+    public static native int parseInt(String held, int radix) throws java.lang.NumberFormatException ;
     public static native String toString(int value);
     public static native String toString(int value, int radix);
     public static native String toBinaryString(int value);
@@ -9205,17 +9231,17 @@ public class Integer extends Number implements Comparable<Integer> {
     public static native int remainderUnsigned(int left, int right);
     public static native long toUnsignedLong(int value);
     public static native String toUnsignedString(int value);
-    public static native int decode(String held);
+    public static native int decode(String held) throws java.lang.NumberFormatException ;
 }
 
 public class Long extends Number implements Comparable<Long> {
     public static final long MAX_VALUE;
     public static final long MIN_VALUE;
-    public native Long(long value);
+    public native Long(long value) throws java.lang.NumberFormatException ;
     public native long longValue();
     public native int compareTo(Long other);
-    public static native Long valueOf(long value);
-    public static native long parseLong(String held);
+    public static native Long valueOf(long value) throws java.lang.NumberFormatException ;
+    public static native long parseLong(String held) throws java.lang.NumberFormatException ;
     public static native String toString(long value);
     public static native String toBinaryString(long value);
     public static native String toHexString(long value);
@@ -9235,19 +9261,19 @@ public class Long extends Number implements Comparable<Long> {
     public static native long rotateLeft(long value, int by);
     public static native long rotateRight(long value, int by);
     public static native String toOctalString(long value);
-    public static native long parseLong(String held, int radix);
+    public static native long parseLong(String held, int radix) throws java.lang.NumberFormatException ;
     public static native String toString(long value, int radix);
-    public static native Long valueOf(String held);
+    public static native Long valueOf(String held) throws java.lang.NumberFormatException ;
 }
 
 public class Short extends Number implements Comparable<Short> {
     public static final short MAX_VALUE;
     public static final short MIN_VALUE;
-    public native Short(short value);
+    public native Short(short value) throws java.lang.NumberFormatException ;
     public native short shortValue();
     public native int compareTo(Short other);
-    public static native Short valueOf(short value);
-    public static native short parseShort(String held);
+    public static native Short valueOf(short value) throws java.lang.NumberFormatException ;
+    public static native short parseShort(String held) throws java.lang.NumberFormatException ;
     public static native int compare(short left, short right);
     public static native int hashCode(short value);
     public static native String toString(short value);
@@ -9256,11 +9282,11 @@ public class Short extends Number implements Comparable<Short> {
 public class Byte extends Number implements Comparable<Byte> {
     public static final byte MAX_VALUE;
     public static final byte MIN_VALUE;
-    public native Byte(byte value);
+    public native Byte(byte value) throws java.lang.NumberFormatException ;
     public native byte byteValue();
     public native int compareTo(Byte other);
-    public static native Byte valueOf(byte value);
-    public static native byte parseByte(String held);
+    public static native Byte valueOf(byte value) throws java.lang.NumberFormatException ;
+    public static native byte parseByte(String held) throws java.lang.NumberFormatException ;
     public static native int compare(byte left, byte right);
     public static native int hashCode(byte value);
     public static native String toString(byte value);
@@ -9272,12 +9298,12 @@ public class Float extends Number implements Comparable<Float> {
     public static final float NaN;
     public static final float POSITIVE_INFINITY;
     public static final float NEGATIVE_INFINITY;
-    public native Float(float value);
+    public native Float(float value) throws java.lang.NumberFormatException ;
     public native float floatValue();
     public native int compareTo(Float other);
     public native boolean isNaN();
-    public static native Float valueOf(float value);
-    public static native float parseFloat(String held);
+    public static native Float valueOf(float value) throws java.lang.NumberFormatException ;
+    public static native float parseFloat(String held) throws java.lang.NumberFormatException ;
     public static native int compare(float left, float right);
     public static native int hashCode(float value);
     public static native String toString(float value);
@@ -9291,13 +9317,13 @@ public class Double extends Number implements Comparable<Double> {
     public static final double NaN;
     public static final double POSITIVE_INFINITY;
     public static final double NEGATIVE_INFINITY;
-    public native Double(double value);
+    public native Double(double value) throws java.lang.NumberFormatException ;
     public native double doubleValue();
     public native int compareTo(Double other);
     public native boolean isNaN();
     public native boolean isInfinite();
-    public static native Double valueOf(double value);
-    public static native double parseDouble(String held);
+    public static native Double valueOf(double value) throws java.lang.NumberFormatException ;
+    public static native double parseDouble(String held) throws java.lang.NumberFormatException ;
     public static native int compare(double left, double right);
     public static native int hashCode(double value);
     public static native String toString(double value);
@@ -9437,22 +9463,22 @@ public class Class<T> {
     public native boolean isPrimitive();
     public native Class getSuperclass();
     public native Class[] getInterfaces();
-    public native T newInstance();
-    public native java.lang.reflect.Method getDeclaredMethod(String name, Class... taken);
-    public native java.lang.reflect.Method getMethod(String name, Class... taken);
+    public native T newInstance() throws java.lang.InstantiationException, java.lang.IllegalAccessException ;
+    public native java.lang.reflect.Method getDeclaredMethod(String name, Class... taken) throws java.lang.NoSuchMethodException ;
+    public native java.lang.reflect.Method getMethod(String name, Class... taken) throws java.lang.NoSuchMethodException ;
     public native java.lang.reflect.Method[] getDeclaredMethods();
     public native java.lang.reflect.Method[] getMethods();
-    public native java.lang.reflect.Field getDeclaredField(String name);
-    public native java.lang.reflect.Field getField(String name);
+    public native java.lang.reflect.Field getDeclaredField(String name) throws java.lang.NoSuchFieldException ;
+    public native java.lang.reflect.Field getField(String name) throws java.lang.NoSuchFieldException ;
     public native java.lang.reflect.Field[] getDeclaredFields();
     public native java.lang.reflect.Field[] getFields();
-    public native java.lang.reflect.Constructor getDeclaredConstructor(Class... taken);
+    public native java.lang.reflect.Constructor getDeclaredConstructor(Class... taken) throws java.lang.NoSuchMethodException ;
     public native java.lang.annotation.Annotation getAnnotation(Class held);
     public native java.lang.annotation.Annotation[] getAnnotations();
     public native boolean isAnnotationPresent(Class held);
     public native T[] getEnumConstants();
     public native java.lang.reflect.RecordComponent[] getRecordComponents();
-    public static native Class forName(String name);
+    public static native Class forName(String name) throws java.lang.ClassNotFoundException ;
 }
 
 public class Enum<E> implements Comparable<E> {
@@ -9473,8 +9499,8 @@ public class Thread implements Runnable {
     public native Thread(Runnable job, String name);
     public native void start();
     public native void run();
-    public native void join();
-    public native void join(long millis);
+    public native void join() throws java.lang.InterruptedException ;
+    public native void join(long millis) throws java.lang.InterruptedException ;
     public native void interrupt();
     public native boolean isAlive();
     public native boolean isInterrupted();
@@ -9483,7 +9509,7 @@ public class Thread implements Runnable {
     public native void setDaemon(boolean held);
     public native void setPriority(int held);
     public native long getId();
-    public static native void sleep(long millis);
+    public static native void sleep(long millis) throws java.lang.InterruptedException ;
     public static native Thread currentThread();
     public static native void yield();
 }
@@ -9746,7 +9772,7 @@ public class Method extends AccessibleObject implements Member {
     public native Class getReturnType();
     public native Class[] getParameterTypes();
     public native int getParameterCount();
-    public native Object invoke(Object on, Object... parts);
+    public native Object invoke(Object on, Object... parts) throws java.lang.IllegalAccessException, java.lang.reflect.InvocationTargetException ;
     public native Class getDeclaringClass();
     public native Object getDefaultValue();
     public native boolean isVarArgs();
@@ -9758,9 +9784,9 @@ public class Field extends AccessibleObject implements Member {
     public native String getName();
     public native int getModifiers();
     public native Class getType();
-    public native Object get(Object on);
-    public native void set(Object on, Object value);
-    public native int getInt(Object on);
+    public native Object get(Object on) throws java.lang.IllegalArgumentException, java.lang.IllegalAccessException ;
+    public native void set(Object on, Object value) throws java.lang.IllegalArgumentException, java.lang.IllegalAccessException ;
+    public native int getInt(Object on) throws java.lang.IllegalArgumentException, java.lang.IllegalAccessException ;
     public native Class getDeclaringClass();
 }
 
@@ -9768,7 +9794,7 @@ public class Constructor extends AccessibleObject implements Member {
     public native String getName();
     public native int getModifiers();
     public native Class[] getParameterTypes();
-    public native Object newInstance(Object... parts);
+    public native Object newInstance(Object... parts) throws java.lang.InstantiationException, java.lang.IllegalAccessException, java.lang.IllegalArgumentException, java.lang.reflect.InvocationTargetException ;
 }
 
 public class RecordComponent {
@@ -9797,10 +9823,10 @@ public class Modifier {
 }
 
 public class Array {
-    public static native Object newInstance(Class held, int length);
-    public static native int getLength(Object held);
-    public static native Object get(Object held, int at);
-    public static native void set(Object held, int at, Object value);
+    public static native Object newInstance(Class held, int length) throws java.lang.NegativeArraySizeException ;
+    public static native int getLength(Object held) throws java.lang.IllegalArgumentException ;
+    public static native Object get(Object held, int at) throws java.lang.IllegalArgumentException, java.lang.ArrayIndexOutOfBoundsException ;
+    public static native void set(Object held, int at, Object value) throws java.lang.IllegalArgumentException, java.lang.ArrayIndexOutOfBoundsException ;
 }
 
 public class InvocationTargetException extends java.lang.Exception {
@@ -9817,11 +9843,11 @@ package java.io;
 public interface Serializable { }
 
 public interface Closeable extends java.lang.AutoCloseable {
-    void close();
+    void close() throws java.io.IOException ;
 }
 
 public interface Flushable {
-    void flush();
+    void flush() throws java.io.IOException ;
 }
 
 public class IOException extends java.lang.Exception {
@@ -9842,21 +9868,21 @@ public class UncheckedIOException extends java.lang.RuntimeException {
 }
 
 public class InputStream implements Closeable {
-    public native int read();
-    public native int read(byte[] into);
-    public native int read(byte[] into, int at, int count);
-    public native byte[] readAllBytes();
-    public native long skip(long count);
-    public native int available();
-    public native void close();
+    public native int read() throws java.io.IOException ;
+    public native int read(byte[] into) throws java.io.IOException ;
+    public native int read(byte[] into, int at, int count) throws java.io.IOException ;
+    public native byte[] readAllBytes() throws java.io.IOException ;
+    public native long skip(long count) throws java.io.IOException ;
+    public native int available() throws java.io.IOException ;
+    public native void close() throws java.io.IOException ;
 }
 
 public class OutputStream implements Closeable, Flushable {
-    public native void write(int one);
-    public native void write(byte[] held);
-    public native void write(byte[] held, int at, int count);
-    public native void flush();
-    public native void close();
+    public native void write(int one) throws java.io.IOException ;
+    public native void write(byte[] held) throws java.io.IOException ;
+    public native void write(byte[] held, int at, int count) throws java.io.IOException ;
+    public native void flush() throws java.io.IOException ;
+    public native void close() throws java.io.IOException ;
 }
 
 public class ByteArrayInputStream extends InputStream {
@@ -9873,14 +9899,14 @@ public class ByteArrayOutputStream extends OutputStream {
 }
 
 public class FileInputStream extends InputStream {
-    public native FileInputStream(String name);
-    public native FileInputStream(File held);
+    public native FileInputStream(String name) throws java.io.FileNotFoundException ;
+    public native FileInputStream(File held) throws java.io.FileNotFoundException ;
 }
 
 public class FileOutputStream extends OutputStream {
-    public native FileOutputStream(String name);
-    public native FileOutputStream(String name, boolean append);
-    public native FileOutputStream(File held);
+    public native FileOutputStream(String name) throws java.io.FileNotFoundException ;
+    public native FileOutputStream(String name, boolean append) throws java.io.FileNotFoundException ;
+    public native FileOutputStream(File held) throws java.io.FileNotFoundException ;
 }
 
 public class BufferedInputStream extends InputStream {
@@ -9917,23 +9943,23 @@ public class PrintStream extends OutputStream {
 }
 
 public class Reader implements Closeable {
-    public native int read();
-    public native int read(char[] into);
-    public native void close();
+    public native int read() throws java.io.IOException ;
+    public native int read(char[] into) throws java.io.IOException ;
+    public native void close() throws java.io.IOException ;
 }
 
 public class Writer implements Closeable, Flushable {
-    public native void write(String held);
-    public native void write(int one);
-    public native void write(char[] held);
-    public native Writer append(CharSequence held);
-    public native void flush();
-    public native void close();
+    public native void write(String held) throws java.io.IOException ;
+    public native void write(int one) throws java.io.IOException ;
+    public native void write(char[] held) throws java.io.IOException ;
+    public native Writer append(CharSequence held) throws java.io.IOException ;
+    public native void flush() throws java.io.IOException ;
+    public native void close() throws java.io.IOException ;
 }
 
 public class InputStreamReader extends Reader {
     public native InputStreamReader(InputStream from);
-    public native InputStreamReader(InputStream from, String charset);
+    public native InputStreamReader(InputStream from, String charset) throws java.io.UnsupportedEncodingException ;
 }
 
 public class OutputStreamWriter extends Writer {
@@ -9942,24 +9968,24 @@ public class OutputStreamWriter extends Writer {
 
 public class BufferedReader extends Reader {
     public native BufferedReader(Reader from);
-    public native String readLine();
+    public native String readLine() throws java.io.IOException ;
     public native java.util.stream.Stream<String> lines();
 }
 
 public class BufferedWriter extends Writer {
     public native BufferedWriter(Writer into);
-    public native void newLine();
+    public native void newLine() throws java.io.IOException ;
 }
 
 public class FileReader extends InputStreamReader {
-    public native FileReader(String name);
-    public native FileReader(File held);
+    public native FileReader(String name) throws java.io.FileNotFoundException ;
+    public native FileReader(File held) throws java.io.FileNotFoundException ;
 }
 
 public class FileWriter extends OutputStreamWriter {
-    public native FileWriter(String name);
-    public native FileWriter(String name, boolean append);
-    public native FileWriter(File held);
+    public native FileWriter(String name) throws java.io.IOException ;
+    public native FileWriter(String name, boolean append) throws java.io.IOException ;
+    public native FileWriter(File held) throws java.io.IOException ;
 }
 
 public class StringWriter extends Writer {
@@ -10003,7 +10029,7 @@ public class File implements Comparable<File> {
     public native boolean delete();
     public native boolean mkdir();
     public native boolean mkdirs();
-    public native boolean createNewFile();
+    public native boolean createNewFile() throws java.io.IOException ;
     public native boolean renameTo(File into);
     public native String[] list();
     public native File[] listFiles();
@@ -10979,11 +11005,11 @@ public class Collectors {
 package java.util.concurrent;
 
 public interface Callable<V> {
-    V call();
+    V call() throws java.lang.Exception ;
 }
 
 public interface Future<V> {
-    V get();
+    V get() throws java.lang.InterruptedException, java.util.concurrent.ExecutionException ;
     boolean isDone();
     boolean cancel(boolean interrupt);
     boolean isCancelled();
@@ -11000,7 +11026,7 @@ public interface ExecutorService extends Executor {
     java.util.List<java.lang.Runnable> shutdownNow();
     boolean isShutdown();
     boolean isTerminated();
-    boolean awaitTermination(long amount, TimeUnit unit);
+    boolean awaitTermination(long amount, TimeUnit unit) throws java.lang.InterruptedException ;
 }
 
 public class Executors {
@@ -11017,7 +11043,7 @@ public class TimeUnit extends java.lang.Enum<TimeUnit> {
     public static final TimeUnit MINUTES;
     public static final TimeUnit HOURS;
     public static final TimeUnit DAYS;
-    public native void sleep(long amount);
+    public native void sleep(long amount) throws java.lang.InterruptedException ;
     public native long toMillis(long amount);
     public native long toSeconds(long amount);
     public static native TimeUnit valueOf(String name);
@@ -11027,8 +11053,8 @@ public class TimeUnit extends java.lang.Enum<TimeUnit> {
 public class CountDownLatch {
     public native CountDownLatch(int count);
     public native void countDown();
-    public native void await();
-    public native boolean await(long amount, TimeUnit unit);
+    public native void await() throws java.lang.InterruptedException ;
+    public native boolean await(long amount, TimeUnit unit) throws java.lang.InterruptedException ;
     public native long getCount();
 }
 
@@ -11540,7 +11566,7 @@ public class DateFormat extends Format {
     public static final int LONG;
     public static final int FULL;
     public native String format(java.util.Date held);
-    public native java.util.Date parse(String held);
+    public native java.util.Date parse(String held) throws java.text.ParseException ;
     public native void setTimeZone(java.util.TimeZone held);
     public static native DateFormat getDateInstance();
     public static native DateFormat getTimeInstance();
@@ -11559,7 +11585,7 @@ public class SimpleDateFormat extends DateFormat {
 public class NumberFormat extends Format {
     public native String format(double held);
     public native String format(long held);
-    public native Number parse(String held);
+    public native Number parse(String held) throws java.text.ParseException ;
     public native void setMaximumFractionDigits(int held);
     public native void setMinimumFractionDigits(int held);
     public native void setGroupingUsed(boolean held);
@@ -11678,26 +11704,26 @@ public class Files {
     public static native boolean isRegularFile(Path held, LinkOption... how);
     public static native boolean isReadable(Path held);
     public static native boolean isWritable(Path held);
-    public static native long size(Path held);
-    public static native byte[] readAllBytes(Path held);
-    public static native java.util.List<String> readAllLines(Path held);
-    public static native String readString(Path held);
+    public static native long size(Path held) throws java.io.IOException ;
+    public static native byte[] readAllBytes(Path held) throws java.io.IOException ;
+    public static native java.util.List<String> readAllLines(Path held) throws java.io.IOException ;
+    public static native String readString(Path held) throws java.io.IOException ;
     public static native Path write(Path held, byte[] what, OpenOption... how);
-    public static native Path writeString(Path held, CharSequence what, OpenOption... how);
-    public static native Path createDirectory(Path held, java.nio.file.attribute.FileAttribute... how);
-    public static native Path createDirectories(Path held, java.nio.file.attribute.FileAttribute... how);
-    public static native Path createFile(Path held, java.nio.file.attribute.FileAttribute... how);
-    public static native void delete(Path held);
-    public static native boolean deleteIfExists(Path held);
+    public static native Path writeString(Path held, CharSequence what, OpenOption... how) throws java.io.IOException ;
+    public static native Path createDirectory(Path held, java.nio.file.attribute.FileAttribute... how) throws java.io.IOException ;
+    public static native Path createDirectories(Path held, java.nio.file.attribute.FileAttribute... how) throws java.io.IOException ;
+    public static native Path createFile(Path held, java.nio.file.attribute.FileAttribute... how) throws java.io.IOException ;
+    public static native void delete(Path held) throws java.io.IOException ;
+    public static native boolean deleteIfExists(Path held) throws java.io.IOException ;
     public static native Path copy(Path from, Path to, CopyOption... how);
-    public static native Path move(Path from, Path to, CopyOption... how);
-    public static native java.util.stream.Stream<Path> list(Path held);
-    public static native java.util.stream.Stream<Path> walk(Path held, FileVisitOption... how);
-    public static native java.util.stream.Stream<String> lines(Path held);
-    public static native java.io.BufferedReader newBufferedReader(Path held);
-    public static native java.io.BufferedWriter newBufferedWriter(Path held, OpenOption... how);
-    public static native java.io.InputStream newInputStream(Path held, OpenOption... how);
-    public static native java.io.OutputStream newOutputStream(Path held, OpenOption... how);
+    public static native Path move(Path from, Path to, CopyOption... how) throws java.io.IOException ;
+    public static native java.util.stream.Stream<Path> list(Path held) throws java.io.IOException ;
+    public static native java.util.stream.Stream<Path> walk(Path held, FileVisitOption... how) throws java.io.IOException ;
+    public static native java.util.stream.Stream<String> lines(Path held) throws java.io.IOException ;
+    public static native java.io.BufferedReader newBufferedReader(Path held) throws java.io.IOException ;
+    public static native java.io.BufferedWriter newBufferedWriter(Path held, OpenOption... how) throws java.io.IOException ;
+    public static native java.io.InputStream newInputStream(Path held, OpenOption... how) throws java.io.IOException ;
+    public static native java.io.OutputStream newOutputStream(Path held, OpenOption... how) throws java.io.IOException ;
 }
 
 public class NoSuchFileException extends java.io.IOException {
@@ -11715,36 +11741,36 @@ public class FileAlreadyExistsException extends java.io.IOException {
 package java.net;
 
 public class URI implements Comparable<URI> {
-    public native URI(String held);
+    public native URI(String held) throws java.net.URISyntaxException ;
     public native String getScheme();
     public native String getHost();
     public native int getPort();
     public native String getPath();
     public native String getQuery();
-    public native URL toURL();
+    public native URL toURL() throws java.net.MalformedURLException ;
     public native int compareTo(URI other);
     public native String toString();
     public static native URI create(String held);
 }
 
 public class URL {
-    public native URL(String held);
+    public native URL(String held) throws java.net.MalformedURLException ;
     public native String getProtocol();
     public native String getHost();
     public native int getPort();
     public native String getPath();
-    public native java.io.InputStream openStream();
-    public native URLConnection openConnection();
+    public native java.io.InputStream openStream() throws java.io.IOException ;
+    public native URLConnection openConnection() throws java.io.IOException ;
     public native String toString();
 }
 
 public class URLConnection {
-    public native void connect();
+    public native void connect() throws java.io.IOException ;
     public native void setRequestProperty(String name, String value);
     public native void setConnectTimeout(int millis);
     public native void setReadTimeout(int millis);
-    public native java.io.InputStream getInputStream();
-    public native java.io.OutputStream getOutputStream();
+    public native java.io.InputStream getInputStream() throws java.io.IOException ;
+    public native java.io.OutputStream getOutputStream() throws java.io.IOException ;
     public native void setDoOutput(boolean held);
     public native String getContentType();
     public native int getContentLength();
@@ -11753,19 +11779,19 @@ public class URLConnection {
 public class HttpURLConnection extends URLConnection {
     public static final int HTTP_OK;
     public static final int HTTP_NOT_FOUND;
-    public native void setRequestMethod(String name);
-    public native int getResponseCode();
-    public native String getResponseMessage();
+    public native void setRequestMethod(String name) throws java.net.ProtocolException ;
+    public native int getResponseCode() throws java.io.IOException ;
+    public native String getResponseMessage() throws java.io.IOException ;
     public native void disconnect();
     public native java.io.InputStream getErrorStream();
 }
 
 public class URLEncoder {
-    public static native String encode(String held, String charset);
+    public static native String encode(String held, String charset) throws java.io.UnsupportedEncodingException ;
 }
 
 public class URLDecoder {
-    public static native String decode(String held, String charset);
+    public static native String decode(String held, String charset) throws java.io.UnsupportedEncodingException ;
 }
 
 public class MalformedURLException extends java.io.IOException {
@@ -13046,6 +13072,83 @@ impl Emitter<'_> {
         ))
     }
 
+    /// Whether an exception is one the language makes a person answer for.
+    ///
+    /// Everything under `RuntimeException` and everything under `Error` may
+    /// happen anywhere and is nobody's to declare. What is left -- a plain
+    /// `Exception`, an `IOException`, a class somebody wrote extending either
+    /// -- has to be caught or declared, and this is what says which is which.
+    fn is_answered_for(&self, named: &str) -> bool {
+        if named == "java/lang/RuntimeException" || named == "java/lang/Error" {
+            return false;
+        }
+        let mut walking = named.to_string();
+        // Deeper than anybody's exception hierarchy, and it stops a class that
+        // extends itself from going round for ever.
+        for _ in 0..64 {
+            if walking == "java/lang/RuntimeException" || walking == "java/lang/Error" {
+                return false;
+            }
+            if walking == "java/lang/Throwable" || walking == "java/lang/Exception" {
+                return true;
+            }
+            match self
+                .classpath
+                .get(&walking)
+                .and_then(|known| known.superclass.clone())
+            {
+                Some(above) => walking = above,
+                // A class nobody handed over: `Throwable` is what a `throw`
+                // needs it to be, and answering for it is the careful answer.
+                None => return true,
+            }
+        }
+        true
+    }
+
+    /// Whether one of these classes catches that one.
+    fn covers(&self, held: &[String], thrown: &str) -> bool {
+        held.iter().any(|one| {
+            one == thrown
+                || self.reaches(
+                    &Type::Object(thrown.to_string(), Vec::new()),
+                    &Type::Object(one.clone(), Vec::new()),
+                )
+        })
+    }
+
+    /// Notes that what is being written here can throw this, and refuses it
+    /// where nothing catches it and the method does not say it throws.
+    ///
+    /// This is the one check in this compiler that refuses code the device
+    /// would happily run. It is here because `javac` refuses it too, and a
+    /// compiler that does not is a compiler a person finds out about at run
+    /// time.
+    fn it_can_throw(&mut self, named: &str, line: u32) -> Result<(), Diagnostic> {
+        if !self.is_answered_for(named) {
+            return Ok(());
+        }
+        if self.caught.iter().any(|held| self.covers(held, named)) {
+            return Ok(());
+        }
+        let said = self.said_to_throw.clone();
+        if self.covers(&said, named) {
+            return Ok(());
+        }
+        Err(at(
+            "EJ256",
+            line,
+            1,
+            format!(
+                "`{}` has to be caught or declared to be thrown.",
+                named.replace('/', ".")
+            ),
+        )
+        .with_suggestion(
+            "Put it in a `try` with a `catch` for it, or write `throws` on the method.              Anything under `RuntimeException` or `Error` needs neither.",
+        ))
+    }
+
     /// The classes this one is written inside, from the one directly around it
     /// outwards. A name written here that this class does not hold is looked
     /// for along this road, in that order, which is the order Java reads it in.
@@ -13699,6 +13802,9 @@ impl Emitter<'_> {
         };
         let descriptor = match signature {
             Some(found) => {
+                // A constructor that says it throws is a `new` that has to be
+                // caught or declared, the same as any other call.
+                self.what_the_call_can_throw(&found, line)?;
                 // The instance it belongs to is already on the stack, so the
                 // parameter that holds it is not one of the arguments.
                 let wanted = if belongs.is_some() && !found.parameters.is_empty() {
@@ -13806,6 +13912,7 @@ impl Emitter<'_> {
                     returns_stands_for: Standing::Fixed,
                     own_variables: Vec::new(),
                     witnessed: Vec::new(),
+                    throws: Vec::new(),
                 })
             }
             None => self
@@ -13867,12 +13974,31 @@ impl Emitter<'_> {
     /// `String.format("%d", n)` hands over two things and the method takes
     /// two: a String and an array. Making that array is the whole of what
     /// varargs is, and it happens here rather than at run time.
+    /// What a call can throw, checked where the call is written.
+    ///
+    /// Every call goes through here on its way to having its arguments
+    /// written, which makes it the one place that sees every signature this
+    /// method reaches.
+    fn what_the_call_can_throw(
+        &mut self,
+        signature: &Signature,
+        line: u32,
+    ) -> Result<(), Diagnostic> {
+        for named in signature.throws.clone() {
+            self.it_can_throw(&named, line)?;
+        }
+        Ok(())
+    }
+
     fn arguments_for_signature(
         &mut self,
         signature: &Signature,
         given: &[Expression],
         line: u32,
     ) -> Result<(), Diagnostic> {
+        // Every call comes through here, which makes it the one place that
+        // sees every signature this method reaches.
+        self.what_the_call_can_throw(signature, line)?;
         let wanted = &signature.parameters;
         if !signature.variadic || wanted.is_empty() {
             return self.arguments_for(wanted, given, line);
@@ -14351,8 +14477,16 @@ impl Emitter<'_> {
                     .map(|(what, _)| standing_of(what))
                     .collect(),
                 returns_stands_for: standing_of(&own.returns),
-                own_variables: Vec::new(),
+                own_variables: own.own_variables.clone(),
                 witnessed: Vec::new(),
+                // What it says it throws, so a call to a method written in
+                // this very class is answered for the same way a call to one
+                // anywhere else is.
+                throws: own
+                    .throws
+                    .iter()
+                    .filter_map(|one| self.resolve_class(one, line).ok())
+                    .collect(),
             };
             let descriptor = signature.descriptor();
 
@@ -15198,6 +15332,7 @@ impl Emitter<'_> {
                 returns_stands_for: Standing::Fixed,
                 own_variables: Vec::new(),
                 witnessed: Vec::new(),
+                throws: Vec::new(),
             });
         }
         for round in 0..3 {
@@ -15363,6 +15498,7 @@ impl Emitter<'_> {
                     returns_stands_for: Standing::Fixed,
                     own_variables: Vec::new(),
                     witnessed: Vec::new(),
+                    throws: Vec::new(),
                 });
             }
             if !found.is_empty() {
@@ -16534,6 +16670,10 @@ impl Emitter<'_> {
                 Ok(())
             }
             Statement::Throw(what) => {
+                let found = self.type_of(what, line)?;
+                if let Type::Object(named, _) = &found {
+                    self.it_can_throw(named, line)?;
+                }
                 let found = self.value(what, line)?;
                 if !found.is_reference() {
                     return Err(at(
@@ -17849,12 +17989,29 @@ impl Emitter<'_> {
             self.finallys.push(Cleanup::Block(finally.to_vec()));
         }
 
+        // What the `catch` clauses take, while the body is being written: a
+        // checked exception thrown in there is answered for by them.
+        let mut takes: Vec<String> = Vec::new();
+        for catch in catches {
+            for written in &catch.types {
+                if let Ok(Type::Object(named, _)) = self.resolve(written, catch.line) {
+                    takes.push(named);
+                }
+            }
+        }
         let begun = self.code.len();
+        self.caught.push(takes);
         self.open();
+        let mut written = Ok(());
         for one in body {
-            self.statement(one)?;
+            written = self.statement(one);
+            if written.is_err() {
+                break;
+            }
         }
         self.close();
+        self.caught.pop();
+        written?;
         let ended = self.code.len();
 
         let mut outs: Vec<Pending> = Vec::new();
@@ -18126,7 +18283,15 @@ impl Emitter<'_> {
                 default_value: None,
                 own_variables: Vec::new(),
                 own_bounds: Vec::new(),
-                throws: Vec::new(),
+                // A lambda has no signature of its own: what it may throw is
+                // what the interface's one method says it may throw, which is
+                // why `() -> { throw new Exception("no"); }` is written where
+                // a `Callable` is wanted and nowhere else.
+                throws: single
+                    .throws
+                    .iter()
+                    .map(|one| one.replace('/', "."))
+                    .collect(),
             }],
             instance_setup: Vec::new(),
         };
@@ -18425,6 +18590,7 @@ impl Emitter<'_> {
                     returns_stands_for: Standing::Fixed,
                     own_variables: Vec::new(),
                     witnessed: Vec::new(),
+                    throws: Vec::new(),
                 });
             }
             found.retain(counts);
@@ -19246,6 +19412,7 @@ impl Emitter<'_> {
                 returns_stands_for: Standing::Fixed,
                 own_variables: Vec::new(),
                 witnessed: Vec::new(),
+                throws: Vec::new(),
             }
         } else {
             match self.find_signature(owner, "<init>", arguments.len()) {
@@ -19265,6 +19432,7 @@ impl Emitter<'_> {
                     returns_stands_for: Standing::Fixed,
                     own_variables: Vec::new(),
                     witnessed: Vec::new(),
+                    throws: Vec::new(),
                 },
                 None => {
                     return Err(at(
@@ -21120,6 +21288,7 @@ pub fn compile_unit_in_nest(
                 returns_stands_for: Standing::Fixed,
                 own_variables: Vec::new(),
                 witnessed: Vec::new(),
+                throws: Vec::new(),
             }
             .descriptor();
             let descriptor = pool.utf8(&descriptor);
@@ -21176,6 +21345,23 @@ pub fn compile_unit_in_nest(
         // `this.` -- which in a class written for a lambda would otherwise
         // mean the class the lambda was written in.
         emitter.writing_a_bridge = method.bridge;
+        // What this method says it throws, which is what the checked
+        // exceptions inside it are answered for by. A class this compilation
+        // cannot name is left out rather than guessed at, which can only make
+        // this check quieter, never louder.
+        emitter.said_to_throw = method
+            .throws
+            .iter()
+            .filter_map(|one| resolve_named(classpath, unit, one))
+            .collect();
+        // A constructor and a class initialiser are written from the fields
+        // and the blocks around them, and what those may throw is answered for
+        // where they were written rather than here.
+        if method.name == "<clinit>" {
+            emitter
+                .said_to_throw
+                .push("java/lang/Throwable".to_string());
+        }
         emitter.open();
         if !method.modifiers.static_ {
             emitter.declare("this", Type::Object(this_class.clone(), Vec::new()));
@@ -21337,6 +21523,7 @@ pub fn compile_unit_in_nest(
             returns_stands_for: Standing::Fixed,
             own_variables: Vec::new(),
             witnessed: Vec::new(),
+            throws: Vec::new(),
         }
         .descriptor();
         let descriptor = pool.utf8(&descriptor);
@@ -31229,6 +31416,115 @@ public class Boxed {
         }
     }
 
+    /// A checked exception has to be caught or declared, which is the one
+    /// thing this compiler refuses that a device would happily run.
+    ///
+    /// Every shape of it: a call, a `new`, a `throw`, and the four ways of
+    /// answering for one -- a `catch` that names it, a `catch` that names
+    /// something above it, a `throws` on the method, and a lambda standing for
+    /// an interface whose one method says it throws.
+    #[test]
+    fn a_checked_exception_has_to_be_answered_for() {
+        for (source, why) in [
+            (
+                "import java.io.IOException;
+                 public class A {
+                     static void risky() throws IOException { }
+                     void f() { risky(); }
+                 }",
+                "a call to one",
+            ),
+            (
+                "import java.io.IOException;
+                 public class A {
+                     static class B { B() throws IOException { } }
+                     void f() { new B(); }
+                 }",
+                "a `new` of one",
+            ),
+            (
+                "import java.io.IOException;
+                 public class A { void f() { throw new IOException(\"no\"); } }",
+                "a `throw` of one",
+            ),
+            (
+                "public class A {
+                     void f() { java.io.InputStream in = null; in.read(); }
+                 }",
+                "one the platform declares",
+            ),
+            (
+                "import java.io.IOException;
+                 public class A {
+                     static void risky() throws IOException { }
+                     void f() { try { risky(); } catch (java.io.FileNotFoundException e) { } }
+                 }",
+                "a `catch` for something narrower",
+            ),
+        ] {
+            let refused = compile(source, &empty())
+                .err()
+                .unwrap_or_else(|| panic!("{why} must be refused"));
+            assert_eq!(refused.code, "EJ256", "{why}: {}", refused.message);
+            assert!(refused.suggestion.is_some(), "{why}");
+        }
+
+        // And every way of answering for one, which is what a person writes.
+        for (source, why) in [
+            (
+                "import java.io.IOException;
+                 public class A {
+                     static void risky() throws IOException { }
+                     void f() { try { risky(); } catch (IOException e) { } }
+                 }",
+                "a `catch` naming it",
+            ),
+            (
+                "import java.io.IOException;
+                 public class A {
+                     static void risky() throws IOException { }
+                     void f() { try { risky(); } catch (Exception e) { } }
+                 }",
+                "a `catch` naming something above it",
+            ),
+            (
+                "import java.io.IOException;
+                 public class A {
+                     static void risky() throws IOException { }
+                     void f() throws IOException { risky(); }
+                 }",
+                "a `throws` on the method",
+            ),
+            (
+                "import java.io.IOException;
+                 public class A {
+                     static void risky() throws IOException { }
+                     void f() throws Exception { risky(); }
+                 }",
+                "a `throws` of something above it",
+            ),
+            (
+                "import java.util.concurrent.Callable;
+                 public class A {
+                     Callable<String> f() { return () -> { throw new Exception(\"no\"); }; }
+                 }",
+                "a lambda whose interface says it throws",
+            ),
+            (
+                "public class A { void f() { throw new IllegalStateException(\"fine\"); } }",
+                "a RuntimeException, which nobody declares",
+            ),
+            (
+                "public class A { void f() { throw new StackOverflowError(); } }",
+                "an Error, which nobody declares",
+            ),
+        ] {
+            compile(source, &empty()).unwrap_or_else(|why| panic!("{why:?} refused {why:?}"));
+            let _ = why;
+        }
+        eprintln!("java: a checked exception is caught, declared, or refused");
+    }
+
     /// What a class was written holding, which a descriptor throws away.
     ///
     /// `List<String>` and `List<Integer>` are one descriptor and two
@@ -32577,6 +32873,7 @@ public class Screen extends Activity implements View.OnClickListener {
                     handlers: Vec::new(),
                 }),
                 signature: None,
+                throws: Vec::new(),
             }],
             attributes: Vec::new(),
             kotlin: None,
