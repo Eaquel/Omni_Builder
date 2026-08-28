@@ -5042,6 +5042,34 @@ impl Parser {
                 }
                 continue;
             }
+            // `String[].class`: an array type written where an expression
+            // could be, which only `.class` can follow.
+            if self.is_mark("[") && matches!(self.ahead(1), Token::Punctuation("]")) {
+                let Some(mut named) = as_a_written_type(&found) else {
+                    return Err(at(
+                        "EJ122",
+                        self.line(),
+                        self.column(),
+                        "Only a class can be written in front of this.",
+                    ));
+                };
+                while self.is_mark("[") && matches!(self.ahead(1), Token::Punctuation("]")) {
+                    self.take();
+                    self.take();
+                    named = Written::Array(Box::new(named));
+                }
+                self.want_mark(".")?;
+                if !self.eat_word("class") {
+                    return Err(at(
+                        "EJ122",
+                        self.line(),
+                        self.column(),
+                        "An array type written here is only there to name its class.",
+                    ));
+                }
+                found = Expression::ClassLiteral { of: named, line };
+                continue;
+            }
             if self.is_mark("[") {
                 self.take();
                 let index = self.expression()?;
@@ -5240,18 +5268,30 @@ impl Parser {
     fn primary(&mut self) -> Result<Expression, Diagnostic> {
         let (line, column) = (self.line(), self.column());
 
-        // `int.class`. A primitive is the one type that can start an
-        // expression, and only in front of this.
+        // `int.class` and `int[].class`. A primitive is the one type that can
+        // start an expression, and only in front of these.
         if let Token::Keyword(word) = self.here().token {
-            if Written::of_keyword(word).is_some()
-                && matches!(self.ahead(1), Token::Punctuation("."))
-                && matches!(self.ahead(2), Token::Keyword("class"))
-            {
-                let of = Written::of_keyword(word).expect("just checked");
-                self.take();
-                self.take();
-                self.take();
-                return Ok(Expression::ClassLiteral { of, line });
+            if Written::of_keyword(word).is_some() {
+                let mut at = 1usize;
+                while matches!(self.ahead(at), Token::Punctuation("["))
+                    && matches!(self.ahead(at + 1), Token::Punctuation("]"))
+                {
+                    at += 2;
+                }
+                if matches!(self.ahead(at), Token::Punctuation("."))
+                    && matches!(self.ahead(at + 1), Token::Keyword("class"))
+                {
+                    let mut of = Written::of_keyword(word).expect("just checked");
+                    self.take();
+                    while self.is_mark("[") && matches!(self.ahead(1), Token::Punctuation("]")) {
+                        self.take();
+                        self.take();
+                        of = Written::Array(Box::new(of));
+                    }
+                    self.take();
+                    self.take();
+                    return Ok(Expression::ClassLiteral { of, line });
+                }
             }
         }
 
@@ -16048,6 +16088,7 @@ impl Emitter<'_> {
                 // Nothing after an athrow is reached from here, and the stack
                 // it left behind is not the stack anything else will find.
                 self.set_depth(0);
+                self.reachable = false;
                 Ok(())
             }
             Statement::Labelled { label, body } => {
@@ -16113,7 +16154,10 @@ impl Emitter<'_> {
                                 ),
                             ));
                         }
-                        self.op(0xb1);
+                        if self.reachable {
+                            self.op(0xb1);
+                        }
+                        self.reachable = false;
                     }
                     Some(expression) => {
                         if wanted == Type::Void {
@@ -16152,6 +16196,14 @@ impl Emitter<'_> {
                             let held = self.declare("$returning", wanted.clone());
                             self.store(held, &wanted);
                             self.run_finallys(0)?;
+                            // `try { return a; } finally { return b; }` leaves
+                            // by the `finally`, and what would have followed it
+                            // is code no path arrives at -- which the verifier
+                            // wants a frame on and there is nothing to say.
+                            if !self.reachable {
+                                self.close();
+                                return Ok(());
+                            }
                             self.load(held, &wanted);
                             self.close();
                         }
@@ -16164,6 +16216,7 @@ impl Emitter<'_> {
                         };
                         self.op(opcode);
                         self.pops(i32::from(wanted.width()));
+                        self.reachable = false;
                     }
                 }
                 Ok(())
@@ -17406,9 +17459,13 @@ impl Emitter<'_> {
             }
             self.finallys = held;
 
-            self.load(slot, &throwable);
-            self.op(0xbf);
-            self.set_depth(0);
+            // A `finally` that returns or throws on its own leaves by that,
+            // and rethrowing after it is code no path arrives at.
+            if self.reachable {
+                self.load(slot, &throwable);
+                self.op(0xbf);
+                self.set_depth(0);
+            }
             self.close();
         }
 
@@ -27065,6 +27122,153 @@ public abstract class Store<K, V> implements Iterable<Map.Entry<K, V>> {
                      {ada=36, bob=41, cy=29} 2 true 329"
                 );
                 eprintln!("java: a class filling in what the class above it left open");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// The corners left: an anonymous class with a generic method of its own,
+    /// called with the type argument written out; an array of records; an
+    /// `EnumMap` and `merge` on a map keyed by an enum; a `finally` that
+    /// returns and swallows what the body was returning; `instanceof` on an
+    /// array of primitives, an array of objects and a generic; a `switch`
+    /// expression over chars with a `yield`; a string built by `+=` in a loop;
+    /// `null` where a String is wanted; and `int.class`, `String[].class` and
+    /// `Point.class.isRecord()`.
+    const THE_CORNERS_LEFT: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Rest {
+
+    interface Maker {
+        <T> List<T> two(T one, T other);
+    }
+
+    record Point(int x, int y) {
+        static Point origin() { return new Point(0, 0); }
+        Point moved(int by) { return new Point(x + by, y + by); }
+    }
+
+    enum Side { LEFT, RIGHT }
+
+    static class Broken {
+        static int held;
+        static { held = 1; }
+    }
+
+    static String swallow() {
+        try {
+            return "body";
+        } finally {
+            return "finally";
+        }
+    }
+
+    static String kind(Object of) {
+        if (of instanceof int[] numbers) return "ints:" + numbers.length;
+        if (of instanceof Object[] things) return "objects:" + things.length;
+        if (of instanceof List<?> rows) return "list:" + rows.size();
+        return "other";
+    }
+
+    static char grade(int of) {
+        return switch (of / 10) {
+            case 10, 9 -> 'A';
+            case 8 -> 'B';
+            case 7 -> 'C';
+            default -> {
+                char held = of < 0 ? '?' : 'F';
+                yield held;
+            }
+        };
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        Maker maker = new Maker() {
+            public <T> List<T> two(T one, T other) {
+                List<T> held = new ArrayList<T>();
+                held.add(one);
+                held.add(other);
+                return held;
+            }
+        };
+        out.append(maker.two("a", "b")).append(maker.<Integer>two(1, 2)).append(' ');
+
+        Point[] points = {Point.origin(), new Point(1, 2).moved(3)};
+        out.append(Arrays.toString(points)).append(points[1].x()).append(' ');
+
+        EnumMap<Side, List<Point>> bySide = new EnumMap<Side, List<Point>>(Side.class);
+        bySide.put(Side.LEFT, Arrays.asList(points));
+        out.append(bySide.get(Side.LEFT).size()).append(bySide.containsKey(Side.RIGHT))
+           .append(' ');
+
+        Map<Side, Integer> counts = new HashMap<Side, Integer>();
+        counts.put(Side.LEFT, 1);
+        counts.merge(Side.LEFT, 4, (l, r) -> l + r);
+        out.append(counts.get(Side.LEFT)).append(' ');
+
+        out.append(Broken.held).append(' ');
+        out.append(swallow()).append(' ');
+
+        out.append(kind(new int[3])).append('/').append(kind(new String[] {"a"}))
+           .append('/').append(kind(new ArrayList<String>())).append('/').append(kind(1))
+           .append(' ');
+
+        out.append(grade(95)).append(grade(85)).append(grade(42)).append(grade(-1)).append(' ');
+
+        String built = "";
+        for (int i = 0; i < 4; i++) built += i;
+        out.append(built).append(' ');
+
+        String nothing = null;
+        out.append(String.valueOf(nothing)).append('/').append("x" + nothing).append(' ');
+        String either = args.length > 0 ? "some" : null;
+        out.append(either).append(' ');
+
+        out.append(int.class.getName()).append('/').append(String[].class.getSimpleName())
+           .append('/').append(Point.class.isRecord()).append(' ');
+
+        Object held = points;
+        if (held instanceof Point[] found) out.append(found.length);
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_corners_left_give_back_what_javac_gives_back() {
+        let produced = compile(THE_CORNERS_LEFT, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Rest") {
+            None => eprintln!("java: no JVM here to run the corners left"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "[a, b][1, 2] [Point[x=0, y=0], Point[x=4, y=5]]4 2false 5 1 finally \
+                     ints:3/objects:1/list:0/other ABF? 0123 null/xnull null \
+                     int/String[]/true 2"
+                );
+                eprintln!("java: the corners left, and javac's answer");
             }
         }
 
