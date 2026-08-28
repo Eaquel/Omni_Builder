@@ -668,17 +668,30 @@ impl<'a> Lexer<'a> {
             .filter(|c| *c != '_')
             .collect();
 
-        // A leading zero on a decimal integer is octal in Java, which is a trap
-        // rather than a feature; it is refused rather than read either way.
-        if radix == 10 && !floating && digits.len() > 1 && digits.starts_with('0') {
-            return Err(at(
-                "EJ007",
-                line,
-                column,
-                "A number written with a leading zero is octal in Java.",
-            )
-            .with_suggestion("Write it in decimal, or as 0x for hexadecimal."));
-        }
+        // A leading zero on a whole number is octal in Java. It is a trap
+        // rather than a feature, and it is also what the language says, so it
+        // is read as octal rather than refused -- and a digit that is not one
+        // is the mistake it looks like.
+        let (digits, radix) = if radix == 10
+            && !floating
+            && digits.len() > 1
+            && digits.starts_with('0')
+            && !digits.contains('.')
+        {
+            if digits[1..].bytes().any(|one| !(b'0'..=b'7').contains(&one)) {
+                return Err(at(
+                    "EJ007",
+                    line,
+                    column,
+                    "A number written with a leading zero is octal, and 8 and 9 are not \
+                     octal digits.",
+                )
+                .with_suggestion("Drop the leading zero, or write it as 0x for hexadecimal."));
+            }
+            (digits[1..].to_string(), 8u32)
+        } else {
+            (digits, radix)
+        };
 
         let suffix = self.peek(0);
         if matches!(suffix, b'l' | b'L') {
@@ -2123,7 +2136,13 @@ fn written_for(what: &Type) -> Option<Written> {
         Type::Float => Written::Float,
         Type::Double => Written::Double,
         Type::Array(of) => Written::Array(Box::new(written_for(of)?)),
-        Type::Object(name, _) => Written::Named(name.replace('/', "."), Vec::new()),
+        // With whatever it was written holding, so that a lambda handed back
+        // by a lambda -- `a -> b -> a * b` -- still knows what its own
+        // parameters are.
+        Type::Object(name, held) => Written::Named(
+            name.replace('/', "."),
+            held.iter().filter_map(written_for).collect(),
+        ),
     })
 }
 
@@ -8128,15 +8147,27 @@ impl Standing {
                 .map(|(_, what)| what.clone())
                 .unwrap_or(erased.clone()),
             Standing::Holding(inside) => {
-                let Type::Object(named, _) = erased else {
+                let Type::Object(named, arguments) = erased else {
                     return erased.clone();
                 };
+                // Each argument is filled against the argument the declared
+                // type had in that place, not against Object: `Collector<T, ?,
+                // Map<K, V>>` is a Collector holding a Map, and filling the
+                // Map against Object would leave a call on it with nothing to
+                // resolve against.
                 let object = Type::Object("java/lang/Object".to_string(), Vec::new());
-                let arguments = inside
+                let filled = inside
                     .iter()
-                    .map(|one| one.filled(&object, of_the_class, of_the_method))
+                    .enumerate()
+                    .map(|(at, one)| {
+                        one.filled(
+                            arguments.get(at).unwrap_or(&object),
+                            of_the_class,
+                            of_the_method,
+                        )
+                    })
                     .collect();
-                Type::Object(named.clone(), arguments)
+                Type::Object(named.clone(), filled)
             }
             Standing::ArrayOf(of) => match erased {
                 Type::Array(held) => {
@@ -8624,6 +8655,11 @@ public class String implements CharSequence, Comparable<String> {
     public native String(char[] value);
     public native String(char[] value, int offset, int count);
     public native String(byte[] value);
+    public native String(byte[] value, String charset);
+    public native String(byte[] value, java.nio.charset.Charset charset);
+    public native String(byte[] value, int offset, int count);
+    public native String(byte[] value, int offset, int count, String charset);
+    public native String(StringBuilder held);
     public native int length();
     public native boolean isEmpty();
     public native boolean isBlank();
@@ -8660,6 +8696,13 @@ public class String implements CharSequence, Comparable<String> {
     public native int compareToIgnoreCase(String other);
     public native char[] toCharArray();
     public native byte[] getBytes();
+    public native byte[] getBytes(String charset);
+    public native byte[] getBytes(java.nio.charset.Charset charset);
+    public native String stripLeading();
+    public native String stripTrailing();
+    public native boolean contentEquals(CharSequence other);
+    public native boolean regionMatches(int at, String other, int from, int count);
+    public native java.util.stream.Stream<String> lines();
     public native String intern();
     public native String formatted(Object... parts);
     public native java.util.stream.IntStream chars();
@@ -8670,6 +8713,7 @@ public class String implements CharSequence, Comparable<String> {
     public static native String valueOf(boolean value);
     public static native String valueOf(char value);
     public static native String valueOf(char[] value);
+    public static native String valueOf(char[] value, int offset, int count);
     public static native String valueOf(Object value);
     public static native String format(String pattern, Object... parts);
     public static native String join(CharSequence between, CharSequence... parts);
@@ -10245,10 +10289,15 @@ public interface BiPredicate<T, U> {
 }
 
 public interface UnaryOperator<T> extends Function<T, T> {
+    // Said again here, because what it stands for is a `T` in and a `T` out,
+    // and the one place that can say so is the interface that has the one
+    // type parameter.
+    T apply(T one);
     static <X> UnaryOperator<X> identity() { return null; }
 }
 
 public interface BinaryOperator<T> extends BiFunction<T, T, T> {
+    T apply(T left, T right);
     static <X> BinaryOperator<X> minBy(java.util.Comparator<X> by) { return null; }
     static <X> BinaryOperator<X> maxBy(java.util.Comparator<X> by) { return null; }
 }
@@ -13535,6 +13584,9 @@ impl Emitter<'_> {
         }
 
         let owner_type = self.value(on, line)?;
+        if matches!(owner_type, Type::Array(_)) {
+            return self.call_on_an_array(&owner_type, name, arguments, line);
+        }
         let Type::Object(owner, held) = owner_type.clone() else {
             return Err(at(
                 "EJ226",
@@ -13889,15 +13941,20 @@ impl Emitter<'_> {
     /// Puts the cast erasure implies in front of a value the descriptor called
     /// an Object.
     fn cast_to(&mut self, found: Type, declared: Type) -> Result<Type, Diagnostic> {
-        let Type::Object(named, _) = &found else {
-            return Ok(declared);
+        // An array is a class too, and the pool names it by its descriptor:
+        // `List<int[]>.get(0)[1]` needs the `checkcast [I` before it can be
+        // indexed at all.
+        let named = match &found {
+            Type::Object(named, _) if named == "java/lang/Object" => {
+                // Casting to Object is what it already is, and writing the
+                // instruction would only make the class file longer.
+                return Ok(declared);
+            }
+            Type::Object(named, _) => named.clone(),
+            Type::Array(_) => found.descriptor(),
+            _ => return Ok(declared),
         };
-        // Casting to Object is what it already is, and writing the instruction
-        // would only make the class file longer.
-        if named == "java/lang/Object" {
-            return Ok(declared);
-        }
-        let index = self.pool.class(named);
+        let index = self.pool.class(&named);
         self.op2(0xc0, index);
         self.pops(1);
         self.pushes(&found);
@@ -16968,10 +17025,44 @@ impl Emitter<'_> {
                 "A lambda takes its type from what it is handed to. Name the interface                  it stands for, or write the class out.",
             ));
         }
+        // Everything it declares and everything it inherits: `UnaryOperator`
+        // declares nothing at all and stands for `Function.apply`, which is
+        // one interface up.
+        //
+        // Only the abstract ones count. An interface with a `default` method
+        // and a `private` one has three methods and exactly one of them is
+        // what a lambda stands for. And a method that redeclares one of
+        // Object's does not count either: `Comparator` declares `equals` so
+        // that its documentation can say something about it; every object
+        // already has one, so there is nothing there for a lambda to be.
+        let counts = |one: &Signature| {
+            !one.static_
+                && one.name != "<init>"
+                && one.abstract_
+                && !matches!(
+                    (one.name.as_str(), one.parameters.len()),
+                    ("equals", 1) | ("hashCode", 0) | ("toString", 0)
+                )
+        };
         let mut found: Vec<Signature> = Vec::new();
-        if let Some(known) = self.classpath.get(named) {
-            found.extend(known.methods.iter().cloned());
+        for one in self.classpath.ancestors(named) {
+            let Some(known) = self.classpath.get(&one) else {
+                continue;
+            };
+            for held in &known.methods {
+                // A method redeclared further down is the same method.
+                if found
+                    .iter()
+                    .any(|before| before.name == held.name && before.parameters == held.parameters)
+                {
+                    continue;
+                }
+                found.push(held.clone());
+            }
         }
+        found.retain(counts);
+        // Where the classpath knows nothing abstract, the built-in table takes
+        // over -- a listener from a platform nobody handed over, say.
         if found.is_empty() {
             for (class, name, descriptor, static_) in BUILT_IN_METHODS {
                 if *class != named || *static_ {
@@ -16995,24 +17086,8 @@ impl Emitter<'_> {
                     returns_stands_for: Standing::Fixed,
                 });
             }
+            found.retain(counts);
         }
-        // Only the abstract one counts. An interface with a `default` method
-        // and a `private` one has three methods and exactly one of them is
-        // what a lambda stands for.
-        //
-        // And a method that redeclares one of Object's does not count either.
-        // `Comparator` declares `equals` so that its documentation can say
-        // something about it; every object already has one, so there is
-        // nothing there for a lambda to be.
-        found.retain(|one| {
-            !one.static_
-                && one.name != "<init>"
-                && one.abstract_
-                && !matches!(
-                    (one.name.as_str(), one.parameters.len()),
-                    ("equals", 1) | ("hashCode", 0) | ("toString", 0)
-                )
-        });
         match found.len() {
             1 => Ok(found.remove(0)),
             0 => Err(at(
@@ -17094,6 +17169,31 @@ impl Emitter<'_> {
             captured.push(local);
         }
         captured.sort_by_key(|held| held.slot);
+
+        // And what it reads that belongs to the class around it rather than to
+        // the method. For a class a person wrote that is `$outer.name`; for
+        // one this compiler wrote -- a lambda inside a lambda -- there is no
+        // `$outer` to reach through, because what the outer one captured it
+        // captured by value. So the value is copied in again, the same way.
+        let mut copied: Vec<(String, Type)> = Vec::new();
+        if !self.static_ {
+            for name in &wanted {
+                if self.local(name).is_some() || copied.iter().any(|(held, _)| held == name) {
+                    continue;
+                }
+                let Some(field) = self
+                    .unit
+                    .fields
+                    .iter()
+                    .find(|held| held.name == *name && !held.modifiers.static_)
+                    .cloned()
+                else {
+                    continue;
+                };
+                let what = self.resolve(&field.what, line)?;
+                copied.push((name.clone(), what));
+            }
+        }
 
         let mut assigned: Vec<String> = Vec::new();
         names_assigned(body, &mut assigned);
@@ -17191,6 +17291,22 @@ impl Emitter<'_> {
             parameters.push((written, local.name.clone()));
             filling.push(fill(&local.name, line));
         }
+        for (name, what) in &copied {
+            let Some(written) = written_for(what) else {
+                return Err(at(
+                    "EJ249",
+                    line,
+                    1,
+                    format!(
+                        "`{name}` is a {} and a class written here cannot hold one.",
+                        what.readable()
+                    ),
+                ));
+            };
+            fields.push(held(written.clone(), name, line));
+            parameters.push((written, name.clone()));
+            filling.push(fill(name, line));
+        }
 
         let mut chain = Vec::new();
         for (position, one) in given.iter().enumerate() {
@@ -17287,6 +17403,16 @@ impl Emitter<'_> {
             self.load(local.slot, &local.what);
             descriptor.push_str(&local.what.descriptor());
         }
+        for (name, what) in &copied {
+            let this = Type::Object(self.this_class.clone(), Vec::new());
+            self.load(0, &this);
+            let shape = what.descriptor();
+            let index = self.pool.field(&self.this_class.clone(), name, &shape);
+            self.op2(0xb4, index);
+            self.pops(1);
+            self.pushes(what);
+            descriptor.push_str(&shape);
+        }
         for (argument, want) in arguments.iter().zip(given.iter()) {
             let found = self.value(argument, line)?;
             if !found.is_reference() {
@@ -17303,6 +17429,65 @@ impl Emitter<'_> {
             .unwrap_or(0);
         self.pops(taken + 1);
         Ok(target)
+    }
+
+    /// A method called on an array.
+    ///
+    /// An array is an object with no class file: it answers Object's methods
+    /// and `clone`, and nothing else. `clone`'s descriptor says it hands back
+    /// an Object; the language says it hands back the array's own type, and
+    /// the cast between those two is what makes both true.
+    fn call_on_an_array(
+        &mut self,
+        array: &Type,
+        name: &str,
+        arguments: &[Expression],
+        line: u32,
+    ) -> Result<Type, Diagnostic> {
+        let owner = array.descriptor();
+        let object = Type::Object("java/lang/Object".to_string(), Vec::new());
+        let (descriptor, returns) = match (name, arguments.len()) {
+            ("clone", 0) => ("()Ljava/lang/Object;", array.clone()),
+            ("hashCode", 0) => ("()I", Type::Int),
+            ("equals", 1) => ("(Ljava/lang/Object;)Z", Type::Boolean),
+            ("toString", 0) => (
+                "()Ljava/lang/String;",
+                Type::Object("java/lang/String".to_string(), Vec::new()),
+            ),
+            ("getClass", 0) => (
+                "()Ljava/lang/Class;",
+                Type::Object("java/lang/Class".to_string(), Vec::new()),
+            ),
+            _ => {
+                return Err(at(
+                    "EJ226",
+                    line,
+                    1,
+                    format!(
+                        "A {} has `length`, `clone`, and what every object has -- and no \
+                         other method.",
+                        array.readable()
+                    ),
+                ))
+            }
+        };
+        if !arguments.is_empty() {
+            self.arguments_for(std::slice::from_ref(&object), arguments, line)?;
+        }
+        let index = self.pool.method(&owner, name, descriptor, false);
+        self.op2(0xb6, index);
+        let taken: i32 = read_descriptor(descriptor)
+            .map(|(parameters, _)| parameters.iter().map(|one| i32::from(one.width())).sum())
+            .unwrap_or(0);
+        self.pops(taken + 1);
+        if name == "clone" {
+            self.pushes(&object);
+            let class = self.pool.class(&owner);
+            self.op2(0xc0, class);
+            self.pops(1);
+        }
+        self.pushes(&returns);
+        Ok(returns)
     }
 
     /// `super(...)` or `this(...)`, at the top of a constructor.
@@ -17473,8 +17658,15 @@ impl Emitter<'_> {
         self.open();
         self.load(held, &iterator.returns);
         self.call_signature(&next, line);
-        if declared != object {
-            let Type::Object(named, _) = &declared else {
+        // `for (int one : list)` walks a list of Integers and hands over ints:
+        // the cast erasure needs comes first, then the box is opened. Java
+        // writes both and says neither.
+        let boxed = match boxed_name(&declared) {
+            Some(named) => Type::Object(named.to_string(), Vec::new()),
+            None => declared.clone(),
+        };
+        if boxed != object {
+            let Type::Object(named, _) = &boxed else {
                 return Err(at(
                     "EJ237",
                     line,
@@ -17489,7 +17681,10 @@ impl Emitter<'_> {
             let index = self.pool.class(named);
             self.op2(0xc0, index);
             self.pops(1);
-            self.pushes(&declared);
+            self.pushes(&boxed);
+        }
+        if boxed != declared {
+            self.box_or_unbox(&boxed, &declared);
         }
         let slot = self.declare(name, declared.clone());
         self.store(slot, &declared);
@@ -18045,6 +18240,14 @@ fn as_written(signature: &Signature, held: &[Type]) -> Signature {
             }
             *one = shape.filled(one, held, &[]);
         }
+        // And what it hands back, which is what a lambda written for it
+        // returns: `Function<A, Function<B, C>>.apply` gives back a
+        // `Function<B, C>` and the lambda inside it has to know that.
+        if signature.returns_stands_for.mentions_the_class() {
+            shaped.returns = signature
+                .returns_stands_for
+                .filled(&signature.returns, held, &[]);
+        }
         return shaped;
     }
     // What the class itself said, where this compilation read it; the built-in
@@ -18452,6 +18655,13 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
             if let Some(up) = &known.superclass {
                 waiting.push(up.clone());
             }
+            // And what it implements, which is as much a road to a method as
+            // what it extends: `UnaryOperator` declares nothing and promises
+            // `Function.apply`, and a class standing for one has to answer
+            // that name in the shape the interface erased it to.
+            for held in &known.interfaces {
+                waiting.push(held.clone());
+            }
         }
     }
 
@@ -18715,21 +18925,26 @@ pub fn compile_unit_in_nest(
         })
     };
 
-    let instance_setup: Vec<Positioned<Statement>> = unit
+    let mut instance_setup: Vec<Positioned<Statement>> = unit
         .fields
         .iter()
         .filter(|field| !field.modifiers.static_)
         .filter_map(assignment)
         .chain(unit.instance_setup.iter().cloned())
         .collect();
+    instance_setup.sort_by_key(|held| held.line);
 
-    let static_setup: Vec<Positioned<Statement>> = unit
+    // In the order they were written, which is the order Java runs them: a
+    // `static` block and a `static` field with a value on it are one sequence,
+    // not two, and `static { a(); } static int x = b();` calls `a` first.
+    let mut static_setup: Vec<Positioned<Statement>> = unit
         .fields
         .iter()
         .filter(|field| field.modifiers.static_)
         .filter_map(assignment)
         .chain(unit.static_setup.iter().cloned())
         .collect();
+    static_setup.sort_by_key(|held| held.line);
 
     // Methods. A class with no constructor written gets the one Java would
     // have written for it, which calls up into the superclass and returns.
@@ -24109,6 +24324,544 @@ public class Handed {
                 eprintln!("java: what a class inherits, it answers");
             }
         }
+    }
+
+    /// The deep end: a generic interface with a bound and a `default` method
+    /// over it, records with type parameters of their own and a generic method
+    /// inside one, enum constants with bodies and an anonymous class inside a
+    /// constant's body, a lambda that hands back a lambda that reads what the
+    /// first one captured, a custom `Iterable` walked into an `int`, array
+    /// covariance and the store that fails, a list of arrays, files written
+    /// and read and deleted, a URI taken apart, and a charset.
+    const THE_DEEP_END_OF_IT: &str = r####"
+package com.my.app;
+
+import java.io.IOException;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.List;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+public class Deep {
+
+    interface Shaped<T extends Comparable<T>> {
+        T value();
+        default int against(Shaped<T> other) { return value().compareTo(other.value()); }
+    }
+
+    record Weight(int grams) implements Shaped<Integer> {
+        public Integer value() { return grams; }
+    }
+
+    record Pair<A, B>(A left, B right) {
+        <C> Pair<A, C> with(C third) { return new Pair<A, C>(left, third); }
+    }
+
+    enum Op {
+        ADD {
+            int of(int a, int b) { return a + b; }
+        },
+        MUL {
+            int of(int a, int b) { return a * b; }
+            Runnable job() {
+                return new Runnable() {
+                    public void run() { seen++; }
+                };
+            }
+        };
+        abstract int of(int a, int b);
+        Runnable job() { return () -> seen += 2; }
+    }
+
+    static int seen;
+
+    static class Closing implements AutoCloseable {
+        private final String name;
+        private final StringBuilder log;
+        Closing(StringBuilder log, String name) { this.log = log; this.name = name; }
+        public void close() { log.append('c').append(name); }
+    }
+
+    static class Range implements Iterable<Integer> {
+        private final int upto;
+        Range(int upto) { this.upto = upto; }
+        public Iterator<Integer> iterator() {
+            return new Iterator<Integer>() {
+                private int at;
+                public boolean hasNext() { return at < upto; }
+                public Integer next() { return at++; }
+            };
+        }
+    }
+
+    static String deeply(int depth) {
+        Function<Integer, Function<Integer, Integer>> curried = a -> b -> a * b + depth;
+        return String.valueOf(curried.apply(3).apply(4));
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        out.append(new Weight(5).against(new Weight(3))).append(' ');
+        Pair<String, Integer> pair = new Pair<String, Integer>("a", 1);
+        out.append(pair).append(pair.with(2.5)).append(' ');
+
+        out.append(Op.ADD.of(2, 3)).append(Op.MUL.of(2, 3)).append(' ');
+        Op.ADD.job().run();
+        Op.MUL.job().run();
+        out.append(seen).append(' ');
+
+        StringBuilder log = new StringBuilder();
+        try (Closing one = new Closing(log, "1"); Closing two = new Closing(log, "2")) {
+            log.append('b');
+        }
+        out.append(log).append(' ');
+
+        StringBuilder walked = new StringBuilder();
+        for (int one : new Range(4)) walked.append(one);
+        out.append(walked).append(' ');
+
+        out.append(deeply(1)).append(' ');
+
+        Object[] mixed = new String[] {"a", "b"};
+        out.append(mixed.length).append(mixed instanceof String[]).append(' ');
+        try {
+            mixed[0] = Integer.valueOf(1);
+            out.append("no");
+        } catch (ArrayStoreException why) {
+            out.append("store");
+        }
+        out.append(' ');
+
+        List<int[]> arrays = new ArrayList<int[]>();
+        arrays.add(new int[] {1, 2});
+        out.append(arrays.get(0)[1]).append(' ');
+
+        Path temp = Files.createDirectories(Paths.get(System.getProperty("java.io.tmpdir"), "omni-probe"));
+        Path file = temp.resolve("held.txt");
+        Files.writeString(file, "one\ntwo");
+        out.append(Files.exists(file)).append(Files.readAllLines(file).size())
+           .append(Files.readString(file).length()).append(' ');
+        List<String> named = Files.list(temp)
+            .map(one -> one.getFileName().toString())
+            .sorted()
+            .collect(Collectors.toList());
+        out.append(named).append(' ');
+        Files.delete(file);
+        out.append(Files.exists(file)).append(' ');
+
+        URI uri = URI.create("https://example.org:8443/a/b?q=1");
+        out.append(uri.getScheme()).append(uri.getHost()).append(uri.getPort())
+           .append(uri.getPath()).append(' ');
+
+        out.append(new String("héllo".getBytes(), StandardCharsets.UTF_8.name()).length()).append(' ');
+
+        String joined = Arrays.asList(1, 2, 3).stream()
+            .map(one -> String.valueOf(one * one))
+            .collect(Collectors.joining("+", "<", ">"));
+        out.append(joined).append(' ');
+
+        try {
+            throw new IOException("io");
+        } catch (IOException | RuntimeException why) {
+            out.append(why.getMessage());
+        }
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_deep_end_of_the_language_gives_back_what_javac_gives_back() {
+        let produced = compile(THE_DEEP_END_OF_IT, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Deep") {
+            None => eprintln!("java: no JVM here to run the deep end"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "1 Pair[left=a, right=1]Pair[left=a, right=2.5] 56 3 bc2c1 0123 13 \
+                     2true store 2 true27 [held.txt] false httpsexample.org8443/a/b 5 \
+                     <1+4+9> io"
+                );
+                eprintln!("java: the deep end, and javac's answer");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// A generic method declared on an interface and answered by two classes,
+    /// `UnaryOperator` and `BinaryOperator` and every other shape in
+    /// `java.util.function`, a constructor reference, a bound instance-method
+    /// reference, a lambda that throws a checked exception into an interface
+    /// that allows one, `computeIfAbsent` and its neighbours, `Objects`,
+    /// `Comparator.comparing(...).thenComparing(...)`, and the collectors that
+    /// build a map or split one in two.
+    const WHAT_A_FUNCTION_IS_HANDED_TO: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.function.BiFunction;
+import java.util.function.BinaryOperator;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+public class Wider {
+
+    interface Tree<T> {
+        <R> R fold(R start, BiFunction<R, T, R> what);
+    }
+
+    static class Leaf<T> implements Tree<T> {
+        private final T value;
+        Leaf(T value) { this.value = value; }
+        public <R> R fold(R start, BiFunction<R, T, R> what) { return what.apply(start, value); }
+    }
+
+    static class Branch<T> implements Tree<T> {
+        private final List<Tree<T>> under = new ArrayList<Tree<T>>();
+        Branch<T> add(Tree<T> one) { under.add(one); return this; }
+        public <R> R fold(R start, BiFunction<R, T, R> what) {
+            R held = start;
+            for (Tree<T> one : under) held = one.fold(held, what);
+            return held;
+        }
+    }
+
+    static <T> T firstOr(List<T> of, T fallback) {
+        return of.isEmpty() ? fallback : of.get(0);
+    }
+
+    static <T, R> List<R> each(List<T> of, java.util.function.Function<T, R> what) {
+        List<R> out = new ArrayList<R>();
+        of.forEach(one -> out.add(what.apply(one)));
+        return out;
+    }
+
+    static class Counter {
+        private int held;
+        Counter add(int by) { held += by; return this; }
+        int held() { return held; }
+    }
+
+    interface Visitor { void see(String one) throws Exception; }
+
+    static void safely(Visitor who, String what) {
+        try {
+            who.see(what);
+        } catch (Exception ignored) {
+        }
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        Tree<Integer> tree = new Branch<Integer>()
+            .add(new Leaf<Integer>(1))
+            .add(new Branch<Integer>().add(new Leaf<Integer>(2)).add(new Leaf<Integer>(3)));
+        out.append(tree.fold(0, (sum, one) -> sum + one)).append(' ');
+        out.append(tree.fold("", (text, one) -> text + one)).append(' ');
+
+        out.append(firstOr(new ArrayList<String>(), "none")).append(' ');
+        out.append(firstOr(Arrays.asList("a", "b"), "none").toUpperCase()).append(' ');
+        out.append(each(Arrays.asList("x", "yy"), one -> one.length())).append(' ');
+
+        Supplier<Counter> fresh = Counter::new;
+        out.append(fresh.get().add(2).add(3).held()).append(' ');
+
+        UnaryOperator<String> twice = one -> one + one;
+        out.append(twice.apply("ab")).append(' ');
+        BinaryOperator<Integer> bigger = BinaryOperator.maxBy(Comparator.<Integer>naturalOrder());
+        out.append(bigger.apply(3, 7)).append(' ');
+
+        Predicate<String> empty = String::isEmpty;
+        out.append(empty.test("")).append(empty.negate().test("")).append(' ');
+
+        StringBuilder seen = new StringBuilder();
+        Consumer<String> note = seen::append;
+        note.accept("p");
+        note.andThen(one -> seen.append('!')).accept("q");
+        out.append(seen).append(' ');
+
+        safely(one -> { throw new Exception(one); }, "boom");
+        safely(one -> out.append(one), "fine");
+        out.append(' ');
+
+        Map<String, Integer> counts = new HashMap<String, Integer>();
+        counts.put("a", 1);
+        out.append(counts.computeIfAbsent("b", key -> key.length()))
+           .append(counts.computeIfPresent("a", (key, value) -> value + 10))
+           .append(counts.getOrDefault("z", -1)).append(' ');
+
+        out.append(Optional.ofNullable((String) null).map(String::length).orElse(-1)).append(' ');
+        out.append(Optional.of("abc").filter(one -> one.length() > 2).isPresent()).append(' ');
+
+        out.append(Objects.requireNonNullElse((String) null, "fallback")).append(' ');
+        out.append(Objects.hash("a", 1)).append(' ');
+        out.append(Objects.equals(null, null)).append(Objects.toString(null, "-")).append(' ');
+
+        List<String> rows = new ArrayList<String>(Arrays.asList("bb", "a", "ccc"));
+        rows.sort(Comparator.comparing(String::length).thenComparing(Comparator.<String>naturalOrder()));
+        out.append(rows).append(' ');
+        out.append(Collections.unmodifiableList(rows).size()).append(' ');
+        out.append(Collections.nCopies(3, "z")).append(' ');
+        out.append(Collections.frequency(Arrays.asList(1, 2, 1), 1)).append(' ');
+
+        out.append(Stream.of("a", "bb", "ccc")
+            .collect(Collectors.toMap(one -> one, String::length))
+            .get("bb")).append(' ');
+        out.append(Stream.of(1, 2, 3, 4).collect(Collectors.partitioningBy(one -> one % 2 == 0))
+            .get(Boolean.TRUE)).append(' ');
+        out.append(Stream.of(1, 2, 3).reduce(0, (l, r) -> l + r)).append(' ');
+        out.append(Stream.concat(Stream.of("a"), Stream.of("b")).collect(Collectors.joining()));
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn every_shape_a_function_comes_in_gives_back_what_javac_gives_back() {
+        let produced = compile(WHAT_A_FUNCTION_IS_HANDED_TO, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Wider") {
+            None => eprintln!("java: no JVM here to run the functions"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "6 123 none A [1, 2] 5 abab 7 truefalse pq! fine 111-1 -1 true \
+                     fallback 3969 true- [a, bb, ccc] 3 [z, z, z] 2 2 [2, 4] 6 ab"
+                );
+                eprintln!("java: every shape a function comes in");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// The order things happen in, and the shapes numbers come in.
+    ///
+    /// A `static` block and a `static` field with a value on it run in the
+    /// order they were written, interleaved -- not fields first and blocks
+    /// after. An instance block runs before the constructor body and once per
+    /// object, `this(...)` chains, `super.describe()` reaches past an
+    /// override, `Outer.this` reaches the instance around an inner class, and
+    /// `grid[0].clone()` is a method on an array. Then every way a number can
+    /// be written down, including the octal nobody means to write.
+    const THE_ORDER_THINGS_HAPPEN_IN: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Order {
+
+    static final List<String> LOG = new ArrayList<String>();
+
+    static int made;
+
+    static {
+        LOG.add("static-1");
+    }
+
+    static final int START = note("static-field");
+
+    static {
+        LOG.add("static-2");
+    }
+
+    static int note(String what) {
+        LOG.add(what);
+        return LOG.size();
+    }
+
+    interface Sized { int WIDTH = 4; int size(); }
+
+    static class Base implements Sized {
+        protected final String name;
+        protected int count;
+
+        { count = note("instance-block"); }
+
+        Base() { this("unnamed"); }
+
+        Base(String name) {
+            this.name = name;
+            note("base-ctor:" + name);
+        }
+
+        public int size() { return name.length() + count; }
+
+        String describe() { return "base " + name; }
+    }
+
+    static class Derived extends Base {
+        private final int extra;
+
+        Derived(String name, int extra) {
+            super(name);
+            this.extra = extra;
+            note("derived-ctor");
+        }
+
+        @Override
+        public int size() { return super.size() + extra; }
+
+        @Override
+        String describe() { return "derived " + super.describe(); }
+    }
+
+    class Inner {
+        private final String tag;
+        Inner(String tag) { this.tag = tag; }
+        String full() { return Order.this.label + "/" + tag + "/" + Order.this.twice(3); }
+    }
+
+    private final String label;
+
+    Order(String label) { this.label = label; }
+
+    private int twice(int of) { return of * 2; }
+
+    static synchronized void bump() { made++; }
+
+    static volatile boolean flag;
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        out.append(START).append(' ').append(LOG).append(' ');
+        LOG.clear();
+
+        Base base = new Base();
+        out.append(base.describe()).append('/').append(base.size()).append(' ');
+        Derived derived = new Derived("d", 10);
+        out.append(derived.describe()).append('/').append(derived.size()).append(' ');
+        out.append(LOG).append(' ');
+        out.append(Sized.WIDTH).append(((Sized) derived).size()).append(' ');
+
+        Order held = new Order("outer");
+        Order.Inner inner = held.new Inner("t");
+        out.append(inner.full()).append(' ');
+
+        synchronized (Order.class) {
+            bump();
+            bump();
+        }
+        flag = true;
+        out.append(made).append(flag).append(' ');
+
+        out.append(String.format("%s|%d|%05.2f|%x|%c|%b|%%", "s", 42, 3.14159, 255, 'z', true))
+           .append(' ');
+        out.append(String.format("%-5s|%5s|", "l", "r")).append(' ');
+        out.append(String.format("%,d", 1234567)).append(' ');
+
+        int[][] grid = new int[2][];
+        grid[0] = new int[] {1, 2, 3};
+        grid[1] = new int[] {4};
+        int total = 0;
+        for (int[] row : grid) {
+            for (int one : row) total += one;
+        }
+        out.append(total).append(grid[0].length).append(grid.length).append(' ');
+
+        int[] copy = grid[0].clone();
+        copy[0] = 9;
+        out.append(grid[0][0]).append(copy[0]).append(' ');
+
+        byte b = (byte) 130;
+        short sh = (short) 40000;
+        char ch = (char) 8364;
+        long big = 9_000_000_000L;
+        out.append(b).append('/').append(sh).append('/').append((int) ch).append('/').append(big)
+           .append(' ');
+        out.append(0x1F).append('/').append(0b1010).append('/').append(017).append(' ');
+        out.append(1e3).append('/').append(1.5f).append('/').append(3 / 2).append('/')
+           .append(3 % -2).append(' ');
+
+        Object thing = derived;
+        String said = thing instanceof Derived d && d.size() > 5 ? d.describe() : "small";
+        out.append(said);
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn things_happen_in_the_order_they_were_written() {
+        let produced = compile(THE_ORDER_THINGS_HAPPEN_IN, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Order") {
+            None => eprintln!("java: no JVM here to run the order things happen in"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "2 [static-1, static-field, static-2] base unnamed/8 derived base d/14 \
+                     [instance-block, base-ctor:unnamed, instance-block, base-ctor:d, \
+                     derived-ctor] 414 outer/t/6 2true s|42|03.14|ff|z|true|% \
+                     l    |    r| 1,234,567 1032 19 -126/-25536/8364/9000000000 31/10/15 \
+                     1000.0/1.5/1/1 derived base d"
+                );
+                eprintln!("java: things happen in the order they were written");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
     #[test]
