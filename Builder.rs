@@ -5,6 +5,8 @@
 
 #[path = "."]
 pub mod compilers {
+    #[path = "Compilers/Android.rs"]
+    pub mod android;
     #[path = "Compilers/Cpp.rs"]
     pub mod cpp;
     #[path = "Compilers/Java.rs"]
@@ -23700,9 +23702,9 @@ public final class R {{
     ///
     /// Every jar in the project's own `Libraries` folder, and the platform's
     /// `android.jar` where one can be found. A project with neither compiles
-    /// against what the compiler knows on its own, which is the handful of
-    /// signatures ordinary Java touches -- enough to build something, and not
-    /// enough to pretend the platform is there.
+    /// against what the compiler knows on its own, which is the standard
+    /// library and the whole of the platform, both written out in the compiler
+    /// itself. A jar here adds to that rather than making it possible.
     ///
     /// A jar that cannot be read stops the build. It was put there on purpose,
     /// and quietly ignoring it would mean a refusal three screens later about

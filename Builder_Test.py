@@ -135,7 +135,7 @@ def check_layout() -> str:
         raise AssertionError("missing: " + ", ".join(missing))
 
     compilers = sorted(path.name for path in COMPILERS.glob("*.rs"))
-    expected = ["Cpp.rs", "Java.rs", "Kotlin.rs", "Rust.rs"]
+    expected = ["Android.rs", "Cpp.rs", "Java.rs", "Kotlin.rs", "Rust.rs"]
     if compilers != expected:
         raise AssertionError(f"Compilers holds {compilers}, expected {expected}")
 

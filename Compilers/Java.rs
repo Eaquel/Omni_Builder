@@ -5873,6 +5873,14 @@ impl Classpath {
                     units.extend(held);
                 }
             }
+            // And the platform, which is the rest of what a device has. The
+            // two do not overlap: where the standard library says a class, the
+            // platform leaves it alone.
+            for (_, text) in crate::compilers::android::THE_PLATFORM {
+                if let Ok(held) = parse(text) {
+                    units.extend(held);
+                }
+            }
             // Every one of them first, so that a class can name one written
             // after it -- `String` implements `CharSequence`, and `Collection`
             // hands back an `Iterator`.
@@ -6168,6 +6176,12 @@ impl Classpath {
         }
         self.known.insert(internal, known);
         Ok(())
+    }
+
+    /// How many classes it knows, which is what a report about a classpath
+    /// says and what a test about the platform checks.
+    pub fn how_many(&self) -> usize {
+        self.known.len()
     }
 
     pub fn add(&mut self, class: KnownClass) {
@@ -7978,415 +7992,8 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     // platform provides the implementation; what is wanted at build time is
     // only the descriptor, because the descriptor is what the dex records and
     // what the runtime resolves against.
-    (
-        "android/content/Context",
-        "getString",
-        "(I)Ljava/lang/String;",
-        false,
-    ),
-    (
-        "android/content/Context",
-        "getPackageName",
-        "()Ljava/lang/String;",
-        false,
-    ),
-    (
-        "android/content/Context",
-        "startActivity",
-        "(Landroid/content/Intent;)V",
-        false,
-    ),
-    ("android/content/Intent", "<init>", "()V", false),
-    (
-        "android/content/Intent",
-        "<init>",
-        "(Ljava/lang/String;)V",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "<init>",
-        "(Landroid/content/Context;Ljava/lang/Class;)V",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "putExtra",
-        "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "getStringExtra",
-        "(Ljava/lang/String;)Ljava/lang/String;",
-        false,
-    ),
-    ("android/app/Activity", "<init>", "()V", false),
-    (
-        "android/app/Activity",
-        "onCreate",
-        "(Landroid/os/Bundle;)V",
-        false,
-    ),
-    ("android/app/Activity", "onStart", "()V", false),
-    ("android/app/Activity", "onResume", "()V", false),
-    ("android/app/Activity", "onPause", "()V", false),
-    ("android/app/Activity", "onStop", "()V", false),
-    ("android/app/Activity", "onDestroy", "()V", false),
-    ("android/app/Activity", "setContentView", "(I)V", false),
-    (
-        "android/app/Activity",
-        "setContentView",
-        "(Landroid/view/View;)V",
-        false,
-    ),
-    (
-        "android/app/Activity",
-        "findViewById",
-        "(I)Landroid/view/View;",
-        false,
-    ),
-    ("android/app/Activity", "finish", "()V", false),
-    (
-        "android/app/Activity",
-        "setTitle",
-        "(Ljava/lang/CharSequence;)V",
-        false,
-    ),
-    ("android/os/Bundle", "<init>", "()V", false),
-    (
-        "android/os/Bundle",
-        "getInt",
-        "(Ljava/lang/String;)I",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "putInt",
-        "(Ljava/lang/String;I)V",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "getString",
-        "(Ljava/lang/String;)Ljava/lang/String;",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "putString",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
-        false,
-    ),
-    ("android/view/View", "getId", "()I", false),
-    ("android/view/View", "setVisibility", "(I)V", false),
-    ("android/view/View", "getVisibility", "()I", false),
-    ("android/view/View", "setEnabled", "(Z)V", false),
-    (
-        "android/view/View",
-        "setOnClickListener",
-        "(Landroid/view/View$OnClickListener;)V",
-        false,
-    ),
-    (
-        "android/view/View$OnClickListener",
-        "onClick",
-        "(Landroid/view/View;)V",
-        false,
-    ),
     ("java/lang/Runnable", "run", "()V", false),
-    (
-        "android/widget/TextView",
-        "setText",
-        "(Ljava/lang/CharSequence;)V",
-        false,
-    ),
-    (
-        "android/widget/TextView",
-        "getText",
-        "()Ljava/lang/CharSequence;",
-        false,
-    ),
-    ("android/widget/TextView", "setTextSize", "(F)V", false),
-    (
-        "android/widget/Button",
-        "setText",
-        "(Ljava/lang/CharSequence;)V",
-        false,
-    ),
-    (
-        "android/widget/LinearLayout",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    (
-        "android/widget/LinearLayout",
-        "setOrientation",
-        "(I)V",
-        false,
-    ),
-    (
-        "android/widget/LinearLayout",
-        "addView",
-        "(Landroid/view/View;)V",
-        false,
-    ),
-    (
-        "android/widget/TextView",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    (
-        "android/widget/Button",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    (
-        "android/widget/Toast",
-        "makeText",
-        "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;",
-        true,
-    ),
-    ("android/widget/Toast", "show", "()V", false),
     // More of the platform an application touches on its first screen.
-    (
-        "android/app/Activity",
-        "getString",
-        "(I)Ljava/lang/String;",
-        false,
-    ),
-    (
-        "android/content/Context",
-        "getString",
-        "(I)Ljava/lang/String;",
-        false,
-    ),
-    (
-        "android/app/Activity",
-        "onSaveInstanceState",
-        "(Landroid/os/Bundle;)V",
-        false,
-    ),
-    (
-        "android/app/Activity",
-        "onRestoreInstanceState",
-        "(Landroid/os/Bundle;)V",
-        false,
-    ),
-    (
-        "android/app/Activity",
-        "runOnUiThread",
-        "(Ljava/lang/Runnable;)V",
-        false,
-    ),
-    (
-        "android/app/Activity",
-        "startActivityForResult",
-        "(Landroid/content/Intent;I)V",
-        false,
-    ),
-    ("android/app/Activity", "setResult", "(I)V", false),
-    (
-        "android/app/Activity",
-        "getIntent",
-        "()Landroid/content/Intent;",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "putExtra",
-        "(Ljava/lang/String;I)Landroid/content/Intent;",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "putExtra",
-        "(Ljava/lang/String;Z)Landroid/content/Intent;",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "getIntExtra",
-        "(Ljava/lang/String;I)I",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "getBooleanExtra",
-        "(Ljava/lang/String;Z)Z",
-        false,
-    ),
-    (
-        "android/content/Intent",
-        "setAction",
-        "(Ljava/lang/String;)Landroid/content/Intent;",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "containsKey",
-        "(Ljava/lang/String;)Z",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "getBoolean",
-        "(Ljava/lang/String;)Z",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "putBoolean",
-        "(Ljava/lang/String;Z)V",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "getLong",
-        "(Ljava/lang/String;)J",
-        false,
-    ),
-    (
-        "android/os/Bundle",
-        "putLong",
-        "(Ljava/lang/String;J)V",
-        false,
-    ),
-    ("android/view/View", "setId", "(I)V", false),
-    (
-        "android/view/View",
-        "getContext",
-        "()Landroid/content/Context;",
-        false,
-    ),
-    ("android/view/View", "setPadding", "(IIII)V", false),
-    ("android/view/View", "isEnabled", "()Z", false),
-    ("android/view/View", "requestFocus", "()Z", false),
-    ("android/view/View", "setBackgroundColor", "(I)V", false),
-    (
-        "android/view/View",
-        "findViewById",
-        "(I)Landroid/view/View;",
-        false,
-    ),
-    (
-        "android/view/ViewGroup",
-        "addView",
-        "(Landroid/view/View;)V",
-        false,
-    ),
-    ("android/view/ViewGroup", "removeAllViews", "()V", false),
-    ("android/view/ViewGroup", "getChildCount", "()I", false),
-    (
-        "android/view/ViewGroup",
-        "getChildAt",
-        "(I)Landroid/view/View;",
-        false,
-    ),
-    (
-        "android/view/ViewGroup$LayoutParams",
-        "<init>",
-        "(II)V",
-        false,
-    ),
-    (
-        "android/view/View",
-        "setLayoutParams",
-        "(Landroid/view/ViewGroup$LayoutParams;)V",
-        false,
-    ),
-    ("android/widget/LinearLayout", "setGravity", "(I)V", false),
-    ("android/widget/TextView", "setTextColor", "(I)V", false),
-    (
-        "android/widget/TextView",
-        "append",
-        "(Ljava/lang/CharSequence;)V",
-        false,
-    ),
-    ("android/widget/TextView", "setGravity", "(I)V", false),
-    (
-        "android/widget/EditText",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    (
-        "android/widget/EditText",
-        "setHint",
-        "(Ljava/lang/CharSequence;)V",
-        false,
-    ),
-    (
-        "android/widget/ScrollView",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    (
-        "android/widget/FrameLayout",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    (
-        "android/widget/ImageView",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    (
-        "android/widget/ImageView",
-        "setImageResource",
-        "(I)V",
-        false,
-    ),
-    (
-        "android/widget/CheckBox",
-        "<init>",
-        "(Landroid/content/Context;)V",
-        false,
-    ),
-    ("android/widget/CheckBox", "isChecked", "()Z", false),
-    ("android/widget/CheckBox", "setChecked", "(Z)V", false),
-    (
-        "android/util/Log",
-        "e",
-        "(Ljava/lang/String;Ljava/lang/String;)I",
-        true,
-    ),
-    (
-        "android/util/Log",
-        "w",
-        "(Ljava/lang/String;Ljava/lang/String;)I",
-        true,
-    ),
-    (
-        "android/util/Log",
-        "d",
-        "(Ljava/lang/String;Ljava/lang/String;)I",
-        true,
-    ),
-    (
-        "android/util/Log",
-        "i",
-        "(Ljava/lang/String;Ljava/lang/String;)I",
-        true,
-    ),
-    (
-        "android/util/Log",
-        "w",
-        "(Ljava/lang/String;Ljava/lang/String;)I",
-        true,
-    ),
-    (
-        "android/util/Log",
-        "e",
-        "(Ljava/lang/String;Ljava/lang/String;)I",
-        true,
-    ),
     // -- the clock, and somewhere to print
     ("java/lang/System", "currentTimeMillis", "()J", true),
     ("java/lang/System", "nanoTime", "()J", true),
@@ -8474,20 +8081,6 @@ const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ("java/io/IOException", "java/lang/Exception"),
     ("java/lang/IncompatibleClassChangeError", "java/lang/Error"),
     ("java/lang/MatchException", "java/lang/RuntimeException"),
-    ("android/app/Activity", "android/content/Context"),
-    ("android/view/ViewGroup", "android/view/View"),
-    ("android/widget/TextView", "android/view/View"),
-    ("android/widget/Button", "android/widget/TextView"),
-    ("android/widget/EditText", "android/widget/TextView"),
-    ("android/widget/CheckBox", "android/widget/Button"),
-    ("android/widget/ImageView", "android/view/View"),
-    ("android/widget/LinearLayout", "android/view/ViewGroup"),
-    ("android/widget/FrameLayout", "android/view/ViewGroup"),
-    ("android/widget/ScrollView", "android/widget/FrameLayout"),
-    (
-        "android/widget/LinearLayout$LayoutParams",
-        "android/view/ViewGroup$LayoutParams",
-    ),
     ("java/util/Collection", "java/lang/Iterable"),
     ("java/util/List", "java/util/Collection"),
     ("java/util/Set", "java/util/Collection"),
@@ -8520,7 +8113,6 @@ const BUILT_IN_VARIADIC: &[(&str, &str)] = &[
 /// on one is `invokevirtual` or `invokeinterface`. Getting it wrong produces a
 /// class file that verifies and then fails to link on the device.
 const BUILT_IN_INTERFACES: &[&str] = &[
-    "android/view/View$OnClickListener",
     "java/lang/annotation/Annotation",
     "java/lang/Runnable",
     "java/lang/CharSequence",
@@ -8584,21 +8176,6 @@ const BUILT_IN_FIELDS: &[(&str, &str, &str)] = &[
     ("java/lang/Character", "MIN_VALUE", "C"),
     // The constants an Android application names, which are `static final
     // int` on the platform's own classes and nothing a compiler can work out.
-    ("android/widget/LinearLayout", "HORIZONTAL", "I"),
-    ("android/widget/LinearLayout", "VERTICAL", "I"),
-    ("android/widget/Toast", "LENGTH_SHORT", "I"),
-    ("android/widget/Toast", "LENGTH_LONG", "I"),
-    ("android/view/View", "VISIBLE", "I"),
-    ("android/view/View", "INVISIBLE", "I"),
-    ("android/view/View", "GONE", "I"),
-    ("android/view/ViewGroup$LayoutParams", "MATCH_PARENT", "I"),
-    ("android/view/ViewGroup$LayoutParams", "WRAP_CONTENT", "I"),
-    ("android/view/Gravity", "CENTER", "I"),
-    ("android/view/Gravity", "START", "I"),
-    ("android/view/Gravity", "END", "I"),
-    ("android/app/Activity", "RESULT_OK", "I"),
-    ("android/app/Activity", "RESULT_CANCELED", "I"),
-    ("android/os/Build$VERSION", "SDK_INT", "I"),
 ];
 
 /// A signature from [`BUILT_IN_METHODS`], if one of them is what was asked
@@ -9280,7 +8857,12 @@ fn resolve_named_within(
     // comes before the dot is itself a name to resolve: `View.OnClickListener`
     // where `View` was imported is `android/view/View$OnClickListener`.
     if let Some((before, last)) = name.rsplit_once('.') {
-        if let Some(holder) = resolve_named(classpath, unit, before) {
+        // Carrying the same answer inwards, because what is in front of the
+        // dot is being resolved for the same reason: a supertype written
+        // `Animator.AnimatorListener` would otherwise ask what this class
+        // extends in order to work out what it extends.
+        if let Some(holder) = resolve_named_within(classpath, unit, before, through_what_it_extends)
+        {
             let nested = format!("{holder}${last}");
             if exists(&nested) {
                 return Some(nested);
@@ -12174,28 +11756,6 @@ const WELL_KNOWN: &[&str] = &[
     "java/util/Objects",
     "java/util/Arrays",
     "java/lang/Comparable",
-    "android/app/Activity",
-    "android/content/Context",
-    "android/content/Intent",
-    "android/os/Bundle",
-    "android/view/View",
-    "android/view/View$OnClickListener",
-    "android/view/ViewGroup",
-    "android/view/ViewGroup$LayoutParams",
-    "android/view/Gravity",
-    "android/widget/TextView",
-    "android/widget/Button",
-    "android/widget/EditText",
-    "android/widget/CheckBox",
-    "android/widget/ImageView",
-    "android/widget/LinearLayout",
-    "android/widget/LinearLayout$LayoutParams",
-    "android/widget/FrameLayout",
-    "android/widget/ScrollView",
-    "android/widget/Toast",
-    "android/util/Log",
-    "android/os/Build",
-    "android/os/Build$VERSION",
     "java/lang/Throwable",
     "java/lang/Exception",
     "java/lang/RuntimeException",
@@ -31112,6 +30672,256 @@ public class Boxed {
                 eprintln!("java: an ordinary afternoon's Java, against the platform jar, ran");
             }
         }
+    }
+
+    /// A screen somebody writes against the platform and nothing else.
+    ///
+    /// Every name in it comes from `android.*`: an `Activity` subclassed and
+    /// its lifecycle overridden, a listener interface implemented by the
+    /// screen itself and three more written where they are used, two lambdas
+    /// handed to methods that want an interface, a builder chained four deep,
+    /// a generic adapter made with the diamond and a layout out of
+    /// `android.R`, preferences edited and read back, a handler posted to, and
+    /// a menu answered. `javac` accepts it against the real `android.jar`;
+    /// this compiles it against nothing at all.
+    const A_SCREEN_WRITTEN_AGAINST_THE_PLATFORM: &str = r####"
+package com.my.app;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.Editable;
+import android.text.TextWatcher;
+import android.util.Log;
+import android.view.Gravity;
+import android.view.Menu;
+import android.view.MenuItem;
+import android.view.View;
+import android.view.ViewGroup;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.ListView;
+import android.widget.ProgressBar;
+import android.widget.SeekBar;
+import android.widget.Spinner;
+import android.widget.TextView;
+import android.widget.Toast;
+import java.util.ArrayList;
+import java.util.List;
+
+public class Screen extends Activity implements View.OnClickListener {
+
+    private static final String TAG = "Screen";
+    private final List<String> lines = new ArrayList<>();
+    private TextView title;
+    private EditText input;
+    private ListView list;
+    private ArrayAdapter<String> adapter;
+    private int taps;
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.CENTER_HORIZONTAL);
+        root.setPadding(24, 24, 24, 24);
+        root.setBackgroundColor(Color.parseColor("#101014"));
+
+        title = new TextView(this);
+        title.setText("Omni");
+        title.setTextSize(28f);
+        title.setTextColor(Color.WHITE);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        root.addView(title, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        input = new EditText(this);
+        input.setHint("say something");
+        input.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) { }
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {
+                title.setText(s.length() == 0 ? "Omni" : s.toString());
+            }
+            @Override public void afterTextChanged(Editable s) { }
+        });
+        root.addView(input);
+
+        Button add = new Button(this);
+        add.setText("Add");
+        add.setOnClickListener(this);
+        root.addView(add);
+
+        Button ask = new Button(this);
+        ask.setText("Ask");
+        ask.setOnClickListener(v -> new AlertDialog.Builder(this)
+            .setTitle("Sure?")
+            .setMessage("This adds " + taps + " lines.")
+            .setPositiveButton("yes", (dialog, which) -> addLine("yes"))
+            .setNegativeButton("no", null)
+            .show());
+        root.addView(ask);
+
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(100);
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seek, int at, boolean byUser) {
+                title.setAlpha(at / 100f);
+            }
+            @Override public void onStartTrackingTouch(SeekBar seek) { }
+            @Override public void onStopTrackingTouch(SeekBar seek) { }
+        });
+        root.addView(bar);
+
+        ProgressBar spinner = new ProgressBar(this);
+        spinner.setVisibility(View.GONE);
+        root.addView(spinner);
+
+        Spinner picker = new Spinner(this);
+        picker.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
+            new String[] {"one", "two"}));
+        picker.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int at, long id) {
+                Log.d(TAG, "picked " + at);
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
+        root.addView(picker);
+
+        adapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, lines);
+        list = new ListView(this);
+        list.setAdapter(adapter);
+        list.setOnItemClickListener((parent, view, at, id) ->
+            Toast.makeText(Screen.this, lines.get(at), Toast.LENGTH_SHORT).show());
+        root.addView(list, new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+        GradientDrawable edge = new GradientDrawable();
+        edge.setCornerRadius(12f);
+        edge.setColor(Color.argb(255, 20, 20, 30));
+        root.setBackground(edge);
+
+        setContentView(root);
+
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            spinner.setVisibility(View.VISIBLE);
+            addLine("ready");
+        }, 250L);
+    }
+
+    @Override
+    public void onClick(View view) {
+        taps++;
+        addLine(input.getText().toString());
+        input.setText("");
+    }
+
+    private void addLine(String said) {
+        if (said == null || said.trim().isEmpty()) {
+            Toast.makeText(this, "nothing to add", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        lines.add(taps + ": " + said);
+        adapter.notifyDataSetChanged();
+        SharedPreferences held = getSharedPreferences("state", Context.MODE_PRIVATE);
+        held.edit().putInt("taps", taps).putString("last", said).apply();
+        Log.i(TAG, "added " + said + " (" + held.getInt("taps", 0) + ")");
+    }
+
+    @Override
+    public boolean onCreateOptionsMenu(Menu menu) {
+        menu.add(0, 1, 0, "Clear");
+        return true;
+    }
+
+    @Override
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == 1) {
+            lines.clear();
+            adapter.notifyDataSetChanged();
+            startActivity(new Intent(this, Screen.class));
+            return true;
+        }
+        return super.onOptionsItemSelected(item);
+    }
+}
+"####;
+
+    #[test]
+    fn the_platform_is_the_whole_platform_with_no_jar_handed_over() {
+        // Not `empty()` with a jar learned into it: the classpath every
+        // compilation starts from, which is the standard library and the
+        // platform and nothing else.
+        let held = Classpath::new();
+        for named in [
+            "android/app/Activity",
+            "android/app/AlertDialog$Builder",
+            "android/widget/ArrayAdapter",
+            "android/widget/SeekBar$OnSeekBarChangeListener",
+            "android/graphics/drawable/GradientDrawable",
+            "android/os/Handler",
+            "android/R$layout",
+            "android/view/View$OnClickListener",
+            "javax/crypto/Cipher",
+            "java/nio/ByteBuffer",
+            "org/xmlpull/v1/XmlPullParser",
+        ] {
+            assert!(held.get(named).is_some(), "{named} is missing");
+        }
+        // The listeners a lambda is handed to are interfaces, or the call
+        // written for one would be an `invokevirtual` the device refuses.
+        for named in [
+            "android/view/View$OnClickListener",
+            "android/content/DialogInterface$OnClickListener",
+            "android/widget/AdapterView$OnItemClickListener",
+        ] {
+            assert!(
+                held.get(named).is_some_and(|known| known.interface),
+                "{named} has to be an interface"
+            );
+        }
+        eprintln!("java: the platform, {} classes", held.how_many());
+    }
+
+    #[test]
+    fn a_screen_written_against_the_platform_compiles_and_reaches_a_dex() {
+        let produced = compile(A_SCREEN_WRITTEN_AGAINST_THE_PLATFORM, &Classpath::new())
+            .expect("a screen written against the platform must compile");
+        assert!(
+            produced.len() >= 7,
+            "the screen and what is written inside it: {:?}",
+            produced.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+        eprintln!(
+            "java: a screen against the platform, {} classes and {} bytes of dex",
+            produced.len(),
+            dex.len()
+        );
     }
 
     #[test]
