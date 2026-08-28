@@ -1039,6 +1039,9 @@ pub enum Expression {
     Boolean(bool),
     Null,
     This,
+    /// `super`, which is `this` read as the class above it: `super.kept` is
+    /// the field that class declares, whatever this one declares beside it.
+    Super,
     /// A bare name: a local, a parameter, a field of this class, or the start
     /// of a qualified name. Which one it is is decided by the checker.
     Name(String),
@@ -2469,6 +2472,7 @@ fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression))
         | Expression::Boolean(_)
         | Expression::Null
         | Expression::This
+        | Expression::Super
         | Expression::Name(_) => {}
         Expression::Field { of, .. } => visit(of),
         Expression::Call { on, arguments, .. } => {
@@ -4991,6 +4995,25 @@ impl Parser {
                     };
                     continue;
                 }
+                // `super.name(...)` is a call on the class above; `super.name`
+                // is the field that class declares.
+                if matches!(found, Expression::Super) {
+                    let name = self.want_name()?;
+                    found = if self.is_mark("(") {
+                        Expression::Call {
+                            on: None,
+                            super_call: true,
+                            name,
+                            arguments: self.arguments()?,
+                        }
+                    } else {
+                        Expression::Field {
+                            of: Box::new(Expression::Super),
+                            name,
+                        }
+                    };
+                    continue;
+                }
                 // `Left.super.who()`: the `default` method of one named
                 // interface, which is how a class implementing two of them
                 // says which one it means.
@@ -5319,16 +5342,10 @@ impl Parser {
             return Ok(Expression::This);
         }
 
+        // `super.name(...)` and `super.name`, which the postfix loop tells
+        // apart by what follows.
         if self.eat_word("super") {
-            self.want_mark(".")?;
-            let name = self.want_name()?;
-            let arguments = self.arguments()?;
-            return Ok(Expression::Call {
-                on: None,
-                super_call: true,
-                name,
-                arguments,
-            });
+            return Ok(Expression::Super);
         }
 
         if self.eat_word("new") {
@@ -8990,6 +9007,23 @@ fn resolve_written(classpath: &Classpath, unit: &Unit, written: &Written) -> Opt
 }
 
 fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<String> {
+    resolve_named_within(classpath, unit, name, true)
+}
+
+/// The same, with a say in whether the classes this one inherits from are
+/// looked through.
+///
+/// Working out what a class extends is itself a name to resolve, and looking
+/// through what it extends while doing so would ask the same question again:
+/// `class Integer extends Number implements Comparable<Integer>` would resolve
+/// `Comparable` by way of `Number` by way of `Comparable`. So the supertypes
+/// of the class being compiled are resolved without this step.
+fn resolve_named_within(
+    classpath: &Classpath,
+    unit: &Unit,
+    name: &str,
+    through_what_it_extends: bool,
+) -> Option<String> {
     let exists =
         |internal: &str| classpath.get(internal).is_some() || WELL_KNOWN.contains(&internal);
     if name == unit.name {
@@ -9003,6 +9037,46 @@ fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<Strin
         let nested = format!("{current}${name}");
         if exists(&nested) {
             return Some(nested);
+        }
+        holder = current
+            .rsplit_once('$')
+            .map(|(before, _)| before.to_string());
+    }
+    // A type the class above declares is a type here too: `Inner` written in a
+    // class that extends `Root` is `Root$Inner`, with nothing in front of it.
+    // The classes this one is written inside inherit theirs the same way.
+    let mut holder = through_what_it_extends.then(|| unit.internal_name());
+    while let Some(current) = holder {
+        let mut walking = Vec::new();
+        if current == unit.internal_name() {
+            // The class being compiled is not on the classpath the way the
+            // ones handed over are, so what it extends is read from what was
+            // written. A class whose own name is what it extends -- there is
+            // no such class -- would ask this question again for ever.
+            if let Some(parent) = unit.extends.clone() {
+                walking.extend(resolve_named_within(classpath, unit, &parent, false));
+            }
+            for one in &unit.implements {
+                walking.extend(resolve_named_within(classpath, unit, one, false));
+            }
+        } else if let Some(known) = classpath.get(&current) {
+            walking.extend(known.superclass.clone());
+            walking.extend(known.interfaces.iter().cloned());
+        }
+        let mut seen: Vec<String> = Vec::new();
+        while let Some(above) = walking.pop() {
+            if seen.contains(&above) || seen.len() > 64 {
+                continue;
+            }
+            let nested = format!("{above}${name}");
+            if exists(&nested) {
+                return Some(nested);
+            }
+            if let Some(known) = classpath.get(&above) {
+                walking.extend(known.superclass.clone());
+                walking.extend(known.interfaces.iter().cloned());
+            }
+            seen.push(above);
         }
         holder = current
             .rsplit_once('$')
@@ -12196,6 +12270,28 @@ impl Emitter<'_> {
                 self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
                 Ok(Type::Object(self.this_class.clone(), Vec::new()))
             }
+            // `super` is `this` read as the class above it. Nothing else is
+            // loaded: the field a `getfield` names is resolved from the class
+            // written on it upwards, so naming the superclass is what makes
+            // `super.kept` the one that class declares rather than the one
+            // beside it here.
+            Expression::Super => {
+                if self.static_ {
+                    return Err(at(
+                        "EJ222",
+                        line,
+                        1,
+                        "`super` has no meaning in a static method.",
+                    ));
+                }
+                let parent = match self.unit.extends.clone() {
+                    Some(named) => self.resolve_class(&named, line)?,
+                    None => "java/lang/Object".to_string(),
+                };
+                let above = Type::Object(parent, Vec::new());
+                self.load(0, &above);
+                Ok(above)
+            }
             Expression::Name(name) => self.name_value(name, line),
             Expression::Field { of, name } => {
                 // `System.out` is a static field of a class, not a field of a
@@ -12678,7 +12774,7 @@ impl Emitter<'_> {
         }
         // A class written inside another can read what that one holds. Its
         // instance is in a field, so the road is one field access longer.
-        if let Some(enclosing) = self.unit.outer.clone() {
+        for enclosing in self.the_classes_around() {
             if let Some((holder, (_, what, static_))) = self.classpath.find_field(&enclosing, name)
             {
                 let (holder, what, static_) = (holder.name.clone(), what.clone(), *static_);
@@ -12762,8 +12858,8 @@ impl Emitter<'_> {
         }
         // A class written inside another reads what that one holds, so a name
         // it holds is a value here even though nothing here declares it.
-        if let Some(enclosing) = &self.unit.outer {
-            if self.classpath.find_field(enclosing, name).is_some() {
+        for enclosing in self.the_classes_around() {
+            if self.classpath.find_field(&enclosing, name).is_some() {
                 return false;
             }
         }
@@ -12911,15 +13007,53 @@ impl Emitter<'_> {
     fn reach_the_enclosing_instance(&mut self, enclosing: &str) -> Result<(), Diagnostic> {
         let this = Type::Object(self.this_class.clone(), Vec::new());
         self.load(0, &this);
-        let held = Type::Object(enclosing.to_string(), Vec::new());
-        let descriptor = held.descriptor();
-        let index = self
-            .pool
-            .field(&self.this_class.clone(), OUTER, &descriptor);
-        self.op2(0xb4, index);
-        self.pops(1);
-        self.pushes(&held);
-        Ok(())
+        // A class written inside a class written inside a class is two links
+        // away from the outermost one, and each link is a field read. Nobody
+        // writes any of them down.
+        let mut from = self.this_class.clone();
+        for named in self.the_classes_around() {
+            let held = Type::Object(named.clone(), Vec::new());
+            let descriptor = held.descriptor();
+            let index = self.pool.field(&from, OUTER, &descriptor);
+            self.op2(0xb4, index);
+            self.pops(1);
+            self.pushes(&held);
+            if named == enclosing {
+                return Ok(());
+            }
+            from = named;
+        }
+        Err(at(
+            "EJ252",
+            1,
+            1,
+            format!(
+                "This class is written inside nothing that leads to `{}`.",
+                enclosing.replace('/', ".")
+            ),
+        ))
+    }
+
+    /// The classes this one is written inside, from the one directly around it
+    /// outwards. A name written here that this class does not hold is looked
+    /// for along this road, in that order, which is the order Java reads it in.
+    fn the_classes_around(&self) -> Vec<String> {
+        let mut around = Vec::new();
+        let mut outer = self.unit.outer.clone();
+        // Deeper than anybody nests, and it stops a link that points back at
+        // itself from going round for ever.
+        while around.len() < 16 {
+            let Some(named) = outer else { break };
+            if around.contains(&named) {
+                break;
+            }
+            outer = self
+                .classpath
+                .get(&named)
+                .and_then(|known| known.outer.clone());
+            around.push(named);
+        }
+        around
     }
 
     /// A static field named through its class.
@@ -13430,7 +13564,57 @@ impl Emitter<'_> {
                 return self.new_local_object(&held, arguments, line);
             }
         }
-        let target = self.resolve(what, line)?;
+        // `inner.new Deeper()` names a class written inside whatever `inner`
+        // is, and nothing here has to have heard of `Deeper` otherwise. What
+        // is in front of the `new` says where to look.
+        let target = match (outer, what) {
+            (Some(written), Written::Named(named, held)) if !named.contains('.') => {
+                let held = held.clone();
+                let named = named.clone();
+                let around = self.peek_type(written, line).ok();
+                let found = match around {
+                    Some(Type::Object(class, _)) => {
+                        let mut walking = vec![class];
+                        let mut seen: Vec<String> = Vec::new();
+                        let mut found = None;
+                        while let Some(above) = walking.pop() {
+                            if seen.contains(&above) {
+                                continue;
+                            }
+                            let nested = format!("{above}${named}");
+                            if self.classpath.get(&nested).is_some() {
+                                found = Some(nested);
+                                break;
+                            }
+                            if let Some(known) = self.classpath.get(&above) {
+                                walking.extend(known.superclass.clone());
+                                walking.extend(known.interfaces.iter().cloned());
+                            }
+                            seen.push(above);
+                        }
+                        found
+                    }
+                    _ => None,
+                };
+                match found {
+                    Some(nested) => {
+                        let mut arguments = Vec::new();
+                        for one in &held {
+                            match self.resolve(one, line) {
+                                Ok(found) => arguments.push(found),
+                                Err(_) => {
+                                    arguments.clear();
+                                    break;
+                                }
+                            }
+                        }
+                        Type::Object(nested, arguments)
+                    }
+                    None => self.resolve(what, line)?,
+                }
+            }
+            _ => self.resolve(what, line)?,
+        };
         let Type::Object(class, _) = target.clone() else {
             return Err(at(
                 "EJ218",
@@ -13473,7 +13657,7 @@ impl Emitter<'_> {
                 // In a static method there is no instance here, and slot zero
                 // holds the first parameter rather than `this`.
                 self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
-            } else if !self.static_ && self.unit.outer.as_deref() == Some(enclosing.as_str()) {
+            } else if !self.static_ && self.the_classes_around().contains(enclosing) {
                 self.reach_the_enclosing_instance(enclosing)?;
             } else {
                 return Err(at(
@@ -13875,7 +14059,7 @@ impl Emitter<'_> {
                         );
                     }
                 }
-                if let Some(enclosing) = self.unit.outer.clone() {
+                for enclosing in self.the_classes_around() {
                     if let Some(signature) =
                         self.signature_for(&enclosing, name, arguments, line)?
                     {
@@ -15125,9 +15309,38 @@ impl Emitter<'_> {
                     .find(|held| held.name == *name)
                     .cloned();
                 let Some(field) = own else {
+                    // A field the class above declares is written by name
+                    // here, the same way it is read by name. `protected
+                    // String kept` in the superclass is `this.kept` in this
+                    // one, and a static one is written through the class that
+                    // declares it.
+                    let above = self
+                        .unit
+                        .extends
+                        .clone()
+                        .and_then(|parent| self.resolve_class(&parent, line).ok())
+                        .and_then(|parent| {
+                            self.classpath
+                                .find_field(&parent, name)
+                                .map(|(holder, (_, _, static_))| (holder.name.clone(), *static_))
+                        });
+                    if let Some((holder, static_)) = above {
+                        if static_ {
+                            return self.assign_through_the_enclosing_instance(
+                                &holder, name, operator, value, line, wanted,
+                            );
+                        }
+                        if !self.static_ {
+                            let through = Expression::Field {
+                                of: Box::new(Expression::This),
+                                name: name.clone(),
+                            };
+                            return self.assign(&through, operator, value, line, wanted);
+                        }
+                    }
                     // A class written inside another can write what that one
                     // holds, the same way it reads it.
-                    if let Some(enclosing) = self.unit.outer.clone() {
+                    for enclosing in self.the_classes_around() {
                         if self.classpath.find_field(&enclosing, name).is_some() {
                             return self.assign_through_the_enclosing_instance(
                                 &enclosing, name, operator, value, line, wanted,
@@ -18834,30 +19047,26 @@ impl Emitter<'_> {
             self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
             return Ok(wanted);
         }
-        let Some(enclosing) = self.unit.outer.clone() else {
+        let around = self.the_classes_around();
+        if !around.contains(&named) {
             return Err(at(
                 "EJ252",
                 line,
                 1,
-                format!(
-                    "This class does not belong to an instance of `{}`.",
-                    named.replace('/', ".")
-                ),
-            ));
-        };
-        if enclosing != named {
-            return Err(at(
-                "EJ252",
-                line,
-                1,
-                format!(
-                    "This class belongs to an instance of `{}`, not of `{}`.",
-                    enclosing.replace('/', "."),
-                    named.replace('/', ".")
-                ),
+                match around.first() {
+                    Some(enclosing) => format!(
+                        "This class belongs to an instance of `{}`, not of `{}`.",
+                        enclosing.replace('/', "."),
+                        named.replace('/', ".")
+                    ),
+                    None => format!(
+                        "This class does not belong to an instance of `{}`.",
+                        named.replace('/', ".")
+                    ),
+                },
             ));
         }
-        self.reach_the_enclosing_instance(&enclosing)?;
+        self.reach_the_enclosing_instance(&named)?;
         Ok(wanted)
     }
 
@@ -26355,6 +26564,332 @@ public class Reading extends Exception {
 "####,
         ),
     ];
+
+    /// What is left of ordinary Java once the shapes already tested are set
+    /// aside: an interface with a `private` method, a `default` that leans on
+    /// it and a `static` that makes one, a record implementing it, a generic
+    /// class bounded by `Comparable` handing out an anonymous `Iterator`,
+    /// varargs of a value type and of `Object`, every bit operator including
+    /// the unsigned shift, a labelled `continue` and `break` and a `do`, a
+    /// multi-catch beside a catch of a class written here, two resources
+    /// closed in the order they were opened, a ragged array, a map counted up
+    /// and read back in order, static imports, a text block, a pattern with a
+    /// `when` behind it, and the numbers where they wrap.
+    const THE_REST_OF_ORDINARY_JAVA: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import static java.lang.Math.max;
+import static java.lang.Math.abs;
+
+public class Deep {
+
+    interface Shape {
+        double area();
+        default String named() { return tag() + ":" + area(); }
+        private String tag() { return getClass().getSimpleName(); }
+        static Shape unit() { return new Square(1); }
+    }
+
+    record Square(double side) implements Shape {
+        public double area() { return side * side; }
+    }
+
+    static class Circle implements Shape {
+        final double r;
+        Circle(double r) { this.r = r; }
+        public double area() { return 3 * r * r; }
+    }
+
+    static class Bag<T extends Comparable<T>> implements Iterable<T> {
+        private final List<T> held = new ArrayList<T>();
+        Bag<T> add(T one) { held.add(one); return this; }
+        T largest() {
+            T best = null;
+            for (T one : held) {
+                if (best == null || one.compareTo(best) > 0) best = one;
+            }
+            return best;
+        }
+        public Iterator<T> iterator() {
+            return new Iterator<T>() {
+                private int at = 0;
+                public boolean hasNext() { return at < held.size(); }
+                public T next() { return held.get(at++); }
+            };
+        }
+    }
+
+    static class Broken extends RuntimeException {
+        final int at;
+        Broken(String said, int at) { super(said); this.at = at; }
+    }
+
+    static class Held implements AutoCloseable {
+        final String name;
+        final StringBuilder log;
+        Held(String name, StringBuilder log) { this.name = name; this.log = log; log.append("+").append(name); }
+        public void close() { log.append("-").append(name); }
+    }
+
+    static int sum(int... of) {
+        int total = 0;
+        for (int one : of) total += one;
+        return total;
+    }
+
+    static String join(String head, Object... rest) {
+        StringBuilder out = new StringBuilder(head);
+        for (Object one : rest) out.append('/').append(one);
+        return out.toString();
+    }
+
+    static String bits(int n) {
+        return (n << 2) + "," + (n >> 1) + "," + (-n >>> 28) + "," + (n & 6) + "," + (n | 8) + "," + (n ^ 5) + "," + (~n);
+    }
+
+    static String labelled() {
+        StringBuilder out = new StringBuilder();
+        outer:
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                if (j == 2) continue outer;
+                if (i == 3) break outer;
+                out.append(i).append(j);
+            }
+        }
+        int k = 0;
+        do { out.append('.').append(k); k++; } while (k < 2);
+        return out.toString();
+    }
+
+    static String risky(int at) {
+        try {
+            if (at == 0) throw new Broken("zero", at);
+            if (at == 1) throw new IllegalStateException("one");
+            if (at == 2) throw new NumberFormatException("two");
+            return "fine";
+        } catch (Broken b) {
+            return "broken " + b.getMessage() + b.at;
+        } catch (IllegalStateException | NumberFormatException e) {
+            return "either " + e.getMessage();
+        } finally {
+            // runs either way
+        }
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        List<Shape> shapes = new ArrayList<Shape>();
+        shapes.add(new Square(2));
+        shapes.add(new Circle(2));
+        shapes.add(Shape.unit());
+        for (Shape one : shapes) out.append(one.named()).append(' ');
+
+        Bag<String> bag = new Bag<String>().add("pear").add("apple").add("quince");
+        out.append(bag.largest()).append(' ');
+        for (String one : bag) out.append(one.charAt(0));
+        out.append(' ');
+
+        out.append(sum()).append(',').append(sum(1, 2, 3)).append(',').append(sum(new int[] {4, 5})).append(' ');
+        out.append(join("a", 1, true, 'c', 2.5)).append(' ');
+        out.append(bits(9)).append(' ');
+        out.append(labelled()).append(' ');
+        out.append(risky(0)).append('|').append(risky(1)).append('|').append(risky(2)).append('|').append(risky(3)).append(' ');
+
+        StringBuilder log = new StringBuilder();
+        try (Held one = new Held("a", log); Held two = new Held("b", log)) {
+            log.append("=").append(one.name).append(two.name);
+        }
+        out.append(log).append(' ');
+
+        int[][] grid = new int[3][];
+        for (int i = 0; i < 3; i++) {
+            grid[i] = new int[i + 1];
+            for (int j = 0; j <= i; j++) grid[i][j] = i * j;
+        }
+        out.append(Arrays.deepToString(grid)).append(' ');
+
+        Map<String, Integer> counted = new HashMap<String, Integer>();
+        for (String word : "a bb a ccc bb a".split(" ")) {
+            Integer had = counted.get(word);
+            counted.put(word, had == null ? 1 : had + 1);
+        }
+        List<String> keys = new ArrayList<String>(counted.keySet());
+        java.util.Collections.sort(keys);
+        for (String key : keys) out.append(key).append('=').append(counted.get(key)).append(';');
+        out.append(' ');
+
+        out.append(max(3, 7)).append(',').append(abs(-4)).append(' ');
+
+        String text = """
+            two
+              lines""";
+        out.append(text.replace('\n', '|')).append(' ');
+
+        Object held = shapes.get(0);
+        if (held instanceof Square s && s.side() > 1) out.append("square").append(s.side());
+        out.append(' ');
+
+        long big = 1L << 40;
+        out.append(big).append(',').append(Integer.MAX_VALUE + 1).append(',').append((byte) 200).append(',').append((char) 65);
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_rest_of_ordinary_java_gives_back_what_javac_gives_back() {
+        let produced = compile(THE_REST_OF_ORDINARY_JAVA, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Deep") {
+            None => eprintln!("java: no JVM here to run the rest of it"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "Square:4.0 Circle:12.0 Square:1.0 quince paq 0,6,9 a/1/true/c/2.5 \
+                     36,4,15,0,9,12,-10 000110112021.0.1 broken zero0|either one|either \
+                     two|fine +a+b=ab-b-a [[0], [0, 1], [0, 2, 4]] a=3;bb=2;ccc=1; \
+                     7,4 two|  lines square2.0 1099511627776,-2147483648,-56,A"
+                );
+                eprintln!("java: the rest of ordinary Java, and javac's answer");
+            }
+        }
+    }
+
+    /// A class in one package extended in another: `protected` fields and
+    /// methods reached by name, a field the class above declares written to by
+    /// name, `super.describe()` and `super.kept`, a class written inside a
+    /// class written inside a class, `this.new Inner(...)` and
+    /// `inner.new Deeper()`, and `Root.this` reached from two links down.
+    const WHAT_A_CLASS_INHERITS_ACROSS_PACKAGES: &[(&str, &str)] = &[
+        (
+            "com/my/base/Root.java",
+            r####"
+package com.my.base;
+
+public class Root {
+    protected String kept = "root";
+    protected static int made;
+    private final int id;
+
+    public Root() { this(1); }
+
+    protected Root(int id) {
+        this.id = id;
+        made++;
+    }
+
+    protected String describe() { return "root:" + kept + id; }
+
+    public int id() { return id; }
+
+    public static int made() { return made; }
+
+    public class Inner {
+        private final String tag;
+        public Inner(String tag) { this.tag = tag; }
+        public String full() { return kept + "/" + tag + "/" + describe(); }
+        public class Deeper {
+            public String deeper() { return full() + "!" + Root.this.id; }
+        }
+    }
+}
+"####,
+        ),
+        (
+            "com/my/use/Branch.java",
+            r####"
+package com.my.use;
+
+import com.my.base.Root;
+
+public class Branch extends Root {
+
+    private final String own;
+
+    public Branch(String own) {
+        super(7);
+        this.own = own;
+        kept = kept + "+branch";
+    }
+
+    @Override
+    protected String describe() { return "branch:" + super.describe() + "/" + own; }
+
+    public String reach() {
+        Root.Inner inner = this.new Inner("t");
+        Root.Inner.Deeper deeper = inner.new Deeper();
+        return inner.full() + " | " + deeper.deeper();
+    }
+
+    public String fields() { return super.kept + "/" + kept + "/" + made; }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        Branch one = new Branch("a");
+        out.append(one.describe()).append(' ');
+        out.append(one.id()).append('/').append(Root.made()).append(' ');
+        out.append(one.reach()).append(' ');
+        out.append(one.fields()).append(' ');
+
+        Root plain = new Root();
+        out.append(plain.id()).append(' ');
+        Root.Inner inner = plain.new Inner("p");
+        out.append(inner.full()).append(' ');
+
+        Root as = one;
+        out.append(as.id()).append(' ');
+        out.append(Root.made());
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####,
+        ),
+    ];
+
+    #[test]
+    fn what_a_class_inherits_across_packages_runs() {
+        let sources: Vec<(String, String)> = WHAT_A_CLASS_INHERITS_ACROSS_PACKAGES
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), (*text).to_string()))
+            .collect();
+        let produced = compile_together(&sources, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.use.Branch") {
+            None => eprintln!("java: no JVM here to run what a class inherits"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "branch:root:root+branch7/a 7/1 \
+                     root+branch/t/branch:root:root+branch7/a | \
+                     root+branch/t/branch:root:root+branch7/a!7 \
+                     root+branch/root+branch/1 1 root/p/root:root1 7 2"
+                );
+                eprintln!("java: what is inherited across packages, and javac's answer");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
 
     #[test]
     fn a_program_in_four_files_and_two_packages_runs() {
