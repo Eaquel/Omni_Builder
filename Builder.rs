@@ -8359,6 +8359,7 @@ pub mod resources {
     pub enum Kind {
         Anim,
         Animator,
+        Array,
         Bool,
         Color,
         Dimension,
@@ -8370,6 +8371,7 @@ pub mod resources {
         Layout,
         Menu,
         Mipmap,
+        Plurals,
         Raw,
         String,
         Style,
@@ -8382,6 +8384,7 @@ pub mod resources {
             match self {
                 Kind::Anim => "anim",
                 Kind::Animator => "animator",
+                Kind::Array => "array",
                 Kind::Bool => "bool",
                 Kind::Color => "color",
                 Kind::Dimension => "dimen",
@@ -8393,6 +8396,7 @@ pub mod resources {
                 Kind::Layout => "layout",
                 Kind::Menu => "menu",
                 Kind::Mipmap => "mipmap",
+                Kind::Plurals => "plurals",
                 Kind::Raw => "raw",
                 Kind::String => "string",
                 Kind::Style => "style",
@@ -8404,6 +8408,7 @@ pub mod resources {
         pub const ALL: &'static [Kind] = &[
             Kind::Anim,
             Kind::Animator,
+            Kind::Array,
             Kind::Bool,
             Kind::Color,
             Kind::Dimension,
@@ -8415,6 +8420,7 @@ pub mod resources {
             Kind::Layout,
             Kind::Menu,
             Kind::Mipmap,
+            Kind::Plurals,
             Kind::Raw,
             Kind::String,
             Kind::Style,
@@ -8459,6 +8465,12 @@ pub mod resources {
         }
 
         pub fn parse(value: &str) -> Option<Kind> {
+            // A list of strings and a list of numbers are both an `array` in
+            // the table; the element they are written as only says what the
+            // items in it are.
+            if value == "string-array" || value == "integer-array" {
+                return Some(Kind::Array);
+            }
             Kind::ALL
                 .iter()
                 .copied()
@@ -8724,13 +8736,55 @@ pub mod resources {
     pub enum Value {
         Text(String),
         Color(u32),
-        Dimension { milli: i64, unit: Unit },
+        Dimension {
+            milli: i64,
+            unit: Unit,
+        },
         Bool(bool),
         Integer(i32),
         Reference(Reference),
         File(String),
         Empty,
+        /// A value the framework has already decided the shape of.
+        ///
+        /// An attribute in a style says what it accepts, and `16sp` under
+        /// `android:textSize` is a packed dimension while `vertical` under
+        /// `android:orientation` is the number one. What is kept is the kind
+        /// the table stores and the four bytes beside it, together with the
+        /// text it was written as.
+        Typed {
+            source: String,
+            as_what: u8,
+            data: u32,
+        },
+        /// Several values under one name, each with the number the table calls
+        /// it by: an attribute's identifier in a style, a position in an array,
+        /// a quantity in a plural.
+        Bag {
+            parent: Option<Reference>,
+            items: Vec<(u32, Value)>,
+        },
     }
+
+    /// The numbers the table gives the parts of a bag.
+    ///
+    /// An array's items are numbered from `0x0100_0001` upwards, and a plural's
+    /// quantities have one number each out of the same block the platform keeps
+    /// for itself. A style's are the identifiers of the attributes it sets,
+    /// which are numbers the framework already handed out.
+    ///
+    /// The quantities are written in the order they are listed here, which is
+    /// the order the platform names them in and the order `aapt2` writes them,
+    /// whatever order they were written in.
+    pub const BAG_ARRAY_FIRST: u32 = 0x0100_0001;
+    pub const BAG_PLURAL: &[(&str, u32)] = &[
+        ("zero", 0x0100_0005),
+        ("one", 0x0100_0006),
+        ("two", 0x0100_0007),
+        ("few", 0x0100_0008),
+        ("many", 0x0100_0009),
+        ("other", 0x0100_0004),
+    ];
 
     impl Value {
         pub const fn type_name(&self) -> &'static str {
@@ -8743,6 +8797,8 @@ pub mod resources {
                 Value::Reference(_) => "reference",
                 Value::File(_) => "file",
                 Value::Empty => "empty",
+                Value::Typed { .. } => "typed",
+                Value::Bag { .. } => "bag",
             }
         }
 
@@ -8768,6 +8824,10 @@ pub mod resources {
                 Value::Reference(reference) => reference.to_string(),
                 Value::File(path) => path.clone(),
                 Value::Empty => String::new(),
+                Value::Typed { source, .. } => source.clone(),
+                // A bag has no one value to write out; what it holds is
+                // written where it is written.
+                Value::Bag { .. } => String::new(),
             }
         }
     }
@@ -8909,7 +8969,6 @@ pub mod resources {
                         "Understood: {}",
                         Kind::ALL
                             .iter()
-                            .filter(|kind| kind.declarable())
                             .map(|kind| kind.as_str())
                             .collect::<Vec<_>>()
                             .join(", ")
@@ -8922,22 +8981,6 @@ pub mod resources {
                 );
                 return false;
             };
-
-            if !kind.declarable() {
-                sink.emit(
-                    self.problem(
-                        "E9003",
-                        format!("<{kind}> is recognised but not yet modelled."),
-                        origin,
-                        element.position,
-                    )
-                    .with_suggestion(
-                        "It can be referred to with @style/name; declaring one needs \
-                         the attribute system, which is not built.",
-                    ),
-                );
-                return false;
-            }
 
             let Some(name) = element.attribute("name") else {
                 sink.emit(
@@ -8962,6 +9005,26 @@ pub mod resources {
                         ),
                 );
                 return false;
+            }
+
+            // A style, an array and a plural are written as several values
+            // inside one element, and each kind numbers what it holds its own
+            // way.
+            if kind.is_a_bag() {
+                let Some(value) = read_bag(kind, name, element, origin, sink) else {
+                    return false;
+                };
+                return self.push(
+                    Entry {
+                        kind,
+                        name: name.to_string(),
+                        config,
+                        value,
+                        origin: origin.to_string(),
+                        position: element.position,
+                    },
+                    sink,
+                );
             }
 
             if !element.children.is_empty() {
@@ -9392,8 +9455,12 @@ pub mod resources {
     }
 
     impl Kind {
-        pub const fn declarable(self) -> bool {
-            !matches!(self, Kind::Style)
+        /// Whether what this kind holds is several values rather than one: a
+        /// style is a list of attributes, an array a list of items, a plural a
+        /// list of quantities. The table calls these complex entries and
+        /// writes them a different shape.
+        pub const fn is_a_bag(self) -> bool {
+            matches!(self, Kind::Style | Kind::Array | Kind::Plurals)
         }
     }
 
@@ -9502,6 +9569,20 @@ pub mod resources {
                 }
             },
             Kind::Id => Some(Value::Empty),
+            // A bag is put together by the reader that walks the elements
+            // inside it, not from one run of text.
+            Kind::Array | Kind::Plurals | Kind::Style => {
+                sink.emit(
+                    reject(
+                        "E9046",
+                        format!("A {kind} holds several values, not one."),
+                        origin,
+                        position,
+                    )
+                    .with_suggestion("Write each one as an <item> inside it."),
+                );
+                None
+            }
             Kind::Anim
             | Kind::Animator
             | Kind::Drawable
@@ -9524,19 +9605,398 @@ pub mod resources {
                 );
                 None
             }
-            Kind::Style => {
+        }
+    }
+
+    /// The kind of value the table stores for a reference to a theme
+    /// attribute, which is what `?android:attr/colorAccent` is.
+    const TYPE_ATTRIBUTE: u8 = 0x02;
+
+    /// A style, an array or a plural: several values written inside one
+    /// element.
+    ///
+    /// What numbers the parts differs by kind. A style is keyed by the
+    /// identifiers of the attributes it sets; an array by where each item sits;
+    /// a plural by the quantity it is for. So does the order they are written
+    /// in: a style runs by identifier, an array in the order it was written,
+    /// and a plural in the order the platform names the quantities. That is the
+    /// order `aapt2` writes them, and a table is read back by what it holds.
+    fn read_bag(
+        kind: Kind,
+        name: &str,
+        element: &Element,
+        origin: &str,
+        sink: &mut Sink,
+    ) -> Option<Value> {
+        if !element.text.trim().is_empty() {
+            sink.emit(
+                reject(
+                    "E9047",
+                    format!("A {kind} holds several values, not one."),
+                    origin,
+                    element.position,
+                )
+                .with_context(format!("Written: {}", element.text.trim()))
+                .with_suggestion("Write each one as an <item> inside it."),
+            );
+            return None;
+        }
+
+        let parent = if kind == Kind::Style {
+            style_parent(name, element, origin, sink)?
+        } else {
+            None
+        };
+
+        let mut items: Vec<(u32, Value)> = Vec::new();
+        for (at, child) in element.children.iter().enumerate() {
+            if child.name != "item" {
                 sink.emit(
                     reject(
-                        "E9045",
-                        format!("A {kind} cannot be given a value in a values file."),
+                        "E9048",
+                        format!("<{}> is not something a {kind} holds.", child.name),
                         origin,
-                        position,
+                        child.position,
                     )
-                    .with_suggestion("A style is written as a `<style>` with items inside it."),
+                    .with_suggestion("Each value inside one is written as <item>."),
+                );
+                return None;
+            }
+
+            let held = match kind {
+                Kind::Style => style_item(child, origin, sink)?,
+                Kind::Plurals => (
+                    plural_quantity(child, origin, sink)?,
+                    parse_value(Kind::String, &child.text, origin, child.position, sink)?,
+                ),
+                _ => (
+                    BAG_ARRAY_FIRST + at as u32,
+                    array_item(&element.name, child, origin, sink)?,
+                ),
+            };
+
+            if kind != Kind::Array && items.iter().any(|(known, _)| *known == held.0) {
+                sink.emit(
+                    reject(
+                        "E9049",
+                        format!("This {kind} sets the same thing twice."),
+                        origin,
+                        child.position,
+                    )
+                    .with_suggestion(
+                        "Which of the two the device would read is not something to \
+                         leave to the order they were written in.",
+                    ),
+                );
+                return None;
+            }
+            items.push(held);
+        }
+
+        match kind {
+            Kind::Style => items.sort_by_key(|(id, _)| *id),
+            Kind::Plurals => items.sort_by_key(|(id, _)| {
+                BAG_PLURAL
+                    .iter()
+                    .position(|(_, known)| known == id)
+                    .unwrap_or(BAG_PLURAL.len())
+            }),
+            _ => {}
+        }
+
+        Some(Value::Bag { parent, items })
+    }
+
+    /// What a style is built on.
+    ///
+    /// It can say so — `parent="android:Theme.Material"`, or the same written
+    /// as `@android:style/Theme.Material` — and a style named `Theme.Dark` is
+    /// built on `Theme` without saying so, which is how most of them are
+    /// written. Saying `parent=""` is how one of those says it is built on
+    /// nothing.
+    fn style_parent(
+        name: &str,
+        element: &Element,
+        origin: &str,
+        sink: &mut Sink,
+    ) -> Option<Option<Reference>> {
+        let named = match element.attribute("parent") {
+            Some(written) => {
+                let written = written.trim();
+                if written.is_empty() {
+                    return Some(None);
+                }
+                written.to_string()
+            }
+            None => match name.rsplit_once('.') {
+                Some((above, _)) => above.to_string(),
+                None => return Some(None),
+            },
+        };
+
+        if named.starts_with('@') {
+            return match Reference::parse(&named) {
+                Some(reference) if reference.kind == Kind::Style => Some(Some(reference)),
+                _ => {
+                    sink.emit(
+                        reject(
+                            "E9050",
+                            format!("'{named}' is not a style this can be built on."),
+                            origin,
+                            element.position,
+                        )
+                        .with_suggestion(
+                            "A parent is written as a name, as package:name, or as \
+                             @package:style/name.",
+                        ),
+                    );
+                    None
+                }
+            };
+        }
+
+        let (package, bare) = match named.split_once(':') {
+            Some((package, rest)) => (Some(package.to_string()), rest),
+            None => (None, named.as_str()),
+        };
+        Some(Some(Reference {
+            package,
+            kind: Kind::Style,
+            name: bare.to_string(),
+            declares: false,
+        }))
+    }
+
+    /// One `<item name="android:…">` of a style: which attribute it sets, and
+    /// the value typed the way that attribute says it should be.
+    fn style_item(child: &Element, origin: &str, sink: &mut Sink) -> Option<(u32, Value)> {
+        let Some(written) = child.attribute("name") else {
+            sink.emit(
+                reject(
+                    "E9051",
+                    "An item in a style does not say which attribute it sets.",
+                    origin,
+                    child.position,
+                )
+                .with_suggestion("Each one is written as <item name=\"android:textSize\">."),
+            );
+            return None;
+        };
+
+        let written = written.trim();
+        let local = match written.split_once(':') {
+            Some(("android", rest)) => rest,
+            _ => {
+                sink.emit(
+                    reject(
+                        "E9052",
+                        format!("'{written}' is not an attribute this build can name."),
+                        origin,
+                        child.position,
+                    )
+                    .with_suggestion(
+                        "A name without a package is one this application declares \
+                         itself, and declaring attributes is not modelled. The \
+                         framework's own are written android:name.",
+                    ),
+                );
+                return None;
+            }
+        };
+
+        let Some((id, formats, _)) = crate::axml::framework_attribute(local) else {
+            sink.emit(
+                reject(
+                    "E9053",
+                    format!("The framework has no attribute called '{local}'."),
+                    origin,
+                    child.position,
+                )
+                .with_suggestion(
+                    "It is spelled the way android.R.attr spells it, without the \
+                     android: in front.",
+                ),
+            );
+            return None;
+        };
+
+        let raw = child.text.trim();
+        if raw.starts_with('@') {
+            let value = parse_value(Kind::String, &child.text, origin, child.position, sink)?;
+            return Some((id, value));
+        }
+        if raw.starts_with('?') {
+            let Some(attribute) = theme_attribute(raw) else {
+                sink.emit(
+                    reject(
+                        "E9054",
+                        format!("'{raw}' is not an attribute of the theme."),
+                        origin,
+                        child.position,
+                    )
+                    .with_suggestion(
+                        "One is written ?android:attr/name. An application's own are \
+                         not modelled.",
+                    ),
+                );
+                return None;
+            };
+            return Some((
+                id,
+                Value::Typed {
+                    source: raw.to_string(),
+                    as_what: TYPE_ATTRIBUTE,
+                    data: attribute,
+                },
+            ));
+        }
+
+        if let Some((as_what, data)) = crate::axml::typed_for(local, raw) {
+            return Some((
+                id,
+                Value::Typed {
+                    source: raw.to_string(),
+                    as_what,
+                    data,
+                },
+            ));
+        }
+        if formats == "any" || formats.split('|').any(|held| held == "string") {
+            return Some((id, Value::Text(decode_string(&child.text))));
+        }
+
+        sink.emit(
+            reject(
+                "E9055",
+                format!("'{raw}' is not something android:{local} accepts."),
+                origin,
+                child.position,
+            )
+            .with_context(format!("Accepts: {formats}"))
+            .with_suggestion(
+                "What an attribute takes is what the framework says it takes, and a \
+                 value it does not take is refused here rather than by the device.",
+            ),
+        );
+        None
+    }
+
+    /// Which quantity one `<item quantity="…">` of a plural is for.
+    fn plural_quantity(child: &Element, origin: &str, sink: &mut Sink) -> Option<u32> {
+        let Some(written) = child.attribute("quantity") else {
+            sink.emit(
+                reject(
+                    "E9056",
+                    "An item in a plural does not say which quantity it is for.",
+                    origin,
+                    child.position,
+                )
+                .with_suggestion("Each one is written as <item quantity=\"one\">."),
+            );
+            return None;
+        };
+
+        let written = written.trim();
+        match BAG_PLURAL.iter().find(|(name, _)| *name == written) {
+            Some((_, id)) => Some(*id),
+            None => {
+                sink.emit(
+                    reject(
+                        "E9057",
+                        format!("'{written}' is not a quantity the platform knows."),
+                        origin,
+                        child.position,
+                    )
+                    .with_context(format!(
+                        "Known: {}",
+                        BAG_PLURAL
+                            .iter()
+                            .map(|(name, _)| *name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ))
+                    .with_suggestion(
+                        "Which quantities a language uses is the platform's to decide; \
+                         a name it does not know would never be read.",
+                    ),
                 );
                 None
             }
         }
+    }
+
+    /// One item of an array, typed by the element the array was written as: a
+    /// `string-array` holds text, an `integer-array` whole numbers, and a plain
+    /// `array` whatever each item looks like.
+    fn array_item(
+        written_as: &str,
+        child: &Element,
+        origin: &str,
+        sink: &mut Sink,
+    ) -> Option<Value> {
+        match written_as {
+            "string-array" => parse_value(Kind::String, &child.text, origin, child.position, sink),
+            "integer-array" => {
+                parse_value(Kind::Integer, &child.text, origin, child.position, sink)
+            }
+            _ => anything_at_all(&child.text, origin, child.position, sink),
+        }
+    }
+
+    /// A value nothing has said the shape of, read as what it looks like.
+    ///
+    /// This is what a plain `<array>` holds: a reference, then true or false,
+    /// then a colour, then a whole number, then a size, and text where it is
+    /// none of those.
+    fn anything_at_all(
+        text: &str,
+        origin: &str,
+        position: Position,
+        sink: &mut Sink,
+    ) -> Option<Value> {
+        let trimmed = text.trim();
+        if trimmed.starts_with('@') {
+            return parse_value(Kind::String, text, origin, position, sink);
+        }
+        if let Some(attribute) = theme_attribute(trimmed) {
+            return Some(Value::Typed {
+                source: trimmed.to_string(),
+                as_what: TYPE_ATTRIBUTE,
+                data: attribute,
+            });
+        }
+        match trimmed {
+            "true" => return Some(Value::Bool(true)),
+            "false" => return Some(Value::Bool(false)),
+            _ => {}
+        }
+        if trimmed.starts_with('#') {
+            if let Ok(color) = parse_color(trimmed) {
+                return Some(Value::Color(color));
+            }
+        }
+        if let Ok(number) = trimmed.parse::<i32>() {
+            return Some(Value::Integer(number));
+        }
+        if let Ok((milli, unit)) = parse_dimension(trimmed) {
+            return Some(Value::Dimension { milli, unit });
+        }
+        Some(Value::Text(decode_string(text)))
+    }
+
+    /// `?android:attr/colorAccent` and the shorter ways of writing it: a value
+    /// the device looks up in the theme rather than in the table.
+    fn theme_attribute(raw: &str) -> Option<u32> {
+        let body = raw.strip_prefix('?')?;
+        let (package, rest) = match body.split_once(':') {
+            Some((package, rest)) => (package, rest),
+            None => return None,
+        };
+        if package != "android" {
+            return None;
+        }
+        let local = rest.strip_prefix("attr/").unwrap_or(rest);
+        crate::axml::framework_id("attr", local)
     }
 
     fn reject(
@@ -15164,10 +15624,20 @@ pub mod axml {
     /// What the framework says an attribute accepts, and the names it gives
     /// its own values.
     fn what_it_accepts(local: &str) -> Option<(&'static str, &'static [(&'static str, u32)])> {
+        framework_attribute(local).map(|(_, formats, symbols)| (formats, symbols))
+    }
+
+    /// What the framework says about one of its own attributes: the identifier
+    /// it hands out, what it accepts, and the names it gives its own values.
+    pub type Says = (u32, &'static str, &'static [(&'static str, u32)]);
+
+    /// The whole of what the framework says about one of its attributes. A
+    /// style setting `android:textSize` needs all three at once.
+    pub fn framework_attribute(local: &str) -> Option<Says> {
         crate::compilers::android::THE_FRAMEWORK_ATTRIBUTES
             .iter()
             .find(|(name, _, _, _)| *name == local)
-            .map(|(_, _, formats, symbols)| (*formats, *symbols))
+            .map(|(_, id, formats, symbols)| (*id, *formats, *symbols))
     }
 
     /// One attribute's value, typed the way the attribute says it should be.
@@ -15177,9 +15647,11 @@ pub mod axml {
     /// does not accept is not tried: an `enum` that also accepts a dimension
     /// is `match_parent` first and a number second, which is the order the
     /// platform reads them in.
-    fn typed_for(local: &str, raw: &str) -> Option<(u8, u32)> {
+    pub fn typed_for(local: &str, raw: &str) -> Option<(u8, u32)> {
         let (formats, symbols) = what_it_accepts(local)?;
-        let accepts = |what: &str| formats.split('|').any(|held| held == what);
+        // An attribute declared without a format takes whatever it is given,
+        // and the framework writes that down as `any`.
+        let accepts = |what: &str| formats == "any" || formats.split('|').any(|held| held == what);
 
         // A name the attribute gives one of its own values, or several of them
         // added together where it takes flags.
@@ -15312,10 +15784,18 @@ pub mod axml {
     /// The same question for any kind of framework resource, which is what
     /// `@android:id/text1` and `@android:style/Theme` are asking.
     pub fn framework_id(kind: &str, name: &str) -> Option<u32> {
-        crate::compilers::android::THE_FRAMEWORK_IDENTIFIERS
+        let rows = crate::compilers::android::THE_FRAMEWORK_IDENTIFIERS
             .iter()
             .find(|(held, _)| *held == kind)
-            .and_then(|(_, rows)| rows.iter().find(|(known, _)| *known == name))
+            .map(|(_, rows)| *rows)?;
+        if let Some((_, id)) = rows.iter().find(|(known, _)| *known == name) {
+            return Some(*id);
+        }
+        // The list is the platform's own `R`, and a field there cannot have a
+        // dot in it: `Theme.Material.Light` is written `Theme_Material_Light`.
+        let under = name.replace('.', "_");
+        rows.iter()
+            .find(|(known, _)| *known == under)
             .map(|(_, id)| *id)
     }
 
@@ -21932,6 +22412,7 @@ pub mod workspace {
 
 pub mod protobuf {
     pub const VARINT: u32 = 0;
+    pub const FIXED32: u32 = 5;
     pub const LENGTH_DELIMITED: u32 = 2;
 
     pub fn varint(value: u64) -> Vec<u8> {
@@ -21965,6 +22446,13 @@ pub mod protobuf {
         pub fn number(&mut self, field: u32, value: u64) -> &mut Message {
             self.body.extend_from_slice(&tag(field, VARINT));
             self.body.extend_from_slice(&varint(value));
+            self
+        }
+
+        /// Four bytes as they are, which is how a float is written.
+        pub fn fixed32(&mut self, field: u32, value: u32) -> &mut Message {
+            self.body.extend_from_slice(&tag(field, FIXED32));
+            self.body.extend_from_slice(&value.to_le_bytes());
             self
         }
 
@@ -22204,6 +22692,59 @@ pub mod bundle {
     const FILE_TYPE_PNG: u64 = 1;
     const PRIMITIVE_COLOUR_ARGB8: u32 = 9;
     const PRIMITIVE_DIMENSION: u32 = 13;
+    const REFERENCE_TYPE: u32 = 1;
+    const REFERENCE_TYPE_ATTRIBUTE: u64 = 1;
+    /// The kind the table stores a reference to a theme attribute as.
+    const TYPE_ATTRIBUTE: u8 = 0x02;
+    const VALUE_COMPOUND: u32 = 5;
+    const COMPOUND_STYLE: u32 = 2;
+    const COMPOUND_ARRAY: u32 = 4;
+    const COMPOUND_PLURAL: u32 = 5;
+    const STYLE_PARENT: u32 = 1;
+    const STYLE_ENTRY: u32 = 3;
+    const STYLE_ENTRY_KEY: u32 = 3;
+    const STYLE_ENTRY_ITEM: u32 = 4;
+    const ARRAY_ELEMENT: u32 = 1;
+    const ARRAY_ELEMENT_ITEM: u32 = 3;
+    const PLURAL_ENTRY: u32 = 1;
+    const PLURAL_ARITY: u32 = 3;
+    const PLURAL_ENTRY_ITEM: u32 = 4;
+
+    /// The kinds of value the table stores, and the field each is written as
+    /// here. A float is four bytes as they are; the rest are numbers.
+    const PRIMITIVE_FIELDS: &[(u8, u32, bool)] = &[
+        // float
+        (0x04, 3, true),
+        // dimension
+        (0x05, 13, false),
+        // fraction
+        (0x06, 14, false),
+        // a whole number, written as one
+        (0x10, 6, false),
+        // a whole number, written in hexadecimal
+        (0x11, 7, false),
+        // true or false
+        (0x12, 8, false),
+        // #aarrggbb
+        (0x1c, 9, false),
+        // #rrggbb
+        (0x1d, 10, false),
+        // #argb
+        (0x1e, 11, false),
+        // #rgb
+        (0x1f, 12, false),
+    ];
+
+    /// The names the platform gives the quantities of a plural, and the numbers
+    /// this format gives them.
+    const ARITIES: &[(u32, u64)] = &[
+        (0x0100_0005, 0),
+        (0x0100_0006, 1),
+        (0x0100_0007, 2),
+        (0x0100_0008, 3),
+        (0x0100_0009, 4),
+        (0x0100_0004, 5),
+    ];
 
     fn numbered(field: u32, id: u32) -> Message {
         let mut out = Message::new();
@@ -22254,35 +22795,149 @@ pub mod bundle {
                 item.message(ITEM_PRIMITIVE, &held);
             }
             Value::Reference(reference) => {
-                if reference.is_platform() {
-                    return Err(fail(
-                        "EN020",
-                        "A reference to a platform resource cannot be written into a bundle.",
-                    )
-                    .with_context(format!("Reference: {reference}"))
-                    .with_context(format!("In: {named}")));
-                }
-                let id = compiled
-                    .id(reference.kind, &reference.name)
-                    .ok_or_else(|| {
-                        fail(
-                            "EN021",
-                            "A reference names a resource this table does not hold.",
-                        )
-                        .with_context(format!("Reference: {reference}"))
-                        .with_context(format!("In: {named}"))
-                    })?;
                 let mut held = Message::new();
-                held.number(REFERENCE_ID, u64::from(id.raw()));
+                held.number(
+                    REFERENCE_ID,
+                    u64::from(reference_id(reference, compiled, named)?),
+                );
                 item.message(ITEM_REFERENCE, &held);
+            }
+            // A value the framework has already typed. What is kept is the kind
+            // the table stores, and each kind is written as its own field here.
+            Value::Typed {
+                source,
+                as_what,
+                data,
+            } => {
+                if *as_what == TYPE_ATTRIBUTE {
+                    let mut held = Message::new();
+                    held.number(REFERENCE_TYPE, REFERENCE_TYPE_ATTRIBUTE);
+                    held.number(REFERENCE_ID, u64::from(*data));
+                    item.message(ITEM_REFERENCE, &held);
+                    return Ok(item);
+                }
+                let Some((_, field, whole)) = PRIMITIVE_FIELDS
+                    .iter()
+                    .find(|(known, _, _)| known == as_what)
+                else {
+                    return Err(
+                        fail("EN022", "A value of this kind has no place in a bundle.")
+                            .with_context(format!("Written: {source}"))
+                            .with_context(format!("Stored as: {as_what:#04x}"))
+                            .with_context(format!("In: {named}")),
+                    );
+                };
+                let mut held = Message::new();
+                if *whole {
+                    held.fixed32(*field, *data);
+                } else {
+                    held.number(*field, u64::from(*data));
+                }
+                item.message(ITEM_PRIMITIVE, &held);
             }
             Value::Empty => {
                 let mut held = Message::new();
                 held.number(PRIMITIVE_INT_DECIMAL, 0);
                 item.message(ITEM_PRIMITIVE, &held);
             }
+            Value::Bag { .. } => {
+                return Err(fail(
+                    "EN023",
+                    "A bag holds several values and is not written as one of them.",
+                )
+                .with_context(format!("In: {named}")));
+            }
         }
         Ok(item)
+    }
+
+    /// The number one reference stands for: what the framework handed out for
+    /// its own, and what this table gave the rest.
+    fn reference_id(
+        reference: &crate::resources::Reference,
+        compiled: &crate::resources::Compiled,
+        named: &str,
+    ) -> Result<u32, Diagnostic> {
+        if reference.is_platform() {
+            return crate::axml::framework_id(reference.kind.as_str(), &reference.name).ok_or_else(
+                || {
+                    fail("EN020", "The framework has no resource by that name.")
+                        .with_context(format!("Reference: {reference}"))
+                        .with_context(format!("In: {named}"))
+                },
+            );
+        }
+        compiled
+            .id(reference.kind, &reference.name)
+            .map(|id| id.raw())
+            .ok_or_else(|| {
+                fail(
+                    "EN021",
+                    "A reference names a resource this table does not hold.",
+                )
+                .with_context(format!("Reference: {reference}"))
+                .with_context(format!("In: {named}"))
+            })
+    }
+
+    /// A style, an array or a plural, written as what it holds.
+    fn compound_for(
+        parent: Option<&crate::resources::Reference>,
+        items: &[(u32, crate::resources::Value)],
+        kind: crate::resources::Kind,
+        compiled: &crate::resources::Compiled,
+        named: &str,
+    ) -> Result<Message, Diagnostic> {
+        use crate::resources::Kind;
+        let mut compound = Message::new();
+        match kind {
+            Kind::Style => {
+                let mut style = Message::new();
+                if let Some(reference) = parent {
+                    let mut above = Message::new();
+                    above.number(
+                        REFERENCE_ID,
+                        u64::from(reference_id(reference, compiled, named)?),
+                    );
+                    style.message(STYLE_PARENT, &above);
+                }
+                for (attribute, value) in items {
+                    let mut key = Message::new();
+                    key.number(REFERENCE_ID, u64::from(*attribute));
+                    let mut entry = Message::new();
+                    entry.message(STYLE_ENTRY_KEY, &key);
+                    entry.message(STYLE_ENTRY_ITEM, &item_for(value, compiled, named)?);
+                    style.message(STYLE_ENTRY, &entry);
+                }
+                compound.message(COMPOUND_STYLE, &style);
+            }
+            Kind::Plurals => {
+                let mut plural = Message::new();
+                for (quantity, value) in items {
+                    let Some((_, arity)) = ARITIES.iter().find(|(known, _)| known == quantity)
+                    else {
+                        return Err(fail("EN024", "A plural is for a quantity with no name.")
+                            .with_context(format!("Numbered: {quantity:#010x}"))
+                            .with_context(format!("In: {named}")));
+                    };
+                    let mut entry = Message::new();
+                    entry.number(PLURAL_ARITY, *arity);
+                    entry.message(PLURAL_ENTRY_ITEM, &item_for(value, compiled, named)?);
+                    plural.message(PLURAL_ENTRY, &entry);
+                }
+                compound.message(COMPOUND_PLURAL, &plural);
+            }
+            _ => {
+                let mut array = Message::new();
+                for (_, value) in items {
+                    let mut element = Message::new();
+                    element.message(ARRAY_ELEMENT_ITEM, &item_for(value, compiled, named)?);
+                    array.message(ARRAY_ELEMENT, &element);
+                }
+                compound.message(COMPOUND_ARRAY, &array);
+            }
+        }
+        Ok(compound)
     }
 
     pub fn encode_resources(
@@ -22336,15 +22991,15 @@ pub mod bundle {
                         config.text(CONFIG_LOCALE, held.config.locale.as_str());
                     }
 
+                    let where_from = format!("{}/{}", kind.as_str(), name);
                     let mut value = Message::new();
-                    value.message(
-                        VALUE_ITEM,
-                        &item_for(
-                            &held.value,
-                            compiled,
-                            &format!("{}/{}", kind.as_str(), name),
-                        )?,
-                    );
+                    match &held.value {
+                        crate::resources::Value::Bag { parent, items } => value.message(
+                            VALUE_COMPOUND,
+                            &compound_for(parent.as_ref(), items, *kind, compiled, &where_from)?,
+                        ),
+                        held => value.message(VALUE_ITEM, &item_for(held, compiled, &where_from)?),
+                    };
 
                     let mut config_value = Message::new();
                     config_value.message(CONFIG_VALUE_CONFIG, &config);
@@ -22486,6 +23141,8 @@ pub mod arsc {
 
     const NO_ENTRY: u32 = 0xffff_ffff;
     const BOOLEAN_TRUE: u32 = 0xffff_ffff;
+    /// The flag on an entry that holds several values rather than one.
+    const ENTRY_COMPLEX: u16 = 0x0001;
     const CONFIG_LOCALE: u32 = 0x0004;
     const CONFIG_DENSITY: u32 = 0x0100;
 
@@ -22630,6 +23287,13 @@ pub mod arsc {
         where_from: &str,
     ) -> Result<(u8, u32), Diagnostic> {
         match value {
+            // A bag is several values, and the writer that walks it asks about
+            // each of them in turn rather than about the bag.
+            Value::Bag { .. } => Err(fail(
+                "EZ012",
+                "A bag holds several values and has no one value of its own.",
+            )
+            .with_context(format!("Where: {where_from}"))),
             Value::Text(text) => Ok((TYPE_STRING, pool.intern(text))),
             Value::File(path) => Ok((TYPE_STRING, pool.intern(path))),
             Value::Color(argb) => Ok((TYPE_INT_COLOR_ARGB8, *argb)),
@@ -22638,18 +23302,24 @@ pub mod arsc {
             Value::Dimension { milli, unit } => {
                 Ok((TYPE_DIMENSION, encode_dimension(*milli, *unit)?))
             }
+            Value::Typed { as_what, data, .. } => Ok((*as_what, *data)),
             Value::Reference(reference) => {
+                // The framework hands out its own identifiers, and the build
+                // carries the list of them, so a reference to one is the number
+                // it was given.
                 if reference.is_platform() {
-                    return Err(fail(
-                        "EZ010",
-                        "A reference to a platform resource cannot be written yet.",
-                    )
-                    .with_context(format!("Reference: {reference}"))
-                    .with_context(format!("In: {where_from}"))
-                    .with_suggestion(
-                        "Resolving one needs the platform's own table, which this build \
-                         does not read.",
-                    ));
+                    let Some(id) =
+                        crate::axml::framework_id(reference.kind.as_str(), &reference.name)
+                    else {
+                        return Err(fail("EZ010", "The framework has no resource by that name.")
+                            .with_context(format!("Reference: {reference}"))
+                            .with_context(format!("In: {where_from}"))
+                            .with_suggestion(
+                                "It is spelled the way android.R spells it: the kind is the \
+                             field of R it sits under, and the name the field itself.",
+                            ));
+                    };
+                    return Ok((TYPE_REFERENCE, id));
                 }
                 let id = compiled
                     .id(reference.kind, &reference.name)
@@ -22765,12 +23435,44 @@ pub mod arsc {
                         offsets.push(NO_ENTRY);
                         continue;
                     };
-                    let (data_type, data) = resolve(
-                        &entry.value,
-                        compiled,
-                        &mut values,
-                        &format!("{}/{}", kind.as_str(), name),
-                    )?;
+                    let where_from = format!("{}/{}", kind.as_str(), name);
+                    // A style, an array and a plural hold several values, and
+                    // the table writes those a different shape: a longer
+                    // header carrying what it is built on and how many it
+                    // holds, and then one name-and-value pair per part.
+                    if let Value::Bag { parent, items } = &entry.value {
+                        let above = match parent {
+                            Some(reference) => {
+                                let (kind, data) = resolve(
+                                    &Value::Reference(reference.clone()),
+                                    compiled,
+                                    &mut values,
+                                    &where_from,
+                                )?;
+                                let _ = kind;
+                                data
+                            }
+                            None => 0,
+                        };
+                        offsets.push(written.len() as u32);
+                        written.extend_from_slice(&16u16.to_le_bytes());
+                        written.extend_from_slice(&ENTRY_COMPLEX.to_le_bytes());
+                        written.extend_from_slice(&keys.intern(name).to_le_bytes());
+                        written.extend_from_slice(&above.to_le_bytes());
+                        written.extend_from_slice(&(items.len() as u32).to_le_bytes());
+                        for (held, value) in items {
+                            let (data_type, data) =
+                                resolve(value, compiled, &mut values, &where_from)?;
+                            written.extend_from_slice(&held.to_le_bytes());
+                            written.extend_from_slice(&8u16.to_le_bytes());
+                            written.push(0);
+                            written.push(data_type);
+                            written.extend_from_slice(&data.to_le_bytes());
+                        }
+                        continue;
+                    }
+                    let (data_type, data) =
+                        resolve(&entry.value, compiled, &mut values, &where_from)?;
                     offsets.push(written.len() as u32);
                     written.extend_from_slice(&8u16.to_le_bytes());
                     written.extend_from_slice(&0u16.to_le_bytes());
@@ -28010,14 +28712,244 @@ mod tests {
         );
     }
 
+    const THE_BAGS: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ink">#ff102030</color>
+    <string name="app_name">Omni</string>
+    <style name="Theme" parent="android:Theme.Material.Light">
+        <item name="android:textSize">16sp</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorBackground">@color/ink</item>
+        <item name="android:orientation">vertical</item>
+        <item name="android:gravity">center_horizontal|top</item>
+    </style>
+    <style name="Theme.Dark">
+        <item name="android:colorBackground">?android:attr/colorAccent</item>
+    </style>
+    <style name="Plain" parent="" />
+    <string-array name="words">
+        <item>bee</item>
+        <item>ant</item>
+    </string-array>
+    <integer-array name="counts">
+        <item>7</item>
+        <item>9</item>
+    </integer-array>
+    <array name="mixed">
+        <item>@color/ink</item>
+        <item>16dp</item>
+        <item>true</item>
+        <item>#ff102030</item>
+        <item>hello</item>
+    </array>
+    <plurals name="apples">
+        <item quantity="other">apples</item>
+        <item quantity="one">an apple</item>
+        <item quantity="few">a few apples</item>
+    </plurals>
+</resources>
+"####;
+
+    const A_BARE_MANIFEST: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.my.app">
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
+    <application android:label="@string/app_name" android:allowBackup="false">
+        <activity android:name=".Screen" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"####;
+
+    /// Styles, arrays and plurals become the table `aapt2` writes for the same
+    /// file, entry for entry and value for value.
+    ///
+    /// These are the entries that hold several values rather than one, and the
+    /// table gives each part a number: a style by the attribute it sets, an
+    /// array by where the item sits, a plural by the quantity it is for. What
+    /// is compared is `aapt2`'s own reading of both packages, which is the
+    /// reading a device does.
+    #[test]
+    fn styles_arrays_and_plurals_are_the_table_aapt2_writes() {
+        let directory = temp_directory("omni-bags");
+        let res = directory.join("Res");
+        std::fs::create_dir_all(res.join("values")).unwrap();
+        std::fs::write(res.join("values/things.xml"), THE_BAGS.trim_start()).unwrap();
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            A_BARE_MANIFEST.trim_start(),
+        )
+        .unwrap();
+        let root = directory.to_str().unwrap().to_string();
+
+        let mut project =
+            super::builder::from_manifest(A_BARE_MANIFEST).expect("the manifest reads");
+        project.values = super::scaffold::values_files(&root);
+        project.resources = super::scaffold::resource_files(&root);
+
+        let mut sink = crate::diag::Sink::new();
+        super::builder::compile_resources_for_test(&project, &mut sink)
+            .expect("the resources compile");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let mut made = crate::diag::Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut made)
+            .expect("the package is written");
+        assert!(!made.has_blocking(), "{:?}", made.entries());
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("bag conformance: aapt2 is not available here");
+            return;
+        };
+        let Some(platform) = crate::builder::platform_jar() else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("bag conformance: no android.jar to link against");
+            return;
+        };
+        let ours = directory.join("ours.apk");
+        std::fs::write(&ours, &outcome.package).unwrap();
+
+        let compiled = directory.join("compiled.zip");
+        let done = std::process::Command::new(&aapt2)
+            .args(["compile", "--dir"])
+            .arg(res.to_str().unwrap())
+            .arg("-o")
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "aapt2 could not compile the folder: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        let theirs = directory.join("theirs.apk");
+        let linked = std::process::Command::new(&aapt2)
+            .arg("link")
+            .arg("-o")
+            .arg(theirs.to_str().unwrap())
+            .arg("-I")
+            .arg(&platform)
+            .arg("--manifest")
+            .arg(directory.join("AndroidManifest.xml").to_str().unwrap())
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "aapt2 could not link the folder: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+
+        let dump = |apk: &std::path::Path| -> Vec<String> {
+            let out = std::process::Command::new(&aapt2)
+                .args(["dump", "resources"])
+                .arg(apk.to_str().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "aapt2 refused the table in {}: {}",
+                apk.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|one| one.trim().to_string())
+                .filter(|one| !one.is_empty())
+                .collect()
+        };
+        let mine = dump(&ours);
+        // A comparison that passes because neither side holds anything is no
+        // comparison, so what the table has to hold is named here.
+        for held in [
+            "resource 0x7f010000 array/counts",
+            "resource 0x7f030000 plurals/apples",
+            "resource 0x7f050000 style/Plain",
+            "(style) size=5 parent=0x01030237",
+            "(style) size=1 parent=style/Theme (0x7f050001)",
+            "(array) size=5",
+            "(plurals) size=3",
+            "0x01010031=?0x01010435",
+            "0x010100af=0x00000031",
+        ] {
+            assert!(
+                mine.iter().any(|one| one == held || one.ends_with(held)),
+                "{held} is missing from the table: {mine:?}"
+            );
+        }
+        assert_eq!(
+            mine,
+            dump(&theirs),
+            "the table is not what aapt2 makes of the same file"
+        );
+
+        // And the same table written the way a bundle carries it, read back
+        // through aapt2's own converter: what a store is handed has to say the
+        // same thing as what a device is handed.
+        let mut ready = crate::diag::Sink::new();
+        let prepared = super::builder::prepare(&project, &mut ready).expect("the project prepares");
+        let held = prepared.icons.as_ref().expect("there are resources");
+        let mut carried = crate::archive::Builder::new();
+        carried
+            .add(
+                "AndroidManifest.xml",
+                super::bundle::encode_manifest(&prepared.root).expect("the manifest is written"),
+            )
+            .unwrap();
+        carried
+            .add(
+                "resources.pb",
+                super::bundle::encode_resources(&prepared.package, &held.compiled)
+                    .expect("the table is written"),
+            )
+            .unwrap();
+        for (name, bytes) in &held.files {
+            carried.add(name.clone(), bytes.clone()).unwrap();
+        }
+        let as_proto = directory.join("proto.apk");
+        std::fs::write(&as_proto, carried.finish().unwrap()).unwrap();
+        let back = directory.join("back.apk");
+        let converted = std::process::Command::new(&aapt2)
+            .arg("convert")
+            .arg("-o")
+            .arg(back.to_str().unwrap())
+            .args(["--output-format", "binary"])
+            .arg(as_proto.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            converted.status.success(),
+            "aapt2 could not read the table a bundle carries: {}",
+            String::from_utf8_lossy(&converted.stderr)
+        );
+        assert_eq!(
+            dump(&back),
+            mine,
+            "the table a bundle carries is not the table a package carries"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!("bag conformance: styles, arrays and plurals agree with aapt2 value for value");
+    }
+
     #[test]
     fn an_unmodelled_element_is_reported_not_skipped() {
-        let (_, sink) = values("<resources><plurals name=\"p\">x</plurals></resources>");
+        let (_, sink) = values("<resources><declare-styleable name=\"p\"/></resources>");
         assert!(sink.entries().iter().any(|d| d.code == "E9002"));
 
+        // A style is several values, and one written as though it were one is
+        // refused rather than read as the text it holds.
         let (_, sink) = values("<resources><style name=\"Theme\">x</style></resources>");
-        let error = sink.entries().iter().find(|d| d.code == "E9003").unwrap();
-        assert!(error.message.contains("not yet modelled"));
+        let error = sink.entries().iter().find(|d| d.code == "E9047").unwrap();
+        assert!(error.message.contains("several values"));
     }
 
     #[test]
