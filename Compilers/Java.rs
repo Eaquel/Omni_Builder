@@ -2727,6 +2727,11 @@ pub struct Unit {
     /// Its instance is held in a field, and a name this class cannot find is
     /// looked for there before it is refused.
     pub outer: Option<String>,
+    /// What this class was written extending and implementing, with the type
+    /// arguments still on them. `class People extends Store<String, Person>`
+    /// is the only place a call on a `People` can learn that `Store`'s second
+    /// type parameter is a Person.
+    pub above: Vec<Written>,
     /// Whether this is the class a lambda came to.
     ///
     /// A lambda's body belongs to the method it was written in: `holds(one)`
@@ -3429,9 +3434,14 @@ impl Parser {
         // calls `implements`. In the class file they are the same list.
         let mut extends = None;
         let mut implements = Vec::new();
+        // What each supertype was written holding: `class People extends
+        // Store<String, Person>` is where a call on a People learns that
+        // Store's V is a Person, and there is nowhere else it can be learned.
+        let mut above: Vec<Written> = Vec::new();
         if self.eat_word("extends") {
             loop {
                 let named = self.qualified()?;
+                above.push(Written::Named(named.clone(), self.type_arguments()?));
                 self.skip_type_arguments()?;
                 match shape {
                     Shape::Class | Shape::Enum => extends = Some(named),
@@ -3446,8 +3456,10 @@ impl Parser {
         }
         if self.eat_word("implements") {
             loop {
-                implements.push(self.qualified()?);
+                let named = self.qualified()?;
+                above.push(Written::Named(named.clone(), self.type_arguments()?));
                 self.skip_type_arguments()?;
+                implements.push(named);
                 if !self.eat_mark(",") {
                     break;
                 }
@@ -3547,6 +3559,7 @@ impl Parser {
             static_setup,
             outer: None,
             permits,
+            above,
             stands_for_a_lambda: false,
             annotation,
             annotations,
@@ -5645,6 +5658,13 @@ pub struct KnownClass {
     /// everything else -- which is also what "anything may extend this" looks
     /// like, and the difference is what makes a `switch` over one exhaustive.
     pub permits: Vec<String>,
+    /// Each supertype, and what this class hands it in place of its own type
+    /// parameters. `People extends Store<String, Person>` records
+    /// `("com/my/lib/Store", [Fixed(String), Fixed(Person)])`, and a `Box<T>
+    /// extends Holder<T>` records the T by position -- which is what lets a
+    /// call on a `Box<String>` reach a method Holder declares and still know
+    /// what it gives back.
+    pub above: Vec<(String, Vec<(Type, Standing)>)>,
 }
 
 impl Classpath {
@@ -5762,6 +5782,27 @@ impl Classpath {
             .implements
             .iter()
             .filter_map(|named| resolve_named(self, unit, named))
+            .collect();
+        // And what each of them was handed: `Store<String, Person>` says which
+        // of its own type parameters a `People` fills in with what.
+        known.above = unit
+            .above
+            .iter()
+            .filter_map(|one| {
+                let Written::Named(named, arguments) = one else {
+                    return None;
+                };
+                let found = resolve_named(self, unit, named)?;
+                let held = arguments
+                    .iter()
+                    .map(|what| {
+                        let erased = resolve_written(self, unit, what)
+                            .unwrap_or(Type::Object("java/lang/Object".to_string(), Vec::new()));
+                        (erased, standing_of(what))
+                    })
+                    .collect();
+                Some((found, held))
+            })
             .collect();
 
         let shallow = |written: &Written| -> Option<Type> { resolve_written(self, unit, written) };
@@ -5948,6 +5989,45 @@ impl Classpath {
 
     pub fn get(&self, name: &str) -> Option<&KnownClass> {
         self.known.get(name)
+    }
+
+    /// What a class further up was written holding, seen from one further
+    /// down that was written holding these.
+    ///
+    /// `People extends Store<String, Person>`: a call on a `People` that
+    /// reaches a method `Store` declares needs Store's own arguments, and the
+    /// only place they are written down is the `extends`. A `Box<T> extends
+    /// Holder<T>` passes its own along, which is why each one is a shape
+    /// rather than a type.
+    pub fn seen_from(&self, from: &str, held: &[Type], owner: &str) -> Vec<Type> {
+        self.seen_from_within(from, held, owner, 0)
+            .unwrap_or_else(|| held.to_vec())
+    }
+
+    fn seen_from_within(
+        &self,
+        from: &str,
+        held: &[Type],
+        owner: &str,
+        depth: usize,
+    ) -> Option<Vec<Type>> {
+        if from == owner {
+            return Some(held.to_vec());
+        }
+        if depth > 16 {
+            return None;
+        }
+        let known = self.known.get(from)?;
+        for (above, arguments) in &known.above {
+            let next: Vec<Type> = arguments
+                .iter()
+                .map(|(erased, shape)| shape.filled(erased, held, &[]))
+                .collect();
+            if let Some(found) = self.seen_from_within(above, &next, owner, depth + 1) {
+                return Some(found);
+            }
+        }
+        None
     }
 
     pub fn len(&self) -> usize {
@@ -13840,6 +13920,69 @@ impl Emitter<'_> {
                         line,
                     );
                 }
+                // Nothing here declares it and nothing above it was named, so
+                // it comes from somewhere this class did not have to write
+                // down: an interface it implements with a `default` body, or
+                // `java.lang.Object`, which is behind every class whether or
+                // not anybody wrote `extends`.
+                let mine = self.this_class.clone();
+                if let Some(signature) = self.signature_for(&mine, name, arguments, line)? {
+                    if !signature.static_ {
+                        if self.static_ {
+                            return Err(at(
+                                "EJ225",
+                                line,
+                                1,
+                                format!(
+                                    "`{name}` belongs to an instance and this method is \
+                                     static."
+                                ),
+                            ));
+                        }
+                        self.load(0, &Type::Object(mine.clone(), Vec::new()));
+                    }
+                    let first = with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
+                    let given = self.what_was_handed_over(&first, arguments, line)?;
+                    let shaped =
+                        with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
+                    self.arguments_for_signature(&shaped, arguments, line)?;
+                    let taken: i32 = signature
+                        .parameters
+                        .iter()
+                        .map(|one| i32::from(one.width()))
+                        .sum();
+                    let descriptor = signature.descriptor();
+                    // Written against this class, whichever class or interface
+                    // above it declares the method -- which is what lets the
+                    // JVM find a `default` body without this having to say
+                    // where it came from.
+                    let through = self.unit.shape == Shape::Interface;
+                    let owner = if signature.static_ {
+                        signature.owner.clone()
+                    } else {
+                        mine.clone()
+                    };
+                    let index = self.pool.method(&owner, name, &descriptor, through);
+                    match (signature.static_, through) {
+                        (true, _) => self.op2(0xb8, index),
+                        (false, false) => self.op2(0xb6, index),
+                        (false, true) => {
+                            self.code.push(0xb9);
+                            self.code.extend_from_slice(&index.to_be_bytes());
+                            self.code.push((taken + 1) as u8);
+                            self.code.push(0);
+                        }
+                    }
+                    self.pops(taken + i32::from(!signature.static_));
+                    self.pushes(&signature.returns);
+                    return self.what_it_really_gives_back(
+                        &signature,
+                        &[],
+                        &given,
+                        going.as_ref(),
+                        line,
+                    );
+                }
                 // And a class written inside another -- including one this
                 // compiler wrote for a lambda -- can call what that one holds
                 // statically, whether or not it kept an instance of it.
@@ -14100,6 +14243,12 @@ impl Emitter<'_> {
         // is not what their erased descriptors say: `Map<String, Named>.put`
         // takes a Named, and a lambda handed to it has to know that or it has
         // nothing to be.
+        //
+        // Where the method belongs to a class further up, what that class was
+        // written holding is what counts: a `People extends Store<String,
+        // Person>` reaches `Store.sorted(Comparator<V>)` and the V there is a
+        // Person, which only the `extends` says.
+        let held = self.classpath.seen_from(&owner, &held, &signature.owner);
         let shaped = as_written(&signature, &held);
         // What each argument really is, for a method with type parameters of
         // its own. Worked out only where there are any, because working it out
@@ -17952,6 +18101,7 @@ impl Emitter<'_> {
             static_setup: body.static_setup.clone(),
             outer: outer.clone(),
             permits: Vec::new(),
+            above: Vec::new(),
             stands_for_a_lambda,
             annotation: false,
             annotations: Vec::new(),
@@ -26645,6 +26795,276 @@ public class Cards {
                     "[a, b]3String >xx 6.5 [0, 1, 2] b2 4DOWN2UP [ccc, bb, a] is? 33"
                 );
                 eprintln!("java: wildcards, and what gets written around them");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// A program larger than anybody writes by hand, built here rather than
+    /// written out: three hundred methods with a string constant each, a
+    /// switch with two hundred arms, another with a hundred and twenty over
+    /// strings, and a method with four hundred branches in it.
+    ///
+    /// What this is for is the sizes: a constant pool past the short forms of
+    /// `ldc`, a `tableswitch` and a `lookupswitch` next to each other, and
+    /// branch offsets long enough to be worth getting wrong.
+    #[test]
+    fn a_program_larger_than_anybody_writes_by_hand_still_runs() {
+        let mut source = String::from(
+            "import java.util.ArrayList;\n\
+             import java.util.HashMap;\n\
+             import java.util.List;\n\
+             import java.util.Map;\n\
+             public class Huge {\n",
+        );
+        for at in 0..300 {
+            source.push_str(&format!(
+                "    static String piece{at}(int of) {{ return \"piece-{at}-\" + (of * {}); }}\n",
+                at + 1
+            ));
+        }
+        source.push_str("    static int wide(int of) {\n        switch (of) {\n");
+        for at in 0..200 {
+            source.push_str(&format!("            case {}: return {at};\n", at * 7));
+        }
+        source.push_str("            default: return -1;\n        }\n    }\n");
+        source.push_str("    static String longWords(String of) {\n        switch (of) {\n");
+        for at in 0..120 {
+            source.push_str(&format!("            case \"w{at}\": return \"W{at}\";\n"));
+        }
+        source.push_str("            default: return \"?\";\n        }\n    }\n");
+        source.push_str("    static int deep(int of) {\n        int held = of;\n");
+        for at in 0..400 {
+            source.push_str(&format!(
+                "        if (held > {at}) {{ held = held - 1; }} else {{ held = held + 1; }}\n"
+            ));
+        }
+        source.push_str("        return held;\n    }\n");
+        source.push_str(
+            "    public static void main(String[] args) {\n\
+             \x20       StringBuilder sum = new StringBuilder();\n\
+             \x20       Map<String, Integer> seen = new HashMap<String, Integer>();\n\
+             \x20       List<String> rows = new ArrayList<String>();\n",
+        );
+        let mut at = 0;
+        while at < 300 {
+            source.push_str(&format!("        rows.add(piece{at}({at}));\n"));
+            at += 37;
+        }
+        source.push_str(
+            "        for (String one : rows) seen.put(one, one.length());\n\
+             \x20       sum.append(rows.size()).append('/').append(seen.size()).append('/');\n\
+             \x20       sum.append(rows.get(0)).append('/')\n\
+             \x20           .append(rows.get(rows.size() - 1)).append('/');\n\
+             \x20       sum.append(wide(0)).append(wide(700)).append(wide(3)).append('/');\n\
+             \x20       sum.append(longWords(\"w0\")).append(longWords(\"w119\"))\n\
+             \x20           .append(longWords(\"x\")).append('/');\n\
+             \x20       sum.append(deep(10)).append('/').append(deep(1000));\n\
+             \x20       System.out.println(sum.toString());\n    }\n}\n",
+        );
+
+        let produced = compile(&source, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Huge") {
+            None => eprintln!("java: no JVM here to run a large program"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "9/9/piece-0-0/piece-296-87912/0100-1/W0W119?/400/600"
+                );
+                eprintln!("java: a program larger than anybody writes by hand");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// An abstract generic class in one package, a class filling its type
+    /// parameters in from another, and every place that has to be noticed:
+    /// `sorted(Comparator<V>)` is a comparator of people because the
+    /// `extends Store<String, Person>` said so, `getClass()` is reached
+    /// without naming what declares it, and `equals`, `hashCode` and
+    /// `compareTo` are written by hand and used by a set, a map and a sort.
+    const AN_ABSTRACT_CLASS_AND_WHAT_FILLS_IT_IN: &[(&str, &str)] = &[
+        (
+            "com/my/app/People.java",
+            r####"
+package com.my.app;
+
+import com.my.lib.Person;
+import com.my.lib.Store;
+
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+import java.util.Set;
+import java.util.TreeMap;
+
+public class People extends Store<String, Person> {
+
+    @Override
+    protected String keyFor(Person one) { return one.name(); }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        People all = new People();
+        all.keep(new Person("ada", 36)).keep(new Person("bob", 41)).keep(new Person("cy", 29));
+        out.append(all).append('/').append(all.size()).append('/').append(all.changes())
+           .append(' ');
+
+        out.append(all.find("bob")).append(' ');
+        try {
+            all.find("nobody");
+            out.append("no");
+        } catch (NoSuchElementException why) {
+            out.append("missing:").append(why.getMessage());
+        }
+        out.append(' ');
+
+        List<Person> byAge = all.sorted(Comparator.comparingInt(Person::age));
+        out.append(byAge).append(' ');
+        List<Person> byName = all.sorted(Comparator.naturalOrder());
+        out.append(byName.get(0)).append(' ');
+
+        TreeMap<String, Integer> ages = new TreeMap<String, Integer>();
+        for (Map.Entry<String, Person> one : all) ages.put(one.getKey(), one.getValue().age());
+        out.append(ages).append(' ');
+
+        Set<Person> unique = new HashSet<Person>();
+        unique.add(new Person("ada", 36));
+        unique.add(new Person("ada", 36));
+        unique.add(new Person("ada", 37));
+        out.append(unique.size()).append(' ');
+        out.append(new Person("ada", 36).equals(all.find("ada"))).append(' ');
+
+        Store<String, Person> as = all;
+        out.append(as.size()).append(as.find("cy").age());
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####,
+        ),
+        (
+            "com/my/lib/Person.java",
+            r####"
+package com.my.lib;
+
+public class Person implements Comparable<Person> {
+    private final String name;
+    private final int age;
+
+    public Person(String name, int age) {
+        this.name = name;
+        this.age = age;
+    }
+
+    public String name() { return name; }
+    public int age() { return age; }
+
+    @Override public int compareTo(Person other) { return name.compareTo(other.name); }
+    @Override public boolean equals(Object other) {
+        if (!(other instanceof Person them)) return false;
+        return age == them.age && name.equals(them.name);
+    }
+    @Override public int hashCode() { return name.hashCode() * 31 + age; }
+    @Override public String toString() { return name + "(" + age + ")"; }
+}
+"####,
+        ),
+        (
+            "com/my/lib/Store.java",
+            r####"
+package com.my.lib;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.NoSuchElementException;
+
+public abstract class Store<K, V> implements Iterable<Map.Entry<K, V>> {
+
+    protected final Map<K, V> held = new HashMap<K, V>();
+    private int changes;
+
+    protected abstract K keyFor(V one);
+
+    public Store<K, V> keep(V one) {
+        held.put(keyFor(one), one);
+        changes++;
+        return this;
+    }
+
+    public V find(K key) {
+        V found = held.get(key);
+        if (found == null) throw new NoSuchElementException(String.valueOf(key));
+        return found;
+    }
+
+    public int size() { return held.size(); }
+    public int changes() { return changes; }
+
+    public List<V> sorted(Comparator<V> by) {
+        List<V> out = new ArrayList<V>(held.values());
+        out.sort(by);
+        return out;
+    }
+
+    public Iterator<Map.Entry<K, V>> iterator() { return held.entrySet().iterator(); }
+
+    @Override
+    public String toString() { return getClass().getSimpleName() + held.size(); }
+}
+"####,
+        ),
+    ];
+
+    #[test]
+    fn a_class_filling_in_another_class_type_parameters_runs() {
+        let sources: Vec<(String, String)> = AN_ABSTRACT_CLASS_AND_WHAT_FILLS_IT_IN
+            .iter()
+            .map(|(name, text)| ((*name).to_string(), (*text).to_string()))
+            .collect();
+        let produced = compile_together(&sources, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.People") {
+            None => eprintln!("java: no JVM here to run it"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "People3/3/3 bob(41) missing:nobody [cy(29), ada(36), bob(41)] ada(36) \
+                     {ada=36, bob=41, cy=29} 2 true 329"
+                );
+                eprintln!("java: a class filling in what the class above it left open");
             }
         }
 
