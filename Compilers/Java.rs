@@ -1448,6 +1448,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -1529,6 +1530,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         annotations: Vec::new(),
         default_value: None,
         own_variables: Vec::new(),
+        own_bounds: Vec::new(),
         throws: Vec::new(),
     });
 
@@ -1582,6 +1584,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         annotations: Vec::new(),
         default_value: None,
         own_variables: Vec::new(),
+        own_bounds: Vec::new(),
         throws: Vec::new(),
     });
 
@@ -1700,6 +1703,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -1728,6 +1732,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -1779,6 +1784,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -1845,6 +1851,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -1888,6 +1895,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -2038,6 +2046,7 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -2722,6 +2731,10 @@ pub struct Method {
     /// The method's own type parameters, in the order they were written.
     /// `<K, V> Map<K, V> of(K key, V value)` records `["K", "V"]`.
     pub own_variables: Vec<String>,
+    /// What each of them was bounded by, in the same order. `<T extends
+    /// Comparable<T>>` records the `Comparable<T>`, which is what a class
+    /// file's `Signature` says and what a compilation against it reads back.
+    pub own_bounds: Vec<Written>,
     /// What it was written as throwing. A class file records these, and a
     /// class compiled against this one reads them back.
     pub throws: Vec<String>,
@@ -2796,6 +2809,11 @@ pub struct Unit {
     /// says so, and a stack trace off the device reads it back: without it
     /// every line of every trace says `Unknown Source`.
     pub source: Option<String>,
+    /// What the class called its own type parameters, in the order they were
+    /// written, and what each was bounded by. `class Store<K, V extends
+    /// Number>` records both, which is what a class file's `Signature` says
+    /// and what a compilation against this class reads back.
+    pub own_variables: Vec<(String, Written)>,
 }
 
 impl Unit {
@@ -3506,6 +3524,15 @@ impl Parser {
         // which is what makes `T get()` inside it mean `Object get()` -- and
         // what lets a call on a `Box<String>` put the String back.
         let pushed = self.push_type_parameters(true)?;
+        // What it called them, kept for the class file's own `Signature`.
+        let own_variables: Vec<(String, Written)> = if pushed {
+            self.type_variables
+                .last()
+                .map(|frame| frame.held.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         // A record says what it holds in front of everything else.
         let mut permits: Vec<String> = Vec::new();
@@ -3650,6 +3677,7 @@ impl Parser {
             annotations,
             static_imports: Vec::new(),
             source: None,
+            own_variables,
         };
         if shape == Shape::Enum {
             return Ok(as_the_class_it_is(unit, &constants));
@@ -3765,6 +3793,7 @@ impl Parser {
                 annotations,
                 default_value: None,
                 own_variables: Vec::new(),
+                own_bounds: Vec::new(),
                 throws: Vec::new(),
             });
             return Ok(());
@@ -3782,13 +3811,18 @@ impl Parser {
             let (parameters, variadic) = self.parameters_and_shape()?;
             let throws = self.throws()?;
             let body = self.method_body()?;
-            let own_variables = if pushed {
+            let (own_variables, own_bounds) = if pushed {
                 self.type_variables
                     .last()
-                    .map(|frame| frame.held.iter().map(|(name, _)| name.clone()).collect())
+                    .map(|frame| {
+                        (
+                            frame.held.iter().map(|(name, _)| name.clone()).collect(),
+                            frame.held.iter().map(|(_, bound)| bound.clone()).collect(),
+                        )
+                    })
                     .unwrap_or_default()
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             self.pop_type_parameters(pushed);
             methods.push(Method {
@@ -3804,6 +3838,7 @@ impl Parser {
                 annotations,
                 default_value: None,
                 own_variables,
+                own_bounds,
                 throws,
             });
             return Ok(());
@@ -3846,13 +3881,18 @@ impl Parser {
             // What it called its own type parameters, read before they go
             // out of scope. A call writing them out in front of the name is
             // writing these, in this order.
-            let own_variables = if pushed {
+            let (own_variables, own_bounds) = if pushed {
                 self.type_variables
                     .last()
-                    .map(|frame| frame.held.iter().map(|(name, _)| name.clone()).collect())
+                    .map(|frame| {
+                        (
+                            frame.held.iter().map(|(name, _)| name.clone()).collect(),
+                            frame.held.iter().map(|(_, bound)| bound.clone()).collect(),
+                        )
+                    })
                     .unwrap_or_default()
             } else {
-                Vec::new()
+                (Vec::new(), Vec::new())
             };
             self.pop_type_parameters(pushed);
             methods.push(Method {
@@ -3868,6 +3908,7 @@ impl Parser {
                 annotations,
                 default_value,
                 own_variables,
+                own_bounds,
                 throws,
             });
             return Ok(());
@@ -18084,6 +18125,7 @@ impl Emitter<'_> {
                 annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
+                own_bounds: Vec::new(),
                 throws: Vec::new(),
             }],
             instance_setup: Vec::new(),
@@ -18658,6 +18700,7 @@ impl Emitter<'_> {
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         }];
         methods.extend(body.methods.iter().cloned());
@@ -18693,6 +18736,10 @@ impl Emitter<'_> {
             // Written where the class around it was written, which is what a
             // trace through a listener has to say.
             source: self.unit.source.clone(),
+            // A class this compiler wrote for a lambda has no type parameters
+            // of its own: what it stands for was worked out where it was
+            // written, and the class holds the answer rather than the question.
+            own_variables: Vec::new(),
         });
 
         // And the making of it, here.
@@ -18928,6 +18975,7 @@ impl Emitter<'_> {
                 annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
+                own_bounds: Vec::new(),
                 throws: Vec::new(),
             });
         }
@@ -20214,6 +20262,233 @@ fn folded_constant(field: &Field, what: &Type, pool: &mut Pool) -> Option<u16> {
     }
 }
 
+/// Whether anything about a written type survives only in a `Signature`.
+///
+/// A descriptor says `Ljava/util/List;` for every list there has ever been. A
+/// signature says `Ljava/util/List<Ljava/lang/String;>;`, and a compilation
+/// against this class reads the difference back. Where there is no difference
+/// -- an `int`, a `String`, an array of either -- nothing is written.
+fn says_more_than_the_descriptor(what: &Written) -> bool {
+    match what {
+        Written::Variable(_, _) | Written::OwnVariable(_, _) => true,
+        Written::Array(of) => says_more_than_the_descriptor(of),
+        Written::Named(_, held) => !held.is_empty(),
+        _ => false,
+    }
+}
+
+/// A written type as the generic signature a class file carries.
+///
+/// The same shape as a descriptor, with two additions: a type variable is
+/// `TName;` rather than the class it erased to, and a class written holding
+/// something says what, between angle brackets. A name this compilation cannot
+/// resolve gives nothing back, because a signature naming a class nobody has
+/// is worse than no signature at all.
+fn written_as_a_signature(
+    what: &Written,
+    classpath: &Classpath,
+    unit: &Unit,
+    of_the_class: &[String],
+    of_the_method: &[String],
+) -> Option<String> {
+    Some(match what {
+        Written::Void => "V".to_string(),
+        Written::Boolean => "Z".to_string(),
+        Written::Byte => "B".to_string(),
+        Written::Short => "S".to_string(),
+        Written::Char => "C".to_string(),
+        Written::Int => "I".to_string(),
+        Written::Long => "J".to_string(),
+        Written::Float => "F".to_string(),
+        Written::Double => "D".to_string(),
+        Written::Inferred => return None,
+        Written::Array(of) => {
+            format!(
+                "[{}",
+                written_as_a_signature(of, classpath, unit, of_the_class, of_the_method)?
+            )
+        }
+        Written::Variable(at, bound) => match of_the_class.get(*at) {
+            Some(name) => format!("T{name};"),
+            // A class this compiler wrote carries no parameters of its own, so
+            // one numbered against a class that is gone is what it erased to.
+            None => written_as_a_signature(bound, classpath, unit, of_the_class, of_the_method)?,
+        },
+        Written::OwnVariable(name, _) => format!("T{name};"),
+        // A bound is read before the variable it bounds is in scope, so
+        // `<T extends Comparable<T>>` has the inner T as a name rather than as
+        // a variable. It is still the variable: a type parameter shadows a
+        // class of the same name, which is what Java says too.
+        Written::Named(name, held)
+            if held.is_empty() && (of_the_method.contains(name) || of_the_class.contains(name)) =>
+        {
+            format!("T{name};")
+        }
+        Written::Named(name, held) => {
+            let internal = resolve_named(classpath, unit, name)?;
+            if held.is_empty() {
+                format!("L{internal};")
+            } else {
+                let mut inside = String::new();
+                for one in held {
+                    inside.push_str(&written_as_a_signature(
+                        one,
+                        classpath,
+                        unit,
+                        of_the_class,
+                        of_the_method,
+                    )?);
+                }
+                format!("L{internal}<{inside}>;")
+            }
+        }
+    })
+}
+
+/// `<T:Ljava/lang/Object;>` and the rest, for whatever declared them.
+fn what_it_holds_open(
+    held: &[(String, Written)],
+    classpath: &Classpath,
+    unit: &Unit,
+    of_the_class: &[String],
+    of_the_method: &[String],
+) -> Option<String> {
+    if held.is_empty() {
+        return Some(String::new());
+    }
+    let mut out = String::from("<");
+    for (name, bound) in held {
+        out.push_str(name);
+        // One colon for a class bound and two for an interface one: the class
+        // bound in front of an interface is empty, and `<T extends
+        // Comparable<T>>` is written `T::Ljava/lang/Comparable<TT;>;`.
+        out.push(':');
+        if let Written::Named(named, _) = bound {
+            if resolve_named(classpath, unit, named)
+                .and_then(|found| classpath.get(&found).map(|known| known.interface))
+                .unwrap_or(false)
+            {
+                out.push(':');
+            }
+        }
+        out.push_str(&written_as_a_signature(
+            bound,
+            classpath,
+            unit,
+            of_the_class,
+            of_the_method,
+        )?);
+    }
+    out.push('>');
+    Some(out)
+}
+
+/// The `Signature` a class carries, or nothing where a descriptor says it all.
+fn class_signature(classpath: &Classpath, unit: &Unit) -> Option<String> {
+    let named: Vec<String> = unit
+        .own_variables
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let generic_above = unit.above.iter().any(says_more_than_the_descriptor);
+    if named.is_empty() && !generic_above {
+        return None;
+    }
+    let mut out = what_it_holds_open(&unit.own_variables, classpath, unit, &named, &[])?;
+
+    // What it extends, then what it implements, in the order they were
+    // written -- which is the order the class file lists them in.
+    let above_by_name = |written: &String| -> Option<&Written> {
+        unit.above.iter().find(|one| match one {
+            Written::Named(name, _) => name == written,
+            _ => false,
+        })
+    };
+    match &unit.extends {
+        Some(named_above) => {
+            let written = above_by_name(named_above);
+            match written {
+                Some(one) => {
+                    out.push_str(&written_as_a_signature(one, classpath, unit, &named, &[])?)
+                }
+                None => out.push_str(&format!(
+                    "L{};",
+                    resolve_named(classpath, unit, named_above)?
+                )),
+            }
+        }
+        None if unit.shape == Shape::Interface => out.push_str("Ljava/lang/Object;"),
+        None => out.push_str("Ljava/lang/Object;"),
+    }
+    for one in &unit.implements {
+        match above_by_name(one) {
+            Some(written) => out.push_str(&written_as_a_signature(
+                written,
+                classpath,
+                unit,
+                &named,
+                &[],
+            )?),
+            None => out.push_str(&format!("L{};", resolve_named(classpath, unit, one)?)),
+        }
+    }
+    Some(out)
+}
+
+/// The `Signature` a method carries, or nothing where its descriptor says it
+/// all.
+fn method_signature(classpath: &Classpath, unit: &Unit, method: &Method) -> Option<String> {
+    let of_the_class: Vec<String> = unit
+        .own_variables
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let generic = !method.own_variables.is_empty()
+        || says_more_than_the_descriptor(&method.returns)
+        || method
+            .parameters
+            .iter()
+            .any(|(what, _)| says_more_than_the_descriptor(what));
+    if !generic {
+        return None;
+    }
+    // A method's own parameters are written with their bounds the same way a
+    // class's are; what this compilation kept of them is the name and the
+    // erasure, which is what a bound comes to.
+    let object = Written::Named("java.lang.Object".to_string(), Vec::new());
+    let mine: Vec<(String, Written)> = method
+        .own_variables
+        .iter()
+        .enumerate()
+        .map(|(at, name)| {
+            (
+                name.clone(),
+                method.own_bounds.get(at).cloned().unwrap_or(object.clone()),
+            )
+        })
+        .collect();
+    let mut out = what_it_holds_open(&mine, classpath, unit, &of_the_class, &method.own_variables)?;
+    out.push('(');
+    for (what, _) in &method.parameters {
+        out.push_str(&written_as_a_signature(
+            what,
+            classpath,
+            unit,
+            &of_the_class,
+            &method.own_variables,
+        )?);
+    }
+    out.push(')');
+    out.push_str(&written_as_a_signature(
+        &method.returns,
+        classpath,
+        unit,
+        &of_the_class,
+        &method.own_variables,
+    )?);
+    Some(out)
+}
+
 /// The `Exceptions` attribute for a method written with a `throws`, or nothing
 /// where it was written without one.
 ///
@@ -20542,6 +20817,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     annotations: Vec::new(),
                     default_value: None,
                     own_variables: Vec::new(),
+                    own_bounds: Vec::new(),
                     throws: Vec::new(),
                 });
             }
@@ -20647,6 +20923,11 @@ pub fn compile_unit_in_nest(
     // not written again in the class initialiser: the constant is the value,
     // and storing it a second time is a store nothing reads.
     let mut folded: Vec<String> = Vec::new();
+    let of_the_class: Vec<String> = unit
+        .own_variables
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
     for field in &unit.fields {
         let probe = Emitter::new(
             &mut pool,
@@ -20666,7 +20947,16 @@ pub fn compile_unit_in_nest(
         // label. Only a literal counts, which is what the language says too.
         let constant = folded_constant(field, &what, &mut pool)
             .map(|index| (pool.utf8("ConstantValue"), index));
-        let how_many = u16::from(held.is_some()) + u16::from(constant.is_some());
+        let signature = says_more_than_the_descriptor(&field.what)
+            .then(|| written_as_a_signature(&field.what, classpath, unit, &of_the_class, &[]))
+            .flatten()
+            .map(|written| {
+                let index = pool.utf8(&written);
+                (pool.utf8("Signature"), index)
+            });
+        let how_many = u16::from(held.is_some())
+            + u16::from(constant.is_some())
+            + u16::from(signature.is_some());
         field_bytes.extend_from_slice(&field.modifiers.access_flags(0).to_be_bytes());
         field_bytes.extend_from_slice(&name.to_be_bytes());
         field_bytes.extend_from_slice(&descriptor.to_be_bytes());
@@ -20676,6 +20966,9 @@ pub fn compile_unit_in_nest(
         }
         if let Some((name, index)) = constant {
             folded.push(field.name.clone());
+            write_attribute(&mut field_bytes, name, &index.to_be_bytes());
+        }
+        if let Some((name, index)) = signature {
             write_attribute(&mut field_bytes, name, &index.to_be_bytes());
         }
     }
@@ -20759,6 +21052,7 @@ pub fn compile_unit_in_nest(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            own_bounds: Vec::new(),
             throws: Vec::new(),
         });
     }
@@ -20781,6 +21075,7 @@ pub fn compile_unit_in_nest(
                 annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
+                own_bounds: Vec::new(),
                 throws: Vec::new(),
             },
         );
@@ -20842,9 +21137,14 @@ pub fn compile_unit_in_nest(
                 Some((pool.utf8("AnnotationDefault"), body))
             });
             let thrown = thrown_by(&mut pool, classpath, unit, method);
+            let signature = method_signature(classpath, unit, method).map(|written| {
+                let index = pool.utf8(&written);
+                (pool.utf8("Signature"), index)
+            });
             let how_many = u16::from(held.is_some())
                 + u16::from(default_value.is_some())
-                + u16::from(thrown.is_some());
+                + u16::from(thrown.is_some())
+                + u16::from(signature.is_some());
             method_bytes.extend_from_slice(&name.to_be_bytes());
             method_bytes.extend_from_slice(&descriptor.to_be_bytes());
             method_bytes.extend_from_slice(&how_many.to_be_bytes());
@@ -20856,6 +21156,9 @@ pub fn compile_unit_in_nest(
             }
             if let Some((name, body)) = thrown {
                 write_attribute(&mut method_bytes, name, &body);
+            }
+            if let Some((name, index)) = signature {
+                write_attribute(&mut method_bytes, name, &index.to_be_bytes());
             }
             written += 1;
             continue;
@@ -21046,7 +21349,14 @@ pub fn compile_unit_in_nest(
         );
         let held = runtime_annotations(&mut pool, classpath, unit, &method.annotations);
         let thrown = thrown_by(&mut pool, classpath, unit, method);
-        let how_many = 1 + u16::from(held.is_some()) + u16::from(thrown.is_some());
+        let signature = method_signature(classpath, unit, method).map(|written| {
+            let index = pool.utf8(&written);
+            (pool.utf8("Signature"), index)
+        });
+        let how_many = 1
+            + u16::from(held.is_some())
+            + u16::from(thrown.is_some())
+            + u16::from(signature.is_some());
         method_bytes.extend_from_slice(&name.to_be_bytes());
         method_bytes.extend_from_slice(&descriptor.to_be_bytes());
         method_bytes.extend_from_slice(&how_many.to_be_bytes());
@@ -21056,6 +21366,9 @@ pub fn compile_unit_in_nest(
         }
         if let Some((name, body)) = thrown {
             write_attribute(&mut method_bytes, name, &body);
+        }
+        if let Some((name, index)) = signature {
+            write_attribute(&mut method_bytes, name, &index.to_be_bytes());
         }
         written += 1;
     }
@@ -21099,6 +21412,14 @@ pub fn compile_unit_in_nest(
     });
     let held = pool.utf8(&written_in);
     class_attributes.push((pool.utf8("SourceFile"), held.to_be_bytes().to_vec()));
+
+    // What the class was written holding, which the descriptor throws away.
+    // `class Store<K, V> implements Map<K, V>` is one class file either way;
+    // this is what tells a compilation against it that the two are the same K.
+    if let Some(written) = class_signature(classpath, unit) {
+        let index = pool.utf8(&written);
+        class_attributes.push((pool.utf8("Signature"), index.to_be_bytes().to_vec()));
+    }
 
     // `sealed` is a list in the class file: the runtime, not the compiler
     // alone, refuses a class outside it.
@@ -30906,6 +31227,64 @@ public class Boxed {
                 eprintln!("java: an ordinary afternoon's Java, against the platform jar, ran");
             }
         }
+    }
+
+    /// What a class was written holding, which a descriptor throws away.
+    ///
+    /// `List<String>` and `List<Integer>` are one descriptor and two
+    /// signatures, and a class compiled against this one reads the difference
+    /// out of here. Nine of these are what `javac` writes for the same source,
+    /// character for character; the tenth is the class's own.
+    const WHAT_A_DESCRIPTOR_THROWS_AWAY: &str = r####"
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+public class Attrs<K, V extends Number> implements Map.Entry<K, V> {
+    private final List<String> held = new ArrayList<>();
+    private K key;
+    private V value;
+    public K getKey() { return key; }
+    public V getValue() { return value; }
+    public V setValue(V one) { V had = value; value = one; return had; }
+    public List<String> all() { return held; }
+    public <T extends Comparable<T>> T largest(List<T> of) { return of.isEmpty() ? null : of.get(0); }
+    public Map<String, List<V>> grouped() { return null; }
+    public static void main(String[] args) { System.out.println("ok"); }
+}
+"####;
+
+    #[test]
+    fn what_a_descriptor_throws_away_is_written_where_javac_writes_it() {
+        let produced = compile(WHAT_A_DESCRIPTOR_THROWS_AWAY, &empty()).expect("must compile");
+        // Read back with this project's own class reader, which knows nothing
+        // about the compiler that wrote it.
+        let class = crate::jvm::read(&produced[0].1).expect("must read back");
+        let mut written: Vec<String> = class.signature.iter().cloned().collect();
+        for member in class.fields.iter().chain(class.methods.iter()) {
+            written.extend(member.signature.iter().cloned());
+        }
+        written.sort();
+
+        let mut wanted: Vec<String> = [
+            "<K:Ljava/lang/Object;V:Ljava/lang/Number;>Ljava/lang/Object;\
+             Ljava/util/Map$Entry<TK;TV;>;",
+            "Ljava/util/List<Ljava/lang/String;>;",
+            "TK;",
+            "TV;",
+            "()TK;",
+            "()TV;",
+            "(TV;)TV;",
+            "()Ljava/util/List<Ljava/lang/String;>;",
+            "<T::Ljava/lang/Comparable<TT;>;>(Ljava/util/List<TT;>;)TT;",
+            "()Ljava/util/Map<Ljava/lang/String;Ljava/util/List<TV;>;>;",
+        ]
+        .iter()
+        .map(|held| held.to_string())
+        .collect();
+        wanted.sort();
+        assert_eq!(written, wanted);
+        eprintln!("java: ten signatures, and javac writes the same ten");
     }
 
     /// What a class file says about itself beyond its code: the file it was
