@@ -3205,8 +3205,22 @@ impl Parser {
                 Written::Inferred
             }
             Token::Identifier(_) => {
-                let named = self.qualified()?;
-                Written::Named(named, self.type_arguments()?)
+                let mut named = self.qualified()?;
+                let mut arguments = self.type_arguments()?;
+                // `Memory<String, Integer>.Window`: a class written inside a
+                // class that holds something, named through what it holds.
+                // What the outer one holds is written in the middle of the
+                // name, and the name it comes to is the whole of it.
+                while self.is_mark(".") && matches!(self.ahead(1), Token::Identifier(_)) {
+                    self.take();
+                    named.push('.');
+                    named.push_str(&self.want_name()?);
+                    let held = self.type_arguments()?;
+                    if !held.is_empty() {
+                        arguments = held;
+                    }
+                }
+                Written::Named(named, arguments)
             }
             other => {
                 return Err(at(
@@ -3305,6 +3319,18 @@ impl Parser {
                 match self.past_type_arguments(ahead) {
                     Some(past) => ahead = past,
                     None => return false,
+                }
+                // `Memory<String, Integer>.Window window` names a class
+                // written inside one that holds something, and the rest of
+                // the name comes after what it holds.
+                while matches!(self.ahead(ahead), Token::Punctuation("."))
+                    && matches!(self.ahead(ahead + 1), Token::Identifier(_))
+                {
+                    ahead += 2;
+                    match self.past_type_arguments(ahead) {
+                        Some(past) => ahead = past,
+                        None => return false,
+                    }
                 }
                 // Then any number of `[]`.
                 while matches!(self.ahead(ahead), Token::Punctuation("["))
@@ -10381,6 +10407,14 @@ public interface List<E> extends Collection<E> {
     static <T> List<T> of(T one);
     static <T> List<T> of(T one, T two);
     static <T> List<T> of(T one, T two, T three);
+    static <T> List<T> of(T one, T two, T three, T four);
+    static <T> List<T> of(T one, T two, T three, T four, T five);
+    static <T> List<T> of(T one, T two, T three, T four, T five, T six);
+    static <T> List<T> of(T one, T two, T three, T four, T five, T six, T seven);
+    static <T> List<T> of(T one, T two, T three, T four, T five, T six, T seven, T eight);
+    static <T> List<T> of(T one, T two, T three, T four, T five, T six, T seven, T eight, T nine);
+    static <T> List<T> of(T one, T two, T three, T four, T five, T six, T seven, T eight, T nine, T ten);
+    static <T> List<T> of(T... held);
     static <T> List<T> copyOf(Collection<T> held);
 }
 
@@ -10388,6 +10422,15 @@ public interface Set<E> extends Collection<E> {
     static <T> Set<T> of();
     static <T> Set<T> of(T one);
     static <T> Set<T> of(T one, T two);
+    static <T> Set<T> of(T one, T two, T three);
+    static <T> Set<T> of(T one, T two, T three, T four);
+    static <T> Set<T> of(T one, T two, T three, T four, T five);
+    static <T> Set<T> of(T one, T two, T three, T four, T five, T six);
+    static <T> Set<T> of(T one, T two, T three, T four, T five, T six, T seven);
+    static <T> Set<T> of(T one, T two, T three, T four, T five, T six, T seven, T eight);
+    static <T> Set<T> of(T one, T two, T three, T four, T five, T six, T seven, T eight, T nine);
+    static <T> Set<T> of(T one, T two, T three, T four, T five, T six, T seven, T eight, T nine, T ten);
+    static <T> Set<T> of(T... held);
     static <T> Set<T> copyOf(Collection<T> held);
 }
 
@@ -10457,7 +10500,18 @@ public interface Map<K, V> {
     void putAll(Map<K, V> held);
     void forEach(java.util.function.BiConsumer<K, V> what);
     static <A, B> Map<A, B> of();
-    static <A, B> Map<A, B> of(A key, B value);
+    static <A, B> Map<A, B> of(A oneKey, B one);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three, A fourKey, B four);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three, A fourKey, B four, A fiveKey, B five);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three, A fourKey, B four, A fiveKey, B five, A sixKey, B six);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three, A fourKey, B four, A fiveKey, B five, A sixKey, B six, A sevenKey, B seven);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three, A fourKey, B four, A fiveKey, B five, A sixKey, B six, A sevenKey, B seven, A eightKey, B eight);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three, A fourKey, B four, A fiveKey, B five, A sixKey, B six, A sevenKey, B seven, A eightKey, B eight, A nineKey, B nine);
+    static <A, B> Map<A, B> of(A oneKey, B one, A twoKey, B two, A threeKey, B three, A fourKey, B four, A fiveKey, B five, A sixKey, B six, A sevenKey, B seven, A eightKey, B eight, A nineKey, B nine, A tenKey, B ten);
+    static <A, B> Entry<A, B> entry(A key, B value);
+    static <A, B> Map<A, B> ofEntries(Entry<A, B>... held);
     static <A, B> Map<A, B> copyOf(Map<A, B> held);
 }
 
@@ -10860,6 +10914,8 @@ public class Optional<T> {
     public native T orElseGet(java.util.function.Supplier<T> fallback);
     public native T orElseThrow();
     public native void ifPresent(java.util.function.Consumer<T> what);
+    public native void ifPresentOrElse(java.util.function.Consumer<T> what, java.lang.Runnable otherwise);
+    public native Optional<T> or(java.util.function.Supplier<Optional<T>> otherwise);
     public native Optional<T> filter(java.util.function.Predicate<T> when);
     public native <R> Optional<R> map(java.util.function.Function<T, R> what);
     public native <R> Optional<R> flatMap(java.util.function.Function<T, Optional<R>> what);
@@ -11237,12 +11293,21 @@ public class Collectors {
     public static native <T, K> Collector<T, Object, java.util.Map<K, java.util.List<T>>> groupingBy(java.util.function.Function<T, K> by);
     public static native <T, K, A, D> Collector<T, Object, java.util.Map<K, D>> groupingBy(java.util.function.Function<T, K> by, Collector<T, A, D> then);
     public static native <T> Collector<T, Object, java.util.Map<java.lang.Boolean, java.util.List<T>>> partitioningBy(java.util.function.Predicate<T> when);
+    public static native <T, A, D> Collector<T, Object, java.util.Map<java.lang.Boolean, D>> partitioningBy(java.util.function.Predicate<T> when, Collector<T, A, D> then);
     public static native <T, U, A, R> Collector<T, Object, R> mapping(java.util.function.Function<T, U> what, Collector<U, A, R> then);
     public static native <T> Collector<T, Object, java.lang.Long> counting();
     public static native <T> Collector<T, Object, java.lang.Integer> summingInt(java.util.function.ToIntFunction<T> by);
     public static native <T> Collector<T, Object, java.lang.Long> summingLong(java.util.function.ToLongFunction<T> by);
     public static native <T> Collector<T, Object, java.lang.Double> summingDouble(java.util.function.ToDoubleFunction<T> by);
     public static native <T> Collector<T, Object, java.lang.Double> averagingInt(java.util.function.ToIntFunction<T> by);
+    public static native <T> Collector<T, Object, java.lang.Double> averagingLong(java.util.function.ToLongFunction<T> by);
+    public static native <T> Collector<T, Object, java.lang.Double> averagingDouble(java.util.function.ToDoubleFunction<T> by);
+    public static native <T, K, V> Collector<T, Object, java.util.Map<K, V>> toMap(java.util.function.Function<T, K> key, java.util.function.Function<T, V> value, java.util.function.BinaryOperator<V> merged);
+    public static native <T> Collector<T, Object, java.util.Set<T>> toUnmodifiableSet();
+    public static native <T, U, A, R> Collector<T, Object, R> flatMapping(java.util.function.Function<T, Stream<U>> what, Collector<U, A, R> then);
+    public static native <T, A, R> Collector<T, Object, R> filtering(java.util.function.Predicate<T> when, Collector<T, A, R> then);
+    public static native <T, A, R, S> Collector<T, Object, S> collectingAndThen(Collector<T, A, R> then, java.util.function.Function<R, S> after);
+    public static native <T> Collector<T, Object, T> reducing(T start, java.util.function.BinaryOperator<T> what);
     public static native <T> Collector<T, Object, java.util.Optional<T>> minBy(java.util.Comparator<T> by);
     public static native <T> Collector<T, Object, java.util.Optional<T>> maxBy(java.util.Comparator<T> by);
 }
@@ -12362,12 +12427,21 @@ impl Emitter<'_> {
         otherwise: &Expression,
         line: u32,
     ) -> Result<Type, Diagnostic> {
-        // `null` has no type of its own; it is whatever it stands beside.
+        // `null` has no type of its own; it is whatever it stands beside --
+        // and where that is a number, it is the box that number goes in,
+        // because `null` cannot be an int and `had == null ? null : had * 10`
+        // is an Integer.
+        let beside = |what: Type| match boxed_name(&what) {
+            Some(boxed) => Type::Object(boxed.to_string(), Vec::new()),
+            None => what,
+        };
         if matches!(then, Expression::Null) {
-            return self.peek_type(otherwise, line);
+            let there = self.peek_type(otherwise, line)?;
+            return Ok(beside(there));
         }
         if matches!(otherwise, Expression::Null) {
-            return self.peek_type(then, line);
+            let here = self.peek_type(then, line)?;
+            return Ok(beside(here));
         }
         let here = self.peek_type(then, line)?;
         let there = self.peek_type(otherwise, line)?;
@@ -27242,6 +27316,340 @@ public class Reading extends Exception {
 "####,
         ),
     ];
+
+    /// What a stream is asked for: `groupingBy` counted, `toMap`,
+    /// `partitioningBy` with a downstream, sums and averages, an infinite
+    /// stream taken from, the three matches, `sorted` with a comparator and
+    /// `skip`, an `IntStream` boxed, the `String` methods a person reaches
+    /// for, `Optional` with `or` and `ifPresentOrElse`, the fixed collections
+    /// and what they refuse, an iterator removing as it walks, a generic
+    /// method with its type written out at the call, a class inside a class
+    /// reading another's private field, and a `try` with a `finally` around a
+    /// `continue` and a `break`.
+    const WHAT_A_STREAM_IS_ASKED_FOR: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+
+public class Flow {
+
+    record Word(String text, int weight) implements Comparable<Word> {
+        public int compareTo(Word other) { return text.compareTo(other.text); }
+    }
+
+    interface Picks {
+        <T> T pick(T left, T right);
+    }
+
+    static class First implements Picks {
+        public <T> T pick(T left, T right) { return left; }
+    }
+
+    static class Outer {
+        private int secret = 4;
+        static class Inner {
+            int peek(Outer of) { return of.secret * 2; }
+        }
+    }
+
+    static String looped() {
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < 5; i++) {
+            try {
+                if (i == 1) continue;
+                if (i == 4) break;
+                out.append(i);
+            } finally {
+                out.append('.');
+            }
+        }
+        return out.toString();
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        List<Word> words = new ArrayList<>(List.of(
+            new Word("pear", 3), new Word("apple", 5), new Word("fig", 5), new Word("date", 1)));
+
+        Map<Integer, Long> byWeight = words.stream()
+            .collect(Collectors.groupingBy(Word::weight, Collectors.counting()));
+        out.append(new TreeMap<>(byWeight)).append(' ');
+
+        Map<String, Integer> asMap = words.stream()
+            .collect(Collectors.toMap(Word::text, Word::weight));
+        out.append(new TreeMap<>(asMap)).append(' ');
+
+        Map<Boolean, List<String>> split = words.stream()
+            .collect(Collectors.partitioningBy(w -> w.weight() > 2,
+                     Collectors.mapping(Word::text, Collectors.toList())));
+        out.append(split.get(false)).append(split.get(true)).append(' ');
+
+        out.append(words.stream().collect(Collectors.summingInt(Word::weight))).append('/')
+           .append(words.stream().collect(Collectors.averagingDouble(Word::weight))).append(' ');
+
+        out.append(Stream.iterate(1, n -> n * 3).limit(4).map(String::valueOf)
+                   .collect(Collectors.joining("+"))).append(' ');
+
+        out.append(words.stream().anyMatch(w -> w.weight() == 1))
+           .append(words.stream().allMatch(w -> w.weight() > 0))
+           .append(words.stream().noneMatch(w -> w.weight() > 9)).append(' ');
+
+        out.append(words.stream().sorted(Comparator.comparingInt(Word::weight)
+                   .thenComparing(Word::text)).map(Word::text)
+                   .skip(1).collect(Collectors.toList())).append(' ');
+
+        out.append(words.stream().map(Word::text).findFirst().orElse("none")).append(' ');
+
+        int[] raw = {4, 1, 3};
+        out.append(Arrays.stream(raw).max().getAsInt())
+           .append(Arrays.stream(raw).sum())
+           .append(IntStream.of(raw).boxed().sorted().collect(Collectors.toList())).append(' ');
+
+        out.append("a b  c".chars().filter(c -> c == ' ').count()).append('/')
+           .append("  pad ".strip()).append('/').append("".isBlank())
+           .append('/').append("x%dy".formatted(3)).append(' ');
+
+        Optional<Word> first = words.stream().filter(w -> w.text().startsWith("f")).findFirst();
+        out.append(first.map(Word::text).orElse("?"));
+        first.ifPresentOrElse(w -> out.append('!').append(w.weight()), () -> out.append("none"));
+        out.append(Optional.empty().or(() -> Optional.of("made")).get()).append(' ');
+
+        Map<String, Integer> small = Map.of("k", 1);
+        small.forEach((k, v) -> out.append(k).append(v));
+        out.append(Map.entry("e", 2)).append(' ');
+
+        List<String> fixed = List.copyOf(List.of("a", "b"));
+        Set<String> once = Set.of("z");
+        try {
+            fixed.add("c");
+        } catch (UnsupportedOperationException e) {
+            out.append("fixed");
+        }
+        out.append(once.size()).append(' ');
+
+        List<Integer> numbers = new ArrayList<>(List.of(1, 2, 3, 4));
+        var walk = numbers.iterator();
+        while (walk.hasNext()) if (walk.next() % 2 == 0) walk.remove();
+        out.append(numbers).append(' ');
+
+        out.append(new First().<String>pick("l", "r")).append(new First().pick(1, 2)).append(' ');
+        out.append(new Outer.Inner().peek(new Outer())).append(' ');
+        out.append(looped()).append(' ');
+
+        String[][] grid = {{"a"}, {"b"}};
+        String[][] same = {{"a"}, {"b"}};
+        out.append(Arrays.deepEquals(grid, same)).append(Arrays.equals(grid, same)).append(' ');
+
+        List<Word> sorted = new ArrayList<>(words);
+        Collections.sort(sorted);
+        out.append(sorted.get(0).text()).append(Collections.max(sorted).text());
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn what_a_stream_is_asked_for_gives_back_what_javac_gives_back() {
+        let produced = compile(WHAT_A_STREAM_IS_ASKED_FOR, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Flow") {
+            None => eprintln!("java: no JVM here to run what a stream is asked for"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "{1=1, 3=1, 5=2} {apple=5, date=1, fig=5, pear=3} [date][pear, \
+                     apple, fig] 14/3.5 1+3+9+27 truetruetrue [pear, apple, \
+                     fig] pear 48[1, 3, 4] 3/pad/true/x3y fig!5made k1e=2 \
+                     fixed1 [1, 3] l1 8 0..2.3.. truefalse applepear"
+                );
+                eprintln!("java: what a stream is asked for, and javac's answer");
+            }
+        }
+    }
+
+    /// Generics as deep as people write them: an interface holding two of
+    /// them with `default` methods that lean on the abstract one, a class
+    /// filling both in, a class inside that one reaching the outer's type
+    /// parameters, a subclass fixing both and overriding through `super`,
+    /// `Memory<String, Integer>.Window` named with what the outer one holds
+    /// written in the middle of the name, a bounded type parameter, generic
+    /// varargs, `synchronized` on a method and on a block with a parameter
+    /// shadowing a field, `instanceof` patterns whose bindings reach the rest
+    /// of the method, a record pattern inside a record pattern, `null` beside
+    /// a number in a `?:`, and every conversion between the eight primitives.
+    const GENERICS_AS_DEEP_AS_PEOPLE_WRITE_THEM: &str = r####"
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Deeper {
+
+    interface Store<K, V> {
+        void put(K key, V value);
+        V get(K key);
+        default V getOr(K key, V fallback) {
+            V held = get(key);
+            return held == null ? fallback : held;
+        }
+        default int counted(List<K> keys) {
+            int found = 0;
+            for (K key : keys) if (get(key) != null) found++;
+            return found;
+        }
+    }
+
+    static class Memory<K, V> implements Store<K, V> {
+        private final Map<K, V> held = new HashMap<>();
+        public void put(K key, V value) { held.put(key, value); }
+        public V get(K key) { return held.get(key); }
+        int size() { return held.size(); }
+
+        class Window {
+            final K only;
+            Window(K only) { this.only = only; }
+            V value() { return get(only); }
+            String shown() { return only + "=" + value() + "/" + size(); }
+        }
+    }
+
+    static class Names extends Memory<String, Integer> {
+        @Override public Integer get(String key) {
+            Integer had = super.get(key);
+            return had == null ? null : had * 10;
+        }
+    }
+
+    static <T extends Comparable<T>> T largest(List<T> of) {
+        T best = null;
+        for (T one : of) if (best == null || one.compareTo(best) > 0) best = one;
+        return best;
+    }
+
+    @SafeVarargs
+    static <T> List<List<T>> pairs(T... held) {
+        List<List<T>> out = new ArrayList<>();
+        for (int at = 0; at + 1 < held.length; at += 2) {
+            List<T> one = new ArrayList<>();
+            one.add(held[at]);
+            one.add(held[at + 1]);
+            out.add(one);
+        }
+        return out;
+    }
+
+    private int held = 1;
+    private final Object lock = new Object();
+
+    synchronized int bump(int held) {
+        synchronized (lock) {
+            this.held += held;
+            return this.held;
+        }
+    }
+
+    static String flowed(Object one) {
+        if (one instanceof String s && s.length() > 2) return "long " + s;
+        if (!(one instanceof Integer i)) return "other";
+        if (i > 5 || i < -5) return "far " + i;
+        return "near " + i;
+    }
+
+    record Pair(Object left, Object right) { }
+
+    static String taken(Object one) {
+        return switch (one) {
+            case Pair(String a, Pair(Integer b, Integer c)) -> a + (b + c);
+            case Pair(String a, String b) -> a + b;
+            case Pair(Object a, Object b) -> "?" + a + b;
+            default -> "!";
+        };
+    }
+
+    static String numbers() {
+        byte b = 100;
+        short sh = 20000;
+        char c = 'A';
+        int i = 70000;
+        long l = 5_000_000_000L;
+        float f = 1.5f;
+        double d = 2.25;
+        StringBuilder out = new StringBuilder();
+        out.append((int) b + sh).append(',').append((int) c).append(',').append((char) (c + 1))
+           .append(',').append((byte) i).append(',').append((short) i).append(',').append((int) l)
+           .append(',').append((long) f).append(',').append((int) d).append(',').append((float) l)
+           .append(',').append((double) f).append(',').append(b + c).append(',').append(l + i)
+           .append(',').append(f + d).append(',').append(i / 3).append(',').append(i / 3.0)
+           .append(',').append((char) 66).append(',').append(1 / 3f);
+        return out.toString();
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        Memory<String, Integer> memory = new Memory<>();
+        memory.put("a", 1);
+        memory.put("b", 2);
+        out.append(memory.get("a")).append(memory.getOr("z", 9))
+           .append(memory.counted(List.of("a", "z"))).append(' ');
+
+        Memory<String, Integer>.Window window = memory.new Window("b");
+        out.append(window.shown()).append(' ');
+
+        Store<String, Integer> named = new Names();
+        named.put("k", 3);
+        out.append(named.get("k")).append(named.getOr("nope", -1)).append(' ');
+
+        out.append(largest(List.of("pear", "apple"))).append(largest(List.of(3, 9, 4))).append(' ');
+        out.append(pairs("a", "b", "c", "d", "e")).append(' ');
+
+        Deeper one = new Deeper();
+        out.append(one.bump(4)).append(one.bump(5)).append(' ');
+
+        out.append(flowed("abcd")).append('/').append(flowed("ab")).append('/')
+           .append(flowed(9)).append('/').append(flowed(1)).append(' ');
+
+        out.append(taken(new Pair("x", new Pair(1, 2)))).append('/')
+           .append(taken(new Pair("x", "y"))).append('/')
+           .append(taken(new Pair(1, 2))).append('/').append(taken("no")).append(' ');
+
+        out.append(numbers()).append(' ');
+
+        Map<String, Integer> counted = new HashMap<>();
+        counted.put("one", 1);
+        for (var at : counted.entrySet()) out.append(at.getKey()).append(at.getValue());
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn generics_as_deep_as_people_write_them_give_back_what_javac_gives_back() {
+        let produced =
+            compile(GENERICS_AS_DEEP_AS_PEOPLE_WRITE_THEM, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Deeper") {
+            None => eprintln!("java: no JVM here to run generics as deep as people write them"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(said.trim(), "191 b=2/2 30-1 pear9 [[a, b], [c, d]] 510 long abcd/other/far \
+                     9/near 1 x3/xy/?12/! 20100,65,B,112,4464,705032704,1,2,5.0E9,1.5,165,5000070000,3.75,23333,23333.333333333332,B,0.33333334 \
+                     one1");
+                eprintln!("java: generics as deep as people write them, and javac's answer");
+            }
+        }
+    }
 
     /// The Java a person writes today: `var` almost everywhere, the diamond on
     /// every `new`, an interface with a constant and a `static` and a
