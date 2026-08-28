@@ -17106,14 +17106,16 @@ pub mod dalvik {
         )
     }
 
+    /// How many registers a stack shuffle has to work in. The most any of them
+    /// reaches is four slots, and it never needs more room than it reaches.
+    const SHUFFLE_ROOM: u16 = 4;
+
     /// What an opcode is called, so a refusal names it rather than numbering it.
     fn name_of(opcode: u8) -> &'static str {
         match opcode {
             0xa8 | 0xa9 => "`jsr` or `ret`",
             0xba => "`invokedynamic`",
-            0xc4 => "a `wide` instruction",
             0xc5 => "a multi-dimensional array in one instruction",
-            0x5a | 0x5b | 0x5d | 0x5e | 0x5f => "a stack shuffle",
             _ => "that instruction",
         }
     }
@@ -17173,10 +17175,52 @@ pub mod dalvik {
         handlers: Vec<(u16, u16, u16, u16)>,
         stack_base: u16,
         depth: u16,
-        /// How deep the stack is where a branch lands, recorded by the branch
+        /// What each stack slot holds, one entry per slot, the top last.
+        kinds: Vec<Kept>,
+        /// Where the shuffles have room to work, which is above the stack.
+        scratch: u16,
+        /// What the stack holds where a branch lands, recorded by the branch
         /// that goes there.
-        depth_at: std::collections::BTreeMap<usize, u16>,
+        kinds_at: std::collections::BTreeMap<usize, Vec<Kept>>,
         max_outputs: u16,
+    }
+
+    /// What a stack slot holds, which decides which move moves it.
+    ///
+    /// Dalvik has three moves and they are not interchangeable: `move` for a
+    /// number, `move-object` for a reference, `move-wide` for the two halves of
+    /// a long or a double. Using the wrong one is not a detail the runtime
+    /// overlooks -- the verifier refuses the whole class. The JVM instruction
+    /// being translated says what it puts on the stack; `dup` and the shuffles
+    /// say only how many slots, so what is in them is carried along here.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Kept {
+        Number,
+        Reference,
+        /// The first half of a long or a double.
+        Wide,
+        /// The second half of one, which is never named on its own.
+        Half,
+    }
+
+    impl Kept {
+        /// The move that moves one of these.
+        const fn moved_by(self) -> u8 {
+            match self {
+                Kept::Number => 0x01,
+                Kept::Reference => 0x07,
+                Kept::Wide | Kept::Half => 0x04,
+            }
+        }
+
+        /// What a descriptor puts on the stack.
+        fn of(descriptor: &str) -> Kept {
+            match descriptor.chars().next() {
+                Some('J') | Some('D') => Kept::Wide,
+                Some('L') | Some('[') => Kept::Reference,
+                _ => Kept::Number,
+            }
+        }
     }
 
     /// How wide a descriptor's value is, in registers.
@@ -17203,7 +17247,9 @@ pub mod dalvik {
                 handlers: code.handlers.clone(),
                 stack_base: code.max_locals,
                 depth: 0,
-                depth_at: std::collections::BTreeMap::new(),
+                kinds: Vec::new(),
+                scratch: code.max_locals + code.max_stack,
+                kinds_at: std::collections::BTreeMap::new(),
                 max_outputs: 0,
             }
         }
@@ -17217,8 +17263,33 @@ pub mod dalvik {
             self.stack_base + self.depth - from_top
         }
 
+        /// Puts one value on the stack. A long or a double takes two slots, and
+        /// the second of them is never named on its own.
+        fn puts(&mut self, kept: Kept) {
+            match kept {
+                Kept::Wide | Kept::Half => {
+                    self.kinds.push(Kept::Wide);
+                    self.kinds.push(Kept::Half);
+                    self.depth += 2;
+                }
+                other => {
+                    self.kinds.push(other);
+                    self.depth += 1;
+                }
+            }
+        }
+
+        /// The same, for a value known only by how wide it is.
+        fn puts_wide(&mut self, width: u16) {
+            match width {
+                0 => {}
+                2 => self.puts(Kept::Wide),
+                _ => self.puts(Kept::Number),
+            }
+        }
+
         fn grow(&mut self, by: u16) {
-            self.depth += by;
+            self.puts_wide(by);
         }
 
         fn shrink(&mut self, by: u16) -> Result<(), Diagnostic> {
@@ -17226,6 +17297,8 @@ pub mod dalvik {
                 return Err(fail("ED001", "The stack went below empty."));
             }
             self.depth -= by;
+            let left = self.kinds.len().saturating_sub(usize::from(by));
+            self.kinds.truncate(left);
             Ok(())
         }
     }
@@ -17251,8 +17324,9 @@ pub mod dalvik {
                 // Where something jumps here, the depth it jumped with is the
                 // depth here -- whatever the instruction before this one left
                 // behind, which for one that threw is nothing.
-                if let Some(held) = self.depth_at.get(&at) {
-                    self.depth = *held;
+                if let Some(held) = self.kinds_at.get(&at) {
+                    self.kinds = held.clone();
+                    self.depth = self.kinds.len() as u16;
                 }
                 if entries.contains(&at) {
                     // A handler is entered with the thrown object where the
@@ -17268,6 +17342,7 @@ pub mod dalvik {
                         .with_context(format!("Register {register}")));
                     }
                     self.push(Insn::raw(vec![0x000d | (register << 8)]));
+                    self.kinds = vec![Kept::Reference];
                     self.depth = 1;
                 }
                 let opcode = bytes[at];
@@ -17484,7 +17559,8 @@ pub mod dalvik {
         }
 
         /// Puts a constant into the top of the stack.
-        fn constant(&mut self, value: i32, wide: bool) {
+        fn constant(&mut self, value: i32, kept: Kept) {
+            let wide = kept == Kept::Wide;
             let to = self.stack_base + self.depth;
             if wide {
                 if i16::try_from(value).is_ok() {
@@ -17498,7 +17574,7 @@ pub mod dalvik {
                         (value as u32 >> 16) as u16,
                     ]));
                 }
-                self.grow(2);
+                self.puts(Kept::Wide);
                 return;
             }
             if (-8..=7).contains(&value) && to < 16 {
@@ -17517,7 +17593,7 @@ pub mod dalvik {
                     (value as u32 >> 16) as u16,
                 ]));
             }
-            self.grow(1);
+            self.puts(kept);
         }
 
         /// A constant pool entry, by index, or nothing if it is not there.
@@ -17555,7 +17631,7 @@ pub mod dalvik {
         fn load_constant(&mut self, index: u16, start: usize) -> Result<(), Diagnostic> {
             match self.constant_at(index).cloned() {
                 Some(jvm::Constant::Integer(value)) => {
-                    self.constant(value, false);
+                    self.constant(value, Kept::Number);
                     Ok(())
                 }
                 Some(jvm::Constant::String(text)) => {
@@ -17569,7 +17645,7 @@ pub mod dalvik {
                         1,
                         Operand::Text(text),
                     ));
-                    self.grow(1);
+                    self.puts(Kept::Reference);
                     Ok(())
                 }
                 Some(jvm::Constant::Float(bits)) => {
@@ -17584,7 +17660,7 @@ pub mod dalvik {
                         1,
                         Operand::Type(format!("L{name};")),
                     ));
-                    self.grow(1);
+                    self.puts(Kept::Reference);
                     Ok(())
                 }
                 other => Err(fail("ED011", "That constant is not one this translates.")
@@ -17599,7 +17675,7 @@ pub mod dalvik {
                 Some(jvm::Constant::Long(value)) => {
                     let to = self.stack_base + self.depth;
                     if let Ok(narrow) = i32::try_from(value) {
-                        self.constant(narrow, true);
+                        self.constant(narrow, Kept::Wide);
                     } else {
                         // const-wide, all sixty-four bits of it.
                         let raw = value as u64;
@@ -17610,7 +17686,7 @@ pub mod dalvik {
                             (raw >> 32) as u16,
                             (raw >> 48) as u16,
                         ]));
-                        self.grow(2);
+                        self.puts(Kept::Wide);
                     }
                     Ok(())
                 }
@@ -17662,6 +17738,7 @@ pub mod dalvik {
         fn field(&mut self, opcode: u8, index: u16, start: usize) -> Result<(), Diagnostic> {
             let (class, name, descriptor) = self.member_at(index, start)?;
             let width = width_of(&descriptor);
+            let holds = Kept::of(&descriptor);
             let reference = FieldRef {
                 class: format!("L{class};"),
                 name,
@@ -17689,7 +17766,7 @@ pub mod dalvik {
                         1,
                         Operand::Field(reference),
                     ));
-                    self.grow(width);
+                    self.puts(holds);
                 }
                 0xb3 => {
                     // sput
@@ -17711,7 +17788,7 @@ pub mod dalvik {
                         1,
                         Operand::Field(reference),
                     ));
-                    self.grow(width);
+                    self.puts(holds);
                 }
                 _ => {
                     // iput: the value is on top, the object under it.
@@ -17770,7 +17847,7 @@ pub mod dalvik {
                     _ => 0x000a,
                 };
                 self.push(Insn::raw(vec![fetch | (to << 8)]));
-                self.grow(width);
+                self.puts(Kept::of(&returns));
             }
             Ok(())
         }
@@ -17788,10 +17865,10 @@ pub mod dalvik {
                 0x00 => {} // nop
                 0x01 => {
                     // aconst_null is const/4 with zero, which is what null is.
-                    self.constant(0, false);
+                    self.constant(0, Kept::Reference);
                 }
-                0x02..=0x08 => self.constant(i32::from(opcode) - 0x03, false),
-                0x09 | 0x0a => self.constant(i32::from(opcode) - 0x09, true),
+                0x02..=0x08 => self.constant(i32::from(opcode) - 0x03, Kept::Number),
+                0x09 | 0x0a => self.constant(i32::from(opcode) - 0x09, Kept::Wide),
                 0x0b..=0x0d => {
                     // fconst_0, fconst_1, fconst_2, as the bits they are.
                     let value = (f32::from(opcode - 0x0b)).to_bits();
@@ -17804,12 +17881,12 @@ pub mod dalvik {
                 0x10 => {
                     let value = bytes[*at] as i8;
                     *at += 1;
-                    self.constant(i32::from(value), false);
+                    self.constant(i32::from(value), Kept::Number);
                 }
                 0x11 => {
                     let value = Self::u16_at(bytes, *at) as i16;
                     *at += 2;
-                    self.constant(i32::from(value), false);
+                    self.constant(i32::from(value), Kept::Number);
                 }
                 0x12 | 0x13 => {
                     let index = if opcode == 0x12 {
@@ -17871,15 +17948,16 @@ pub mod dalvik {
                 0x2e..=0x35 => {
                     // aget, and the six narrower forms. The index is on top and
                     // the array under it.
-                    let (dalvik, width) = match opcode {
-                        0x2e => (0x0044u16, 1), // int
-                        0x2f => (0x0045, 2),    // long
-                        0x30 => (0x0044, 1),    // float, which is a word like an int
-                        0x31 => (0x0045, 2),    // double
-                        0x32 => (0x0046, 1),    // object
-                        0x33 => (0x0047, 1),    // boolean or byte
-                        0x34 => (0x0049, 1),    // char
-                        _ => (0x004a, 1),       // short
+                    let (dalvik, holds) = match opcode {
+                        0x2e => (0x0044u16, Kept::Number), // int
+                        0x2f => (0x0045, Kept::Wide),      // long
+                        // float, which is a word like an int
+                        0x30 => (0x0044, Kept::Number),
+                        0x31 => (0x0045, Kept::Wide),      // double
+                        0x32 => (0x0046, Kept::Reference), // object
+                        0x33 => (0x0047, Kept::Number),    // boolean or byte
+                        0x34 => (0x0049, Kept::Number),    // char
+                        _ => (0x004a, Kept::Number),       // short
                     };
                     let array = self.slot(2);
                     let index = self.slot(1);
@@ -17889,7 +17967,7 @@ pub mod dalvik {
                         dalvik | (to << 8),
                         (array & 0xff) | ((index & 0xff) << 8),
                     ]));
-                    self.grow(width);
+                    self.puts(holds);
                 }
                 0x4f..=0x56 => {
                     // aput. The value is on top, then the index, then the array.
@@ -17947,17 +18025,8 @@ pub mod dalvik {
                 // -- the stack itself
                 0x57 => self.shrink(1)?,
                 0x58 => self.shrink(2)?,
-                0x59 => {
-                    let from = self.slot(1);
-                    let to = self.stack_base + self.depth;
-                    self.push(move_register(0x01, to, from));
-                    self.grow(1);
-                }
-                0x5c => {
-                    let from = self.slot(2);
-                    let to = self.stack_base + self.depth;
-                    self.push(move_register(0x04, to, from));
-                    self.grow(2);
+                0x59..=0x5f => {
+                    self.shuffle(opcode, start)?;
                 }
 
                 // -- arithmetic, two off the stack and one back on
@@ -17967,13 +18036,33 @@ pub mod dalvik {
                 0x84 => {
                     // iinc: a local stepped where it stands.
                     let local = u16::from(bytes[*at]);
-                    let by = bytes[*at + 1] as i8;
+                    let by = i32::from(bytes[*at + 1] as i8);
                     *at += 2;
-                    // add-int/lit8 vAA, vBB, #+CC
-                    self.push(Insn::raw(vec![
-                        0x00d8 | (local << 8),
-                        (local & 0xff) | ((by as u8 as u16) << 8),
-                    ]));
+                    self.increment(local, by, start)?;
+                }
+
+                // wide: the same instruction again, with a local numbered by
+                // two bytes rather than one. A method with more than two
+                // hundred and fifty-six locals is written entirely this way.
+                0xc4 => {
+                    let held = bytes[*at];
+                    *at += 1;
+                    let local = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    match held {
+                        0x15 | 0x17 => self.load_local(local, 0x01, 1),
+                        0x16 | 0x18 => self.load_local(local, 0x04, 2),
+                        0x19 => self.load_local(local, 0x07, 1),
+                        0x36 | 0x38 => self.store_local(local, 0x01, 1)?,
+                        0x37 | 0x39 => self.store_local(local, 0x04, 2)?,
+                        0x3a => self.store_local(local, 0x07, 1)?,
+                        0x84 => {
+                            let by = i32::from(Self::u16_at(bytes, *at) as i16);
+                            *at += 2;
+                            self.increment(local, by, start)?;
+                        }
+                        _ => return Err(unsupported(start, held, name_of(held))),
+                    }
                 }
 
                 // -- conversions
@@ -18059,6 +18148,7 @@ pub mod dalvik {
                     self.push(Insn::raw(vec![0x0027 | (register << 8)]));
                     // Nothing runs on from a throw, and what the stack held is
                     // not what anything arriving here will find.
+                    self.kinds.clear();
                     self.depth = 0;
                 }
 
@@ -18109,14 +18199,14 @@ pub mod dalvik {
                         1,
                         Operand::Type(format!("L{name};")),
                     ));
-                    self.grow(1);
+                    self.puts(Kept::Reference);
                 }
                 0xbe => {
                     let from = self.slot(1);
                     self.shrink(1)?;
                     let to = self.stack_base + self.depth;
                     self.push(Insn::raw(vec![0x0021 | (to << 8) | (from << 12)]));
-                    self.grow(1);
+                    self.puts(Kept::Number);
                 }
                 0xc0 | 0xc1 => {
                     let index = Self::u16_at(bytes, *at);
@@ -18142,7 +18232,7 @@ pub mod dalvik {
                             1,
                             Operand::Type(descriptor),
                         ));
-                        self.grow(1);
+                        self.puts(Kept::Number);
                     }
                 }
 
@@ -18262,7 +18352,9 @@ pub mod dalvik {
             // Every arm is reached with the stack as it is here, the same as
             // any other branch.
             for target in &targets {
-                self.depth_at.entry(*target).or_insert(self.depth);
+                self.kinds_at
+                    .entry(*target)
+                    .or_insert_with(|| self.kinds.clone());
             }
             self.switches.push(PendingSwitch {
                 instruction,
@@ -18279,10 +18371,156 @@ pub mod dalvik {
             Ok(())
         }
 
+        /// `dup`, `swap` and the rest of the stack shuffles.
+        ///
+        /// Every one of them says the same thing: take the top group of slots,
+        /// take the group under it, and put them back in another order, with
+        /// the top group written twice where the instruction duplicates. What
+        /// moves each value depends on what the value is, which is why the
+        /// kinds are carried along at all.
+        ///
+        /// Where anything is put back below where it started, the values go
+        /// through the scratch registers above the stack first. Writing them
+        /// straight back would overwrite a value that has not been read yet.
+        fn shuffle(&mut self, opcode: u8, start: usize) -> Result<(), Diagnostic> {
+            // How many slots the top group is, how many the one under it, and
+            // whether the top group is written twice.
+            let (above, below, twice) = match opcode {
+                0x59 => (1u16, 0u16, true), // dup
+                0x5a => (1, 1, true),       // dup_x1
+                0x5b => (1, 2, true),       // dup_x2
+                0x5c => (2, 0, true),       // dup2
+                0x5d => (2, 1, true),       // dup2_x1
+                0x5e => (2, 2, true),       // dup2_x2
+                _ => (1, 1, false),         // swap
+            };
+            let reach = above + below;
+            if self.depth < reach {
+                return Err(fail("ED001", "The stack went below empty.")
+                    .with_context(format!("Offset {start}, opcode {opcode:#04x}")));
+            }
+
+            let base = self.stack_base + self.depth - reach;
+            let split = |kinds: &[Kept], from: u16, slots: u16| -> Option<Vec<(Kept, u16)>> {
+                let mut out = Vec::new();
+                let mut at = from;
+                while at < from + slots {
+                    let held = kinds[usize::from(at)];
+                    if held == Kept::Half {
+                        // A long or a double reaching across the group this
+                        // takes apart: no form of the instruction does that.
+                        return None;
+                    }
+                    out.push((held, base + at));
+                    at += if held == Kept::Wide { 2 } else { 1 };
+                }
+                (at == from + slots).then_some(out)
+            };
+
+            let held: Vec<Kept> = self.kinds[self.kinds.len() - usize::from(reach)..].to_vec();
+            let (Some(under), Some(over)) = (split(&held, 0, below), split(&held, below, above))
+            else {
+                return Err(
+                    fail("ED016", "A stack shuffle cuts a long or a double in half.")
+                        .with_context(format!("Offset {start}, opcode {opcode:#04x}"))
+                        .with_suggestion(
+                            "No form of the instruction does that, so the method it came \
+                     from is not one the JVM would run either.",
+                        ),
+                );
+            };
+
+            // Nothing moves down, so nothing needs keeping first: the copy goes
+            // above what is already there.
+            if below == 0 && twice {
+                let mut to = base + above;
+                for (kept, from) in &over {
+                    self.push(move_register(kept.moved_by(), to, *from));
+                    to += if *kept == Kept::Wide { 2 } else { 1 };
+                }
+                for (kept, _) in &over {
+                    self.puts(*kept);
+                }
+                return Ok(());
+            }
+
+            let mut kept_at = self.scratch;
+            let mut keep = |out: &mut Vec<Insn>, values: &[(Kept, u16)]| -> Vec<(Kept, u16)> {
+                let mut done = Vec::new();
+                for (kept, from) in values {
+                    out.push(move_register(kept.moved_by(), kept_at, *from));
+                    done.push((*kept, kept_at));
+                    kept_at += if *kept == Kept::Wide { 2 } else { 1 };
+                }
+                done
+            };
+            let mut moves = Vec::new();
+            let under_kept = keep(&mut moves, &under);
+            let over_kept = keep(&mut moves, &over);
+
+            let mut order: Vec<(Kept, u16)> = Vec::new();
+            order.extend(over_kept.iter().copied());
+            order.extend(under_kept.iter().copied());
+            if twice {
+                order.extend(over_kept.iter().copied());
+            }
+
+            let mut to = base;
+            for (kept, from) in &order {
+                moves.push(move_register(kept.moved_by(), to, *from));
+                to += if *kept == Kept::Wide { 2 } else { 1 };
+            }
+            for one in moves {
+                self.push(one);
+            }
+
+            self.shrink(reach)?;
+            for (kept, _) in &order {
+                self.puts(*kept);
+            }
+            Ok(())
+        }
+
+        /// `iinc`: a local stepped where it stands.
+        ///
+        /// The short form of the Dalvik instruction carries the step in one
+        /// byte and names the local in one. A step that does not fit, or a
+        /// local numbered past what a byte holds, is done the long way: the
+        /// step into a register of its own, and then an add.
+        fn increment(&mut self, local: u16, by: i32, start: usize) -> Result<(), Diagnostic> {
+            if local < 256 && i32::from(by as i8) == by {
+                // add-int/lit8 vAA, vBB, #+CC
+                self.push(Insn::raw(vec![
+                    0x00d8 | (local << 8),
+                    local | ((by as u8 as u16) << 8),
+                ]));
+                return Ok(());
+            }
+            let step = self.scratch;
+            if local > 255 || step > 255 {
+                return Err(fail(
+                    "ED017",
+                    "A local is numbered past what the instruction that steps it can name.",
+                )
+                .with_context(format!("Offset {start}, local {local}")));
+            }
+            // const/16 vAA, #+BBBB, and then add-int vAA, vBB, vCC
+            self.push(Insn::raw(vec![0x0013 | (step << 8), by as i16 as u16]));
+            self.push(Insn::raw(vec![0x0090 | (local << 8), local | (step << 8)]));
+            Ok(())
+        }
+
         fn load_local(&mut self, local: u16, kind: u8, width: u16) {
             let to = self.stack_base + self.depth;
             self.push(move_register(kind, to, local));
-            self.grow(width);
+            self.puts(match kind {
+                0x07 => Kept::Reference,
+                0x04 => Kept::Wide,
+                _ => {
+                    debug_assert_eq!(width, 1);
+                    Kept::Number
+                }
+            });
         }
 
         fn store_local(&mut self, local: u16, kind: u8, width: u16) -> Result<(), Diagnostic> {
@@ -18301,7 +18539,7 @@ pub mod dalvik {
                 opcode | (to << 8),
                 (left & 0xff) | ((right & 0xff) << 8),
             ]));
-            self.grow(1);
+            self.puts(Kept::Number);
             Ok(())
         }
 
@@ -18428,7 +18666,7 @@ pub mod dalvik {
                 1,
                 Operand::Type(descriptor.to_string()),
             ));
-            self.grow(1);
+            self.puts(Kept::Reference);
             Ok(())
         }
 
@@ -18446,7 +18684,7 @@ pub mod dalvik {
                     (bits >> 32) as u16,
                     (bits >> 48) as u16,
                 ]));
-                self.grow(2);
+                self.puts(Kept::Wide);
                 return;
             }
             self.push(Insn::raw(vec![
@@ -18454,7 +18692,7 @@ pub mod dalvik {
                 bits as u16,
                 (bits >> 16) as u16,
             ]));
-            self.grow(1);
+            self.puts(Kept::Number);
         }
 
         /// A branch, recorded for `finish` to fill in.
@@ -18465,7 +18703,9 @@ pub mod dalvik {
             // so is enough -- and it is the only way to know for an
             // instruction that follows a `throw`, where walking the bytes in
             // order says nothing at all.
-            self.depth_at.entry(target).or_insert(self.depth);
+            self.kinds_at
+                .entry(target)
+                .or_insert_with(|| self.kinds.clone());
             let from = units(&self.code);
             let mut first = opcode;
             match registers.len() {
@@ -18484,7 +18724,7 @@ pub mod dalvik {
 
         /// An invoke, in the form that names up to five registers.
         fn invoke(&mut self, opcode: u16, reference: MethodRef, argument_words: u16) {
-            let first = self.slot(argument_words) + 1;
+            let first = self.slot(argument_words);
             let mut registers = Vec::new();
             for step in 0..argument_words {
                 registers.push(first + step);
@@ -18592,10 +18832,24 @@ pub mod dalvik {
         };
 
         let mut translator = Translator::new(class, code);
-        let total = code.max_locals + code.max_stack + inputs;
+        // A shuffle that puts a value back below where it started needs
+        // somewhere to keep the values while it works, and that is above the
+        // stack. Only the shuffles that reach downwards need it, so a method
+        // without one of them is laid out as it always was.
+        let room = if code.max_locals > 255
+            || code
+                .bytes
+                .iter()
+                .any(|byte| matches!(byte, 0x5a | 0x5b | 0x5d | 0x5e | 0x5f | 0xc4))
+        {
+            SHUFFLE_ROOM
+        } else {
+            0
+        };
+        let total = code.max_locals + code.max_stack + room + inputs;
 
         // The parameters arrive at the top and belong at the bottom.
-        let mut at = code.max_locals + code.max_stack;
+        let mut at = code.max_locals + code.max_stack + room;
         let mut local = 0u16;
         if !is_static {
             translator.push(move_register(0x07, local, at));
@@ -28938,6 +29192,935 @@ mod tests {
 
         std::fs::remove_dir_all(&directory).ok();
         eprintln!("bag conformance: styles, arrays and plurals agree with aapt2 value for value");
+    }
+
+    /// What a register holds, as far as the runtime's own check is concerned.
+    ///
+    /// Dalvik is typed: a register holding a reference cannot be read by `move`
+    /// and one holding a number cannot be read by `move-object`. Getting that
+    /// wrong does not merely misbehave -- the verifier refuses the class as it
+    /// is loaded, and nothing in the file runs at all. None of it is visible in
+    /// a package that merely builds, which is why it is read here.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Register {
+        /// Never written on any road to here.
+        Nothing,
+        /// Written as two different things on two different roads.
+        Disagreed,
+        /// A literal zero, which is a number and a null both.
+        Zero,
+        Number,
+        Reference,
+        WideLow,
+        WideHigh,
+    }
+
+    impl Register {
+        fn merged(self, other: Register) -> Register {
+            match (self, other) {
+                (one, two) if one == two => one,
+                (Register::Nothing, held) | (held, Register::Nothing) => held,
+                (Register::Zero, Register::Number) | (Register::Number, Register::Zero) => {
+                    Register::Number
+                }
+                (Register::Zero, Register::Reference) | (Register::Reference, Register::Zero) => {
+                    Register::Reference
+                }
+                _ => Register::Disagreed,
+            }
+        }
+
+        fn a_number(self) -> bool {
+            matches!(self, Register::Number | Register::Zero)
+        }
+
+        fn a_reference(self) -> bool {
+            matches!(self, Register::Reference | Register::Zero)
+        }
+
+        fn of(descriptor: &str) -> Register {
+            match descriptor.chars().next() {
+                Some('J') | Some('D') => Register::WideLow,
+                Some('L') | Some('[') => Register::Reference,
+                _ => Register::Number,
+            }
+        }
+    }
+
+    /// Every register of one method, at one point in it.
+    #[derive(Clone, PartialEq, Eq)]
+    struct Held {
+        registers: Vec<Register>,
+        /// What the last call left behind, which `move-result` picks up.
+        result: Register,
+    }
+
+    impl Held {
+        fn get(&self, at: u16) -> Register {
+            self.registers
+                .get(usize::from(at))
+                .copied()
+                .unwrap_or(Register::Nothing)
+        }
+
+        fn set(&mut self, at: u16, what: Register) {
+            let at = usize::from(at);
+            if at >= self.registers.len() {
+                return;
+            }
+            // Writing over half of a pair leaves the other half meaning nothing.
+            if at > 0 && self.registers[at - 1] == Register::WideLow {
+                self.registers[at - 1] = Register::Disagreed;
+            }
+            if at + 1 < self.registers.len() && self.registers[at + 1] == Register::WideHigh {
+                self.registers[at + 1] = Register::Disagreed;
+            }
+            self.registers[at] = what;
+        }
+
+        fn set_wide(&mut self, at: u16) {
+            self.set(at, Register::Number);
+            self.set(at + 1, Register::Number);
+            let at = usize::from(at);
+            if at + 1 < self.registers.len() {
+                self.registers[at] = Register::WideLow;
+                self.registers[at + 1] = Register::WideHigh;
+            }
+        }
+
+        fn a_pair(&self, at: u16) -> bool {
+            self.get(at) == Register::WideLow && self.get(at + 1) == Register::WideHigh
+        }
+
+        fn merged(&self, other: &Held) -> Held {
+            Held {
+                registers: self
+                    .registers
+                    .iter()
+                    .zip(other.registers.iter())
+                    .map(|(one, two)| one.merged(*two))
+                    .collect(),
+                result: self.result.merged(other.result),
+            }
+        }
+    }
+
+    /// Where an instruction can go on to, other than the next one.
+    struct Goes {
+        targets: Vec<usize>,
+        carries_on: bool,
+    }
+
+    /// Reads every method of a translated class the way the runtime's verifier
+    /// reads it, and says what it would refuse.
+    ///
+    /// This is not the whole of that check: it says nothing about which class a
+    /// reference is of, or whether a field exists. What it does say is what the
+    /// translator can get wrong on its own -- a register read as the wrong kind
+    /// of thing, a call handed the wrong registers, a long read as one word.
+    fn what_the_runtime_would_refuse(class: &crate::dexwrite::Class) -> Vec<String> {
+        let mut found = Vec::new();
+        for method in class
+            .direct_methods
+            .iter()
+            .chain(class.virtual_methods.iter())
+        {
+            if method.instructions.is_empty() {
+                continue;
+            }
+            for one in read_registers(method) {
+                found.push(format!(
+                    "{}{}: {one}",
+                    class.descriptor, method.reference.name
+                ));
+            }
+        }
+        found
+    }
+
+    fn read_registers(method: &crate::dexwrite::Method) -> Vec<String> {
+        // Where each instruction begins, in code units, so a branch can be
+        // followed to the instruction it lands on.
+        let mut running = 0usize;
+        let mut starts = Vec::with_capacity(method.instructions.len());
+        for one in &method.instructions {
+            starts.push(running);
+            running += one.width();
+        }
+        let index_of = |unit: usize| starts.iter().position(|held| *held == unit);
+
+        let mut entry = Held {
+            registers: vec![Register::Nothing; usize::from(method.registers)],
+            result: Register::Nothing,
+        };
+        // The parameters arrive in the registers at the top.
+        let mut cursor = method.registers.saturating_sub(method.inputs);
+        if method.access_flags & 0x0008 == 0 {
+            entry.set(cursor, Register::Reference);
+            cursor += 1;
+        }
+        for parameter in &method.reference.parameters {
+            match Register::of(parameter) {
+                Register::WideLow => {
+                    entry.set_wide(cursor);
+                    cursor += 2;
+                }
+                other => {
+                    entry.set(cursor, other);
+                    cursor += 1;
+                }
+            }
+        }
+
+        let mut coming: Vec<Option<Held>> = vec![None; method.instructions.len()];
+        coming[0] = Some(entry);
+        let mut queue: Vec<usize> = vec![0];
+        let mut said: Vec<String> = Vec::new();
+        let mut rounds = 0usize;
+
+        while let Some(index) = queue.pop() {
+            rounds += 1;
+            if rounds > method.instructions.len() * 64 + 1024 {
+                said.push("the registers never settled".to_string());
+                break;
+            }
+            let Some(before) = coming[index].clone() else {
+                continue;
+            };
+            let mut held = before;
+            let mut complaints = Vec::new();
+            let goes = step(
+                &method.instructions[index],
+                &mut held,
+                starts[index],
+                &mut complaints,
+            );
+            for one in complaints {
+                let at = starts[index];
+                let told = format!("{at:04x}: {one}");
+                if !said.contains(&told) {
+                    said.push(told);
+                }
+            }
+
+            let arrive = |unit: usize, coming: &mut Vec<Option<Held>>, queue: &mut Vec<usize>| {
+                let Some(target) = index_of(unit) else {
+                    return;
+                };
+                let merged = match &coming[target] {
+                    Some(known) => known.merged(&held),
+                    None => held.clone(),
+                };
+                if coming[target].as_ref() != Some(&merged) {
+                    coming[target] = Some(merged);
+                    queue.push(target);
+                }
+            };
+            for one in &goes.targets {
+                arrive(*one, &mut coming, &mut queue);
+            }
+            // Where a switch goes is written in a payload laid down after the
+            // code, so the roads out of it are read from there.
+            let unit = method.instructions[index].units[0] & 0xff;
+            if unit == 0x2b || unit == 0x2c {
+                for one in switch_targets(&method.instructions, &starts, index) {
+                    arrive(one, &mut coming, &mut queue);
+                }
+            }
+            if goes.carries_on {
+                arrive(
+                    starts[index] + method.instructions[index].width(),
+                    &mut coming,
+                    &mut queue,
+                );
+            }
+            // Anything inside a `try` can go to the handler from anywhere in it.
+            for one in &method.tries {
+                let inside = starts[index] >= one.start as usize
+                    && starts[index] < one.start as usize + usize::from(one.units);
+                if !inside {
+                    continue;
+                }
+                for (_, handler) in &one.catches {
+                    arrive(*handler as usize, &mut coming, &mut queue);
+                }
+            }
+        }
+        said.sort();
+        said
+    }
+
+    /// One instruction, read the way the runtime reads it.
+    fn step(
+        one: &crate::dexwrite::Insn,
+        held: &mut Held,
+        at: usize,
+        said: &mut Vec<String>,
+    ) -> Goes {
+        use crate::dexwrite::Operand;
+        let unit = one.units[0];
+        let opcode = (unit & 0xff) as u8;
+        let aa = unit >> 8;
+        let a4 = (unit >> 8) & 0xf;
+        let b4 = (unit >> 12) & 0xf;
+        let second = one.units.get(1).copied().unwrap_or(0);
+        let mut goes = Goes {
+            targets: Vec::new(),
+            carries_on: true,
+        };
+
+        let reads = |held: &Held, register: u16, wanted: Register, said: &mut Vec<String>| {
+            let found = held.get(register);
+            let right = match wanted {
+                Register::Number => found.a_number(),
+                Register::Reference => found.a_reference(),
+                Register::WideLow => held.a_pair(register),
+                _ => true,
+            };
+            if !right {
+                said.push(format!(
+                    "v{register} holds {found:?} where {wanted:?} is wanted"
+                ));
+            }
+        };
+
+        match opcode {
+            // move, move/from16, move-object, move-object/from16, and the wide
+            // pair of each. Which one is used is the whole point.
+            0x01 | 0x04 | 0x07 => {
+                let (to, from) = (a4, b4);
+                let wanted = match opcode {
+                    0x01 => Register::Number,
+                    0x04 => Register::WideLow,
+                    _ => Register::Reference,
+                };
+                reads(held, from, wanted, said);
+                let carried = held.get(from);
+                if opcode == 0x04 {
+                    held.set_wide(to);
+                } else {
+                    held.set(to, carried);
+                }
+            }
+            0x02 | 0x05 | 0x08 => {
+                let (to, from) = (aa, second);
+                let wanted = match opcode {
+                    0x02 => Register::Number,
+                    0x05 => Register::WideLow,
+                    _ => Register::Reference,
+                };
+                reads(held, from, wanted, said);
+                let carried = held.get(from);
+                if opcode == 0x05 {
+                    held.set_wide(to);
+                } else {
+                    held.set(to, carried);
+                }
+            }
+            0x0a | 0x0c => {
+                let wanted = if opcode == 0x0a {
+                    Register::Number
+                } else {
+                    Register::Reference
+                };
+                if held.result != wanted && !(wanted == Register::Number && held.result.a_number())
+                {
+                    said.push(format!(
+                        "a call left {:?} behind where {wanted:?} is picked up",
+                        held.result
+                    ));
+                }
+                held.set(aa, held.result);
+                held.result = Register::Nothing;
+            }
+            0x0b => {
+                if held.result != Register::WideLow {
+                    said.push(format!(
+                        "a call left {:?} behind where a long or a double is picked up",
+                        held.result
+                    ));
+                }
+                held.set_wide(aa);
+                held.result = Register::Nothing;
+            }
+            0x0d => held.set(aa, Register::Reference),
+            0x0e => goes.carries_on = false,
+            0x0f => {
+                reads(held, aa, Register::Number, said);
+                goes.carries_on = false;
+            }
+            0x10 => {
+                reads(held, aa, Register::WideLow, said);
+                goes.carries_on = false;
+            }
+            0x11 => {
+                reads(held, aa, Register::Reference, said);
+                goes.carries_on = false;
+            }
+            // The constants.
+            0x12 => {
+                let value = ((unit >> 12) as i16) << 12 >> 12;
+                held.set(
+                    a4,
+                    if value == 0 {
+                        Register::Zero
+                    } else {
+                        Register::Number
+                    },
+                );
+            }
+            0x13 => held.set(
+                aa,
+                if second == 0 {
+                    Register::Zero
+                } else {
+                    Register::Number
+                },
+            ),
+            0x14 => held.set(
+                aa,
+                if second == 0 && one.units.get(2) == Some(&0) {
+                    Register::Zero
+                } else {
+                    Register::Number
+                },
+            ),
+            0x15 => held.set(aa, Register::Number),
+            0x16..=0x19 => held.set_wide(aa),
+            0x1a..=0x1c => held.set(aa, Register::Reference),
+            0x1d | 0x1e => reads(held, aa, Register::Reference, said),
+            0x1f => reads(held, aa, Register::Reference, said),
+            0x20 => {
+                reads(held, b4, Register::Reference, said);
+                held.set(a4, Register::Number);
+            }
+            0x21 => {
+                reads(held, b4, Register::Reference, said);
+                held.set(a4, Register::Number);
+            }
+            0x22 => held.set(aa, Register::Reference),
+            0x23 => {
+                reads(held, b4, Register::Number, said);
+                held.set(a4, Register::Reference);
+            }
+            0x24 | 0x25 => held.result = Register::Reference,
+            0x26 => reads(held, aa, Register::Reference, said),
+            0x27 => {
+                reads(held, aa, Register::Reference, said);
+                goes.carries_on = false;
+            }
+            0x28 => {
+                let offset = (aa as u8) as i8;
+                goes.targets.push((at as i64 + i64::from(offset)) as usize);
+                goes.carries_on = false;
+            }
+            0x29 => {
+                goes.targets
+                    .push((at as i64 + i64::from(second as i16)) as usize);
+                goes.carries_on = false;
+            }
+            0x2a => {
+                let wide = i32::from(second) | (i32::from(one.units[2]) << 16);
+                goes.targets.push((at as i64 + i64::from(wide)) as usize);
+                goes.carries_on = false;
+            }
+            0x2b | 0x2c => {
+                reads(held, aa, Register::Number, said);
+                // Where a switch goes is written in its payload, which this
+                // does not walk; every road out of it is reached from the
+                // payload's own landing places instead.
+            }
+            0x2d..=0x31 => {
+                let (left, right) = ((second & 0xff), (second >> 8));
+                let wide = matches!(opcode, 0x2f..=0x31);
+                let wanted = if wide {
+                    Register::WideLow
+                } else {
+                    Register::Number
+                };
+                reads(held, left, wanted, said);
+                reads(held, right, wanted, said);
+                held.set(aa, Register::Number);
+            }
+            0x32..=0x37 => {
+                // if-eq and if-ne compare two references for identity or two
+                // numbers for equality, and never one of each. The four that
+                // order their operands take numbers only.
+                let left = held.get(a4);
+                let right = held.get(b4);
+                if opcode > 0x33 {
+                    reads(held, a4, Register::Number, said);
+                    reads(held, b4, Register::Number, said);
+                } else if (left == Register::Reference && right == Register::Number)
+                    || (left == Register::Number && right == Register::Reference)
+                {
+                    said.push(format!("v{a4} holds {left:?} and v{b4} holds {right:?}"));
+                }
+                goes.targets
+                    .push((at as i64 + i64::from(second as i16)) as usize);
+            }
+            0x38..=0x3d => {
+                let found = held.get(aa);
+                if !found.a_number() && !found.a_reference() {
+                    said.push(format!("v{aa} holds {found:?} where a value is compared"));
+                }
+                goes.targets
+                    .push((at as i64 + i64::from(second as i16)) as usize);
+            }
+            // Arrays.
+            0x44..=0x4a => {
+                let (array, index) = ((second & 0xff), (second >> 8));
+                reads(held, array, Register::Reference, said);
+                reads(held, index, Register::Number, said);
+                match opcode {
+                    0x45 => held.set_wide(aa),
+                    0x46 => held.set(aa, Register::Reference),
+                    _ => held.set(aa, Register::Number),
+                }
+            }
+            0x4b..=0x51 => {
+                let (array, index) = ((second & 0xff), (second >> 8));
+                reads(held, array, Register::Reference, said);
+                reads(held, index, Register::Number, said);
+                let wanted = match opcode {
+                    0x4c => Register::WideLow,
+                    0x4d => Register::Reference,
+                    _ => Register::Number,
+                };
+                reads(held, aa, wanted, said);
+            }
+            // Fields.
+            0x52..=0x58 => {
+                let Operand::Field(field) = &one.operand else {
+                    return goes;
+                };
+                reads(held, b4, Register::Reference, said);
+                match Register::of(&field.descriptor) {
+                    Register::WideLow => held.set_wide(a4),
+                    other => held.set(a4, other),
+                }
+            }
+            0x59..=0x5f => {
+                let Operand::Field(field) = &one.operand else {
+                    return goes;
+                };
+                reads(held, b4, Register::Reference, said);
+                reads(held, a4, Register::of(&field.descriptor), said);
+            }
+            0x60..=0x66 => {
+                let Operand::Field(field) = &one.operand else {
+                    return goes;
+                };
+                match Register::of(&field.descriptor) {
+                    Register::WideLow => held.set_wide(aa),
+                    other => held.set(aa, other),
+                }
+            }
+            0x67..=0x6d => {
+                let Operand::Field(field) = &one.operand else {
+                    return goes;
+                };
+                reads(held, aa, Register::of(&field.descriptor), said);
+            }
+            // Calls.
+            0x6e..=0x72 => {
+                let Operand::Method(call) = &one.operand else {
+                    return goes;
+                };
+                let count = unit >> 12;
+                let third = one.units.get(2).copied().unwrap_or(0);
+                let mut named = Vec::new();
+                for step in 0..count.min(4) {
+                    named.push((third >> (step * 4)) & 0xf);
+                }
+                if count == 5 {
+                    named.push((unit >> 8) & 0xf);
+                }
+
+                let mut wanted: Vec<Register> = Vec::new();
+                if opcode != 0x71 {
+                    wanted.push(Register::Reference);
+                }
+                for parameter in &call.parameters {
+                    match Register::of(parameter) {
+                        Register::WideLow => {
+                            wanted.push(Register::WideLow);
+                            wanted.push(Register::WideHigh);
+                        }
+                        other => wanted.push(other),
+                    }
+                }
+                if wanted.len() != named.len() {
+                    said.push(format!(
+                        "{} is handed {} registers and takes {}",
+                        call.name,
+                        named.len(),
+                        wanted.len()
+                    ));
+                } else {
+                    for (register, want) in named.iter().zip(wanted.iter()) {
+                        if *want == Register::WideHigh {
+                            continue;
+                        }
+                        reads(held, *register, *want, said);
+                    }
+                }
+                held.result = if call.return_type == "V" {
+                    Register::Nothing
+                } else {
+                    Register::of(&call.return_type)
+                };
+            }
+            // The one-operand arithmetic, then the two-operand kind.
+            0x7b..=0x8f => {
+                let (from_wide, to_wide) = shape_of(opcode);
+                reads(
+                    held,
+                    b4,
+                    if from_wide {
+                        Register::WideLow
+                    } else {
+                        Register::Number
+                    },
+                    said,
+                );
+                if to_wide {
+                    held.set_wide(a4);
+                } else {
+                    held.set(a4, Register::Number);
+                }
+            }
+            0x90..=0xaf => {
+                let wide = wide_arithmetic(opcode);
+                let (left, right) = ((second & 0xff), (second >> 8));
+                let shifty = matches!(opcode, 0xa3..=0xa5);
+                reads(
+                    held,
+                    left,
+                    if wide {
+                        Register::WideLow
+                    } else {
+                        Register::Number
+                    },
+                    said,
+                );
+                reads(
+                    held,
+                    right,
+                    if wide && !shifty {
+                        Register::WideLow
+                    } else {
+                        Register::Number
+                    },
+                    said,
+                );
+                if wide {
+                    held.set_wide(aa);
+                } else {
+                    held.set(aa, Register::Number);
+                }
+            }
+            0xd0..=0xd7 => {
+                reads(held, b4, Register::Number, said);
+                held.set(a4, Register::Number);
+            }
+            0xd8..=0xe2 => {
+                reads(held, second & 0xff, Register::Number, said);
+                held.set(aa, Register::Number);
+            }
+            _ => {}
+        }
+        goes
+    }
+
+    /// Whether a one-operand instruction reads and writes a pair.
+    fn shape_of(opcode: u8) -> (bool, bool) {
+        match opcode {
+            0x7b | 0x7c | 0x7f => (false, false),
+            0x7d | 0x7e | 0x80 => (true, true),
+            0x81 => (false, true),  // int-to-long
+            0x82 => (false, false), // int-to-float
+            0x83 => (false, true),  // int-to-double
+            0x84 => (true, false),  // long-to-int
+            0x85 => (true, false),  // long-to-float
+            0x86 => (true, true),   // long-to-double
+            0x87 => (false, false), // float-to-int
+            0x88 => (false, true),  // float-to-long
+            0x89 => (false, true),  // float-to-double
+            0x8a => (true, false),  // double-to-int
+            0x8b => (true, true),   // double-to-long
+            0x8c => (true, false),  // double-to-float
+            _ => (false, false),    // int-to-byte, -char, -short
+        }
+    }
+
+    /// Whether a two-operand instruction works on pairs.
+    fn wide_arithmetic(opcode: u8) -> bool {
+        matches!(opcode, 0x9b..=0xa5 | 0xab..=0xaf)
+    }
+
+    /// Where one switch instruction can go, read out of the payload it points
+    /// at. The payload holds one thirty-two bit offset per case, counted from
+    /// the switch instruction itself.
+    fn switch_targets(
+        instructions: &[crate::dexwrite::Insn],
+        starts: &[usize],
+        index: usize,
+    ) -> Vec<usize> {
+        let one = &instructions[index];
+        if one.units.len() < 3 {
+            return Vec::new();
+        }
+        let away = (u32::from(one.units[1]) | (u32::from(one.units[2]) << 16)) as i32;
+        let payload_at = (starts[index] as i64 + i64::from(away)) as usize;
+        let Some(payload) = starts
+            .iter()
+            .position(|held| *held == payload_at)
+            .map(|at| &instructions[at])
+        else {
+            return Vec::new();
+        };
+        if payload.units.len() < 2 {
+            return Vec::new();
+        }
+        let packed = payload.units[0] == 0x0100;
+        let count = usize::from(payload.units[1]);
+        let first = if packed { 4 } else { 2 + count * 2 };
+        let mut out = Vec::new();
+        for step in 0..count {
+            let low = payload.units.get(first + step * 2).copied().unwrap_or(0);
+            let high = payload
+                .units
+                .get(first + step * 2 + 1)
+                .copied()
+                .unwrap_or(0);
+            let offset = (u32::from(low) | (u32::from(high) << 16)) as i32;
+            out.push((starts[index] as i64 + i64::from(offset)) as usize);
+        }
+        out
+    }
+
+    const A_PROGRAM_THAT_USES_THE_LOT: &str = r####"
+package com.my.app;
+
+public class Everything {
+    private int count;
+    private static String label = "omni";
+    private long[] held;
+
+    public Everything(int start) {
+        count = start;
+        held = new long[4];
+    }
+
+    public String describe(Object what) {
+        StringBuilder out = new StringBuilder();
+        out.append(label).append(':').append(count);
+        if (what instanceof String) {
+            String text = (String) what;
+            out.append(' ').append(text.length());
+        } else if (what != null) {
+            out.append(' ').append(what.hashCode());
+        }
+        return out.toString();
+    }
+
+    public long total() {
+        long sum = 0;
+        for (int i = 0; i < held.length; i++) {
+            sum += held[i];
+        }
+        return sum;
+    }
+
+    public double average(double[] values) {
+        double sum = 0.0;
+        for (double one : values) {
+            sum = sum + one;
+        }
+        return values.length == 0 ? 0.0 : sum / values.length;
+    }
+
+    public String pick(int which) {
+        switch (which) {
+            case 0:
+                return "none";
+            case 1:
+            case 2:
+                return "some";
+            case 17:
+                return label;
+            default:
+                return String.valueOf(which);
+        }
+    }
+
+    public int careful(String text) {
+        try {
+            return Integer.parseInt(text);
+        } catch (NumberFormatException why) {
+            return -1;
+        } finally {
+            count = count + 1;
+        }
+    }
+
+    public Object[] pack(int a, long b, Object c) {
+        Object[] out = new Object[3];
+        out[0] = Integer.valueOf(a);
+        out[1] = Long.valueOf(b);
+        out[2] = c;
+        held[0] = b;
+        return out;
+    }
+
+    public boolean same(Object one, Object two) {
+        return one == two || (one != null && one.equals(two));
+    }
+
+    public int shifted(int value, long wide) {
+        return (int) ((wide << value) >>> 3) ^ (value & 0xff);
+    }
+}
+"####;
+
+    const A_PROGRAM_OF_THE_SUGARED_KIND: &str = r####"
+package com.my.app;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class Sugared {
+    public interface Names {
+        String of(int which);
+
+        default String twice(int which) {
+            return of(which) + of(which);
+        }
+    }
+
+    public enum Colour {
+        RED(0xff0000),
+        GREEN(0x00ff00),
+        BLUE(0x0000ff);
+
+        private final int packed;
+
+        Colour(int packed) {
+            this.packed = packed;
+        }
+
+        public int packed() {
+            return packed;
+        }
+    }
+
+    private final List<String> kept = new ArrayList<String>();
+
+    public Names counting(final String prefix) {
+        return new Names() {
+            public String of(int which) {
+                return prefix + which;
+            }
+        };
+    }
+
+    public Names shorter(String prefix) {
+        return which -> prefix + which;
+    }
+
+    public String all(String... parts) {
+        StringBuilder out = new StringBuilder();
+        for (String one : parts) {
+            out.append(one);
+            kept.add(one);
+        }
+        for (Colour colour : Colour.values()) {
+            out.append(colour.name()).append(colour.packed());
+        }
+        synchronized (kept) {
+            out.append(kept.size());
+        }
+        return out.toString();
+    }
+
+    public <T extends Comparable<T>> T larger(T one, T two) {
+        return one.compareTo(two) >= 0 ? one : two;
+    }
+
+    class Inner {
+        int seen() {
+            return kept.size();
+        }
+    }
+
+    public int inner() {
+        return new Inner().seen();
+    }
+}
+"####;
+
+    /// Every class this build translates is one the runtime would load.
+    ///
+    /// A dex file is typed, and the check the runtime does as it loads a class
+    /// is not a formality: a register read as the wrong kind of thing makes the
+    /// whole class refused, and a package holding one builds, installs and then
+    /// fails the moment it is used. Nothing in a build says so, so it is said
+    /// here -- every method that comes out of the translator is read the way
+    /// the runtime reads it.
+    #[test]
+    fn every_class_this_translates_is_one_the_runtime_would_load() {
+        let classpath = crate::compilers::java::Classpath::new();
+        let mut refused = Vec::new();
+        let mut classes = 0;
+        for source in [A_PROGRAM_THAT_USES_THE_LOT, A_PROGRAM_OF_THE_SUGARED_KIND] {
+            let produced = crate::compilers::java::compile(source.trim_start(), &classpath)
+                .expect("the program compiles");
+            assert!(!produced.is_empty(), "something came out of it");
+            classes += produced.len();
+            for (name, bytes) in &produced {
+                let class = crate::jvm::read(bytes)
+                    .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
+                let translated = crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|error| panic!("{name} does not translate: {error:?}"));
+                refused.extend(what_the_runtime_would_refuse(&translated));
+            }
+        }
+        assert!(classes >= 7, "only {classes} classes were read");
+        assert!(
+            refused.is_empty(),
+            "the runtime would refuse this:\n  {}",
+            refused.join("\n  ")
+        );
+
+        // And the same reading, on a class where a reference is moved as
+        // though it were a number, says so. A check that cannot fail is not
+        // a check.
+        let mut wrong =
+            crate::dexwrite::Class::named("Lcom/my/app/Wrong;", "Ljava/lang/Object;", 1);
+        wrong.direct_methods.push(crate::dexwrite::Method {
+            reference: crate::dexwrite::MethodRef {
+                class: "Lcom/my/app/Wrong;".to_string(),
+                name: "of".to_string(),
+                return_type: "Ljava/lang/Object;".to_string(),
+                parameters: vec!["Ljava/lang/Object;".to_string()],
+            },
+            access_flags: 0x0008,
+            registers: 2,
+            inputs: 1,
+            outputs: 0,
+            // move v0, v1 -- where v1 holds a reference.
+            instructions: vec![
+                crate::dexwrite::Insn::raw(vec![0x0001 | (1 << 12)]),
+                crate::dexwrite::Insn::raw(vec![0x0011]),
+            ],
+            tries: Vec::new(),
+        });
+        let said = what_the_runtime_would_refuse(&wrong);
+        assert!(
+            said.iter().any(|one| one.contains("Reference")),
+            "a reference moved as a number is not caught: {said:?}"
+        );
     }
 
     #[test]
