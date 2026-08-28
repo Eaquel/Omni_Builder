@@ -26432,7 +26432,9 @@ public final class R {{
         let mut sources = Vec::new();
         gather_java(&folder, &mut sources);
         if sources.is_empty() {
-            return Ok(Vec::new());
+            // A project may be nothing but what it depends on, and that still
+            // has to be packaged.
+            return library_classes(root, &[]);
         }
         // In a settled order, so that the same project comes to the same
         // package whatever the filesystem hands back first.
@@ -26462,6 +26464,118 @@ public final class R {{
                 crate::dalvik::translate_class(&class)
                     .map_err(|error| error.with_context(format!("Class: {name}")))?,
             );
+        }
+        let already: Vec<String> = out.iter().map(|one| one.descriptor.clone()).collect();
+        out.extend(library_classes(root, &already)?);
+        Ok(out)
+    }
+
+    /// The jars a project brings with it that have to go into the package.
+    ///
+    /// The platform's own jar is what the device already has: compiling
+    /// against it is right and putting it in the package is not. Everything
+    /// else in `Libraries` is code the application is made of, and a package
+    /// without it installs and then cannot find its own classes.
+    pub fn packaged_jars(root: &str) -> Vec<std::path::PathBuf> {
+        let folder = std::path::Path::new(root).join(crate::scaffold::LIBRARY_FOLDER);
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            return Vec::new();
+        };
+        let mut found: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|held| held == "jar" || held == "zip")
+                    && path.file_name().is_some_and(|held| held != "android.jar")
+            })
+            .collect();
+        // In a settled order, so that two jars holding the same class come out
+        // the same way every time.
+        found.sort();
+        found
+    }
+
+    /// Everything in those jars, translated, less whatever is already there.
+    ///
+    /// A class the project declares itself wins over one a jar brought, and
+    /// the first jar to declare a class wins over the next. Writing both would
+    /// produce a package the tools refuse, and choosing quietly by whichever
+    /// came last would make the build depend on the order of a directory.
+    pub fn library_classes(
+        root: &str,
+        already: &[String],
+    ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
+        let mut out: Vec<crate::dexwrite::Class> = Vec::new();
+        let mut held: Vec<String> = already.to_vec();
+        for path in packaged_jars(root) {
+            let bytes = std::fs::read(&path).map_err(|why| {
+                fail("EB045", "A dependency could not be read.")
+                    .with_context(format!("Path: {}", path.display()))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            let mut sink = crate::diag::Sink::new();
+            let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+                return Err(fail("EB046", "A dependency is not an archive this reads.")
+                    .with_context(format!("Path: {}", path.display()))
+                    .with_suggestion("A dependency is a jar, which is a zip of class files."));
+            };
+
+            let mut names: Vec<&crate::archive::Entry> = archive
+                .entries()
+                .iter()
+                .filter(|entry| {
+                    !entry.is_directory()
+                        && entry.name.ends_with(".class")
+                        // What is under META-INF describes the jar rather than
+                        // being part of it, and the copies kept there for
+                        // newer releases would collide with the originals.
+                        && !entry.name.starts_with("META-INF/")
+                        && !entry.name.ends_with("module-info.class")
+                })
+                .collect();
+            names.sort_by(|left, right| left.name.cmp(&right.name));
+
+            for entry in names {
+                let from = entry.data_offset as usize;
+                let to = from.saturating_add(entry.compressed_size as usize);
+                let Some(raw) = bytes.get(from..to) else {
+                    continue;
+                };
+                let content = match entry.compression {
+                    crate::archive::Compression::Stored => raw.to_vec(),
+                    crate::archive::Compression::Deflate => {
+                        crate::inflate::raw(raw).map_err(|error| {
+                            error
+                                .with_context(format!("In: {}", path.display()))
+                                .with_context(format!("Entry: {}", entry.name))
+                        })?
+                    }
+                    crate::archive::Compression::Other(how) => {
+                        return Err(fail(
+                            "EB047",
+                            "A dependency holds a class squeezed in a way this does not read.",
+                        )
+                        .with_context(format!("In: {}", path.display()))
+                        .with_context(format!("Entry: {}, method {how}", entry.name)))
+                    }
+                };
+                let class = crate::jvm::read(&content).map_err(|error| {
+                    error
+                        .with_context(format!("In: {}", path.display()))
+                        .with_context(format!("Entry: {}", entry.name))
+                })?;
+                let descriptor = format!("L{};", class.name.replace('.', "/"));
+                if held.contains(&descriptor) {
+                    continue;
+                }
+                held.push(descriptor);
+                out.extend(crate::dalvik::translate_class(&class).map_err(|error| {
+                    error
+                        .with_context(format!("In: {}", path.display()))
+                        .with_context(format!("Class: {}", class.name))
+                })?);
+            }
         }
         Ok(out)
     }
@@ -31811,6 +31925,172 @@ public class Written {
                 into.push(path);
             }
         }
+    }
+
+    /// A jar a project depends on ends up in the package.
+    ///
+    /// Compiling against a dependency and shipping it are two different
+    /// things, and only the first was happening: a project that used a library
+    /// built, installed, and then could not find a class it was made of. What
+    /// the platform provides stays out, because the device already has it;
+    /// everything else in `Libraries` goes in.
+    #[test]
+    fn a_library_a_project_depends_on_is_in_the_package() {
+        let directory = temp_directory("omni-library");
+        let made = directory.join("made");
+        std::fs::create_dir_all(&made).unwrap();
+        std::fs::write(
+            made.join("Greeting.java"),
+            r#"
+package com.some.lib;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public final class Greeting {
+    private final String who;
+
+    public Greeting(String who) {
+        this.who = who;
+    }
+
+    public String said() {
+        return "hello " + who;
+    }
+
+    public List<String> twice() {
+        List<String> out = new ArrayList<String>();
+        out.add(said());
+        out.add(said());
+        return out;
+    }
+
+    public java.util.function.Supplier<String> later() {
+        return this::said;
+    }
+}
+"#
+            .trim_start(),
+        )
+        .unwrap();
+
+        let done = std::process::Command::new("javac")
+            .args(["--release", "17", "-d"])
+            .arg(made.to_str().unwrap())
+            .arg(made.join("Greeting.java").to_str().unwrap())
+            .output();
+        let Ok(done) = done else {
+            std::fs::remove_dir_all(&directory).ok();
+            assert!(
+                std::env::var("OMNI_REQUIRE_JAVAC").is_err(),
+                "OMNI_REQUIRE_JAVAC is set but javac is not here"
+            );
+            eprintln!("library packaging: javac is not available here");
+            return;
+        };
+        assert!(
+            done.status.success(),
+            "javac refused the library: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+
+        let root = directory.join("App");
+        let spec =
+            "package=com.tr.yt;label=App;abis=arm64-v8a;minSdk=30;targetSdk=36;languages=java";
+        super::scaffold::create(
+            root.to_str().unwrap(),
+            &super::scaffold::Spec::parse(spec).unwrap(),
+        )
+        .expect("the project is created");
+
+        // The library, zipped the way a jar is.
+        let mut classes = Vec::new();
+        gather_class_files(&made, &mut classes);
+        classes.sort();
+        assert!(!classes.is_empty(), "the library compiled to something");
+        let mut jar = crate::archive::Builder::new();
+        for path in &classes {
+            let name = path
+                .strip_prefix(&made)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            jar.add(name, std::fs::read(path).unwrap()).unwrap();
+        }
+        let libraries = root.join(super::scaffold::LIBRARY_FOLDER);
+        std::fs::create_dir_all(&libraries).unwrap();
+        std::fs::write(libraries.join("greeting.jar"), jar.finish().unwrap()).unwrap();
+
+        std::fs::write(
+            root.join(super::scaffold::JAVA_FOLDER)
+                .join("MainActivity.java"),
+            r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.widget.TextView;
+import com.some.lib.Greeting;
+
+public final class MainActivity extends Activity {
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        Greeting greeting = new Greeting("world");
+        TextView view = new TextView(this);
+        view.setText(greeting.said() + greeting.twice().size() + greeting.later().get());
+        setContentView(view);
+    }
+}
+"#
+            .trim_start(),
+        )
+        .unwrap();
+
+        let project =
+            super::builder::from_project(root.to_str().unwrap()).expect("the project reads");
+        let named: Vec<&str> = project
+            .code
+            .iter()
+            .map(|one| one.descriptor.as_str())
+            .collect();
+        for wanted in [
+            "Lcom/tr/yt/MainActivity;",
+            "Lcom/some/lib/Greeting;",
+            "Lcom/some/lib/Greeting$$Lambda$0;",
+        ] {
+            assert!(
+                named.contains(&wanted),
+                "{wanted} is not in the package: {named:?}"
+            );
+        }
+        let mut refused = Vec::new();
+        for one in &project.code {
+            refused.extend(what_the_runtime_would_refuse(one));
+        }
+        assert!(
+            refused.is_empty(),
+            "the runtime would refuse this:\n  {}",
+            refused.join("\n  ")
+        );
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let mut sink = crate::diag::Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut sink)
+            .expect("the package is written");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let held = crate::archive::read(&outcome.package, &mut crate::diag::Sink::new())
+            .expect("the package reads");
+        assert!(
+            held.entry("classes.dex").is_some(),
+            "the package carries its code"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "library packaging: {} classes, a library among them",
+            project.code.len()
+        );
     }
 
     /// A class with one static method in it, whose body is the bytes given.
