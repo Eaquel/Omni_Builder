@@ -1448,6 +1448,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
     for method in &mut unit.methods {
@@ -1528,6 +1529,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         annotations: Vec::new(),
         default_value: None,
         own_variables: Vec::new(),
+        throws: Vec::new(),
     });
 
     // `valueOf` is written out rather than handed to `Enum.valueOf`, which
@@ -1580,6 +1582,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         annotations: Vec::new(),
         default_value: None,
         own_variables: Vec::new(),
+        throws: Vec::new(),
     });
 
     unit.extends = Some("java.lang.Enum".to_string());
@@ -1697,6 +1700,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
 
@@ -1724,6 +1728,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
 
@@ -1774,6 +1779,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
 
@@ -1839,6 +1845,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
 
@@ -1881,6 +1888,7 @@ fn as_the_class_a_record_is(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
 
@@ -2030,6 +2038,7 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
     for method in &mut unit.methods {
@@ -2713,6 +2722,9 @@ pub struct Method {
     /// The method's own type parameters, in the order they were written.
     /// `<K, V> Map<K, V> of(K key, V value)` records `["K", "V"]`.
     pub own_variables: Vec<String>,
+    /// What it was written as throwing. A class file records these, and a
+    /// class compiled against this one reads them back.
+    pub throws: Vec<String>,
     pub line: u32,
 }
 
@@ -2780,6 +2792,10 @@ pub struct Unit {
     pub static_imports: Vec<String>,
     /// What was written above it.
     pub annotations: Vec<Annotated>,
+    /// The file it was written in, where the compilation knows. A class file
+    /// says so, and a stack trace off the device reads it back: without it
+    /// every line of every trace says `Unknown Source`.
+    pub source: Option<String>,
 }
 
 impl Unit {
@@ -3633,6 +3649,7 @@ impl Parser {
             annotation,
             annotations,
             static_imports: Vec::new(),
+            source: None,
         };
         if shape == Shape::Enum {
             return Ok(as_the_class_it_is(unit, &constants));
@@ -3748,16 +3765,32 @@ impl Parser {
                 annotations,
                 default_value: None,
                 own_variables: Vec::new(),
+                throws: Vec::new(),
             });
             return Ok(());
         }
+        // `<T> void f(...)` and `<U> Held(U one)`: the method's own type
+        // parameters, erased like every other one, and in scope until the body
+        // ends. A constructor may be written with them too, which is why they
+        // are read before the class's own name is looked for.
+        let pushed = self.push_type_parameters(false)?;
+
         if matches!(&self.here().token, Token::Identifier(found) if found == simple)
             && matches!(self.ahead(1), Token::Punctuation("("))
         {
             self.take();
             let (parameters, variadic) = self.parameters_and_shape()?;
-            self.throws()?;
+            let throws = self.throws()?;
             let body = self.method_body()?;
+            let own_variables = if pushed {
+                self.type_variables
+                    .last()
+                    .map(|frame| frame.held.iter().map(|(name, _)| name.clone()).collect())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            self.pop_type_parameters(pushed);
             methods.push(Method {
                 modifiers,
                 returns: Written::Void,
@@ -3770,21 +3803,18 @@ impl Parser {
                 bridge: false,
                 annotations,
                 default_value: None,
-                own_variables: Vec::new(),
+                own_variables,
+                throws,
             });
             return Ok(());
         }
-
-        // `<T> void f(...)`: the method's own type parameters, erased like
-        // every other one, and in scope until the body ends.
-        let pushed = self.push_type_parameters(false)?;
 
         let what = self.written_type()?;
         let name = self.want_name()?;
 
         if self.is_mark("(") {
             let (parameters, variadic) = self.parameters_and_shape()?;
-            self.throws()?;
+            let throws = self.throws()?;
             // `int order() default 0;` inside an `@interface`.
             let default_value = if self.eat_word("default") {
                 let held = self.annotation_value()?;
@@ -3838,6 +3868,7 @@ impl Parser {
                 annotations,
                 default_value,
                 own_variables,
+                throws,
             });
             return Ok(());
         }
@@ -4036,16 +4067,17 @@ impl Parser {
 
     /// A `throws` clause is read and thrown away: nothing here checks what a
     /// method may throw, and recording the list would suggest otherwise.
-    fn throws(&mut self) -> Result<(), Diagnostic> {
+    fn throws(&mut self) -> Result<Vec<String>, Diagnostic> {
+        let mut named = Vec::new();
         if self.eat_word("throws") {
             loop {
-                self.qualified()?;
+                named.push(self.qualified()?);
                 if !self.eat_mark(",") {
                     break;
                 }
             }
         }
-        Ok(())
+        Ok(named)
     }
 
     fn method_body(&mut self) -> Result<Option<Vec<Positioned<Statement>>>, Diagnostic> {
@@ -6731,6 +6763,9 @@ struct Emitter<'a> {
     /// method body is what decides whether the method can fall off its end --
     /// which the shape of the source alone cannot always say.
     reachable: bool,
+    /// Where each statement began and the line it was written on, which
+    /// becomes the `LineNumberTable` the runtime prints traces from.
+    lines: Vec<(u16, u16)>,
     /// The loops and switches this is inside, innermost last.
     levels: Vec<Level>,
     /// The `finally` bodies that have to run before control leaves where it
@@ -6833,6 +6868,7 @@ impl<'a> Emitter<'a> {
             frames: Vec::new(),
             stack: Vec::new(),
             reachable: true,
+            lines: Vec::new(),
         }
     }
 
@@ -15958,6 +15994,24 @@ impl Emitter<'_> {
 
     fn statement(&mut self, statement: &Positioned<Statement>) -> Result<(), Diagnostic> {
         let line = statement.line;
+        // Where this statement begins, against the line it was written on. A
+        // trace off the device reads these back and prints the line beside the
+        // method, which is the whole difference between a stack trace and a
+        // list of names. One row per instruction offset: a statement that
+        // writes nothing shares the row with whatever comes next, and a line
+        // written twice in a row says so once.
+        let began = self.code.len() as u16;
+        if line > 0 {
+            match self.lines.last_mut() {
+                // A statement written around another one -- a `try`, a block --
+                // writes nothing of its own before it, so the one inside is
+                // what this offset is really on.
+                Some((before, said)) if *before == began => *said = line as u16,
+                // And a run of statements on one line is one row, not four.
+                Some((_, said)) if *said == line as u16 => {}
+                _ => self.lines.push((began, line as u16)),
+            }
+        }
         match &statement.node {
             Statement::Nothing => Ok(()),
             Statement::Locally(units) => self.a_class_written_in_here(units, line),
@@ -18030,6 +18084,7 @@ impl Emitter<'_> {
                 annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
+                throws: Vec::new(),
             }],
             instance_setup: Vec::new(),
         };
@@ -18603,6 +18658,7 @@ impl Emitter<'_> {
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         }];
         methods.extend(body.methods.iter().cloned());
         fields.extend(body.fields.iter().cloned());
@@ -18634,6 +18690,9 @@ impl Emitter<'_> {
             annotation: false,
             annotations: Vec::new(),
             static_imports: self.unit.static_imports.clone(),
+            // Written where the class around it was written, which is what a
+            // trace through a listener has to say.
+            source: self.unit.source.clone(),
         });
 
         // And the making of it, here.
@@ -18762,6 +18821,7 @@ impl Emitter<'_> {
         let mut made = first.clone();
         made.name = name.clone();
         made.package = self.unit.package.clone();
+        made.source = self.unit.source.clone();
         made.imports = self.unit.imports.clone();
         made.static_imports = self.unit.static_imports.clone();
         made.outer = outer.clone();
@@ -18821,6 +18881,36 @@ impl Emitter<'_> {
         fields.extend(made.fields);
         made.fields = fields;
 
+        // An interface written in a method has no constructor, carries no
+        // instance of anything, and holds no captured local: it is a shape,
+        // and a class file that gave one an `<init>` is one the device
+        // refuses to load at all.
+        if made.shape == Shape::Interface {
+            made.fields.retain(|held| held.value.is_some());
+            self.made.push(made);
+            for one in beside {
+                let mut held = one.clone();
+                held.package = self.unit.package.clone();
+                held.source = self.unit.source.clone();
+                held.source = self.unit.source.clone();
+                held.imports = self.unit.imports.clone();
+                held.static_imports = self.unit.static_imports.clone();
+                self.made.push(held);
+            }
+            let internal = match &self.unit.package {
+                Some(package) => format!("{}/{name}", package.replace('.', "/")),
+                None => name,
+            };
+            self.locally.push(Locally {
+                written: first.name.clone(),
+                internal,
+                outer: None,
+                through_the_one_around: false,
+                captured: Vec::new(),
+            });
+            return Ok(());
+        }
+
         if !made.methods.iter().any(|one| one.constructor) {
             made.methods.push(Method {
                 modifiers: Modifiers {
@@ -18838,6 +18928,7 @@ impl Emitter<'_> {
                 annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
+                throws: Vec::new(),
             });
         }
         for method in &mut made.methods {
@@ -20095,6 +20186,67 @@ fn array_load(element: &Type) -> u8 {
     }
 }
 
+/// The constant a `static final` field was given, where it was given one that
+/// is a constant at all.
+///
+/// This is what `javac` writes as `ConstantValue`, and it is the difference
+/// between a name another class can use in a `case` label and a name it has to
+/// read at run time. Anything but a literal of the field's own type is not one:
+/// `static final int SIZE = width();` is a store in the class initialiser and
+/// nothing else.
+fn folded_constant(field: &Field, what: &Type, pool: &mut Pool) -> Option<u16> {
+    if !field.modifiers.static_ || !field.modifiers.final_ {
+        return None;
+    }
+    match (field.value.as_ref()?, what) {
+        (Expression::Int(value), one) if one.is_int_like() => {
+            Some(pool.integer(i32::try_from(*value).ok()?))
+        }
+        (Expression::Char(value), Type::Char) => Some(pool.integer(i32::from(*value))),
+        (Expression::Boolean(value), Type::Boolean) => Some(pool.integer(i32::from(*value))),
+        (Expression::Long(value), Type::Long) => Some(pool.long(*value)),
+        (Expression::Float(value), Type::Float) => Some(pool.float(*value as f32)),
+        (Expression::Double(value), Type::Double) => Some(pool.double(*value)),
+        (Expression::Str(text), Type::Object(named, _)) if named == "java/lang/String" => {
+            Some(pool.string(text))
+        }
+        _ => None,
+    }
+}
+
+/// The `Exceptions` attribute for a method written with a `throws`, or nothing
+/// where it was written without one.
+///
+/// A class file records what a method says it throws, and a compilation
+/// against this class reads it back. A name this compilation cannot resolve is
+/// left out rather than guessed at, which is the same rule the rest of this
+/// holds to.
+fn thrown_by(
+    pool: &mut Pool,
+    classpath: &Classpath,
+    unit: &Unit,
+    method: &Method,
+) -> Option<(u16, Vec<u8>)> {
+    if method.throws.is_empty() {
+        return None;
+    }
+    let mut named = Vec::new();
+    for one in &method.throws {
+        if let Some(found) = resolve_named(classpath, unit, one) {
+            named.push(pool.class(&found));
+        }
+    }
+    if named.is_empty() {
+        return None;
+    }
+    let mut body = Vec::with_capacity(2 + named.len() * 2);
+    body.extend_from_slice(&(named.len() as u16).to_be_bytes());
+    for index in named {
+        body.extend_from_slice(&index.to_be_bytes());
+    }
+    Some((pool.utf8("Exceptions"), body))
+}
+
 fn write_attribute(out: &mut Vec<u8>, name: u16, body: &[u8]) {
     out.extend_from_slice(&name.to_be_bytes());
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -20390,6 +20542,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     annotations: Vec::new(),
                     default_value: None,
                     own_variables: Vec::new(),
+                    throws: Vec::new(),
                 });
             }
         }
@@ -20490,6 +20643,10 @@ pub fn compile_unit_in_nest(
 
     // Fields.
     let mut field_bytes = Vec::new();
+    // The fields whose value the class file carries. What is written there is
+    // not written again in the class initialiser: the constant is the value,
+    // and storing it a second time is a store nothing reads.
+    let mut folded: Vec<String> = Vec::new();
     for field in &unit.fields {
         let probe = Emitter::new(
             &mut pool,
@@ -20503,12 +20660,23 @@ pub fn compile_unit_in_nest(
         let name = pool.utf8(&field.name);
         let descriptor = pool.utf8(&what.descriptor());
         let held = runtime_annotations(&mut pool, classpath, unit, &field.annotations);
+        // `static final int WIDTH = 3;` is a constant, and a class file says
+        // so rather than storing it: a class compiled against this one reads
+        // the value out of here, which is what makes it usable as a `case`
+        // label. Only a literal counts, which is what the language says too.
+        let constant = folded_constant(field, &what, &mut pool)
+            .map(|index| (pool.utf8("ConstantValue"), index));
+        let how_many = u16::from(held.is_some()) + u16::from(constant.is_some());
         field_bytes.extend_from_slice(&field.modifiers.access_flags(0).to_be_bytes());
         field_bytes.extend_from_slice(&name.to_be_bytes());
         field_bytes.extend_from_slice(&descriptor.to_be_bytes());
-        field_bytes.extend_from_slice(&u16::from(held.is_some()).to_be_bytes());
+        field_bytes.extend_from_slice(&how_many.to_be_bytes());
         if let Some((name, body)) = held {
             write_attribute(&mut field_bytes, name, &body);
+        }
+        if let Some((name, index)) = constant {
+            folded.push(field.name.clone());
+            write_attribute(&mut field_bytes, name, &index.to_be_bytes());
         }
     }
 
@@ -20556,6 +20724,7 @@ pub fn compile_unit_in_nest(
         .fields
         .iter()
         .filter(|field| field.modifiers.static_)
+        .filter(|field| !folded.contains(&field.name))
         .filter_map(assignment)
         .chain(unit.static_setup.iter().cloned())
         .collect();
@@ -20590,6 +20759,7 @@ pub fn compile_unit_in_nest(
             annotations: Vec::new(),
             default_value: None,
             own_variables: Vec::new(),
+            throws: Vec::new(),
         });
     }
     if unit.shape == Shape::Class && !methods.iter().any(|held| held.constructor) {
@@ -20611,6 +20781,7 @@ pub fn compile_unit_in_nest(
                 annotations: Vec::new(),
                 default_value: None,
                 own_variables: Vec::new(),
+                throws: Vec::new(),
             },
         );
     }
@@ -20670,7 +20841,10 @@ pub fn compile_unit_in_nest(
                 let body = annotation_value(&mut pool, classpath, unit, value)?;
                 Some((pool.utf8("AnnotationDefault"), body))
             });
-            let how_many = u16::from(held.is_some()) + u16::from(default_value.is_some());
+            let thrown = thrown_by(&mut pool, classpath, unit, method);
+            let how_many = u16::from(held.is_some())
+                + u16::from(default_value.is_some())
+                + u16::from(thrown.is_some());
             method_bytes.extend_from_slice(&name.to_be_bytes());
             method_bytes.extend_from_slice(&descriptor.to_be_bytes());
             method_bytes.extend_from_slice(&how_many.to_be_bytes());
@@ -20678,6 +20852,9 @@ pub fn compile_unit_in_nest(
                 write_attribute(&mut method_bytes, name, &body);
             }
             if let Some((name, body)) = default_value {
+                write_attribute(&mut method_bytes, name, &body);
+            }
+            if let Some((name, body)) = thrown {
                 write_attribute(&mut method_bytes, name, &body);
             }
             written += 1;
@@ -20782,6 +20959,7 @@ pub fn compile_unit_in_nest(
         let max_locals = emitter.max_slot.max(1);
         let frames = emitter.frames;
         let handlers = emitter.handlers;
+        let written_on = emitter.lines;
 
         // One past the end is not a place anything can land. The very start
         // is: a method whose first statement is a loop is jumped back to at
@@ -20812,9 +20990,32 @@ pub fn compile_unit_in_nest(
             };
             attribute.extend_from_slice(&class.to_be_bytes());
         }
-        attribute.extend_from_slice(&u16::from(table.is_some()).to_be_bytes());
+        // What each instruction was written on, for the traces the runtime
+        // prints. Rows past the end of the code are not rows: a statement that
+        // wrote nothing at the tail leaves an offset one past the last
+        // instruction, and the runtime reads that as a line nothing is on.
+        let mut lines: Vec<(u16, u16)> = written_on
+            .into_iter()
+            .filter(|(at, _)| usize::from(*at) < code.len())
+            .collect();
+        lines.dedup_by_key(|(at, _)| *at);
+        let table_of_lines = (!lines.is_empty()).then(|| {
+            let mut body = Vec::with_capacity(2 + lines.len() * 4);
+            body.extend_from_slice(&(lines.len() as u16).to_be_bytes());
+            for (at, said) in &lines {
+                body.extend_from_slice(&at.to_be_bytes());
+                body.extend_from_slice(&said.to_be_bytes());
+            }
+            (pool.utf8("LineNumberTable"), body)
+        });
+
+        let how_many = u16::from(table.is_some()) + u16::from(table_of_lines.is_some());
+        attribute.extend_from_slice(&how_many.to_be_bytes());
         if let (Some(body), Some(name)) = (&table, table_name) {
             write_attribute(&mut attribute, name, body);
+        }
+        if let Some((name, body)) = &table_of_lines {
+            write_attribute(&mut attribute, *name, body);
         }
 
         let name = pool.utf8(&method.name);
@@ -20844,11 +21045,16 @@ pub fn compile_unit_in_nest(
                 .to_be_bytes(),
         );
         let held = runtime_annotations(&mut pool, classpath, unit, &method.annotations);
+        let thrown = thrown_by(&mut pool, classpath, unit, method);
+        let how_many = 1 + u16::from(held.is_some()) + u16::from(thrown.is_some());
         method_bytes.extend_from_slice(&name.to_be_bytes());
         method_bytes.extend_from_slice(&descriptor.to_be_bytes());
-        method_bytes.extend_from_slice(&(1 + u16::from(held.is_some())).to_be_bytes());
+        method_bytes.extend_from_slice(&how_many.to_be_bytes());
         write_attribute(&mut method_bytes, code_name, &attribute);
         if let Some((name, body)) = held {
+            write_attribute(&mut method_bytes, name, &body);
+        }
+        if let Some((name, body)) = thrown {
             write_attribute(&mut method_bytes, name, &body);
         }
         written += 1;
@@ -20880,6 +21086,19 @@ pub fn compile_unit_in_nest(
     if let Some(held) = runtime_annotations(&mut pool, classpath, unit, &unit.annotations) {
         class_attributes.push(held);
     }
+
+    // The file this was written in. Without it every line of every trace off
+    // the device reads `Unknown Source`, which is the difference between a
+    // stack trace and a list of method names. Where the compilation was handed
+    // no file name -- one source, compiled on its own -- the name of the
+    // outermost class is what the file would have been called, because Java
+    // says a public class lives in a file of its own name.
+    let written_in = unit.source.clone().unwrap_or_else(|| {
+        let outermost = unit.name.split('$').next().unwrap_or(&unit.name);
+        format!("{outermost}.java")
+    });
+    let held = pool.utf8(&written_in);
+    class_attributes.push((pool.utf8("SourceFile"), held.to_be_bytes().to_vec()));
 
     // `sealed` is a list in the class file: the runtime, not the compiler
     // alone, refuses a class outside it.
@@ -21062,7 +21281,16 @@ pub fn compile_together(
     let mut declared = Vec::new();
     for (label, text) in sources {
         let units = parse(text).map_err(|error| named_file(error, label))?;
-        for unit in units {
+        // A class file says which file it was written in, and a trace off the
+        // device reads it back. The path is not what it wants: `javac` writes
+        // the name alone, and the runtime prints it beside the line.
+        let source = label
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|held| !held.is_empty())
+            .map(|held| held.to_string());
+        for mut unit in units {
+            unit.source.clone_from(&source);
             declared.push((label.clone(), unit));
         }
     }
@@ -22592,9 +22820,15 @@ public class Shaped {
             "an interface has to say it is one"
         );
         assert!(shape.access_flags & 0x0400 != 0, "and that it is abstract");
+        // `int SIDES = 0;` in an interface is a constant, and the class file
+        // carries the value rather than a class initialiser that stores it.
         assert!(
-            shape.methods.iter().any(|one| one.name == "<clinit>"),
-            "a field of an interface is a constant, and constants are set once"
+            !shape.methods.iter().any(|one| one.name == "<clinit>"),
+            "a constant is in the class file, not in code that runs"
+        );
+        assert!(
+            shape.fields.iter().any(|one| one.name == "SIDES"),
+            "and the field is still there"
         );
         assert!(
             !shape.methods.iter().any(|one| one.name == "<init>"),
@@ -30672,6 +30906,82 @@ public class Boxed {
                 eprintln!("java: an ordinary afternoon's Java, against the platform jar, ran");
             }
         }
+    }
+
+    /// What a class file says about itself beyond its code: the file it was
+    /// written in and the line every instruction is on, the value of every
+    /// constant, and what each method says it throws. A trace read back off
+    /// the running program names the file and the line, which is the whole
+    /// difference between a stack trace and a list of method names.
+    const WHAT_A_CLASS_FILE_SAYS_ABOUT_ITSELF: &str = r####"
+import java.io.IOException;
+
+public class Traced {
+
+    public static final int WIDTH = 3;
+    public static final String NAME = "omni";
+    public static final long BIG = 40L;
+    public static final boolean ON = true;
+    public static final char MARK = '!';
+    static final double RATIO = 1.5;
+    static final int MADE = make();
+
+    static int make() { return 7; }
+
+    static void risky(int at) throws IOException {
+        if (at == 0) {
+            throw new IOException("bottom");
+        }
+        risky(at - 1);
+    }
+
+    interface Held {
+        int SIDES = 4;
+        int of();
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+        try {
+            risky(2);
+        } catch (IOException e) {
+            for (StackTraceElement one : e.getStackTrace()) {
+                out.append(one.getFileName()).append(':').append(one.getLineNumber()).append(' ');
+            }
+        }
+        out.append(WIDTH).append(NAME).append(BIG).append(ON).append(MARK)
+           .append(RATIO).append(MADE).append(Held.SIDES);
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn what_a_class_file_says_about_itself_is_what_javac_says() {
+        let produced =
+            compile(WHAT_A_CLASS_FILE_SAYS_ABOUT_ITSELF, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Traced") {
+            None => eprintln!("java: no JVM here to read a trace back"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "Traced.java:18 Traced.java:20 Traced.java:20 Traced.java:31 \
+                     3omni40true!1.574"
+                );
+                eprintln!("java: the file and the line, and javac's answer");
+            }
+        }
+
+        // `MADE` is worked out by a call, so it is not a constant and there is
+        // still a class initialiser; everything beside it is one, and none of
+        // those is stored by anything that runs.
+        let traced = crate::jvm::read(&produced[0].1).expect("must read back");
+        assert_eq!(traced.name, "Traced");
+        assert!(
+            traced.methods.iter().any(|one| one.name == "<clinit>"),
+            "MADE is worked out by a call"
+        );
     }
 
     /// A screen somebody writes against the platform and nothing else.
