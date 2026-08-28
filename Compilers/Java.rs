@@ -13226,6 +13226,18 @@ impl Emitter<'_> {
                 return false;
             }
         }
+        // And one written inside another with `static` keeps no instance of
+        // it and still reads what it holds statically, which is what makes a
+        // `private static` a thing the whole file shares.
+        for holder in self.holders() {
+            if self
+                .classpath
+                .find_field(&holder, name)
+                .is_some_and(|(_, (_, _, static_))| *static_)
+            {
+                return false;
+            }
+        }
         true
     }
 
@@ -27316,6 +27328,159 @@ public class Reading extends Exception {
 "####,
         ),
     ];
+
+    /// The corners a compiler is caught out on: a `switch` over strings whose
+    /// cases collide on their hash, one spread far enough apart to be looked
+    /// up rather than indexed and one packed tightly enough to be indexed, a
+    /// `static` block in a class written inside another reaching what that one
+    /// holds, two classes initialised in the order they are first touched,
+    /// constants folded before anything runs, wildcards written both ways on
+    /// parameters, every shift including the ones past the width of what they
+    /// shift, a concatenation of a null and a null object and every primitive,
+    /// the boxes that are shared and the ones that are not, and what `.class`
+    /// and `getClass` say about a class, an array and a primitive.
+    const THE_CORNERS_A_COMPILER_IS_CAUGHT_ON: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class Corners {
+
+    static final StringBuilder ORDER = new StringBuilder();
+
+    static class First {
+        static final int VALUE;
+        static { ORDER.append("F"); VALUE = 1; }
+    }
+
+    static class Second {
+        static final int VALUE = make();
+        static int make() { ORDER.append("S"); return 2; }
+    }
+
+    static final int FOLDED = 3 * 7;
+    static final String JOINED = "a" + "b" + 1;
+
+    static String collided(String key) {
+        // "Aa" and "BB" have the same hashCode, which is what a string switch
+        // has to survive.
+        switch (key) {
+            case "Aa": return "first";
+            case "BB": return "second";
+            case "AaAa": return "third";
+            case "BBBB": return "fourth";
+            default: return "none";
+        }
+    }
+
+    static int spread(int n) {
+        switch (n) {
+            case 1: return 10;
+            case 1000: return 20;
+            case 1000000: return 30;
+            default: return 0;
+        }
+    }
+
+    static int packed(int n) {
+        switch (n) {
+            case 0: return 1;
+            case 1: return 2;
+            case 2: return 3;
+            case 3: return 4;
+            case 4: return 5;
+            default: return -1;
+        }
+    }
+
+    static int total(List<? extends Number> of) {
+        int sum = 0;
+        for (Number one : of) sum += one.intValue();
+        return sum;
+    }
+
+    static void fill(List<? super Integer> into, int upto) {
+        for (int at = 0; at < upto; at++) into.add(at);
+    }
+
+    static String shifts() {
+        int i = -8;
+        long l = -8L;
+        return (i >> 1) + "," + (i >>> 1) + "," + (i << 33) + "," + (i >> 33) + ","
+             + (l >> 1) + "," + (l >>> 1) + "," + (l << 65) + "," + (1 << 31) + "," + (1L << 63);
+    }
+
+    static String concat() {
+        String nothing = null;
+        Object held = null;
+        char[] letters = {'h', 'i'};
+        return "x" + nothing + held + 'c' + 1 + 2L + 1.5f + 2.5 + true + letters.length;
+    }
+
+    static Runnable made(final int by) {
+        return new Runnable() {
+            @Override public void run() { ORDER.append('r').append(by); }
+        };
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        out.append(collided("Aa")).append(collided("BB")).append(collided("AaAa"))
+           .append(collided("BBBB")).append(collided("zz")).append(' ');
+        out.append(spread(1)).append(spread(1000)).append(spread(1000000)).append(spread(7)).append(' ');
+        out.append(packed(0)).append(packed(4)).append(packed(9)).append(' ');
+
+        out.append(total(List.of(1, 2, 3))).append('/').append(total(List.of(1.5, 2.5))).append(' ');
+        List<Number> into = new ArrayList<>();
+        fill(into, 3);
+        out.append(into).append(' ');
+
+        out.append(shifts()).append(' ');
+        out.append(concat()).append(' ');
+
+        Integer small = 127, sameSmall = 127;
+        Integer big = 128, sameBig = 128;
+        out.append(small == sameSmall).append(big == sameBig).append(big.equals(sameBig)).append(' ');
+
+        out.append(Second.VALUE).append(First.VALUE).append(ORDER).append(' ');
+        out.append(FOLDED).append(JOINED).append(' ');
+
+        Class<?> what = "text".getClass();
+        out.append(what.getName()).append('/').append(what.getSimpleName())
+           .append('/').append(String.class.getSimpleName())
+           .append('/').append(int.class.getName())
+           .append('/').append(int[].class.getSimpleName())
+           .append('/').append(what.isInstance("other"))
+           .append('/').append(new int[0].getClass().getSimpleName()).append(' ');
+
+        made(7).run();
+        out.append(ORDER).append(' ');
+
+        int[] copy = Arrays.copyOfRange(new int[] {1, 2, 3, 4}, 1, 3);
+        out.append(Arrays.toString(copy));
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_corners_a_compiler_is_caught_on_give_back_what_javac_gives_back() {
+        let produced =
+            compile(THE_CORNERS_A_COMPILER_IS_CAUGHT_ON, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Corners") {
+            None => eprintln!("java: no JVM here to run the corners"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(said.trim(), "firstsecondthirdfourthnone 1020300 15-1 6/3 [0, 1, 2] \
+                     -4,2147483644,-16,-4,-4,9223372036854775804,-16,-2147483648,-9223372036854775808 \
+                     xnullnullc121.52.5true2 truefalsetrue 21SF 21ab1 java.lang.String/String/String/int/int[]/true/int[] \
+                     SFr7 [2, 3]");
+                eprintln!("java: the corners a compiler is caught on, and javac's answer");
+            }
+        }
+    }
 
     /// What a stream is asked for: `groupingBy` counted, `toMap`,
     /// `partitioningBy` with a downstream, sums and averages, an infinite
