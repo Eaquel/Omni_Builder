@@ -8494,8 +8494,13 @@ pub mod resources {
         ExtraHigh,
         ExtraExtraHigh,
         ExtraExtraExtraHigh,
+        /// What a television is, which is between medium and high and has a
+        /// name of its own because nothing else is that.
+        Television,
         None,
         Any,
+        /// A number of dots per inch said outright, which a folder may do.
+        Exactly(u16),
     }
 
     impl Density {
@@ -8508,8 +8513,20 @@ pub mod resources {
                 Density::ExtraHigh => "xhdpi",
                 Density::ExtraExtraHigh => "xxhdpi",
                 Density::ExtraExtraExtraHigh => "xxxhdpi",
+                Density::Television => "tvdpi",
                 Density::None => "nodpi",
                 Density::Any => "anydpi",
+                // One said outright has no name of its own; `name` gives it
+                // the one the folder used.
+                Density::Exactly(_) => "dpi",
+            }
+        }
+
+        /// What a folder carrying this density is called.
+        pub fn name(self) -> String {
+            match self {
+                Density::Exactly(dots) => format!("{dots}dpi"),
+                held => held.as_str().to_string(),
             }
         }
 
@@ -8521,15 +8538,23 @@ pub mod resources {
             Density::ExtraHigh,
             Density::ExtraExtraHigh,
             Density::ExtraExtraExtraHigh,
+            Density::Television,
             Density::None,
             Density::Any,
         ];
 
         pub fn parse(value: &str) -> Option<Density> {
-            Density::ALL
+            if let Some(found) = Density::ALL
                 .iter()
                 .copied()
                 .find(|density| density.as_str() == value)
+            {
+                return Some(found);
+            }
+            value
+                .strip_suffix("dpi")
+                .and_then(|dots| dots.parse::<u16>().ok())
+                .map(Density::Exactly)
         }
     }
 
@@ -8569,22 +8594,156 @@ pub mod resources {
         }
     }
 
+    /// Everything a folder name can say about which devices its contents are
+    /// for, kept the way the table keeps it.
+    ///
+    /// The names are the platform's own, and so are the numbers: a folder
+    /// called `values-night-sw600dp-v26` is these fields set, and nothing else
+    /// about it survives. What is not said is zero, which the platform reads as
+    /// "any", and a resource in a folder that says nothing is the one every
+    /// device falls back to.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
     pub struct Config {
         pub locale: Locale,
         pub density: Density,
+        /// The network the device is on.
+        pub mcc: u16,
+        pub mnc: u16,
+        /// Which way round the screen is held.
+        pub orientation: u8,
+        /// What there is to touch it, type on and move around with.
+        pub touchscreen: u8,
+        pub keyboard: u8,
+        pub navigation: u8,
+        pub input_flags: u8,
+        /// How big it is in pixels, which no folder name says any more.
+        pub screen_width: u16,
+        pub screen_height: u16,
+        /// The oldest platform that understands the rest of this.
+        pub version: u16,
+        /// How big it is, which way up it is long, and which way it reads.
+        pub screen_layout: u8,
+        /// What kind of thing it is, and whether it is night.
+        pub ui_mode: u8,
+        /// How big it is in the units a layout is written in.
+        pub smallest_width: u16,
+        pub width: u16,
+        pub height: u16,
+        /// Whether it is round.
+        pub screen_layout2: u8,
+        /// What colours it can show.
+        pub colour_mode: u8,
+    }
+
+    /// The numbers the platform gives the things a folder name can say.
+    pub mod said {
+        pub const ORIENTATION_PORT: u8 = 1;
+        pub const ORIENTATION_LAND: u8 = 2;
+
+        pub const TOUCHSCREEN_NOTOUCH: u8 = 1;
+        pub const TOUCHSCREEN_FINGER: u8 = 3;
+
+        pub const KEYBOARD_NOKEYS: u8 = 1;
+        pub const KEYBOARD_QWERTY: u8 = 2;
+        pub const KEYBOARD_12KEY: u8 = 3;
+
+        pub const NAVIGATION_NONAV: u8 = 1;
+        pub const NAVIGATION_DPAD: u8 = 2;
+        pub const NAVIGATION_TRACKBALL: u8 = 3;
+        pub const NAVIGATION_WHEEL: u8 = 4;
+
+        pub const KEYS_EXPOSED: u8 = 0x01;
+        pub const KEYS_HIDDEN: u8 = 0x02;
+        pub const KEYS_SOFT: u8 = 0x03;
+        pub const NAV_EXPOSED: u8 = 0x04;
+        pub const NAV_HIDDEN: u8 = 0x08;
+
+        pub const SIZE_SMALL: u8 = 0x01;
+        pub const SIZE_NORMAL: u8 = 0x02;
+        pub const SIZE_LARGE: u8 = 0x03;
+        pub const SIZE_XLARGE: u8 = 0x04;
+        pub const NOTLONG: u8 = 0x10;
+        pub const LONG: u8 = 0x20;
+        pub const LTR: u8 = 0x40;
+        pub const RTL: u8 = 0x80;
+
+        pub const NORMAL: u8 = 0x01;
+        pub const DESK: u8 = 0x02;
+        pub const CAR: u8 = 0x03;
+        pub const TELEVISION: u8 = 0x04;
+        pub const APPLIANCE: u8 = 0x05;
+        pub const WATCH: u8 = 0x06;
+        pub const VR_HEADSET: u8 = 0x07;
+        pub const NOTNIGHT: u8 = 0x10;
+        pub const NIGHT: u8 = 0x20;
+
+        pub const NOTROUND: u8 = 0x01;
+        pub const ROUND: u8 = 0x02;
+
+        pub const NOWIDECG: u8 = 0x01;
+        pub const WIDECG: u8 = 0x02;
+        pub const LOWDR: u8 = 0x04;
+        pub const HIGHDR: u8 = 0x08;
     }
 
     impl Config {
         pub const DEFAULT: Config = Config {
             locale: Locale::ANY,
             density: Density::Default,
+            mcc: 0,
+            mnc: 0,
+            orientation: 0,
+            touchscreen: 0,
+            keyboard: 0,
+            navigation: 0,
+            input_flags: 0,
+            screen_width: 0,
+            screen_height: 0,
+            version: 0,
+            screen_layout: 0,
+            ui_mode: 0,
+            smallest_width: 0,
+            width: 0,
+            height: 0,
+            screen_layout2: 0,
+            colour_mode: 0,
         };
 
         pub fn for_locale(locale: Locale) -> Config {
             Config {
                 locale,
                 ..Config::DEFAULT
+            }
+        }
+
+        /// Whether this says nothing at all, which is the folder every device
+        /// falls back to.
+        pub fn says_nothing(&self) -> bool {
+            *self == Config::DEFAULT
+        }
+
+        /// The oldest platform that understands what this says.
+        ///
+        /// A folder naming something the platform learned later has to say so,
+        /// or an older one reads it as though the qualifier were not there and
+        /// picks the wrong resource. Which of them decides is a chain, not a
+        /// sum: the first that applies is the answer, exactly as `aapt2` does
+        /// it.
+        pub fn oldest_platform(&self) -> u16 {
+            if self.density == Density::Any {
+                21
+            } else if self.smallest_width != 0 || self.width != 0 || self.height != 0 {
+                13
+            } else if self.screen_layout2 & 0x03 != 0 {
+                23
+            } else if self.colour_mode != 0 {
+                26
+            } else if self.ui_mode != 0 {
+                8
+            } else if self.screen_layout & 0x3f != 0 || self.density != Density::Default {
+                4
+            } else {
+                0
             }
         }
 
@@ -8617,12 +8776,225 @@ pub mod resources {
             name: &str,
             qualifiers: impl Iterator<Item = &'a str>,
         ) -> Result<Config, String> {
+            use said::*;
             let mut config = Config::DEFAULT;
             for qualifier in qualifiers {
                 if let Some(density) = Density::parse(qualifier) {
                     config.density = density;
                     continue;
                 }
+                // Everything a folder name can say, in the order the platform
+                // lists them. Each is a name of its own, so which field it
+                // lands in is not a guess.
+                let one = |held: &mut u8, mask: u8, value: u8| {
+                    *held = (*held & !mask) | value;
+                };
+                match qualifier {
+                    "ldltr" => {
+                        one(&mut config.screen_layout, 0xc0, LTR);
+                        continue;
+                    }
+                    "ldrtl" => {
+                        one(&mut config.screen_layout, 0xc0, RTL);
+                        continue;
+                    }
+                    "small" => {
+                        one(&mut config.screen_layout, 0x0f, SIZE_SMALL);
+                        continue;
+                    }
+                    "normal" => {
+                        one(&mut config.screen_layout, 0x0f, SIZE_NORMAL);
+                        continue;
+                    }
+                    "large" => {
+                        one(&mut config.screen_layout, 0x0f, SIZE_LARGE);
+                        continue;
+                    }
+                    "xlarge" => {
+                        one(&mut config.screen_layout, 0x0f, SIZE_XLARGE);
+                        continue;
+                    }
+                    "long" => {
+                        one(&mut config.screen_layout, 0x30, LONG);
+                        continue;
+                    }
+                    "notlong" => {
+                        one(&mut config.screen_layout, 0x30, NOTLONG);
+                        continue;
+                    }
+                    "round" => {
+                        one(&mut config.screen_layout2, 0x03, ROUND);
+                        continue;
+                    }
+                    "notround" => {
+                        one(&mut config.screen_layout2, 0x03, NOTROUND);
+                        continue;
+                    }
+                    "widecg" => {
+                        one(&mut config.colour_mode, 0x03, WIDECG);
+                        continue;
+                    }
+                    "nowidecg" => {
+                        one(&mut config.colour_mode, 0x03, NOWIDECG);
+                        continue;
+                    }
+                    "highdr" => {
+                        one(&mut config.colour_mode, 0x0c, HIGHDR);
+                        continue;
+                    }
+                    "lowdr" => {
+                        one(&mut config.colour_mode, 0x0c, LOWDR);
+                        continue;
+                    }
+                    "port" => {
+                        config.orientation = ORIENTATION_PORT;
+                        continue;
+                    }
+                    "land" => {
+                        config.orientation = ORIENTATION_LAND;
+                        continue;
+                    }
+                    "car" => {
+                        one(&mut config.ui_mode, 0x0f, CAR);
+                        continue;
+                    }
+                    "desk" => {
+                        one(&mut config.ui_mode, 0x0f, DESK);
+                        continue;
+                    }
+                    "television" => {
+                        one(&mut config.ui_mode, 0x0f, TELEVISION);
+                        continue;
+                    }
+                    "appliance" => {
+                        one(&mut config.ui_mode, 0x0f, APPLIANCE);
+                        continue;
+                    }
+                    "watch" => {
+                        one(&mut config.ui_mode, 0x0f, WATCH);
+                        continue;
+                    }
+                    "vrheadset" => {
+                        one(&mut config.ui_mode, 0x0f, VR_HEADSET);
+                        continue;
+                    }
+                    "night" => {
+                        one(&mut config.ui_mode, 0x30, NIGHT);
+                        continue;
+                    }
+                    "notnight" => {
+                        one(&mut config.ui_mode, 0x30, NOTNIGHT);
+                        continue;
+                    }
+                    "notouch" => {
+                        config.touchscreen = TOUCHSCREEN_NOTOUCH;
+                        continue;
+                    }
+                    "finger" => {
+                        config.touchscreen = TOUCHSCREEN_FINGER;
+                        continue;
+                    }
+                    "keysexposed" => {
+                        one(&mut config.input_flags, 0x03, KEYS_EXPOSED);
+                        continue;
+                    }
+                    "keyshidden" => {
+                        one(&mut config.input_flags, 0x03, KEYS_HIDDEN);
+                        continue;
+                    }
+                    "keyssoft" => {
+                        one(&mut config.input_flags, 0x03, KEYS_SOFT);
+                        continue;
+                    }
+                    "nokeys" => {
+                        config.keyboard = KEYBOARD_NOKEYS;
+                        continue;
+                    }
+                    "qwerty" => {
+                        config.keyboard = KEYBOARD_QWERTY;
+                        continue;
+                    }
+                    "12key" => {
+                        config.keyboard = KEYBOARD_12KEY;
+                        continue;
+                    }
+                    "navexposed" => {
+                        one(&mut config.input_flags, 0x0c, NAV_EXPOSED);
+                        continue;
+                    }
+                    "navhidden" => {
+                        one(&mut config.input_flags, 0x0c, NAV_HIDDEN);
+                        continue;
+                    }
+                    "nonav" => {
+                        config.navigation = NAVIGATION_NONAV;
+                        continue;
+                    }
+                    "dpad" => {
+                        config.navigation = NAVIGATION_DPAD;
+                        continue;
+                    }
+                    "trackball" => {
+                        config.navigation = NAVIGATION_TRACKBALL;
+                        continue;
+                    }
+                    "wheel" => {
+                        config.navigation = NAVIGATION_WHEEL;
+                        continue;
+                    }
+                    _ => {}
+                }
+
+                // And the ones that carry a number.
+                if let Some(number) = qualifier.strip_prefix("mcc") {
+                    match number.parse::<u16>() {
+                        Ok(held) => {
+                            config.mcc = held;
+                            continue;
+                        }
+                        Err(_) => return Err(format!("'{qualifier}' is not a country code.")),
+                    }
+                }
+                if let Some(number) = qualifier.strip_prefix("mnc") {
+                    match number.parse::<u16>() {
+                        Ok(held) => {
+                            config.mnc = held;
+                            continue;
+                        }
+                        Err(_) => return Err(format!("'{qualifier}' is not a network code.")),
+                    }
+                }
+                // A version, which is a `v` and a number. A language can
+                // begin with a `v` too, so anything else falls through.
+                if let Some(held) = qualifier
+                    .strip_prefix('v')
+                    .and_then(|number| number.parse::<u16>().ok())
+                {
+                    config.version = held;
+                    continue;
+                }
+
+                let in_dp = |prefix: &str| -> Option<Result<u16, String>> {
+                    let number = qualifier.strip_prefix(prefix)?.strip_suffix("dp")?;
+                    Some(
+                        number
+                            .parse::<u16>()
+                            .map_err(|_| format!("'{qualifier}' is not a width in dp.")),
+                    )
+                };
+                if let Some(held) = in_dp("sw") {
+                    config.smallest_width = held?;
+                    continue;
+                }
+                if let Some(held) = in_dp("w") {
+                    config.width = held?;
+                    continue;
+                }
+                if let Some(held) = in_dp("h") {
+                    config.height = held?;
+                    continue;
+                }
+
                 match Locale::parse(qualifier) {
                     Some(locale) if config.locale.is_any() => config.locale = locale,
                     Some(_) => {
@@ -8645,9 +9017,9 @@ pub mod resources {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
             match (self.locale.is_any(), self.density) {
                 (true, Density::Default) => f.write_str("default"),
-                (true, density) => f.write_str(density.as_str()),
+                (true, density) => f.write_str(&density.name()),
                 (false, Density::Default) => f.write_str(self.locale.as_str()),
-                (false, density) => write!(f, "{}-{}", self.locale.as_str(), density.as_str()),
+                (false, density) => write!(f, "{}-{}", self.locale.as_str(), density.name()),
             }
         }
     }
@@ -8907,6 +9279,63 @@ pub mod resources {
 
         pub fn is_empty(&self) -> bool {
             self.entries.is_empty()
+        }
+
+        /// Settles what platform each entry is for, and drops the ones the
+        /// project has already left behind.
+        ///
+        /// A folder naming something the platform learned later has to say so,
+        /// or an older platform reads it as though the qualifier were not
+        /// there. But if the oldest platform the project runs on knows it
+        /// already, saying so is noise: the table carries a version nothing
+        /// will ever be older than, and two folders that now say the same
+        /// thing collide. The one asking for the newer platform wins, which is
+        /// the one the device would have chosen anyway.
+        pub fn settle_versions(&mut self, oldest: u16) {
+            let mut asked: Vec<u16> = Vec::with_capacity(self.entries.len());
+            for entry in &self.entries {
+                asked.push(entry.config.version.max(entry.config.oldest_platform()));
+            }
+            let mut settled: Vec<Config> = Vec::with_capacity(self.entries.len());
+            for (entry, version) in self.entries.iter().zip(asked.iter()) {
+                let mut config = entry.config;
+                config.version = if *version <= oldest { 0 } else { *version };
+                settled.push(config);
+            }
+
+            let mut keep = vec![true; self.entries.len()];
+            for (at, entry) in self.entries.iter().enumerate() {
+                let newest = self
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, one)| {
+                        one.kind == entry.kind
+                            && one.name == entry.name
+                            && settled[*other] == settled[at]
+                    })
+                    .map(|(other, _)| asked[other])
+                    .max()
+                    .unwrap_or(asked[at]);
+                if asked[at] < newest {
+                    keep[at] = false;
+                }
+            }
+
+            let mut at = 0usize;
+            let mut written = 0usize;
+            self.entries.retain(|_| {
+                let held = keep[at];
+                at += 1;
+                held
+            });
+            for entry in &mut self.entries {
+                while !keep[written] {
+                    written += 1;
+                }
+                entry.config = settled[written];
+                written += 1;
+            }
         }
 
         pub fn read_values(&mut self, text: &str, origin: &str, sink: &mut Sink) -> bool {
@@ -24648,8 +25077,23 @@ pub mod arsc {
     const BOOLEAN_TRUE: u32 = 0xffff_ffff;
     /// The flag on an entry that holds several values rather than one.
     const ENTRY_COMPLEX: u16 = 0x0001;
-    const CONFIG_LOCALE: u32 = 0x0004;
-    const CONFIG_DENSITY: u32 = 0x0100;
+    const CONFIG_MCC: u32 = 0x0000_0001;
+    const CONFIG_MNC: u32 = 0x0000_0002;
+    const CONFIG_LOCALE: u32 = 0x0000_0004;
+    const CONFIG_TOUCHSCREEN: u32 = 0x0000_0008;
+    const CONFIG_KEYBOARD: u32 = 0x0000_0010;
+    const CONFIG_KEYBOARD_HIDDEN: u32 = 0x0000_0020;
+    const CONFIG_NAVIGATION: u32 = 0x0000_0040;
+    const CONFIG_ORIENTATION: u32 = 0x0000_0080;
+    const CONFIG_DENSITY: u32 = 0x0000_0100;
+    const CONFIG_SCREEN_SIZE: u32 = 0x0000_0200;
+    const CONFIG_VERSION: u32 = 0x0000_0400;
+    const CONFIG_SCREEN_LAYOUT: u32 = 0x0000_0800;
+    const CONFIG_UI_MODE: u32 = 0x0000_1000;
+    const CONFIG_SMALLEST_SCREEN_SIZE: u32 = 0x0000_2000;
+    const CONFIG_LAYOUT_DIRECTION: u32 = 0x0000_4000;
+    const CONFIG_SCREEN_ROUND: u32 = 0x0000_8000;
+    const CONFIG_COLOUR_MODE: u32 = 0x0001_0000;
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
@@ -24681,8 +25125,10 @@ pub mod arsc {
             Density::ExtraHigh => 320,
             Density::ExtraExtraHigh => 480,
             Density::ExtraExtraExtraHigh => 640,
+            Density::Television => 213,
             Density::None => 0xffff,
             Density::Any => 0xfffe,
+            Density::Exactly(dots) => dots,
         }
     }
 
@@ -24778,10 +25224,27 @@ pub mod arsc {
     fn encode_config(config: Config) -> Vec<u8> {
         let mut out = vec![0u8; CONFIG_BYTES];
         out[0..4].copy_from_slice(&(CONFIG_BYTES as u32).to_le_bytes());
+        out[4..6].copy_from_slice(&config.mcc.to_le_bytes());
+        out[6..8].copy_from_slice(&config.mnc.to_le_bytes());
         if let Some(language) = config.locale.language() {
             out[8..10].copy_from_slice(&language);
         }
+        out[12] = config.orientation;
+        out[13] = config.touchscreen;
         out[14..16].copy_from_slice(&density_value(config.density).to_le_bytes());
+        out[16] = config.keyboard;
+        out[17] = config.navigation;
+        out[18] = config.input_flags;
+        out[20..22].copy_from_slice(&config.screen_width.to_le_bytes());
+        out[22..24].copy_from_slice(&config.screen_height.to_le_bytes());
+        out[24..26].copy_from_slice(&config.version.to_le_bytes());
+        out[28] = config.screen_layout;
+        out[29] = config.ui_mode;
+        out[30..32].copy_from_slice(&config.smallest_width.to_le_bytes());
+        out[32..34].copy_from_slice(&config.width.to_le_bytes());
+        out[34..36].copy_from_slice(&config.height.to_le_bytes());
+        out[48] = config.screen_layout2;
+        out[49] = config.colour_mode;
         out
     }
 
@@ -24906,12 +25369,60 @@ pub mod arsc {
                     .filter(|entry| entry.kind == *kind && entry.name == *name)
                     .map(|entry| entry.config)
                     .collect();
+                // Which of the things a folder can say this resource is
+                // told apart by. The platform reads it to know which changes
+                // to a device make it look this resource up again.
                 let mut flags = 0u32;
-                if held.iter().any(|one| one.density != held[0].density) {
-                    flags |= CONFIG_DENSITY;
-                }
-                if held.iter().any(|one| one.locale != held[0].locale) {
-                    flags |= CONFIG_LOCALE;
+                let differs = |what: &dyn Fn(&Config) -> u32| -> bool {
+                    held.iter().any(|one| what(one) != what(&held[0]))
+                };
+                for (bit, what) in [
+                    (CONFIG_MCC, &|one: &Config| u32::from(one.mcc)),
+                    (CONFIG_MNC, &|one: &Config| u32::from(one.mnc)),
+                    (CONFIG_LOCALE, &|one: &Config| {
+                        one.locale
+                            .language()
+                            .map_or(0, |held| u32::from(held[0]) | (u32::from(held[1]) << 8))
+                    }),
+                    (CONFIG_TOUCHSCREEN, &|one: &Config| {
+                        u32::from(one.touchscreen)
+                    }),
+                    (CONFIG_KEYBOARD, &|one: &Config| u32::from(one.keyboard)),
+                    (CONFIG_KEYBOARD_HIDDEN, &|one: &Config| {
+                        u32::from(one.input_flags & 0x0f)
+                    }),
+                    (CONFIG_NAVIGATION, &|one: &Config| u32::from(one.navigation)),
+                    (CONFIG_ORIENTATION, &|one: &Config| {
+                        u32::from(one.orientation)
+                    }),
+                    (CONFIG_DENSITY, &|one: &Config| {
+                        u32::from(density_value(one.density))
+                    }),
+                    (CONFIG_SCREEN_SIZE, &|one: &Config| {
+                        u32::from(one.screen_width) | (u32::from(one.screen_height) << 16)
+                    }),
+                    (CONFIG_VERSION, &|one: &Config| u32::from(one.version)),
+                    (CONFIG_SCREEN_LAYOUT, &|one: &Config| {
+                        u32::from(one.screen_layout & 0x3f)
+                    }),
+                    (CONFIG_UI_MODE, &|one: &Config| u32::from(one.ui_mode)),
+                    (CONFIG_SMALLEST_SCREEN_SIZE, &|one: &Config| {
+                        u32::from(one.smallest_width) | (u32::from(one.width) << 16)
+                    }),
+                    (CONFIG_LAYOUT_DIRECTION, &|one: &Config| {
+                        u32::from(one.screen_layout & 0xc0)
+                    }),
+                    (CONFIG_SCREEN_ROUND, &|one: &Config| {
+                        u32::from(one.screen_layout2 & 0x03)
+                    }),
+                    (CONFIG_COLOUR_MODE, &|one: &Config| {
+                        u32::from(one.colour_mode)
+                    }),
+                ] as [(u32, &dyn Fn(&Config) -> u32); 17]
+                {
+                    if differs(what) {
+                        flags |= bit;
+                    }
                 }
                 spec_flags[index] = flags;
             }
@@ -25938,6 +26449,24 @@ pub mod builder {
         compile_resources(project, sink)
     }
 
+    /// The oldest platform the project says it runs on.
+    ///
+    /// A folder qualified for something the platform learned later says which
+    /// platform it needs, and where every device the project runs on has it
+    /// already, saying so is noise the table does not carry.
+    fn oldest_platform_wanted(manifest: &str) -> u16 {
+        let mut sink = Sink::new();
+        let Some(root) = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink) else {
+            return 1;
+        };
+        root.children
+            .iter()
+            .find(|one| one.name == "uses-sdk")
+            .and_then(|one| one.attribute("android:minSdkVersion"))
+            .and_then(|text| text.parse::<u16>().ok())
+            .unwrap_or(1)
+    }
+
     fn compile_resources(project: &Project, sink: &mut Sink) -> Result<Option<Icons>, Diagnostic> {
         let set = launcher_icons(project)?;
         if set.is_empty() && project.values.is_empty() && project.resources.is_empty() {
@@ -26032,6 +26561,7 @@ pub mod builder {
             }
         }
 
+        table.settle_versions(oldest_platform_wanted(&project.manifest));
         let compiled = table
             .compile(sink)
             .ok_or_else(|| fail("EB041", "The resource table could not be built."))?;
@@ -30463,6 +30993,213 @@ mod tests {
 </manifest>
 "####;
 
+    /// Every qualifier a folder name can carry means to `aapt2` what it means
+    /// here.
+    ///
+    /// A folder called `values-night` or `mipmap-anydpi-v26` is how an
+    /// application says which devices something is for, and a build that does
+    /// not understand one of them either refuses the folder or, worse, drops
+    /// the qualifier and ships the wrong resource. The same folders go through
+    /// both tools, and what each makes of the table is compared line for line.
+    #[test]
+    fn every_qualifier_a_folder_can_carry_means_the_same_to_aapt2() {
+        const QUALIFIERS: &[&str] = &[
+            "",
+            "ldltr",
+            "ldrtl",
+            "small",
+            "normal",
+            "large",
+            "xlarge",
+            "long",
+            "notlong",
+            "round",
+            "notround",
+            "widecg",
+            "nowidecg",
+            "highdr",
+            "lowdr",
+            "port",
+            "land",
+            "car",
+            "desk",
+            "television",
+            "appliance",
+            "watch",
+            "vrheadset",
+            "night",
+            "notnight",
+            "notouch",
+            "finger",
+            "keysexposed",
+            "keyshidden",
+            "keyssoft",
+            "nokeys",
+            "qwerty",
+            "12key",
+            "navexposed",
+            "navhidden",
+            "nonav",
+            "dpad",
+            "trackball",
+            "wheel",
+            "ldpi",
+            "mdpi",
+            "hdpi",
+            "xhdpi",
+            "xxhdpi",
+            "xxxhdpi",
+            "nodpi",
+            "tvdpi",
+            "anydpi",
+            "sw600dp",
+            "w720dp",
+            "h1024dp",
+            "v26",
+            "v31",
+            "mcc310",
+            "mcc310-mnc004",
+            "tr",
+            "de",
+            "sw600dp-land-night-xxhdpi-v31",
+            "large-long-notround-port-hdpi",
+            "car-night-nokeys-navhidden-v29",
+        ];
+
+        let directory = temp_directory("omni-qualifiers");
+        let res = directory.join("Res");
+        for one in QUALIFIERS {
+            let folder = if one.is_empty() {
+                "values".to_string()
+            } else {
+                format!("values-{one}")
+            };
+            let at = res.join(&folder);
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(
+                at.join("strings.xml"),
+                format!(
+                    "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+                     <resources><string name=\"app_name\">{folder}</string></resources>\n"
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            A_BARE_MANIFEST.trim_start(),
+        )
+        .unwrap();
+        let root = directory.to_str().unwrap().to_string();
+
+        let mut project =
+            super::builder::from_manifest(A_BARE_MANIFEST).expect("the manifest reads");
+        project.values = super::scaffold::values_files(&root);
+        project.resources = super::scaffold::resource_files(&root);
+        assert_eq!(
+            project.values.len(),
+            QUALIFIERS.len(),
+            "every folder is read"
+        );
+
+        let mut sink = crate::diag::Sink::new();
+        super::builder::compile_resources_for_test(&project, &mut sink)
+            .expect("the resources compile");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let mut made = crate::diag::Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut made)
+            .expect("the package is written");
+        assert!(!made.has_blocking(), "{:?}", made.entries());
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("qualifier conformance: aapt2 is not available here");
+            return;
+        };
+        let Some(platform) = crate::builder::platform_jar() else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("qualifier conformance: no android.jar to link against");
+            return;
+        };
+        let ours = directory.join("ours.apk");
+        std::fs::write(&ours, &outcome.package).unwrap();
+
+        let compiled = directory.join("compiled.zip");
+        let done = std::process::Command::new(&aapt2)
+            .args(["compile", "--dir"])
+            .arg(res.to_str().unwrap())
+            .arg("-o")
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "aapt2 could not compile the folders: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        let theirs = directory.join("theirs.apk");
+        let linked = std::process::Command::new(&aapt2)
+            .arg("link")
+            .arg("-o")
+            .arg(theirs.to_str().unwrap())
+            .arg("-I")
+            .arg(&platform)
+            .arg("--manifest")
+            .arg(directory.join("AndroidManifest.xml").to_str().unwrap())
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "aapt2 could not link the folders: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+
+        // The order the configurations come out in is the writer's own; what
+        // matters is that both hold the same ones, saying the same things.
+        let dump = |apk: &std::path::Path| -> Vec<String> {
+            let out = std::process::Command::new(&aapt2)
+                .args(["dump", "resources"])
+                .arg(apk.to_str().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "aapt2 refused the table in {}: {}",
+                apk.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let mut lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|one| one.trim().to_string())
+                .filter(|one| one.starts_with('('))
+                .collect();
+            lines.sort();
+            lines
+        };
+        let mine = dump(&ours);
+        // One line per folder, less `values-v26`: every device the project
+        // runs on is past 26, so what that folder says is nothing, and it
+        // becomes the folder everything falls back to.
+        assert_eq!(
+            mine.len(),
+            QUALIFIERS.len() - 1,
+            "one line per folder: {mine:?}"
+        );
+        assert_eq!(
+            mine,
+            dump(&theirs),
+            "a qualifier does not mean here what it means to aapt2"
+        );
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "qualifier conformance: {} folders agree with aapt2",
+            QUALIFIERS.len()
+        );
+    }
+
     /// Styles, arrays and plurals become the table `aapt2` writes for the same
     /// file, entry for entry and value for value.
     ///
@@ -32309,9 +33046,9 @@ public final class MainActivity extends Activity {
         let mut table = ResourceTable::new();
         let mut sink = Sink::new();
         assert!(!table.read_file(
-            "drawable-land",
+            "drawable-nonsuch",
             "a.png",
-            "res/drawable-land/a.png",
+            "res/drawable-nonsuch/a.png",
             &mut sink
         ));
         let error = sink.entries().iter().find(|d| d.code == "E9010").unwrap();
@@ -32325,6 +33062,19 @@ public final class MainActivity extends Activity {
         assert!(
             table.read_file("drawable-tr", "a.png", "res/drawable-tr/a.png", &mut sink),
             "a language is a qualifier this build does model"
+        );
+
+        // And the ones a folder really can carry, which are now all of them.
+        let mut sink = Sink::new();
+        assert!(
+            table.read_file(
+                "drawable-sw600dp-land-night-xxhdpi-v31",
+                "b.png",
+                "res/drawable-sw600dp-land-night-xxhdpi-v31/b.png",
+                &mut sink
+            ),
+            "{:?}",
+            sink.entries()
         );
 
         let mut sink = Sink::new();
