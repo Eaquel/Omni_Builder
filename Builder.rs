@@ -16362,6 +16362,11 @@ pub mod dexwrite {
     pub struct Class {
         pub descriptor: String,
         pub superclass: String,
+        /// What it implements, which the file says in a list of its own. A
+        /// class whose interfaces are not written is a class the runtime does
+        /// not believe implements them: a cast to one fails, and so does every
+        /// call made through one.
+        pub interfaces: Vec<String>,
         pub access_flags: u32,
         pub source_file: Option<String>,
         /// Constructors, static methods and anything private: everything that
@@ -16379,6 +16384,7 @@ pub mod dexwrite {
             Class {
                 descriptor: descriptor.to_string(),
                 superclass: superclass.to_string(),
+                interfaces: Vec::new(),
                 access_flags,
                 source_file: None,
                 direct_methods: Vec::new(),
@@ -16521,6 +16527,9 @@ pub mod dexwrite {
         for class in classes {
             pools.kind(&class.descriptor);
             pools.kind(&class.superclass);
+            for one in &class.interfaces {
+                pools.kind(one);
+            }
             if let Some(source) = &class.source_file {
                 pools.string(source);
             }
@@ -16749,8 +16758,35 @@ pub mod dexwrite {
                 data.extend_from_slice(&at.to_le_bytes());
             }
         }
-        let type_lists = parameter_offsets.iter().filter(|at| **at != 0).count() as u32;
-        let first_type_list = parameter_offsets.iter().copied().find(|at| *at != 0);
+        // What each class implements is written the same way, and lands
+        // beside the parameter lists so that the map can name both at once.
+        let mut interface_offsets: Vec<u32> = Vec::with_capacity(classes.len());
+        for class in classes {
+            if class.interfaces.is_empty() {
+                interface_offsets.push(0);
+                continue;
+            }
+            while !(data_off + data.len()).is_multiple_of(4) {
+                data.push(0);
+            }
+            interface_offsets.push((data_off + data.len()) as u32);
+            data.extend_from_slice(&(class.interfaces.len() as u32).to_le_bytes());
+            for descriptor in &class.interfaces {
+                let at = pools.index_of_type(descriptor)? as u16;
+                data.extend_from_slice(&at.to_le_bytes());
+            }
+        }
+
+        let type_lists = parameter_offsets
+            .iter()
+            .chain(interface_offsets.iter())
+            .filter(|at| **at != 0)
+            .count() as u32;
+        let first_type_list = parameter_offsets
+            .iter()
+            .chain(interface_offsets.iter())
+            .copied()
+            .find(|at| *at != 0);
 
         let mut code_offsets: Vec<Vec<u32>> = Vec::new();
         for class in classes {
@@ -17034,7 +17070,7 @@ pub mod dexwrite {
             out.extend_from_slice(&pools.index_of_type(&class.descriptor)?.to_le_bytes());
             out.extend_from_slice(&class.access_flags.to_le_bytes());
             out.extend_from_slice(&pools.index_of_type(&class.superclass)?.to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&interface_offsets[index].to_le_bytes());
             match &class.source_file {
                 Some(source) => {
                     out.extend_from_slice(&pools.index_of_string(source)?.to_le_bytes())
@@ -17104,6 +17140,57 @@ pub mod dalvik {
             "core.dalvik",
             message,
         )
+    }
+
+    /// What an `invokedynamic` is asking for: the name and the descriptor of
+    /// the call, the class, name and descriptor of the method that works it
+    /// out, and the constants that method is handed.
+    type CallSite = (String, String, (String, String, String), Vec<jvm::Constant>);
+
+    /// One piece of the recipe a joined string is written from.
+    enum Piece {
+        Value,
+        Constant,
+        Text(String),
+    }
+
+    fn split_recipe(recipe: &str) -> Vec<Piece> {
+        let mut out = Vec::new();
+        let mut text = String::new();
+        for one in recipe.chars() {
+            match one {
+                '\u{1}' | '\u{2}' => {
+                    if !text.is_empty() {
+                        out.push(Piece::Text(std::mem::take(&mut text)));
+                    }
+                    out.push(if one == '\u{1}' {
+                        Piece::Value
+                    } else {
+                        Piece::Constant
+                    });
+                }
+                held => text.push(held),
+            }
+        }
+        if !text.is_empty() {
+            out.push(Piece::Text(text));
+        }
+        out
+    }
+
+    /// Which `append` takes a value of this kind. The builder has one for each
+    /// of the primitives, one for a string and one for anything else.
+    fn appends(descriptor: &str) -> &'static str {
+        match descriptor {
+            "Z" => "Z",
+            "C" => "C",
+            "J" => "J",
+            "F" => "F",
+            "D" => "D",
+            "B" | "S" | "I" => "I",
+            "Ljava/lang/String;" => "Ljava/lang/String;",
+            _ => "Ljava/lang/Object;",
+        }
     }
 
     /// The class the platform keeps a primitive's own class on. `int.class` is
@@ -17839,6 +17926,241 @@ pub mod dalvik {
             Ok(())
         }
 
+        /// What an `invokedynamic` is asking for: the name and descriptor of
+        /// the call, the method that works it out, and the constants it is
+        /// handed.
+        fn dynamic_at(&self, index: u16, start: usize) -> Result<CallSite, Diagnostic> {
+            let Some(jvm::Constant::InvokeDynamic(bootstrap, name_and_type)) =
+                self.constant_at(index)
+            else {
+                return Err(fail("ED050", "A dynamic call points at no call site.")
+                    .with_context(format!("Offset {start}, constant {index}")));
+            };
+            let (bootstrap, name_and_type) = (*bootstrap, *name_and_type);
+
+            let Some(jvm::Constant::NameAndType(name, descriptor)) =
+                self.constant_at(name_and_type)
+            else {
+                return Err(fail("ED050", "A dynamic call has no name and type.")
+                    .with_context(format!("Offset {start}")));
+            };
+            let (name, descriptor) = (*name, *descriptor);
+            let name = self
+                .utf8_at(name)
+                .ok_or_else(|| fail("ED050", "A dynamic call has no name."))?;
+            let descriptor = self
+                .utf8_at(descriptor)
+                .ok_or_else(|| fail("ED050", "A dynamic call has no descriptor."))?;
+
+            let Some(row) = self.class.bootstrap.get(usize::from(bootstrap)) else {
+                return Err(fail(
+                    "ED051",
+                    "A dynamic call names a bootstrap method the class does not have.",
+                )
+                .with_context(format!("Offset {start}, row {bootstrap}")));
+            };
+            let Some(jvm::Constant::MethodHandle(_, reference)) = self.constant_at(row.handle)
+            else {
+                return Err(fail("ED051", "A bootstrap method is not a method handle.")
+                    .with_context(format!("Offset {start}")));
+            };
+            let told = self.member_at(*reference, start)?;
+            let handed = row
+                .arguments
+                .iter()
+                .map(|one| {
+                    self.constant_at(*one)
+                        .cloned()
+                        .unwrap_or(jvm::Constant::Unusable)
+                })
+                .collect();
+            Ok((name, descriptor, told, handed))
+        }
+
+        /// `invokedynamic`, which Dalvik has only for what the platform itself
+        /// arranges and not for what a compiler asks of it.
+        ///
+        /// Everything written this way is written by one of two bootstrap
+        /// methods, and both of them are asking for something that can be
+        /// written out instead. This one joins strings together.
+        fn dynamic(&mut self, index: u16, start: usize) -> Result<(), Diagnostic> {
+            let (name, descriptor, (holder, told, _), handed) = self.dynamic_at(index, start)?;
+            let Some((parameters, returns)) = split_descriptor(&descriptor) else {
+                return Err(fail(
+                    "ED052",
+                    "A dynamic call has a descriptor that will not read.",
+                )
+                .with_context(format!("Offset {start}: {descriptor}")));
+            };
+
+            if holder == "java/lang/invoke/StringConcatFactory" {
+                return self.joined(&parameters, &returns, &told, &handed, start);
+            }
+
+            Err(fail(
+                "ED053",
+                "A dynamic call is arranged by something this does not know how to write out.",
+            )
+            .with_context(format!("Offset {start}"))
+            .with_context(format!("Call: {name}{descriptor}"))
+            .with_context(format!("Arranged by: {holder}.{told}"))
+            .with_suggestion(
+                "Dalvik has no instruction for this, so it has to be written out as \
+                 the instructions it stands for. Nothing is skipped: a call that ran \
+                 as something else would be worse than one that does not build.",
+            ))
+        }
+
+        /// Strings joined together, which javac writes as a dynamic call and
+        /// which the platform has done with a builder since it began.
+        ///
+        /// The recipe says what goes where: a one for the next value handed to
+        /// the call, a two for the next constant handed to the bootstrap, and
+        /// anything else for itself.
+        fn joined(
+            &mut self,
+            parameters: &[String],
+            returns: &str,
+            told: &str,
+            handed: &[jvm::Constant],
+            start: usize,
+        ) -> Result<(), Diagnostic> {
+            const BUILDER: &str = "Ljava/lang/StringBuilder;";
+            const VALUE: char = '\u{1}';
+
+            let (recipe, mut constants) = match told {
+                "makeConcatWithConstants" => {
+                    let Some(jvm::Constant::String(text)) = handed.first() else {
+                        return Err(fail("ED054", "A joined string has no recipe.")
+                            .with_context(format!("Offset {start}")));
+                    };
+                    let text = self.utf8_at(*text).ok_or_else(|| {
+                        fail("ED054", "A joined string's recipe is not text.")
+                            .with_context(format!("Offset {start}"))
+                    })?;
+                    (text, handed[1..].iter())
+                }
+                // Every value and nothing else, in the order they were handed
+                // over.
+                "makeConcat" => (VALUE.to_string().repeat(parameters.len()), handed.iter()),
+                other => {
+                    return Err(fail("ED054", "Strings are joined by something unexpected.")
+                        .with_context(format!("Offset {start}, by {other}")))
+                }
+            };
+
+            let words: u16 = parameters.iter().map(|one| width_of(one)).sum();
+            let base = self.slot(words);
+            let mut positions = Vec::with_capacity(parameters.len());
+            let mut at = base;
+            for one in parameters {
+                positions.push(at);
+                at += width_of(one);
+            }
+            self.shrink(words)?;
+
+            let hold = self.scratch;
+            let argument = self.scratch + 1;
+            if argument + 2 > 255 {
+                return Err(
+                    fail("ED055", "A joined string has nowhere to build itself.")
+                        .with_context(format!("Offset {start}, register {argument}")),
+                );
+            }
+
+            self.push(Insn::pointing(
+                vec![0x0022 | (hold << 8), 0],
+                1,
+                Operand::Type(BUILDER.to_string()),
+            ));
+            self.max_outputs = self.max_outputs.max(3);
+            self.invoke_at(
+                0x0070,
+                MethodRef {
+                    class: BUILDER.to_string(),
+                    name: "<init>".to_string(),
+                    return_type: "V".to_string(),
+                    parameters: Vec::new(),
+                },
+                hold,
+                1,
+            );
+
+            let mut taken = positions.iter().zip(parameters.iter());
+            for piece in split_recipe(&recipe) {
+                let (kept, appended) = match piece {
+                    Piece::Value => {
+                        let Some((register, descriptor)) = taken.next() else {
+                            return Err(fail(
+                                "ED054",
+                                "A joined string's recipe asks for more values than it was given.",
+                            )
+                            .with_context(format!("Offset {start}")));
+                        };
+                        let kept = Kept::of(descriptor);
+                        self.push(move_register(kept.moved_by(), argument, *register));
+                        (kept, appends(descriptor))
+                    }
+                    Piece::Constant => {
+                        let Some(jvm::Constant::String(text)) = constants.next() else {
+                            return Err(fail(
+                                "ED054",
+                                "A joined string's recipe asks for a constant that is not text.",
+                            )
+                            .with_context(format!("Offset {start}")));
+                        };
+                        let text = self.utf8_at(*text).ok_or_else(|| {
+                            fail("ED054", "A joined string's constant is not text.")
+                        })?;
+                        self.push(Insn::pointing(
+                            vec![0x001a | (argument << 8), 0],
+                            1,
+                            Operand::Text(text),
+                        ));
+                        (Kept::Reference, "Ljava/lang/String;")
+                    }
+                    Piece::Text(text) => {
+                        self.push(Insn::pointing(
+                            vec![0x001a | (argument << 8), 0],
+                            1,
+                            Operand::Text(text),
+                        ));
+                        (Kept::Reference, "Ljava/lang/String;")
+                    }
+                };
+                let width = if kept == Kept::Wide { 2 } else { 1 };
+                self.invoke_at(
+                    0x006e,
+                    MethodRef {
+                        class: BUILDER.to_string(),
+                        name: "append".to_string(),
+                        return_type: BUILDER.to_string(),
+                        parameters: vec![appended.to_string()],
+                    },
+                    hold,
+                    1 + width,
+                );
+                // What `append` gives back is the builder itself, and taking it
+                // rather than the register keeps the two in step.
+                self.push(Insn::raw(vec![0x000c | (hold << 8)]));
+            }
+
+            self.invoke_at(
+                0x006e,
+                MethodRef {
+                    class: BUILDER.to_string(),
+                    name: "toString".to_string(),
+                    return_type: "Ljava/lang/String;".to_string(),
+                    parameters: Vec::new(),
+                },
+                hold,
+                1,
+            );
+            self.push(Insn::raw(vec![0x000c | (base << 8)]));
+            self.puts(Kept::of(returns));
+            Ok(())
+        }
+
         fn call(&mut self, opcode: u8, index: u16, start: usize) -> Result<(), Diagnostic> {
             let (class, name, descriptor) = self.member_at(index, start)?;
             let Some((parameters, returns)) = split_descriptor(&descriptor) else {
@@ -18218,6 +18540,11 @@ pub mod dalvik {
                     let index = Self::u16_at(bytes, *at);
                     *at += 4;
                     self.call(opcode, index, start)?;
+                }
+                0xba => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 4;
+                    self.dynamic(index, start)?;
                 }
 
                 0xc5 => {
@@ -18886,6 +19213,18 @@ pub mod dalvik {
         /// An invoke, in the form that names up to five registers.
         fn invoke(&mut self, opcode: u16, reference: MethodRef, argument_words: u16) {
             let first = self.slot(argument_words);
+            self.invoke_at(opcode, reference, first, argument_words);
+        }
+
+        /// The same, on registers named outright rather than taken off the
+        /// stack.
+        fn invoke_at(
+            &mut self,
+            opcode: u16,
+            reference: MethodRef,
+            first: u16,
+            argument_words: u16,
+        ) {
             let last = first + argument_words.saturating_sub(1);
             self.max_outputs = self.max_outputs.max(argument_words);
 
@@ -18933,6 +19272,11 @@ pub mod dalvik {
         );
         let mut out =
             crate::dexwrite::Class::named(&descriptor, &superclass, u32::from(class.access_flags));
+        out.interfaces = class
+            .interfaces
+            .iter()
+            .map(|one| format!("L{};", one.replace('.', "/")))
+            .collect();
 
         for field in &class.fields {
             let entry = crate::dexwrite::Field {
@@ -19010,7 +19354,7 @@ pub mod dalvik {
             || code
                 .bytes
                 .iter()
-                .any(|byte| matches!(byte, 0x5a | 0x5b | 0x5d | 0x5e | 0x5f | 0xc4 | 0xc5))
+                .any(|byte| matches!(byte, 0x5a | 0x5b | 0x5d | 0x5e | 0x5f | 0xba | 0xc4 | 0xc5))
         {
             SHUFFLE_ROOM
         } else {
@@ -25115,6 +25459,7 @@ pub mod builder {
             code: vec![crate::dexwrite::Class {
                 descriptor: descriptor.clone(),
                 superclass: "Landroid/app/Activity;".to_string(),
+                interfaces: Vec::new(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
                 // Up into the superclass, which for an activity is the
@@ -25226,6 +25571,7 @@ pub mod builder {
             code: vec![crate::dexwrite::Class {
                 descriptor: descriptor.clone(),
                 superclass: "Landroid/app/Activity;".to_string(),
+                interfaces: Vec::new(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
                 // Up into the superclass, which for an activity is the
@@ -25719,6 +26065,18 @@ pub mod jvm {
         FieldRef(u16, u16),
         MethodRef(u16, u16),
         InterfaceMethodRef(u16, u16),
+        /// A reference to a member as a value: what kind of reference it is,
+        /// and the member it points at. This is what a bootstrap method is,
+        /// and what a lambda's body is named by.
+        MethodHandle(u8, u16),
+        /// A descriptor on its own, with no name attached to it.
+        MethodType(u16),
+        /// A call whose target is worked out the first time it runs: which
+        /// bootstrap method works it out, and the name and descriptor of the
+        /// call itself.
+        InvokeDynamic(u16, u16),
+        /// The same, for a constant rather than a call.
+        Dynamic(u16, u16),
         Unusable,
         Other(u8),
     }
@@ -25764,6 +26122,16 @@ pub mod jvm {
         pub length: u32,
     }
 
+    /// One row of the `BootstrapMethods` attribute.
+    #[derive(Clone, Debug)]
+    pub struct Bootstrap {
+        /// The constant pool index of the method handle that works the call
+        /// out.
+        pub handle: u16,
+        /// The constant pool indices of what it is handed.
+        pub arguments: Vec<u16>,
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct KotlinMetadata {
         pub kind: i32,
@@ -25793,6 +26161,11 @@ pub mod jvm {
         pub methods: Vec<Member>,
         pub attributes: Vec<Attribute>,
         pub kotlin: Option<KotlinMetadata>,
+        /// How each `invokedynamic` in the class works out what it calls: the
+        /// method handle that does the working out, and the constants it is
+        /// handed. A lambda and a string joined together are both written this
+        /// way, and neither can be read without this.
+        pub bootstrap: Vec<Bootstrap>,
         /// The generic signature the class was declared with, where it has
         /// one: `<T:Ljava/lang/Object;>Ljava/lang/Object;` for a `Box<T>`.
         /// This is the only place the names of its type parameters survive.
@@ -25917,12 +26290,18 @@ pub mod jvm {
         let mut attributes = Vec::with_capacity(attribute_count as usize);
         let mut kotlin = None;
         let mut signature: Option<String> = None;
+        let mut bootstrap: Vec<Bootstrap> = Vec::new();
         for _ in 0..attribute_count {
             let name_index = reader.u16()?;
             let length = reader.u32()?;
             let attribute_name = utf8(name_index, "attribute name")?;
             let content_start = reader.position();
             let content_length = reader.checked_length(u64::from(length))?;
+
+            if attribute_name == "BootstrapMethods" {
+                let content = reader.slice_at(content_start as u64, content_length as u64)?;
+                bootstrap = read_bootstrap_methods(content)?;
+            }
 
             if attribute_name == "Signature" && content_length == 2 {
                 let content = reader.slice_at(content_start as u64, 2)?;
@@ -25955,8 +26334,43 @@ pub mod jvm {
             methods,
             attributes,
             kotlin,
+            bootstrap,
             signature,
         })
+    }
+
+    /// The `BootstrapMethods` attribute, which is a count and then one row per
+    /// `invokedynamic` the class has: a method handle and the constants that
+    /// go with it.
+    fn read_bootstrap_methods(content: &[u8]) -> Result<Vec<Bootstrap>, Diagnostic> {
+        let short = || fail("EJ012", "The bootstrap methods attribute stops early.");
+        if content.len() < 2 {
+            return Err(short());
+        }
+        let count = u16::from_be_bytes([content[0], content[1]]);
+        let mut at = 2usize;
+        let mut out = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            if at + 4 > content.len() {
+                return Err(short());
+            }
+            let handle = u16::from_be_bytes([content[at], content[at + 1]]);
+            let arguments = u16::from_be_bytes([content[at + 2], content[at + 3]]);
+            at += 4;
+            let mut held = Vec::with_capacity(usize::from(arguments));
+            for _ in 0..arguments {
+                if at + 2 > content.len() {
+                    return Err(short());
+                }
+                held.push(u16::from_be_bytes([content[at], content[at + 1]]));
+                at += 2;
+            }
+            out.push(Bootstrap {
+                handle,
+                arguments: held,
+            });
+        }
+        Ok(out)
     }
 
     fn bounded(
@@ -26031,14 +26445,21 @@ pub mod jvm {
                     }
                 }
                 17 | 18 => {
-                    reader.skip(4)?;
-                    Constant::Other(tag)
+                    let bootstrap = reader.u16()?;
+                    let what = reader.u16()?;
+                    if tag == 17 {
+                        Constant::Dynamic(bootstrap, what)
+                    } else {
+                        Constant::InvokeDynamic(bootstrap, what)
+                    }
                 }
                 15 => {
-                    reader.skip(3)?;
-                    Constant::Other(tag)
+                    let kind = reader.u8()?;
+                    let reference = reader.u16()?;
+                    Constant::MethodHandle(kind, reference)
                 }
-                16 | 19 | 20 => {
+                16 => Constant::MethodType(reader.u16()?),
+                19 | 20 => {
                     reader.skip(2)?;
                     Constant::Other(tag)
                 }
@@ -30353,6 +30774,14 @@ public class Written {
         return a + b;
     }
 
+    public static String joined(int a, long b, double c, Object d, String e, char f, boolean g) {
+        return "a=" + a + " b=" + b + " c=" + c + " d=" + d + " e=" + e + " f=" + f + " g=" + g + "!";
+    }
+
+    public static String joined_only_values(String a, String b) {
+        return a + b;
+    }
+
     public static String describe(int which) {
         String out;
         switch (which) {
@@ -30402,7 +30831,7 @@ public class Written {
         std::fs::write(&source, WHAT_JAVAC_WRITES.trim_start()).unwrap();
 
         let done = std::process::Command::new("javac")
-            .args(["--release", "17", "-XDstringConcat=inline", "-d"])
+            .args(["--release", "17", "-d"])
             .arg(out.to_str().unwrap())
             .arg(source.to_str().unwrap())
             .output();
@@ -30427,6 +30856,7 @@ public class Written {
         assert!(!written.is_empty(), "javac wrote nothing");
 
         let mut refused = Vec::new();
+        let mut joined = 0;
         for path in &written {
             let bytes = std::fs::read(path).unwrap();
             let class = crate::jvm::read(&bytes)
@@ -30434,17 +30864,79 @@ public class Written {
             let translated = crate::dalvik::translate_class(&class)
                 .unwrap_or_else(|error| panic!("{} does not translate: {error:?}", path.display()));
             refused.extend(what_the_runtime_would_refuse(&translated));
+            // Strings joined together are written as a dynamic call, and what
+            // it stands for is a builder handed one piece at a time. Which
+            // pieces, and which `append` takes each, is the whole of what the
+            // call meant -- so it is read back out and compared.
+            for method in translated
+                .direct_methods
+                .iter()
+                .chain(translated.virtual_methods.iter())
+            {
+                let wanted: &[&str] = match method.reference.name.as_str() {
+                    "joined" => &[
+                        "\"a=\"",
+                        "Ljava/lang/String;",
+                        "I",
+                        "\" b=\"",
+                        "Ljava/lang/String;",
+                        "J",
+                        "\" c=\"",
+                        "Ljava/lang/String;",
+                        "D",
+                        "\" d=\"",
+                        "Ljava/lang/String;",
+                        "Ljava/lang/String;",
+                        "\" e=\"",
+                        "Ljava/lang/String;",
+                        "Ljava/lang/String;",
+                        "\" f=\"",
+                        "Ljava/lang/String;",
+                        "C",
+                        "\" g=\"",
+                        "Ljava/lang/String;",
+                        "Z",
+                        "\"!\"",
+                        "Ljava/lang/String;",
+                    ],
+                    "joined_only_values" => &["Ljava/lang/String;", "Ljava/lang/String;"],
+                    _ => continue,
+                };
+                assert_eq!(
+                    pieces_of(method),
+                    wanted,
+                    "{} is not joined the way it was written",
+                    method.reference.name
+                );
+                joined += 1;
+            }
         }
         assert!(
             refused.is_empty(),
             "the runtime would refuse this:\n  {}",
             refused.join("\n  ")
         );
+        assert_eq!(joined, 2, "both joined strings were read");
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
             "javac conformance: {} classes another compiler wrote translate and hold up",
             written.len()
         );
+    }
+
+    /// The text and the appends one method is written from, in order.
+    fn pieces_of(method: &crate::dexwrite::Method) -> Vec<String> {
+        let mut out = Vec::new();
+        for one in &method.instructions {
+            match &one.operand {
+                crate::dexwrite::Operand::Text(text) => out.push(format!("{text:?}")),
+                crate::dexwrite::Operand::Method(call) if call.name == "append" => {
+                    out.push(call.parameters.join(","))
+                }
+                _ => {}
+            }
+        }
+        out
     }
 
     fn gather_class_files(root: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
@@ -30492,6 +30984,7 @@ public class Written {
             }],
             attributes: Vec::new(),
             kotlin: None,
+            bootstrap: Vec::new(),
             signature: None,
         }
     }
@@ -33912,6 +34405,7 @@ public class Written {
         super::dexwrite::Class {
             descriptor: "Lcom/omni/made/MainActivity;".to_string(),
             superclass: "Landroid/app/Activity;".to_string(),
+            interfaces: Vec::new(),
             access_flags: super::dexwrite::ACC_PUBLIC,
             source_file: Some("MainActivity.java".to_string()),
             direct_methods: vec![super::dexwrite::default_constructor(
@@ -34806,6 +35300,30 @@ public final class MainActivity extends Activity {
             ] {
                 assert!(said.contains(wanted), "dexdump printed no {wanted:?}");
             }
+            // What a class implements is written down in a list of its own, or
+            // the runtime does not believe it implements it: a cast to the
+            // interface fails, and so does every call made through one.
+            let mut implemented: Vec<&str> = Vec::new();
+            let mut inside = false;
+            for line in said.lines() {
+                if line.trim_start().starts_with("Interfaces") {
+                    inside = true;
+                    continue;
+                }
+                if inside {
+                    if line.trim_start().starts_with('#') {
+                        implemented.push(line.trim());
+                    } else {
+                        inside = false;
+                    }
+                }
+            }
+            assert!(
+                implemented
+                    .iter()
+                    .any(|line| line.contains("Landroid/view/View$OnClickListener;")),
+                "no class says it implements the listener: {implemented:?}"
+            );
         }
 
         // And every class of it read the way the runtime reads one as it

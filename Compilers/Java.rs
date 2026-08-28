@@ -32877,6 +32877,7 @@ public class Screen extends Activity implements View.OnClickListener {
             }],
             attributes: Vec::new(),
             kotlin: None,
+            bootstrap: Vec::new(),
             signature: None,
         };
 
