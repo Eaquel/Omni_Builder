@@ -3817,17 +3817,26 @@ impl Parser {
             return Ok(Vec::new());
         }
         loop {
+            // A wildcard is read as what it erases to: `? extends Number` is a
+            // Number, and `?` and `? super T` are an Object. Reading the rest
+            // of the list and keeping none of it was the other way to do this,
+            // and it lost the key of a `Map<String, ? extends List<?>>` for no
+            // reason -- and read the list twice, which the lexer's one `>>`
+            // token cannot survive.
             if self.is_mark("?") {
                 self.take();
-                if self.eat_word("extends") || self.eat_word("super") {
-                    self.written_type()?;
+                if self.eat_word("extends") {
+                    found.push(self.written_type()?);
+                } else {
+                    if self.eat_word("super") {
+                        self.written_type()?;
+                    }
+                    found.push(Written::Named("Object".to_string(), Vec::new()));
                 }
-                found.clear();
-                // Read the rest and keep nothing: a wildcard says the argument
-                // is not one thing.
-                self.at = began;
-                self.skip_type_arguments()?;
-                return Ok(Vec::new());
+                if self.eat_mark(",") {
+                    continue;
+                }
+                break;
             }
             match self.written_type() {
                 Ok(one) => found.push(one),
@@ -8437,15 +8446,23 @@ impl Standing {
     fn bind(&self, actual: &Type, out: &mut Vec<(String, Type)>) {
         match self {
             Standing::OfTheMethod(name) => {
-                if !out.iter().any(|(held, _)| held == name) {
-                    // A type variable never stands for a primitive: erasure
-                    // has nowhere to put one. `listOf(1, 2)` is a list of
-                    // Integer, and the ints go into their boxes on the way.
-                    let actual = match boxed_name(actual) {
-                        Some(boxed) => Type::Object(boxed.to_string(), Vec::new()),
-                        None => actual.clone(),
-                    };
-                    out.push((name.clone(), actual));
+                // A type variable never stands for a primitive: erasure has
+                // nowhere to put one. `listOf(1, 2)` is a list of Integer, and
+                // the ints go into their boxes on the way.
+                let actual = match boxed_name(actual) {
+                    Some(boxed) => Type::Object(boxed.to_string(), Vec::new()),
+                    None => actual.clone(),
+                };
+                match out.iter_mut().find(|(held, _)| held == name) {
+                    // Bound twice to two different things, which is what
+                    // `asList(1, 2.5, 3L)` does. What they have in common is
+                    // more than Object and less than either; Object is the
+                    // part of it this can say without inventing anything.
+                    Some((_, before)) if *before != actual => {
+                        *before = Type::Object("java/lang/Object".to_string(), Vec::new());
+                    }
+                    Some(_) => {}
+                    None => out.push((name.clone(), actual)),
                 }
             }
             Standing::Holding(inside) => {
@@ -10062,12 +10079,18 @@ public interface Comparator<T> {
     default Comparator<T> reversed() { return null; }
     default Comparator<T> thenComparing(Comparator<T> then) { return null; }
     default <V> Comparator<T> thenComparing(java.util.function.Function<T, V> by) { return null; }
-    static <X> Comparator<X> naturalOrder();
     static <X> Comparator<X> reverseOrder();
+    default Comparator<T> thenComparingInt(java.util.function.ToIntFunction<T> by) { return null; }
+    default Comparator<T> thenComparingLong(java.util.function.ToLongFunction<T> by) { return null; }
+    default Comparator<T> thenComparingDouble(java.util.function.ToDoubleFunction<T> by) { return null; }
+    static <X> Comparator<X> naturalOrder();
     static <X, Y> Comparator<X> comparing(java.util.function.Function<X, Y> by);
+    static <X, Y> Comparator<X> comparing(java.util.function.Function<X, Y> by, Comparator<Y> then);
     static <X> Comparator<X> comparingInt(java.util.function.ToIntFunction<X> by);
     static <X> Comparator<X> comparingLong(java.util.function.ToLongFunction<X> by);
     static <X> Comparator<X> comparingDouble(java.util.function.ToDoubleFunction<X> by);
+    static <X> Comparator<X> nullsFirst(Comparator<X> then);
+    static <X> Comparator<X> nullsLast(Comparator<X> then);
 }
 
 public class AbstractCollection<E> implements Collection<E> { }
@@ -19057,8 +19080,17 @@ fn what_the_call_says(
             }
         }
     }
+    // Where the answer is going fills in what the arguments left unsaid, and
+    // nothing else: an argument that said what a variable stands for has
+    // already said it, and the target of the call is one step further out.
     if let Some(going) = going {
-        signature.returns_stands_for.bind(going, &mut bound);
+        let mut theirs: Vec<(String, Type)> = Vec::new();
+        signature.returns_stands_for.bind(going, &mut theirs);
+        for (name, what) in theirs {
+            if !bound.iter().any(|(held, _)| *held == name) {
+                bound.push((name, what));
+            }
+        }
     }
     // Nothing is learned from a variable that only stands for Object, which is
     // what it erased to in the first place.
@@ -26463,6 +26495,156 @@ public class Big {
                      0010112021 [0, 1, 1, 1, 1] [[x, y], [z]]y ver 45"
                 );
                 eprintln!("java: a lambda in a default method calls what it was written in");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// Wildcards where a person writes them -- `List<? extends Number>`,
+    /// `List<? super Integer>`, `Map<String, ? extends List<?>>` -- an
+    /// annotation with an array, a number and a class literal in it, read back
+    /// through reflection, a `private static` helper on an interface reached
+    /// from a lambda inside a `default` method, a record and an enum written
+    /// inside a method, and a `switch` over an Object with patterns.
+    const WILDCARDS_AND_WHAT_IS_WRITTEN_ON_THEM: &str = r####"
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
+
+public class Cards {
+
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target(ElementType.TYPE)
+    @interface Marked {
+        String[] tags() default {"none"};
+        int level() default 1;
+        Class held() default Object.class;
+    }
+
+    @Marked(tags = {"a", "b"}, level = 3, held = String.class)
+    static class Tagged { }
+
+    interface Sink<T> {
+        void take(T one);
+        private static String prefix() { return ">"; }
+        static <X> Sink<X> ignoring() { return one -> { }; }
+        default Sink<T> logged(StringBuilder out) {
+            return one -> { out.append(prefix()).append(one); take(one); };
+        }
+    }
+
+    static double total(List<? extends Number> of) {
+        double sum = 0;
+        for (Number one : of) sum += one.doubleValue();
+        return sum;
+    }
+
+    static void fill(List<? super Integer> into, int count) {
+        for (int i = 0; i < count; i++) into.add(i);
+    }
+
+    static String widest(Map<String, ? extends List<?>> of) {
+        String best = "";
+        int most = -1;
+        for (Map.Entry<String, ? extends List<?>> one : of.entrySet()) {
+            if (one.getValue().size() > most) {
+                most = one.getValue().size();
+                best = one.getKey();
+            }
+        }
+        return best + most;
+    }
+
+    static String deeply(int of) {
+        record Step(int at, String said) {
+            String shown() { return at + said; }
+        }
+        enum Way { UP, DOWN }
+        Way way = of > 0 ? Way.UP : Way.DOWN;
+        return new Step(Math.abs(of), way.name()).shown();
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        Marked marked = Tagged.class.getAnnotation(Marked.class);
+        out.append(Arrays.toString(marked.tags())).append(marked.level())
+           .append(marked.held().getSimpleName()).append(' ');
+
+        StringBuilder seen = new StringBuilder();
+        Sink<String> keep = one -> seen.append(one);
+        keep.logged(seen).take("x");
+        out.append(seen).append(' ');
+        Sink.<String>ignoring().take("nothing");
+
+        List<? extends Number> numbers = Arrays.asList(1, 2.5, 3L);
+        out.append(total(numbers)).append(' ');
+        List<Object> into = new ArrayList<Object>();
+        fill(into, 3);
+        out.append(into).append(' ');
+
+        Map<String, List<String>> rows = new HashMap<String, List<String>>();
+        rows.put("a", Arrays.asList("1"));
+        rows.put("b", Arrays.asList("1", "2"));
+        out.append(widest(rows)).append(' ');
+
+        out.append(deeply(-4)).append(deeply(2)).append(' ');
+
+        List<String> sorted = new ArrayList<String>(Arrays.asList("bb", "a", "ccc"));
+        sorted.sort(Comparator.comparing(String::length, Comparator.reverseOrder()));
+        out.append(sorted).append(' ');
+
+        Object[] things = {1, "a", 2.5};
+        StringBuilder kinds = new StringBuilder();
+        for (Object one : things) {
+            kinds.append(switch (one) {
+                case Integer i -> "i";
+                case String s -> "s";
+                default -> "?";
+            });
+        }
+        out.append(kinds).append(' ');
+
+        int deep = ((1 + 2) * (3 - 4) / (5 % 6)) + (7 << 1) - (~8) + (9 > 3 ? 10 : 11);
+        out.append(deep);
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn wildcards_and_the_things_written_around_them_run() {
+        let produced =
+            compile(WILDCARDS_AND_WHAT_IS_WRITTEN_ON_THEM, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Cards") {
+            None => eprintln!("java: no JVM here to run the wildcards"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "[a, b]3String >xx 6.5 [0, 1, 2] b2 4DOWN2UP [ccc, bb, a] is? 33"
+                );
+                eprintln!("java: wildcards, and what gets written around them");
             }
         }
 
