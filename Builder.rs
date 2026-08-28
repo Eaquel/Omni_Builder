@@ -17106,16 +17106,40 @@ pub mod dalvik {
         )
     }
 
+    /// The class the platform keeps a primitive's own class on. `int.class` is
+    /// `Integer.TYPE`, and there is one of those for each of the eight.
+    fn boxed(descriptor: &str) -> Option<&'static str> {
+        Some(match descriptor {
+            "Z" => "Ljava/lang/Boolean;",
+            "B" => "Ljava/lang/Byte;",
+            "C" => "Ljava/lang/Character;",
+            "S" => "Ljava/lang/Short;",
+            "I" => "Ljava/lang/Integer;",
+            "J" => "Ljava/lang/Long;",
+            "F" => "Ljava/lang/Float;",
+            "D" => "Ljava/lang/Double;",
+            _ => return None,
+        })
+    }
+
+    /// How far along the range form of a call is from the short form. Every
+    /// one of the five is the same distance away.
+    const RANGE_AWAY: u16 = 0x0006;
+
     /// How many registers a stack shuffle has to work in. The most any of them
     /// reaches is four slots, and it never needs more room than it reaches.
     const SHUFFLE_ROOM: u16 = 4;
+
+    /// How many registers are kept at the bottom for the instructions that name
+    /// a register in four bits. The widest of them names two, and either may be
+    /// a long or a double.
+    const LOW_ROOM: u16 = 4;
 
     /// What an opcode is called, so a refusal names it rather than numbering it.
     fn name_of(opcode: u8) -> &'static str {
         match opcode {
             0xa8 | 0xa9 => "`jsr` or `ret`",
             0xba => "`invokedynamic`",
-            0xc5 => "a multi-dimensional array in one instruction",
             _ => "that instruction",
         }
     }
@@ -17173,6 +17197,10 @@ pub mod dalvik {
         switches: Vec<PendingSwitch>,
         /// The method's exception table, as the class file gave it.
         handlers: Vec<(u16, u16, u16, u16)>,
+        /// Where the registers kept for the instructions that name a register
+        /// in four bits begin, and how many there are. Everything else in the
+        /// method sits above them.
+        low: u16,
         stack_base: u16,
         depth: u16,
         /// What each stack slot holds, one entry per slot, the top last.
@@ -17237,7 +17265,7 @@ pub mod dalvik {
     }
 
     impl<'a> Translator<'a> {
-        pub fn new(class: &'a jvm::Class, code: &jvm::Code) -> Translator<'a> {
+        pub fn new(class: &'a jvm::Class, code: &jvm::Code, low: u16) -> Translator<'a> {
             Translator {
                 class,
                 code: Vec::new(),
@@ -17245,10 +17273,11 @@ pub mod dalvik {
                 fixups: Vec::new(),
                 switches: Vec::new(),
                 handlers: code.handlers.clone(),
-                stack_base: code.max_locals,
+                low,
+                stack_base: low + code.max_locals,
                 depth: 0,
                 kinds: Vec::new(),
-                scratch: code.max_locals + code.max_stack,
+                scratch: low + code.max_locals + code.max_stack,
                 kinds_at: std::collections::BTreeMap::new(),
                 max_outputs: 0,
             }
@@ -17783,11 +17812,14 @@ pub mod dalvik {
                     let object = self.slot(1);
                     self.shrink(1)?;
                     let to = self.stack_base + self.depth;
+                    let object = self.brought_down(object, Kept::Reference, 0);
+                    let into = if to > 15 { 2 } else { to };
                     self.push(Insn::pointing(
-                        vec![(0x0052 + kind) | (to << 8) | (object << 12), 0],
+                        vec![(0x0052 + kind) | (into << 8) | (object << 12), 0],
                         1,
                         Operand::Field(reference),
                     ));
+                    self.put_back(to, holds, into);
                     self.puts(holds);
                 }
                 _ => {
@@ -17795,6 +17827,8 @@ pub mod dalvik {
                     let value = self.slot(width);
                     let object = self.slot(width + 1);
                     self.shrink(width + 1)?;
+                    let value = self.brought_down(value, holds, 0);
+                    let object = self.brought_down(object, Kept::Reference, 2);
                     self.push(Insn::pointing(
                         vec![(0x0059 + kind) | (value << 8) | (object << 12), 0],
                         1,
@@ -18083,24 +18117,21 @@ pub mod dalvik {
                     // if-eqz .. if-lez
                     self.branch(0x0038 + u16::from(opcode) - 0x99, vec![register], target);
                 }
-                0x9f..=0xa4 => {
+                0x9f..=0xa6 => {
                     let target = self.jump_target(bytes, at, start);
                     let left = self.slot(2);
                     let right = self.slot(1);
                     self.shrink(2)?;
-                    // if-eq .. if-le
-                    self.branch(0x0032 + u16::from(opcode) - 0x9f, vec![left, right], target);
-                }
-                0xa5 | 0xa6 => {
-                    let target = self.jump_target(bytes, at, start);
-                    let left = self.slot(2);
-                    let right = self.slot(1);
-                    self.shrink(2)?;
-                    self.branch(
-                        if opcode == 0xa5 { 0x0032 } else { 0x0033 },
-                        vec![left, right],
-                        target,
-                    );
+                    // The two that compare references are if-eq and if-ne, the
+                    // same instructions the six that compare numbers use.
+                    let (dalvik, kept) = match opcode {
+                        0xa5 => (0x0032, Kept::Reference),
+                        0xa6 => (0x0033, Kept::Reference),
+                        _ => (0x0032 + u16::from(opcode) - 0x9f, Kept::Number),
+                    };
+                    let left = self.brought_down(left, kept, 0);
+                    let right = self.brought_down(right, kept, 2);
+                    self.branch(dalvik, vec![left, right], target);
                 }
                 0xc6 | 0xc7 => {
                     let target = self.jump_target(bytes, at, start);
@@ -18189,6 +18220,15 @@ pub mod dalvik {
                     self.call(opcode, index, start)?;
                 }
 
+                0xc5 => {
+                    let index = Self::u16_at(bytes, *at);
+                    *at += 2;
+                    let dimensions = u16::from(bytes[*at]);
+                    *at += 1;
+                    let name = self.class_name(index, start)?;
+                    self.many_dimensions(&name, dimensions, start)?;
+                }
+
                 0xbb => {
                     let index = Self::u16_at(bytes, *at);
                     *at += 2;
@@ -18205,7 +18245,10 @@ pub mod dalvik {
                     let from = self.slot(1);
                     self.shrink(1)?;
                     let to = self.stack_base + self.depth;
-                    self.push(Insn::raw(vec![0x0021 | (to << 8) | (from << 12)]));
+                    let from = self.brought_down(from, Kept::Reference, 0);
+                    let into = if to > 15 { 2 } else { to };
+                    self.push(Insn::raw(vec![0x0021 | (into << 8) | (from << 12)]));
+                    self.put_back(to, Kept::Number, into);
                     self.puts(Kept::Number);
                 }
                 0xc0 | 0xc1 => {
@@ -18227,11 +18270,14 @@ pub mod dalvik {
                     } else {
                         self.shrink(1)?;
                         let to = self.stack_base + self.depth;
+                        let register = self.brought_down(register, Kept::Reference, 0);
+                        let into = if to > 15 { 2 } else { to };
                         self.push(Insn::pointing(
-                            vec![0x0020 | (to << 8) | (register << 12), 0],
+                            vec![0x0020 | (into << 8) | (register << 12), 0],
                             1,
                             Operand::Type(descriptor),
                         ));
+                        self.put_back(to, Kept::Number, into);
                         self.puts(Kept::Number);
                     }
                 }
@@ -18371,6 +18417,28 @@ pub mod dalvik {
             Ok(())
         }
 
+        /// Brings a value down to the registers kept at the bottom, where the
+        /// four bits an instruction names it in cannot reach it.
+        ///
+        /// A register past fifteen written into a four bit field is a different
+        /// register, and the runtime reads it as one: the wrong value, or a
+        /// refusal. So the value is moved down, the instruction is done there,
+        /// and `put_back` takes the answer home.
+        fn brought_down(&mut self, register: u16, kept: Kept, into: u16) -> u16 {
+            if register <= 15 {
+                return register;
+            }
+            self.push(move_register(kept.moved_by(), into, register));
+            into
+        }
+
+        fn put_back(&mut self, register: u16, kept: Kept, from: u16) {
+            if register <= 15 {
+                return;
+            }
+            self.push(move_register(kept.moved_by(), register, from));
+        }
+
         /// `dup`, `swap` and the rest of the stack shuffles.
         ///
         /// Every one of them says the same thing: take the top group of slots,
@@ -18488,6 +18556,7 @@ pub mod dalvik {
         /// local numbered past what a byte holds, is done the long way: the
         /// step into a register of its own, and then an add.
         fn increment(&mut self, local: u16, by: i32, start: usize) -> Result<(), Diagnostic> {
+            let local = self.low + local;
             if local < 256 && i32::from(by as i8) == by {
                 // add-int/lit8 vAA, vBB, #+CC
                 self.push(Insn::raw(vec![
@@ -18511,6 +18580,7 @@ pub mod dalvik {
         }
 
         fn load_local(&mut self, local: u16, kind: u8, width: u16) {
+            let local = self.low + local;
             let to = self.stack_base + self.depth;
             self.push(move_register(kind, to, local));
             self.puts(match kind {
@@ -18524,9 +18594,38 @@ pub mod dalvik {
         }
 
         fn store_local(&mut self, local: u16, kind: u8, width: u16) -> Result<(), Diagnostic> {
+            let local = self.low + local;
             let from = self.slot(width);
             self.shrink(width)?;
             self.push(move_register(kind, local, from));
+            Ok(())
+        }
+
+        /// `op vA, vB`: one value in and one out, both named in four bits.
+        fn one_operand(
+            &mut self,
+            dalvik: u16,
+            from_width: u16,
+            to_width: u16,
+        ) -> Result<(), Diagnostic> {
+            let from = self.slot(from_width);
+            self.shrink(from_width)?;
+            let to = self.stack_base + self.depth;
+            let from_kept = if from_width == 2 {
+                Kept::Wide
+            } else {
+                Kept::Number
+            };
+            let to_kept = if to_width == 2 {
+                Kept::Wide
+            } else {
+                Kept::Number
+            };
+            let from = self.brought_down(from, from_kept, 0);
+            let into = if to > 15 { 2 } else { to };
+            self.push(Insn::raw(vec![dalvik | (into << 8) | (from << 12)]));
+            self.put_back(to, to_kept, into);
+            self.puts_wide(to_width);
             Ok(())
         }
 
@@ -18558,23 +18657,9 @@ pub mod dalvik {
                 0x6d => (0x009e, 2, 2, 2),    // div-long
                 0x70 => (0x0094, 1, 1, 1),    // rem-int
                 0x71 => (0x009f, 2, 2, 2),    // rem-long
-                0x74 => {
-                    // neg-int, which takes one operand and is a different shape.
-                    let from = self.slot(1);
-                    self.shrink(1)?;
-                    let to = self.stack_base + self.depth;
-                    self.push(Insn::raw(vec![0x007b | (to << 8) | (from << 12)]));
-                    self.grow(1);
-                    return Ok(());
-                }
-                0x75 => {
-                    let from = self.slot(2);
-                    self.shrink(2)?;
-                    let to = self.stack_base + self.depth;
-                    self.push(Insn::raw(vec![0x007d | (to << 8) | (from << 12)]));
-                    self.grow(2);
-                    return Ok(());
-                }
+                // The four that take one operand are a different shape.
+                0x74 => return self.one_operand(0x007b, 1, 1),
+                0x75 => return self.one_operand(0x007d, 2, 2),
                 0x62 => (0x00a6, 1, 1, 1), // add-float
                 0x63 => (0x00ab, 2, 2, 2), // add-double
                 0x66 => (0x00a7, 1, 1, 1), // sub-float
@@ -18585,22 +18670,8 @@ pub mod dalvik {
                 0x6f => (0x00ae, 2, 2, 2), // div-double
                 0x72 => (0x00aa, 1, 1, 1), // rem-float
                 0x73 => (0x00af, 2, 2, 2), // rem-double
-                0x76 => {
-                    let from = self.slot(1);
-                    self.shrink(1)?;
-                    let to = self.stack_base + self.depth;
-                    self.push(Insn::raw(vec![0x007f | (to << 8) | (from << 12)]));
-                    self.grow(1);
-                    return Ok(());
-                }
-                0x77 => {
-                    let from = self.slot(2);
-                    self.shrink(2)?;
-                    let to = self.stack_base + self.depth;
-                    self.push(Insn::raw(vec![0x0080 | (to << 8) | (from << 12)]));
-                    self.grow(2);
-                    return Ok(());
-                }
+                0x76 => return self.one_operand(0x007f, 1, 1),
+                0x77 => return self.one_operand(0x0080, 2, 2),
                 0x78 => (0x0098, 1, 1, 1), // shl-int
                 0x79 => (0x00a3, 2, 1, 2), // shl-long
                 0x7a => (0x0099, 1, 1, 1), // shr-int
@@ -18647,11 +18718,98 @@ pub mod dalvik {
                 0x93 => (0x008f, 1, 1),    // int-to-short
                 _ => return Err(unsupported(start, opcode, name_of(opcode))),
             };
-            let from = self.slot(from_width);
-            self.shrink(from_width)?;
-            let to = self.stack_base + self.depth;
-            self.push(Insn::raw(vec![dalvik | (to << 8) | (from << 12)]));
-            self.grow(to_width);
+            self.one_operand(dalvik, from_width, to_width)
+        }
+
+        /// `new int[a][b]`, which Dalvik has no instruction for.
+        ///
+        /// The JVM makes the whole thing in one go. Dalvik does not, and the
+        /// platform's own answer is the one used here: the lengths go into an
+        /// array of their own, and `java.lang.reflect.Array.newInstance` is
+        /// handed that and the type the whole thing is an array of. What comes
+        /// back is an Object, and it is cast to what it is.
+        fn many_dimensions(
+            &mut self,
+            name: &str,
+            dimensions: u16,
+            start: usize,
+        ) -> Result<(), Diagnostic> {
+            if dimensions == 0 || self.depth < dimensions {
+                return Err(fail("ED018", "An array of no dimensions was asked for.")
+                    .with_context(format!("Offset {start}, {dimensions} dimensions")));
+            }
+            let whole = if name.starts_with('[') {
+                name.to_string()
+            } else {
+                format!("L{name};")
+            };
+            let Some(inside) = whole.strip_prefix(&"[".repeat(usize::from(dimensions))) else {
+                return Err(fail(
+                    "ED019",
+                    "An array is asked for in more dimensions than it has.",
+                )
+                .with_context(format!("Offset {start}: {whole}, {dimensions} dimensions")));
+            };
+            let inside = inside.to_string();
+
+            let base = self.slot(dimensions);
+            let of_what = self.scratch;
+            let lengths = self.scratch + 1;
+            if lengths > 255 {
+                return Err(fail(
+                    "ED017",
+                    "A local is numbered past what the instruction that steps it can name.",
+                )
+                .with_context(format!("Offset {start}, register {lengths}")));
+            }
+
+            // The lengths are already in a row of registers, which is exactly
+            // what one instruction makes an array out of.
+            self.max_outputs = self.max_outputs.max(dimensions.max(2));
+            self.push(Insn::pointing(
+                vec![0x0025 | (dimensions << 8), 0, base],
+                1,
+                Operand::Type("[I".to_string()),
+            ));
+            self.push(Insn::raw(vec![0x000c | (lengths << 8)]));
+
+            // The type the whole thing is an array of, as a class. A primitive
+            // has no class of its own; the platform keeps one on the box.
+            match boxed(&inside) {
+                Some(box_class) => self.push(Insn::pointing(
+                    vec![0x0062 | (of_what << 8), 0],
+                    1,
+                    Operand::Field(FieldRef {
+                        class: box_class.to_string(),
+                        name: "TYPE".to_string(),
+                        descriptor: "Ljava/lang/Class;".to_string(),
+                    }),
+                )),
+                None => self.push(Insn::pointing(
+                    vec![0x001c | (of_what << 8), 0],
+                    1,
+                    Operand::Type(inside.clone()),
+                )),
+            }
+
+            self.push(Insn::pointing(
+                vec![0x0077 | (2 << 8), 0, of_what],
+                1,
+                Operand::Method(MethodRef {
+                    class: "Ljava/lang/reflect/Array;".to_string(),
+                    name: "newInstance".to_string(),
+                    return_type: "Ljava/lang/Object;".to_string(),
+                    parameters: vec!["Ljava/lang/Class;".to_string(), "[I".to_string()],
+                }),
+            ));
+            self.shrink(dimensions)?;
+            self.push(Insn::raw(vec![0x000c | (base << 8)]));
+            self.push(Insn::pointing(
+                vec![0x001f | (base << 8), 0],
+                1,
+                Operand::Type(whole),
+            ));
+            self.puts(Kept::Reference);
             Ok(())
         }
 
@@ -18661,11 +18819,14 @@ pub mod dalvik {
             let length = self.slot(1);
             self.shrink(1)?;
             let to = self.stack_base + self.depth;
+            let length = self.brought_down(length, Kept::Number, 0);
+            let into = if to > 15 { 2 } else { to };
             self.push(Insn::pointing(
-                vec![0x0023 | (to << 8) | (length << 12), 0],
+                vec![0x0023 | (into << 8) | (length << 12), 0],
                 1,
                 Operand::Type(descriptor.to_string()),
             ));
+            self.put_back(to, Kept::Reference, into);
             self.puts(Kept::Reference);
             Ok(())
         }
@@ -18725,20 +18886,30 @@ pub mod dalvik {
         /// An invoke, in the form that names up to five registers.
         fn invoke(&mut self, opcode: u16, reference: MethodRef, argument_words: u16) {
             let first = self.slot(argument_words);
-            let mut registers = Vec::new();
-            for step in 0..argument_words {
-                registers.push(first + step);
-            }
+            let last = first + argument_words.saturating_sub(1);
             self.max_outputs = self.max_outputs.max(argument_words);
 
-            let count = registers.len() as u16;
-            let mut packed = 0u16;
-            for (index, register) in registers.iter().take(4).enumerate() {
-                packed |= (register & 0xf) << (index * 4);
+            // The short form names each register in four bits and holds five of
+            // them. Anything past that is the range form, which names the first
+            // register and how many follow -- and the arguments are always in a
+            // row here, so it always reaches. Truncating a register to four bits
+            // instead would name a different one, quietly.
+            if argument_words > 5 || last > 15 {
+                self.push(Insn::pointing(
+                    vec![(opcode + RANGE_AWAY) | (argument_words << 8), 0, first],
+                    1,
+                    Operand::Method(reference),
+                ));
+                return;
             }
-            let fifth = registers.get(4).copied().unwrap_or(0) & 0xf;
+
+            let mut packed = 0u16;
+            for step in 0..argument_words.min(4) {
+                packed |= (first + step) << (step * 4);
+            }
+            let fifth = if argument_words == 5 { first + 4 } else { 0 };
             self.push(Insn::pointing(
-                vec![opcode | (fifth << 8) | (count << 12), 0, packed],
+                vec![opcode | (fifth << 8) | (argument_words << 12), 0, packed],
                 1,
                 Operand::Method(reference),
             ));
@@ -18831,7 +19002,6 @@ pub mod dalvik {
             });
         };
 
-        let mut translator = Translator::new(class, code);
         // A shuffle that puts a value back below where it started needs
         // somewhere to keep the values while it works, and that is above the
         // stack. Only the shuffles that reach downwards need it, so a method
@@ -18840,17 +19010,38 @@ pub mod dalvik {
             || code
                 .bytes
                 .iter()
-                .any(|byte| matches!(byte, 0x5a | 0x5b | 0x5d | 0x5e | 0x5f | 0xc4))
+                .any(|byte| matches!(byte, 0x5a | 0x5b | 0x5d | 0x5e | 0x5f | 0xc4 | 0xc5))
         {
             SHUFFLE_ROOM
         } else {
             0
         };
-        let total = code.max_locals + code.max_stack + room + inputs;
+        // And most of the one-operand instructions name their registers in
+        // four bits, which reaches the first sixteen and no further. A method
+        // that needs more than that keeps the first few for them.
+        let low = if code.max_locals + code.max_stack + room >= 16 {
+            LOW_ROOM
+        } else {
+            0
+        };
+        let total = low + code.max_locals + code.max_stack + room + inputs;
+        if total > 255 {
+            return Err(fail(
+                "ED021",
+                "A method needs more registers than its instructions can name.",
+            )
+            .with_context(format!(
+                "Method: {}.{}{}",
+                class.name, method.name, method.descriptor
+            ))
+            .with_context(format!("Registers: {total}")));
+        }
+
+        let mut translator = Translator::new(class, code, low);
 
         // The parameters arrive at the top and belong at the bottom.
-        let mut at = code.max_locals + code.max_stack + room;
-        let mut local = 0u16;
+        let mut at = low + code.max_locals + code.max_stack + room;
+        let mut local = low;
         if !is_static {
             translator.push(move_register(0x07, local, at));
             at += 1;
@@ -29722,23 +29913,31 @@ mod tests {
                 };
                 reads(held, aa, Register::of(&field.descriptor), said);
             }
-            // Calls.
-            0x6e..=0x72 => {
+            // Calls, in the form that names each register and the form that
+            // names the first of a row of them.
+            0x6e..=0x72 | 0x74..=0x78 => {
                 let Operand::Method(call) = &one.operand else {
                     return goes;
                 };
-                let count = unit >> 12;
                 let third = one.units.get(2).copied().unwrap_or(0);
+                let ranged = opcode >= 0x74;
                 let mut named = Vec::new();
-                for step in 0..count.min(4) {
-                    named.push((third >> (step * 4)) & 0xf);
-                }
-                if count == 5 {
-                    named.push((unit >> 8) & 0xf);
+                if ranged {
+                    for step in 0..aa {
+                        named.push(third + step);
+                    }
+                } else {
+                    let count = unit >> 12;
+                    for step in 0..count.min(4) {
+                        named.push((third >> (step * 4)) & 0xf);
+                    }
+                    if count == 5 {
+                        named.push((unit >> 8) & 0xf);
+                    }
                 }
 
                 let mut wanted: Vec<Register> = Vec::new();
-                if opcode != 0x71 {
+                if opcode != 0x71 && opcode != 0x77 {
                     wanted.push(Register::Reference);
                 }
                 for parameter in &call.parameters {
@@ -29981,6 +30180,53 @@ public class Everything {
     public int shifted(int value, long wide) {
         return (int) ((wide << value) >>> 3) ^ (value & 0xff);
     }
+
+    static int seven(int a, int b, int c, int d, int e, int f, int g) {
+        return a + b + c + d + e + f + g;
+    }
+
+    // Enough locals that the registers the arguments sit in are past the four
+    // bits the short form of a call names them in.
+    // Enough live values that the registers holding them run past the
+    // sixteen a four bit field reaches, with something of every shape in
+    // among them: a field, an array, a cast, a negation, a length.
+    public String crowded(Object what, int[] numbers) {
+        int a = numbers.length;
+        int b = -a;
+        int c = a + b;
+        long d = a;
+        long e = -d;
+        double f = a;
+        double g = -f;
+        Object h = what;
+        Object i = h;
+        String j = what instanceof String ? (String) what : "no";
+        int k = j.length();
+        int l = numbers[0];
+        int m = numbers[k % (a + 1)];
+        count = count + a;
+        held[0] = e;
+        held[1] = held[1] + d;
+        int n = (int) (d + e);
+        int o = (int) (f + g);
+        boolean p = h == i;
+        StringBuilder out = new StringBuilder();
+        out.append(a).append(b).append(c).append(d).append(e);
+        out.append(f).append(g).append(j).append(k).append(l);
+        out.append(m).append(n).append(o).append(p).append(count);
+        return out.toString();
+    }
+
+    public int far(int a, int b, int c, int d, int e, int f, int g) {
+        int h = a * 2;
+        int i = b * 2;
+        int j = c * 2;
+        int k = d * 2;
+        int l = e * 2;
+        int m = f * 2;
+        int n = g * 2;
+        return seven(h, i, j, k, l, m, n) + seven(a, b, c, d, e, f, g);
+    }
 }
 "####;
 
@@ -30059,6 +30305,260 @@ public class Sugared {
     }
 }
 "####;
+
+    const WHAT_JAVAC_WRITES: &str = r####"
+package com.my.app;
+
+public class Written {
+    int count;
+    long total;
+    static int[][] grid;
+    static String[][][] words;
+
+    public static int[][] make(int rows, int columns) {
+        return new int[rows][columns];
+    }
+
+    public static int[][] partly(int rows) {
+        return new int[rows][];
+    }
+
+    public static String[][][] deep(int a, int b) {
+        words = new String[a][b][];
+        return words;
+    }
+
+    public int stepped() {
+        // The result of a compound assignment on a field, which javac writes
+        // with dup_x1.
+        return (count += 1);
+    }
+
+    public long stepped_wide() {
+        return (total += 2L);
+    }
+
+    public static int inside(int[] held, int at) {
+        return (held[at] += 3);
+    }
+
+    public static long inside_wide(long[] held, int at) {
+        return (held[at] += 4L);
+    }
+
+    public static int chained() {
+        int a;
+        int b;
+        a = b = 7;
+        return a + b;
+    }
+
+    public static String describe(int which) {
+        String out;
+        switch (which) {
+            case 1:
+                out = "one";
+                break;
+            case 2:
+                out = "two";
+                break;
+            default:
+                out = "many";
+        }
+        try {
+            return out.concat(String.valueOf(which));
+        } finally {
+            out = null;
+        }
+    }
+
+    public static int many(int seed) {
+        int a0 = seed, a1 = a0 + 1, a2 = a1 + 1, a3 = a2 + 1, a4 = a3 + 1;
+        int a5 = a4 + 1, a6 = a5 + 1, a7 = a6 + 1, a8 = a7 + 1, a9 = a8 + 1;
+        long b0 = a9, b1 = b0 + 1, b2 = b1 + 1, b3 = b2 + 1, b4 = b3 + 1;
+        double c0 = b4, c1 = c0 + 1, c2 = c1 + 1, c3 = c2 + 1, c4 = c3 + 1;
+        Object d0 = null, d1 = d0, d2 = d1, d3 = d2, d4 = d3;
+        return a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9
+            + (int) (b0 + b1 + b2 + b3 + b4)
+            + (int) (c0 + c1 + c2 + c3 + c4)
+            + (d0 == d4 ? 1 : 0);
+    }
+}
+"####;
+
+    /// What another compiler writes, translated and read back.
+    ///
+    /// Everything else here goes through this build's own compiler, which
+    /// writes a narrow set of the instructions the format has. A jar does not:
+    /// it holds whatever javac wrote, and that is where `dup_x1`, `dup2_x1`,
+    /// `multianewarray` and a method with more locals than a byte can number
+    /// come from. So javac writes it, and the translator reads it.
+    #[test]
+    fn what_another_compiler_writes_translates_and_holds_up() {
+        let directory = temp_directory("omni-javac");
+        let out = directory.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let source = directory.join("Written.java");
+        std::fs::write(&source, WHAT_JAVAC_WRITES.trim_start()).unwrap();
+
+        let done = std::process::Command::new("javac")
+            .args(["--release", "17", "-XDstringConcat=inline", "-d"])
+            .arg(out.to_str().unwrap())
+            .arg(source.to_str().unwrap())
+            .output();
+        let Ok(done) = done else {
+            std::fs::remove_dir_all(&directory).ok();
+            assert!(
+                std::env::var("OMNI_REQUIRE_JAVAC").is_err(),
+                "OMNI_REQUIRE_JAVAC is set but javac is not here"
+            );
+            eprintln!("javac conformance: javac is not available here");
+            return;
+        };
+        assert!(
+            done.status.success(),
+            "javac refused its own source: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+
+        let mut written = Vec::new();
+        gather_class_files(&out, &mut written);
+        written.sort();
+        assert!(!written.is_empty(), "javac wrote nothing");
+
+        let mut refused = Vec::new();
+        for path in &written {
+            let bytes = std::fs::read(path).unwrap();
+            let class = crate::jvm::read(&bytes)
+                .unwrap_or_else(|error| panic!("{} does not read: {error:?}", path.display()));
+            let translated = crate::dalvik::translate_class(&class)
+                .unwrap_or_else(|error| panic!("{} does not translate: {error:?}", path.display()));
+            refused.extend(what_the_runtime_would_refuse(&translated));
+        }
+        assert!(
+            refused.is_empty(),
+            "the runtime would refuse this:\n  {}",
+            refused.join("\n  ")
+        );
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "javac conformance: {} classes another compiler wrote translate and hold up",
+            written.len()
+        );
+    }
+
+    fn gather_class_files(root: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                gather_class_files(&path, into);
+            } else if path.extension().and_then(|one| one.to_str()) == Some("class") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// A class with one static method in it, whose body is the bytes given.
+    fn a_method_of(
+        descriptor: &str,
+        max_stack: u16,
+        max_locals: u16,
+        bytes: Vec<u8>,
+    ) -> crate::jvm::Class {
+        crate::jvm::Class {
+            major_version: 69,
+            minor_version: 0,
+            constants: vec![crate::jvm::Constant::Unusable],
+            access_flags: 0x0021,
+            name: "com.my.app.Shuffled".to_string(),
+            superclass: Some("java.lang.Object".to_string()),
+            interfaces: Vec::new(),
+            fields: Vec::new(),
+            methods: vec![crate::jvm::Member {
+                access_flags: 0x0009,
+                name: "run".to_string(),
+                descriptor: descriptor.to_string(),
+                code: Some(crate::jvm::Code {
+                    max_stack,
+                    max_locals,
+                    bytes,
+                    handlers: Vec::new(),
+                }),
+                signature: None,
+                throws: Vec::new(),
+            }],
+            attributes: Vec::new(),
+            kotlin: None,
+            signature: None,
+        }
+    }
+
+    /// Every shuffle the JVM has, in every form it has, translated and then
+    /// read back the way the runtime reads it.
+    ///
+    /// This compiler writes none of these except `dup` and `dup2`; javac writes
+    /// all of them, and so does every jar. Each one is written out here by hand
+    /// rather than coaxed out of a compiler, because what is being checked is
+    /// that every form is handled -- and no one program uses them all.
+    #[test]
+    fn every_stack_shuffle_the_jvm_has_becomes_registers_that_hold_up() {
+        // The constants that put one word or two on the stack, and what each
+        // one is.
+        const AN_INT: u8 = 0x05; // iconst_2
+        const A_LONG: u8 = 0x09; // lconst_0
+        const A_NULL: u8 = 0x01; // aconst_null
+
+        for (what, before, opcode, after) in [
+            ("dup", vec![AN_INT], 0x59u8, 2usize),
+            ("dup on a reference", vec![A_NULL], 0x59, 2),
+            ("dup_x1", vec![AN_INT, A_NULL], 0x5a, 3),
+            ("dup_x2", vec![AN_INT, AN_INT, A_NULL], 0x5b, 4),
+            ("dup_x2 over a long", vec![A_LONG, A_NULL], 0x5b, 4),
+            ("dup2 on two words", vec![AN_INT, A_NULL], 0x5c, 4),
+            ("dup2 on a long", vec![A_LONG], 0x5c, 4),
+            ("dup2_x1", vec![AN_INT, AN_INT, A_NULL], 0x5d, 5),
+            ("dup2_x1 over a long", vec![AN_INT, A_LONG], 0x5d, 5),
+            ("dup2_x2", vec![AN_INT, AN_INT, AN_INT, A_NULL], 0x5e, 6),
+            ("dup2_x2 over a long", vec![A_LONG, AN_INT, A_NULL], 0x5e, 6),
+            (
+                "dup2_x2 under a long",
+                vec![AN_INT, AN_INT, A_LONG],
+                0x5e,
+                6,
+            ),
+            ("dup2_x2 of two longs", vec![A_LONG, A_LONG], 0x5e, 6),
+            ("swap", vec![AN_INT, A_NULL], 0x5f, 2),
+        ] {
+            // Everything the shuffle left is taken off again, one slot at a
+            // time, which says how many it left. Taking off one more than that
+            // has to fail, or the count means nothing.
+            let written = |taken: usize| -> Vec<u8> {
+                let mut bytes: Vec<u8> = before.clone();
+                bytes.push(opcode);
+                // pop, one slot at a time
+                bytes.extend(std::iter::repeat_n(0x57, taken));
+                bytes.push(0xb1); // return
+                bytes
+            };
+
+            let class = a_method_of("()V", 8, 1, written(after));
+            let translated = crate::dalvik::translate_class(&class)
+                .unwrap_or_else(|error| panic!("{what} does not translate: {error:?}"));
+            let refused = what_the_runtime_would_refuse(&translated);
+            assert!(
+                refused.is_empty(),
+                "{what}: the runtime would refuse it: {refused:?}"
+            );
+            let too_far = a_method_of("()V", 8, 1, written(after + 1));
+            assert!(
+                crate::dalvik::translate_class(&too_far).is_err(),
+                "{what} is said to leave {after} slots, and one more came off"
+            );
+        }
+    }
 
     /// Every class this build translates is one the runtime would load.
     ///
@@ -33980,6 +34480,16 @@ public final class MainActivity extends Activity {
             assert!(said.contains("move-exception"), "and so is the catch");
         }
 
+        let mut refused = Vec::new();
+        for class in &project.code {
+            refused.extend(what_the_runtime_would_refuse(class));
+        }
+        assert!(
+            refused.is_empty(),
+            "the runtime would refuse this:\n  {}",
+            refused.join("\n  ")
+        );
+
         eprintln!(
             "java: a project's own Java, compiled and packed -- {} classes, a {} byte package",
             project.code.len(),
@@ -34298,9 +34808,23 @@ public final class MainActivity extends Activity {
             }
         }
 
+        // And every class of it read the way the runtime reads one as it
+        // loads it. A package the tools accept is not the same as one the
+        // device will run: the tools check the shape of the file, and the
+        // runtime checks what every register holds.
+        let mut refused = Vec::new();
+        for class in &project.code {
+            refused.extend(what_the_runtime_would_refuse(class));
+        }
+        assert!(
+            refused.is_empty(),
+            "the runtime would refuse this:\n  {}",
+            refused.join("\n  ")
+        );
+
         eprintln!(
             "java: a whole application -- {} classes, a {} byte signed package that \
-             apksigner and dexdump both accept",
+             apksigner and dexdump both accept, and that the runtime would load",
             project.code.len(),
             outcome.package.len()
         );
