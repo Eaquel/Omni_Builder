@@ -16883,6 +16883,10 @@ pub mod dexwrite {
         pub inputs: u16,
         pub outputs: u16,
         pub instructions: Vec<Insn>,
+        /// Which line of the source each stretch of the method came from, in
+        /// code units. A crash on a device names a file and a line out of
+        /// this, and names only the method without it.
+        pub lines: Vec<(u32, u32)>,
         /// The stretches of this method that are inside a `try`, and where
         /// control goes when something is thrown out of them.
         pub tries: Vec<Try>,
@@ -16992,6 +16996,7 @@ pub mod dexwrite {
             registers: 1,
             inputs: 1,
             outputs: 1,
+            lines: Vec::new(),
             instructions: vec![
                 // invoke-direct {v0}, superclass.<init>()V
                 Insn::pointing(
@@ -17072,6 +17077,51 @@ pub mod dexwrite {
                 .map(|at| at as u32)
                 .ok_or_else(|| fail("EW005", "a field was not interned"))
         }
+    }
+
+    /// Where a method came from, in the shape the format keeps it.
+    ///
+    /// It is a little machine: a line to start at, then instructions that step
+    /// the address and the line along, and one that says "a statement begins
+    /// here". Every kind of step is written out longhand rather than folded
+    /// into the one-byte form, which is a few bytes more and exactly right.
+    fn debug_info(method: &Method) -> Vec<u8> {
+        const END: u8 = 0x00;
+        const ADVANCE_PC: u8 = 0x01;
+        const ADVANCE_LINE: u8 = 0x02;
+        /// The one-byte instruction for "here, and nothing has moved": the
+        /// first special opcode, offset by the four lines it can go back.
+        const HERE: u8 = 0x0a + 4;
+
+        let mut out = Vec::new();
+        let mut lines = method.lines.clone();
+        lines.sort_by_key(|(at, _)| *at);
+        let start = lines.first().map(|(_, line)| *line).unwrap_or(1).max(1);
+        uleb128(&mut out, start);
+        uleb128(&mut out, method.reference.parameters.len() as u32);
+        for _ in &method.reference.parameters {
+            // No name for any of them, which is what a zero says here.
+            uleb128(&mut out, 0);
+        }
+
+        let mut address = 0u32;
+        let mut line = start;
+        for (at, held) in lines {
+            let held = held.max(1);
+            if held != line {
+                out.push(ADVANCE_LINE);
+                sleb128(&mut out, held as i32 - line as i32);
+                line = held;
+            }
+            if at > address {
+                out.push(ADVANCE_PC);
+                uleb128(&mut out, at - address);
+                address = at;
+            }
+            out.push(HERE);
+        }
+        out.push(END);
+        out
     }
 
     fn utf16_order(left: &str, right: &str) -> core::cmp::Ordering {
@@ -17350,8 +17400,33 @@ pub mod dexwrite {
             .copied()
             .find(|at| *at != 0);
 
-        let mut code_offsets: Vec<Vec<u32>> = Vec::new();
+        // Where each method says it came from, laid down first because a
+        // code item points at it and has to know where it is.
+        let mut debug_offsets: Vec<Vec<u32>> = Vec::new();
         for class in classes {
+            let mut here = Vec::new();
+            for method in class.methods() {
+                if method.instructions.is_empty() || method.lines.is_empty() {
+                    here.push(0);
+                    continue;
+                }
+                here.push((data_off + data.len()) as u32);
+                data.extend_from_slice(&debug_info(method));
+            }
+            debug_offsets.push(here);
+        }
+        let debug_items = debug_offsets
+            .iter()
+            .map(|list| list.iter().filter(|at| **at != 0).count() as u32)
+            .sum::<u32>();
+        let first_debug_item = debug_offsets
+            .iter()
+            .flat_map(|list| list.iter())
+            .copied()
+            .find(|at| *at != 0);
+
+        let mut code_offsets: Vec<Vec<u32>> = Vec::new();
+        for (index, class) in classes.iter().enumerate() {
             let mut here = Vec::new();
             for method in class.methods() {
                 // A method with no instructions is abstract or native: it has
@@ -17447,7 +17522,7 @@ pub mod dexwrite {
                 data.extend_from_slice(&method.inputs.to_le_bytes());
                 data.extend_from_slice(&method.outputs.to_le_bytes());
                 data.extend_from_slice(&(method.tries.len() as u16).to_le_bytes());
-                data.extend_from_slice(&0u32.to_le_bytes());
+                data.extend_from_slice(&debug_offsets[index][here.len() - 1].to_le_bytes());
                 data.extend_from_slice(&(instructions.len() as u32).to_le_bytes());
                 for unit in &instructions {
                     data.extend_from_slice(&unit.to_le_bytes());
@@ -17553,6 +17628,9 @@ pub mod dexwrite {
             (0x2000, classes.len() as u32, class_data_offsets[0]),
             (0x1000, 1, map_off as u32),
         ];
+        if let Some(first) = first_debug_item {
+            map.push((0x2003, debug_items, first));
+        }
         if !pools.fields.is_empty() {
             map.push((0x0004, pools.fields.len() as u32, field_ids_off as u32));
         }
@@ -17977,6 +18055,25 @@ pub mod dalvik {
 
         fn grow(&mut self, by: u16) {
             self.puts_wide(by);
+        }
+
+        /// Where each line of the source ended up, in code units.
+        ///
+        /// The class file says which bytecode offset each line begins at; this
+        /// walk knows what every offset came to. A line whose offset never
+        /// landed anywhere -- which happens where an instruction was folded
+        /// away -- is left out rather than pointed somewhere wrong.
+        pub fn where_they_landed(&self, lines: &[(u16, u16)]) -> Vec<(u32, u32)> {
+            let mut out = Vec::with_capacity(lines.len());
+            for (at, line) in lines {
+                let Some(unit) = self.landed.get(&usize::from(*at)) else {
+                    continue;
+                };
+                out.push((*unit as u32, u32::from(*line)));
+            }
+            out.sort();
+            out.dedup_by_key(|(unit, _)| *unit);
+            out
         }
 
         fn shrink(&mut self, by: u16) -> Result<(), Diagnostic> {
@@ -20323,6 +20420,7 @@ pub mod dalvik {
             inputs,
             outputs: writing.outputs.max(1),
             instructions: writing.code,
+            lines: Vec::new(),
             tries: Vec::new(),
         })
     }
@@ -20492,6 +20590,7 @@ pub mod dalvik {
             inputs,
             outputs: writing.outputs,
             instructions: writing.code,
+            lines: Vec::new(),
             tries: Vec::new(),
         })
     }
@@ -20518,6 +20617,7 @@ pub mod dalvik {
             .iter()
             .map(|one| format!("L{};", one.replace('.', "/")))
             .collect();
+        out.source_file = class.source_file.clone();
 
         for field in &class.fields {
             let entry = crate::dexwrite::Field {
@@ -20589,6 +20689,7 @@ pub mod dalvik {
                 inputs,
                 outputs: 0,
                 instructions: Vec::new(),
+                lines: Vec::new(),
                 tries: Vec::new(),
             });
         };
@@ -20693,6 +20794,7 @@ pub mod dalvik {
         };
         translator.walk(&code.bytes).map_err(named)?;
         let outputs = translator.max_outputs;
+        let lines = translator.where_they_landed(&code.lines);
         let (instructions, tries) = translator.finish().map_err(named)?;
 
         Ok(Method {
@@ -20702,6 +20804,7 @@ pub mod dalvik {
             inputs,
             outputs,
             instructions,
+            lines,
             tries,
         })
     }
@@ -27614,6 +27717,11 @@ pub mod jvm {
         /// Where exceptions are caught: start, end, handler, and the type
         /// caught, zero meaning anything.
         pub handlers: Vec<(u16, u16, u16, u16)>,
+        /// Which line of the source each stretch of bytecode came from, as the
+        /// class file's own table gives it: an offset and a line, in the order
+        /// they were written. Without this a crash on a device names a method
+        /// and nothing else.
+        pub lines: Vec<(u16, u16)>,
     }
 
     #[derive(Clone, Debug)]
@@ -27661,6 +27769,9 @@ pub mod jvm {
         pub methods: Vec<Member>,
         pub attributes: Vec<Attribute>,
         pub kotlin: Option<KotlinMetadata>,
+        /// The file it was written in, which is what a crash on a device
+        /// names beside the line.
+        pub source_file: Option<String>,
         /// How each `invokedynamic` in the class works out what it calls: the
         /// method handle that does the working out, and the constants it is
         /// handed. A lambda and a string joined together are both written this
@@ -27791,6 +27902,7 @@ pub mod jvm {
         let mut kotlin = None;
         let mut signature: Option<String> = None;
         let mut bootstrap: Vec<Bootstrap> = Vec::new();
+        let mut source_file: Option<String> = None;
         for _ in 0..attribute_count {
             let name_index = reader.u16()?;
             let length = reader.u32()?;
@@ -27798,6 +27910,11 @@ pub mod jvm {
             let content_start = reader.position();
             let content_length = reader.checked_length(u64::from(length))?;
 
+            if attribute_name == "SourceFile" && content_length == 2 {
+                let content = reader.slice_at(content_start as u64, 2)?;
+                let index = u16::from_be_bytes([content[0], content[1]]);
+                source_file = utf8(index, "source file").ok();
+            }
             if attribute_name == "BootstrapMethods" {
                 let content = reader.slice_at(content_start as u64, content_length as u64)?;
                 bootstrap = read_bootstrap_methods(content)?;
@@ -27834,6 +27951,7 @@ pub mod jvm {
             methods,
             attributes,
             kotlin,
+            source_file,
             bootstrap,
             signature,
         })
@@ -28040,7 +28158,7 @@ pub mod jvm {
                     .unwrap_or_default();
                 if named == "Code" {
                     let content = reader.slice_at(start as u64, length as u64)?;
-                    code = read_code(content)?;
+                    code = read_code(content, constants)?;
                 }
                 // Two bytes, an index into the pool, and the string there is
                 // what was written before erasure got to it.
@@ -28092,7 +28210,7 @@ pub mod jvm {
     /// class file that cannot be translated is still one whose shape can be
     /// read and reported, and refusing to read it at all would turn a
     /// question into a dead end.
-    fn read_code(content: &[u8]) -> Result<Option<Code>, Diagnostic> {
+    fn read_code(content: &[u8], constants: &[Constant]) -> Result<Option<Code>, Diagnostic> {
         let mut reader = Reader::new(content, Endian::Big, "code");
         let Ok(max_stack) = reader.u16() else {
             return Ok(None);
@@ -28127,12 +28245,57 @@ pub mod jvm {
             }
         }
 
+        // What is left is the code's own attributes, and one of them says
+        // which line each instruction came from.
+        let mut lines = Vec::new();
+        if let Ok(count) = reader.u16() {
+            for _ in 0..count {
+                let (Ok(name), Ok(length)) = (reader.u16(), reader.u32()) else {
+                    break;
+                };
+                let Ok(length) = reader.checked_length(u64::from(length)) else {
+                    break;
+                };
+                let at = reader.position();
+                let named = constant_utf8(constants, name, "attribute name").unwrap_or_default();
+                if named == "LineNumberTable" {
+                    if let Ok(held) = reader.slice_at(at as u64, length as u64) {
+                        lines = read_lines(held);
+                    }
+                }
+                if reader.skip(length).is_err() {
+                    break;
+                }
+            }
+        }
+
         Ok(Some(Code {
             max_stack,
             max_locals,
             bytes,
             handlers,
+            lines,
         }))
+    }
+
+    /// The `LineNumberTable`: a count, and then an offset and a line each.
+    fn read_lines(content: &[u8]) -> Vec<(u16, u16)> {
+        if content.len() < 2 {
+            return Vec::new();
+        }
+        let count = usize::from(u16::from_be_bytes([content[0], content[1]]));
+        let mut out = Vec::with_capacity(count);
+        for step in 0..count {
+            let at = 2 + step * 4;
+            let Some(row) = content.get(at..at + 4) else {
+                break;
+            };
+            out.push((
+                u16::from_be_bytes([row[0], row[1]]),
+                u16::from_be_bytes([row[2], row[3]]),
+            ));
+        }
+        out
     }
 
     fn read_kotlin_metadata(
@@ -32821,6 +32984,35 @@ public class Written {
                 );
             }
         }
+
+        // And every line the class files came from is a line the finished
+        // package says it came from, which is what a stack trace off a device
+        // is made of.
+        let mut wanted: Vec<u32> = Vec::new();
+        for path in &written {
+            let bytes = std::fs::read(path).unwrap();
+            let class = crate::jvm::read(&bytes).unwrap();
+            for method in &class.methods {
+                let Some(code) = &method.code else { continue };
+                wanted.extend(code.lines.iter().map(|(_, line)| u32::from(*line)));
+            }
+        }
+        wanted.sort();
+        wanted.dedup();
+        assert!(wanted.len() > 20, "javac wrote {} lines down", wanted.len());
+        if let Some(said) = dexdump_text(&dex) {
+            let mut found: Vec<u32> = said
+                .lines()
+                .filter_map(|line| line.split("line=").nth(1))
+                .filter_map(|held| held.trim().parse::<u32>().ok())
+                .collect();
+            found.sort();
+            found.dedup();
+            assert_eq!(
+                found, wanted,
+                "the package does not say the lines the class files said"
+            );
+        }
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
             "javac conformance: {} classes another compiler wrote translate and hold up",
@@ -32841,6 +33033,26 @@ public class Written {
             }
         }
         out
+    }
+
+    /// What `dexdump` says about a dex, disassembled.
+    fn dexdump_text(bytes: &[u8]) -> Option<String> {
+        let tool = find_apksigner().and_then(|p| Some(p.parent()?.join("dexdump")))?;
+        if !tool.is_file() {
+            return None;
+        }
+        let directory = temp_directory("dexdump-lines");
+        let path = directory.join("classes.dex");
+        std::fs::write(&path, bytes).ok()?;
+        let output = std::process::Command::new(&tool)
+            .args(["-d", path.to_str()?])
+            .output()
+            .ok()?;
+        std::fs::remove_dir_all(&directory).ok();
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     fn gather_class_files(root: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
@@ -33048,12 +33260,14 @@ public final class MainActivity extends Activity {
                     max_locals,
                     bytes,
                     handlers: Vec::new(),
+                    lines: Vec::new(),
                 }),
                 signature: None,
                 throws: Vec::new(),
             }],
             attributes: Vec::new(),
             kotlin: None,
+            source_file: None,
             bootstrap: Vec::new(),
             signature: None,
         }
@@ -33182,6 +33396,7 @@ public final class MainActivity extends Activity {
                 crate::dexwrite::Insn::raw(vec![0x0001 | (1 << 12)]),
                 crate::dexwrite::Insn::raw(vec![0x0011]),
             ],
+            lines: Vec::new(),
             tries: Vec::new(),
         });
         let said = what_the_runtime_would_refuse(&wrong);
@@ -36560,6 +36775,7 @@ public final class MainActivity extends Activity {
             outputs: 0,
             // return-void, which is the whole body.
             instructions: vec![super::dexwrite::Insn::raw(vec![0x000e])],
+            lines: Vec::new(),
             tries: Vec::new(),
         }];
         class
@@ -37385,9 +37601,15 @@ public final class MainActivity extends Activity {
                 "move-exception",
                 "invoke-interface",
                 "$outer",
+                // Which line each thing came from, or a crash on a device
+                // names a method and stops there.
+                "line=",
+                "MainActivity.java",
             ] {
                 assert!(said.contains(wanted), "dexdump printed no {wanted:?}");
             }
+            let told = said.lines().filter(|line| line.contains("line=")).count();
+            assert!(told > 20, "only {told} lines are named");
             // What a class implements is written down in a list of its own, or
             // the runtime does not believe it implements it: a cast to the
             // interface fails, and so does every call made through one.

@@ -32883,12 +32883,14 @@ public class Screen extends Activity implements View.OnClickListener {
                     // the type-checking verifier refuses `jsr` anyway.
                     bytes: vec![0x01, 0xa8, 0x00, 0x03],
                     handlers: Vec::new(),
+                    lines: Vec::new(),
                 }),
                 signature: None,
                 throws: Vec::new(),
             }],
             attributes: Vec::new(),
             kotlin: None,
+            source_file: None,
             bootstrap: Vec::new(),
             signature: None,
         };
