@@ -8449,19 +8449,15 @@ pub mod resources {
             )
         }
 
-        /// Whether a file of this kind is XML that becomes binary XML in the
-        /// package. A `raw` file is carried as it is; a `layout` is compiled.
+        /// Whether XML of this kind becomes binary XML in the package.
+        ///
+        /// Everything but a `raw` file does: a layout, a menu, a drawable that
+        /// is a vector or a shape or a list of states, an icon written as an
+        /// adaptive one. A `raw` file is carried exactly as it was written,
+        /// which is the whole point of `raw`. What is not XML in the first
+        /// place -- a picture, a sound -- is carried whatever folder it is in.
         pub const fn is_compiled_xml(self) -> bool {
-            matches!(
-                self,
-                Kind::Anim
-                    | Kind::Animator
-                    | Kind::Interpolator
-                    | Kind::Layout
-                    | Kind::Menu
-                    | Kind::Transition
-                    | Kind::Xml
-            )
+            !matches!(self, Kind::Raw)
         }
 
         pub fn parse(value: &str) -> Option<Kind> {
@@ -8558,34 +8554,154 @@ pub mod resources {
         }
     }
 
+    /// Which people a resource is for: a language, and where it is spoken.
+    ///
+    /// The table keeps a language and a region in two bytes each, and a script
+    /// in four. Two letters go in as they are; three are packed into the same
+    /// two bytes with the top bit set, which is how the platform makes room
+    /// for `fil` and `gsw` in a field built for `en` and `de`.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
-    pub struct Locale(Option<[u8; 2]>);
+    pub struct Locale {
+        language: Option<[u8; 2]>,
+        region: Option<[u8; 2]>,
+        script: Option<[u8; 4]>,
+    }
 
     impl Locale {
-        pub const ANY: Locale = Locale(None);
+        pub const ANY: Locale = Locale {
+            language: None,
+            region: None,
+            script: None,
+        };
 
         pub fn parse(value: &str) -> Option<Locale> {
-            let bytes = value.as_bytes();
-            if bytes.len() != 2 || !bytes.iter().all(|byte| byte.is_ascii_lowercase()) {
+            if !value.chars().all(|held| held.is_ascii_lowercase()) {
                 return None;
             }
-            Some(Locale(Some([bytes[0], bytes[1]])))
+            Some(Locale {
+                language: Some(packed(value, b'a')?),
+                region: None,
+                script: None,
+            })
+        }
+
+        /// `rUS`, which only means anything after a language.
+        pub fn with_region(self, value: &str) -> Option<Locale> {
+            let rest = value.strip_prefix('r')?;
+            if self.language.is_none() || self.region.is_some() {
+                return None;
+            }
+            if !rest.chars().all(|held| held.is_ascii_uppercase()) {
+                return None;
+            }
+            Some(Locale {
+                region: Some(packed(rest, b'0')?),
+                ..self
+            })
+        }
+
+        /// `b+sr+Latn+RS`, which is how a folder says all of it at once.
+        pub fn parse_bcp47(value: &str) -> Option<Locale> {
+            let mut parts = value.strip_prefix("b+")?.split('+');
+            let language = packed(parts.next()?, b'a')?;
+            let mut held = Locale {
+                language: Some(language),
+                region: None,
+                script: None,
+            };
+            for part in parts {
+                let bytes = part.as_bytes();
+                match bytes.len() {
+                    4 => {
+                        let mut script = [0u8; 4];
+                        script.copy_from_slice(bytes);
+                        held.script = Some(script);
+                    }
+                    2 | 3 => held.region = Some(packed(part, b'0')?),
+                    _ => return None,
+                }
+            }
+            Some(held)
         }
 
         pub fn language(self) -> Option<[u8; 2]> {
-            self.0
+            self.language
+        }
+
+        pub fn region(self) -> Option<[u8; 2]> {
+            self.region
+        }
+
+        pub fn script(self) -> Option<[u8; 4]> {
+            self.script
         }
 
         pub fn is_any(self) -> bool {
-            self.0.is_none()
+            self.language.is_none()
         }
 
+        /// The language on its own, which is what a folder is named after.
         pub fn as_str(&self) -> &str {
-            match &self.0 {
-                Some(letters) => core::str::from_utf8(letters).unwrap_or("??"),
+            match &self.language {
+                Some(letters) if letters[0] & 0x80 == 0 => {
+                    core::str::from_utf8(letters).unwrap_or("??")
+                }
+                Some(_) => "???",
                 None => "any",
             }
         }
+
+        /// All of it, the way a bundle names a language.
+        pub fn name(&self) -> String {
+            let mut out = unpacked(self.language, b'a');
+            if let Some(script) = &self.script {
+                out.push('-');
+                out.push_str(core::str::from_utf8(script).unwrap_or(""));
+            }
+            let region = unpacked(self.region, b'0');
+            if !region.is_empty() {
+                out.push('-');
+                out.push_str(&region);
+            }
+            out
+        }
+    }
+
+    /// Two letters as they are, or three squeezed into the same two bytes.
+    ///
+    /// The platform packs a three letter code as five bits each from a base --
+    /// `a` for a language, `0` for a region -- with the top bit set to say it
+    /// did. Two letters are left alone, so `en` reads as `en` on a platform
+    /// that never heard of the packing.
+    fn packed(value: &str, base: u8) -> Option<[u8; 2]> {
+        let bytes = value.as_bytes();
+        match bytes.len() {
+            2 => Some([bytes[0], bytes[1]]),
+            3 => {
+                let first = bytes[0].checked_sub(base)?;
+                let second = bytes[1].checked_sub(base)?;
+                let third = bytes[2].checked_sub(base)?;
+                if first > 31 || second > 31 || third > 31 {
+                    return None;
+                }
+                Some([0x80 | (third << 2) | (second >> 3), (second << 5) | first])
+            }
+            _ => None,
+        }
+    }
+
+    /// The other way round.
+    fn unpacked(value: Option<[u8; 2]>, base: u8) -> String {
+        let Some(held) = value else {
+            return String::new();
+        };
+        if held[0] & 0x80 == 0 {
+            return String::from_utf8_lossy(&held).to_string();
+        }
+        let first = held[1] & 0x1f;
+        let second = ((held[1] & 0xe0) >> 5) | ((held[0] & 0x03) << 3);
+        let third = (held[0] & 0x7c) >> 2;
+        String::from_utf8_lossy(&[base + first, base + second, base + third]).to_string()
     }
 
     impl core::fmt::Display for Locale {
@@ -8995,6 +9111,23 @@ pub mod resources {
                     continue;
                 }
 
+                // A whole locale said at once, which is how a folder names
+                // one that needs a script.
+                if let Some(locale) = Locale::parse_bcp47(qualifier) {
+                    if !config.locale.is_any() {
+                        return Err(format!(
+                            "'{name}' names two languages, and a folder carries one."
+                        ));
+                    }
+                    config.locale = locale;
+                    continue;
+                }
+                // Where it is spoken, which only means anything after which
+                // language it is.
+                if let Some(locale) = config.locale.with_region(qualifier) {
+                    config.locale = locale;
+                    continue;
+                }
                 match Locale::parse(qualifier) {
                     Some(locale) if config.locale.is_any() => config.locale = locale,
                     Some(_) => {
@@ -24922,7 +25055,7 @@ pub mod bundle {
                         config.number(CONFIG_DENSITY, u64::from(density));
                     }
                     if !held.config.locale.is_any() {
-                        config.text(CONFIG_LOCALE, held.config.locale.as_str());
+                        config.text(CONFIG_LOCALE, &held.config.locale.name());
                     }
 
                     let where_from = format!("{}/{}", kind.as_str(), name);
@@ -25229,6 +25362,12 @@ pub mod arsc {
         if let Some(language) = config.locale.language() {
             out[8..10].copy_from_slice(&language);
         }
+        if let Some(region) = config.locale.region() {
+            out[10..12].copy_from_slice(&region);
+        }
+        if let Some(script) = config.locale.script() {
+            out[36..40].copy_from_slice(&script);
+        }
         out[12] = config.orientation;
         out[13] = config.touchscreen;
         out[14..16].copy_from_slice(&density_value(config.density).to_le_bytes());
@@ -25380,9 +25519,10 @@ pub mod arsc {
                     (CONFIG_MCC, &|one: &Config| u32::from(one.mcc)),
                     (CONFIG_MNC, &|one: &Config| u32::from(one.mnc)),
                     (CONFIG_LOCALE, &|one: &Config| {
-                        one.locale
-                            .language()
-                            .map_or(0, |held| u32::from(held[0]) | (u32::from(held[1]) << 8))
+                        let held = |what: Option<[u8; 2]>| {
+                            what.map_or(0u32, |held| u32::from(held[0]) | (u32::from(held[1]) << 8))
+                        };
+                        held(one.locale.language()) ^ held(one.locale.region()).rotate_left(16)
                     }),
                     (CONFIG_TOUCHSCREEN, &|one: &Config| {
                         u32::from(one.touchscreen)
@@ -26517,7 +26657,7 @@ pub mod builder {
                         .with_context(format!("Entry: {entry}")),
                 );
             }
-            if kind.is_compiled_xml() {
+            if kind.is_compiled_xml() && held.name.ends_with(".xml") {
                 let mut named = crate::diag::Sink::new();
                 let text = String::from_utf8_lossy(&held.bytes).to_string();
                 let Some(parsed) = crate::xml::parse(&text, &entry, &mut named) else {
@@ -30737,6 +30877,36 @@ mod tests {
 </resources>
 "####;
 
+    const A_VECTOR: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24.0"
+    android:viewportHeight="24.0"
+    android:tint="@color/ink"
+    android:autoMirrored="true">
+    <group android:name="all" android:rotation="45.0" android:pivotX="12.0" android:pivotY="12.0">
+        <path
+            android:name="body"
+            android:fillColor="#FF000000"
+            android:strokeColor="@color/back"
+            android:strokeWidth="1.5"
+            android:strokeLineCap="round"
+            android:pathData="M12,2L2,22L22,22Z" />
+    </group>
+</vector>
+"####;
+
+    const AN_ADAPTIVE_ICON: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/back" />
+    <foreground android:drawable="@drawable/mark" />
+    <monochrome android:drawable="@drawable/mark" />
+</adaptive-icon>
+"####;
+
     const THE_COLOURS: &str = r####"
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
@@ -30780,7 +30950,7 @@ mod tests {
     fn a_layout_and_a_menu_become_what_aapt2_makes_of_them() {
         let directory = temp_directory("omni-layout");
         let res = directory.join("Res");
-        for folder in ["layout", "menu", "values"] {
+        for folder in ["layout", "menu", "values", "drawable", "mipmap-anydpi-v26"] {
             std::fs::create_dir_all(res.join(folder)).unwrap();
         }
         // The declaration has to be the first thing in the file, and a raw
@@ -30788,6 +30958,8 @@ mod tests {
         for (path, text) in [
             ("layout/screen.xml", A_LAYOUT),
             ("menu/main.xml", A_MENU),
+            ("drawable/mark.xml", A_VECTOR),
+            ("mipmap-anydpi-v26/ic_shape.xml", AN_ADAPTIVE_ICON),
             ("values/strings.xml", THE_WORDS),
             ("values/colors.xml", THE_COLOURS),
             ("values/dimens.xml", THE_SIZES),
@@ -30805,7 +30977,11 @@ mod tests {
         project.values = super::scaffold::values_files(&root);
         project.resources = super::scaffold::resource_files(&root);
         assert_eq!(project.values.len(), 3, "three values files");
-        assert_eq!(project.resources.len(), 2, "a layout and a menu");
+        assert_eq!(
+            project.resources.len(),
+            4,
+            "a layout, a menu, a vector and an adaptive icon"
+        );
 
         let mut sink = crate::diag::Sink::new();
         let icons = super::builder::compile_resources_for_test(&project, &mut sink)
@@ -30839,7 +31015,12 @@ mod tests {
         }
         // And each XML resource is in the package as the binary XML a device
         // reads, not as the text it was written in.
-        for entry in ["res/layout/screen.xml", "res/menu/main.xml"] {
+        for entry in [
+            "res/layout/screen.xml",
+            "res/menu/main.xml",
+            "res/drawable/mark.xml",
+            "res/mipmap-anydpi-v26/ic_shape.xml",
+        ] {
             let (_, bytes) = icons
                 .files
                 .iter()
@@ -30925,7 +31106,12 @@ mod tests {
             lines.sort();
             lines
         };
-        for file in ["res/layout/screen.xml", "res/menu/main.xml"] {
+        for file in [
+            "res/layout/screen.xml",
+            "res/menu/main.xml",
+            "res/drawable/mark.xml",
+            "res/mipmap-anydpi-v26/ic_shape.xml",
+        ] {
             assert_eq!(
                 dump(&ours, file),
                 dump(&theirs, file),
@@ -30934,7 +31120,8 @@ mod tests {
         }
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
-            "layout conformance: a layout and a menu agree with aapt2 attribute for attribute"
+            "layout conformance: a layout, a menu, a vector drawable and an adaptive icon \
+             agree with aapt2 attribute for attribute"
         );
     }
 
@@ -31061,6 +31248,12 @@ mod tests {
             "mcc310-mnc004",
             "tr",
             "de",
+            "en-rUS",
+            "pt-rBR",
+            "zh-rCN",
+            "b+sr+Latn+RS",
+            "b+es+419",
+            "fil",
             "sw600dp-land-night-xxhdpi-v31",
             "large-long-notround-port-hdpi",
             "car-night-nokeys-navhidden-v29",
