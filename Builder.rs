@@ -1357,12 +1357,23 @@ pub mod compiler {
 
     /// The oldest and newest Android anything built here targets.
     ///
-    /// API 30 to 36, which is Android 11 through 16 -- seven releases, since
-    /// 12L is its own API level. Below 30 is a platform nothing here supports;
-    /// above 36 is one that has not shipped, and a compiler cannot target a
-    /// platform it has never been given.
+    /// API 30 to 37, which is Android 11 through 17 -- eight releases, since
+    /// 12L is its own API level. Below 30 is a platform nothing here supports.
+    ///
+    /// The classes this build writes calls against are the platform's own as
+    /// of API 36, which is what `Android.rs` holds. A target above that is a
+    /// promise about behaviour rather than about classes: `targetSdkVersion`
+    /// is a number the device reads to decide which of its own defaults apply,
+    /// and a package built here runs on a newer Android whatever it says. So
+    /// 37 may be targeted and 38 may not, because 38 is a platform nobody has
+    /// yet described.
     pub const OLDEST_API: u32 = 30;
-    pub const NEWEST_API: u32 = 36;
+    pub const NEWEST_API: u32 = 37;
+
+    /// The newest platform whose classes this build has been given, which is
+    /// what a call is checked against. A target may be one above it; a class
+    /// may not.
+    pub const NEWEST_DESCRIBED_API: u32 = 36;
 
     pub const fn api_is_supported(level: u32) -> bool {
         level >= OLDEST_API && level <= NEWEST_API
@@ -4193,8 +4204,11 @@ pub mod project {
                 version: "0.1.0".to_string(),
                 edition: None,
                 min_sdk: crate::compiler::OLDEST_API,
-                target_sdk: crate::compiler::NEWEST_API,
-                compile_sdk: crate::compiler::NEWEST_API,
+                // The newest platform whose classes are here, not the newest
+                // that may be targeted: what a project is built against by
+                // default is what this build can check a call against.
+                target_sdk: crate::compiler::NEWEST_DESCRIBED_API,
+                compile_sdk: crate::compiler::NEWEST_DESCRIBED_API,
                 profile: Profile::Debug,
                 optimization: Optimization::None,
                 lto: false,
@@ -18421,6 +18435,9 @@ pub mod scaffold {
     /// ones that have to produce something a device of that age can run.
     pub const OLDEST_SUPPORTED: u32 = crate::compiler::OLDEST_API;
     pub const NEWEST_SUPPORTED: u32 = crate::compiler::NEWEST_API;
+    /// What a new project is created targeting: the newest platform whose
+    /// classes are here, which is one below the newest that may be targeted.
+    pub const NEWEST_DESCRIBED: u32 = crate::compiler::NEWEST_DESCRIBED_API;
 
     pub const DEFAULT_PACKAGE: &str = "com.my.app";
     pub const DEFAULT_LABEL: &str = "My App";
@@ -18460,7 +18477,7 @@ pub mod scaffold {
                 label: DEFAULT_LABEL.to_string(),
                 abis: vec![ARM64.to_string()],
                 min_sdk: OLDEST_SUPPORTED,
-                target_sdk: NEWEST_SUPPORTED,
+                target_sdk: NEWEST_DESCRIBED,
                 languages: vec!["kotlin".to_string()],
                 locales: LOCALES.iter().map(|(tag, _)| (*tag).to_string()).collect(),
                 version_name: FIRST_VERSION_NAME.to_string(),
@@ -34380,9 +34397,53 @@ public final class MainActivity extends Activity {
     }
 
     #[test]
+    fn every_android_from_eleven_to_seventeen_may_be_named() {
+        // API 30 is Android 11 and API 37 is Android 17, with 12L its own
+        // level in between. A package built here declares a minimum inside
+        // this range and a target inside it, and nothing outside it.
+        for (level, release) in [
+            (30u32, "11"),
+            (31, "12"),
+            (32, "12L"),
+            (33, "13"),
+            (34, "14"),
+            (35, "15"),
+            (36, "16"),
+            (37, "17"),
+        ] {
+            assert!(
+                super::compiler::api_is_supported(level),
+                "Android {release} is API {level}"
+            );
+        }
+        assert!(!super::compiler::api_is_supported(29));
+        assert!(!super::compiler::api_is_supported(38));
+
+        // What a call is checked against is the platform whose classes are
+        // here, which is one below the newest that may be targeted.
+        assert_eq!(super::compiler::NEWEST_DESCRIBED_API, 36);
+        const {
+            assert!(super::compiler::NEWEST_DESCRIBED_API <= super::compiler::NEWEST_API);
+        }
+
+        // And a project made here is made against that one.
+        let spec = super::scaffold::Spec::default();
+        assert_eq!(spec.min_sdk, 30);
+        assert_eq!(spec.target_sdk, super::compiler::NEWEST_DESCRIBED_API);
+
+        // A target above what is described is still allowed, because a target
+        // is a number the device reads rather than a class anything calls.
+        let held = super::scaffold::Spec::parse(
+            "package=com.tr.yt;label=X;abis=arm64-v8a;languages=java;targetSdk=37",
+        )
+        .expect("Android 17 may be targeted");
+        assert_eq!(held.target_sdk, 37);
+    }
+
+    #[test]
     fn a_platform_that_has_not_shipped_cannot_be_targeted() {
         let error = super::scaffold::Spec::parse(
-            "package=com.tr.yt;label=X;abis=arm64-v8a;languages=kotlin;targetSdk=37",
+            "package=com.tr.yt;label=X;abis=arm64-v8a;languages=kotlin;targetSdk=38",
         )
         .unwrap_err();
         assert_eq!(error.code, "EP015");
