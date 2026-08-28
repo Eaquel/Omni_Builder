@@ -22333,8 +22333,9 @@ mod tests {
         assert_eq!(name, "com/my/app/Counter.class");
 
         let class = crate::jvm::read(&class_bytes).expect("what was written must read");
-        let translated =
-            crate::dalvik::translate_class(&class).expect("and must translate to Dalvik");
+        let translated = crate::dalvik::translate_class(&class)
+            .expect("and must translate to Dalvik")
+            .remove(0);
 
         assert_eq!(translated.descriptor, "Lcom/my/app/Counter;");
         assert_eq!(translated.superclass, "Ljava/lang/Object;");
@@ -22400,7 +22401,9 @@ mod tests {
         // The same source is the same dex, which is what the compiler contract
         // promises when it says its output is reproducible.
         let (_, again) = compile_one(source, &empty()).unwrap();
-        let again = crate::dalvik::translate_class(&crate::jvm::read(&again).unwrap()).unwrap();
+        let again = crate::dalvik::translate_class(&crate::jvm::read(&again).unwrap())
+            .unwrap()
+            .remove(0);
         assert_eq!(
             dex,
             crate::dexwrite::write(&[again], &[]).unwrap(),
@@ -22532,8 +22535,9 @@ mod tests {
 
         let (_, class_bytes) = compile_one(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&class_bytes).expect("what was written must read");
-        let translated =
-            crate::dalvik::translate_class(&class).expect("and must translate to Dalvik");
+        let translated = crate::dalvik::translate_class(&class)
+            .expect("and must translate to Dalvik")
+            .remove(0);
 
         let with_tries: Vec<&str> = translated
             .virtual_methods
@@ -23257,8 +23261,9 @@ public class Shaped {
         }
 
         // And it has to reach a device, not just a JVM.
-        let translated =
-            crate::dalvik::translate_class(&class).expect("and must translate to Dalvik");
+        let translated = crate::dalvik::translate_class(&class)
+            .expect("and must translate to Dalvik")
+            .remove(0);
         let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
             for wanted in ["LShaped;", "<clinit>", "sget", "sput", "check-cast"] {
@@ -23362,7 +23367,7 @@ public class Shaped {
         let mut classes = Vec::new();
         for (_, bytes) in &produced {
             let class = crate::jvm::read(bytes).unwrap();
-            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("must translate"));
         }
         let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
@@ -23435,7 +23440,9 @@ public class Shaped {
             Some(Verdict::Verified) => {}
         }
 
-        let translated = crate::dalvik::translate_class(&class).expect("must translate");
+        let translated = crate::dalvik::translate_class(&class)
+            .expect("must translate")
+            .remove(0);
         let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
             assert!(text.contains("Lcom/my/app/Planet;"));
@@ -23519,7 +23526,9 @@ public class Shaped {
             Some(Verdict::Verified) => {}
         }
 
-        let translated = crate::dalvik::translate_class(&class).expect("must translate");
+        let translated = crate::dalvik::translate_class(&class)
+            .expect("must translate")
+            .remove(0);
         let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
             assert!(text.contains("Lcom/my/app/Point;"));
@@ -23596,7 +23605,9 @@ public class Shaped {
             Some(Verdict::Verified) => {}
         }
 
-        let translated = crate::dalvik::translate_class(&class).expect("must translate");
+        let translated = crate::dalvik::translate_class(&class)
+            .expect("must translate")
+            .remove(0);
         let dex = crate::dexwrite::write(&[translated], &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
             assert!(
@@ -23682,7 +23693,7 @@ public class Shaped {
         let mut classes = Vec::new();
         for (_, bytes) in &produced {
             let class = crate::jvm::read(bytes).unwrap();
-            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("must translate"));
         }
         let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
@@ -23763,7 +23774,7 @@ public class Shaped {
         let mut classes = Vec::new();
         for (_, bytes) in &produced {
             let class = crate::jvm::read(bytes).unwrap();
-            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("must translate"));
         }
         let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
@@ -23853,7 +23864,7 @@ public class Shaped {
         let mut classes = Vec::new();
         for (_, bytes) in &produced {
             let class = crate::jvm::read(bytes).unwrap();
-            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("must translate"));
         }
         let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
@@ -23930,7 +23941,7 @@ public class Shaped {
         let mut classes = Vec::new();
         for (_, bytes) in &produced {
             let class = crate::jvm::read(bytes).unwrap();
-            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("must translate"));
         }
         crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
 
@@ -24113,7 +24124,7 @@ public class Shaped {
         let mut classes = Vec::new();
         for (_, bytes) in &produced {
             let class = crate::jvm::read(bytes).unwrap();
-            classes.push(crate::dalvik::translate_class(&class).expect("must translate"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("must translate"));
         }
         let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
@@ -24952,7 +24963,7 @@ public class Sides {
         // to be handed every one of these as registers.
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -25033,7 +25044,7 @@ public class Ops {
         // and the two methods with no body at all.
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -25229,7 +25240,7 @@ public class Wide {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -25402,7 +25413,7 @@ public class More {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -25615,7 +25626,7 @@ public class Third {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -25718,7 +25729,7 @@ public class Flow {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -25877,7 +25888,7 @@ public class Last {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -26040,7 +26051,7 @@ public class Twist {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -26205,7 +26216,7 @@ public class Edge {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -26404,7 +26415,7 @@ public class MainActivity extends Activity {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -26588,7 +26599,7 @@ public class Everything {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -26889,7 +26900,7 @@ public class Deep {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -27061,7 +27072,7 @@ public class Wider {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -27243,7 +27254,7 @@ public class Order {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -27373,7 +27384,7 @@ public class Modern {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -29240,7 +29251,7 @@ public class Branch extends Root {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -29275,7 +29286,7 @@ public class Branch extends Root {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -29444,7 +29455,7 @@ public class Gen {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -29603,7 +29614,7 @@ public class Big {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -29753,7 +29764,7 @@ public class Cards {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -29843,7 +29854,7 @@ public class Cards {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -30023,7 +30034,7 @@ public abstract class Store<K, V> implements Iterable<Map.Entry<K, V>> {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -30170,7 +30181,7 @@ public class Rest {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -30210,7 +30221,7 @@ public class Rest {
         // And to Dalvik, which is where it would actually run.
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, bytes)| {
+            .flat_map(|(file, bytes)| {
                 let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -30366,7 +30377,7 @@ public final class R {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, bytes)| {
+            .flat_map(|(file, bytes)| {
                 let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -30998,7 +31009,7 @@ public final class Screen extends Activity {
             .any(|(name, _)| name == "com/my/app/Screen.class"));
         let translated: Vec<_> = whole
             .iter()
-            .map(|(file, bytes)| {
+            .flat_map(|(file, bytes)| {
                 let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -31310,7 +31321,7 @@ public class Boxed {
         // It has to reach the device, not just the compiler.
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -31892,7 +31903,7 @@ public class Screen extends Activity implements View.OnClickListener {
 
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, held)| {
+            .flat_map(|(file, held)| {
                 let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -32351,7 +32362,7 @@ public class Screen extends Activity implements View.OnClickListener {
         // -- and every one of them reaches Dalvik.
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, bytes)| {
+            .flat_map(|(file, bytes)| {
                 let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -32686,7 +32697,7 @@ public class Screen extends Activity implements View.OnClickListener {
         // refuses it.
         let translated: Vec<_> = produced
             .iter()
-            .map(|(file, bytes)| {
+            .flat_map(|(file, bytes)| {
                 let class = crate::jvm::read(bytes).unwrap_or_else(|_| panic!("read back {file}"));
                 crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
@@ -32817,7 +32828,8 @@ public class Screen extends Activity implements View.OnClickListener {
         let (_, bytes) = compile_one(source, &empty()).expect("this must compile");
         let class = crate::jvm::read(&bytes).expect("and read back");
         let translated = crate::dalvik::translate_class(&class)
-            .expect("arrays and floating point must translate");
+            .expect("arrays and floating point must translate")
+            .remove(0);
 
         let named: Vec<&str> = translated
             .direct_methods

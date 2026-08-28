@@ -17290,6 +17290,9 @@ pub mod dalvik {
         low: u16,
         stack_base: u16,
         depth: u16,
+        /// The classes written to stand in for a lambda, which the format
+        /// makes as the method runs and Dalvik cannot.
+        made: &'a mut Synthesised,
         /// What each stack slot holds, one entry per slot, the top last.
         kinds: Vec<Kept>,
         /// Where the shuffles have room to work, which is above the stack.
@@ -17352,7 +17355,12 @@ pub mod dalvik {
     }
 
     impl<'a> Translator<'a> {
-        pub fn new(class: &'a jvm::Class, code: &jvm::Code, low: u16) -> Translator<'a> {
+        pub fn new(
+            class: &'a jvm::Class,
+            code: &jvm::Code,
+            low: u16,
+            made: &'a mut Synthesised,
+        ) -> Translator<'a> {
             Translator {
                 class,
                 code: Vec::new(),
@@ -17363,6 +17371,7 @@ pub mod dalvik {
                 low,
                 stack_base: low + code.max_locals,
                 depth: 0,
+                made,
                 kinds: Vec::new(),
                 scratch: low + code.max_locals + code.max_stack,
                 kinds_at: std::collections::BTreeMap::new(),
@@ -17996,6 +18005,9 @@ pub mod dalvik {
             if holder == "java/lang/invoke/StringConcatFactory" {
                 return self.joined(&parameters, &returns, &told, &handed, start);
             }
+            if holder == "java/lang/invoke/LambdaMetafactory" {
+                return self.lambda(&name, &parameters, &returns, &told, &handed, start);
+            }
 
             Err(fail(
                 "ED053",
@@ -18009,6 +18021,152 @@ pub mod dalvik {
                  the instructions it stands for. Nothing is skipped: a call that ran \
                  as something else would be worse than one that does not build.",
             ))
+        }
+
+        /// A lambda, or a reference to a method, which the format asks for in
+        /// one instruction and Dalvik cannot make.
+        ///
+        /// The class that stands in for it is written out beside the one it
+        /// came from, and what is left here is making one of those: the values
+        /// it captured handed to its constructor.
+        fn lambda(
+            &mut self,
+            called: &str,
+            parameters: &[String],
+            returns: &str,
+            told: &str,
+            handed: &[jvm::Constant],
+            start: usize,
+        ) -> Result<(), Diagnostic> {
+            let refused = |why: &str| {
+                fail("ED062", "A lambda cannot be read.")
+                    .with_context(format!("Offset {start}"))
+                    .with_context(why.to_string())
+            };
+            if told != "metafactory" && told != "altMetafactory" {
+                return Err(refused("it is not made by anything this knows"));
+            }
+            let Some(jvm::Constant::MethodType(sam)) = handed.first() else {
+                return Err(refused(
+                    "it does not say what the interface's method looks like",
+                ));
+            };
+            let sam = self
+                .utf8_at(*sam)
+                .ok_or_else(|| refused("the interface's method has no descriptor"))?;
+            let Some(jvm::Constant::MethodHandle(kind, reference)) = handed.get(1) else {
+                return Err(refused("it does not say what runs"));
+            };
+            let (kind, reference) = (*kind, *reference);
+            let (body_class, body_name, body_descriptor) = self.member_at(reference, start)?;
+
+            // What it is also marked with, and what has to be written twice
+            // because the interface says so in more than one shape.
+            let mut markers: Vec<String> = Vec::new();
+            let mut bridges: Vec<String> = Vec::new();
+            if told == "altMetafactory" {
+                let Some(jvm::Constant::Integer(flags)) = handed.get(3) else {
+                    return Err(refused("it does not say what else is asked of it"));
+                };
+                let flags = *flags;
+                let mut at = 4usize;
+                if flags & 1 != 0 {
+                    markers.push("Ljava/io/Serializable;".to_string());
+                }
+                if flags & 2 != 0 {
+                    let Some(jvm::Constant::Integer(count)) = handed.get(at) else {
+                        return Err(refused(
+                            "it does not say how many interfaces it is marked with",
+                        ));
+                    };
+                    let count = *count;
+                    at += 1;
+                    for _ in 0..count {
+                        let Some(jvm::Constant::Class(named)) = handed.get(at) else {
+                            return Err(refused(
+                                "one of the interfaces it is marked with is not a class",
+                            ));
+                        };
+                        let named = self
+                            .utf8_at(*named)
+                            .ok_or_else(|| refused("an interface it is marked with has no name"))?;
+                        markers.push(format!("L{named};"));
+                        at += 1;
+                    }
+                }
+                if flags & 4 != 0 {
+                    let Some(jvm::Constant::Integer(count)) = handed.get(at) else {
+                        return Err(refused("it does not say how many shapes its method has"));
+                    };
+                    let count = *count;
+                    at += 1;
+                    for _ in 0..count {
+                        let Some(jvm::Constant::MethodType(shape)) = handed.get(at) else {
+                            return Err(refused("one of its method's shapes is not a descriptor"));
+                        };
+                        let shape = self
+                            .utf8_at(*shape)
+                            .ok_or_else(|| refused("a shape of its method has no descriptor"))?;
+                        bridges.push(shape);
+                        at += 1;
+                    }
+                }
+            }
+
+            if !returns.starts_with('L') {
+                return Err(refused("what it comes to is not an interface"));
+            }
+            let named = self.made.named();
+            let written = a_lambda(&Recipe {
+                named: &named,
+                interface: returns,
+                markers: &markers,
+                method: called,
+                sam: &sam,
+                bridges: &bridges,
+                kind,
+                body: (
+                    format!("L{body_class};"),
+                    body_name,
+                    body_descriptor.clone(),
+                ),
+                captured: parameters,
+            })?;
+            self.made.made.push(written);
+
+            // And here, one of those, made out of what it captured.
+            let words: u16 = parameters.iter().map(|one| width_of(one)).sum();
+            let base = self.slot(words);
+            let object = self.scratch;
+            if object + 1 + words > 255 {
+                return Err(refused("there is nowhere to put together what it captured"));
+            }
+            self.push(Insn::pointing(
+                vec![0x0022 | (object << 8), 0],
+                1,
+                Operand::Type(named.clone()),
+            ));
+            let mut at = 0u16;
+            for descriptor in parameters {
+                let kept = Kept::of(descriptor);
+                self.push(move_register(kept.moved_by(), object + 1 + at, base + at));
+                at += width_of(descriptor);
+            }
+            self.shrink(words)?;
+            self.max_outputs = self.max_outputs.max(1 + words);
+            self.push(Insn::pointing(
+                vec![(0x0070 + RANGE_AWAY) | ((1 + words) << 8), 0, object],
+                1,
+                Operand::Method(MethodRef {
+                    class: named,
+                    name: "<init>".to_string(),
+                    return_type: "V".to_string(),
+                    parameters: parameters.to_vec(),
+                }),
+            ));
+            self.push(move_register(0x07, base, object));
+            self.puts(Kept::Reference);
+            Ok(())
         }
 
         /// Strings joined together, which javac writes as a dynamic call and
@@ -19255,8 +19413,529 @@ pub mod dalvik {
         }
     }
 
+    /// The classes written to stand in for something the format says in one
+    /// instruction and Dalvik has no instruction for.
+    ///
+    /// A lambda is the one that needs a whole class: the JVM makes one as the
+    /// method runs, and Dalvik cannot, so it is written out here and put in the
+    /// package beside the class it came from.
+    pub struct Synthesised {
+        pub made: Vec<crate::dexwrite::Class>,
+        owner: String,
+        next: usize,
+    }
+
+    impl Synthesised {
+        fn new(owner: &str) -> Synthesised {
+            Synthesised {
+                made: Vec::new(),
+                owner: owner.to_string(),
+                next: 0,
+            }
+        }
+
+        /// The name of the next one. This is the name javac gives them, so a
+        /// stack trace off a device reads the way one off a desktop does.
+        fn named(&mut self) -> String {
+            let held = self.next;
+            self.next += 1;
+            format!("{}$$Lambda${held};", self.owner.trim_end_matches(';'))
+        }
+    }
+
+    /// The box a primitive is kept in, and the method that takes it out again.
+    fn boxes(descriptor: &str) -> Option<(&'static str, &'static str)> {
+        Some(match descriptor {
+            "Z" => ("Ljava/lang/Boolean;", "booleanValue"),
+            "B" => ("Ljava/lang/Byte;", "byteValue"),
+            "C" => ("Ljava/lang/Character;", "charValue"),
+            "S" => ("Ljava/lang/Short;", "shortValue"),
+            "I" => ("Ljava/lang/Integer;", "intValue"),
+            "J" => ("Ljava/lang/Long;", "longValue"),
+            "F" => ("Ljava/lang/Float;", "floatValue"),
+            "D" => ("Ljava/lang/Double;", "doubleValue"),
+            _ => return None,
+        })
+    }
+
+    fn a_primitive(descriptor: &str) -> bool {
+        !descriptor.starts_with('L') && !descriptor.starts_with('[') && descriptor != "V"
+    }
+
+    /// The instruction that widens one primitive into another, where Java
+    /// allows it without being asked.
+    fn widens(from: &str, to: &str) -> Option<Option<u16>> {
+        if from == to {
+            return Some(None);
+        }
+        Some(Some(match (from, to) {
+            // Everything narrower than an int is an int already.
+            ("B" | "S" | "C" | "Z", "I") => return Some(None),
+            ("B" | "S" | "C" | "I", "J") => 0x0081,
+            ("B" | "S" | "C" | "I", "F") => 0x0082,
+            ("B" | "S" | "C" | "I", "D") => 0x0083,
+            ("J", "F") => 0x0085,
+            ("J", "D") => 0x0086,
+            ("F", "D") => 0x0089,
+            _ => return None,
+        }))
+    }
+
+    /// The registers a written-out class works in, low enough that every
+    /// instruction can name them. Two for a value of any width coming in, two
+    /// for one going out, and one for the object whose fields are read.
+    const SPARE_IN: u16 = 0;
+    const SPARE_OUT: u16 = 2;
+    const SELF: u16 = 4;
+    const LOW: u16 = 5;
+
+    /// A method being written a piece at a time.
+    struct Writing {
+        code: Vec<Insn>,
+        outputs: u16,
+    }
+
+    impl Writing {
+        fn new() -> Writing {
+            Writing {
+                code: Vec::new(),
+                outputs: 0,
+            }
+        }
+
+        fn moved(&mut self, kept: Kept, to: u16, from: u16) {
+            if to != from {
+                self.code.push(move_register(kept.moved_by(), to, from));
+            }
+        }
+
+        /// A call, always in the form that names a row of registers, because
+        /// what is written here is always in a row.
+        fn call(&mut self, opcode: u16, reference: MethodRef, first: u16, words: u16) {
+            self.outputs = self.outputs.max(words);
+            self.code.push(Insn::pointing(
+                vec![(opcode + RANGE_AWAY) | (words << 8), 0, first],
+                1,
+                Operand::Method(reference),
+            ));
+        }
+
+        fn result(&mut self, kept: Kept, to: u16) {
+            let fetch = match kept {
+                Kept::Reference => 0x000cu16,
+                Kept::Wide | Kept::Half => 0x000b,
+                Kept::Number => 0x000a,
+            };
+            self.code.push(Insn::raw(vec![fetch | (to << 8)]));
+        }
+
+        fn cast(&mut self, register: u16, descriptor: &str) {
+            self.code.push(Insn::pointing(
+                vec![0x001f | (register << 8), 0],
+                1,
+                Operand::Type(descriptor.to_string()),
+            ));
+        }
+
+        /// Puts a value of one kind where a value of another is wanted, doing
+        /// whatever Java would have done on the way: a cast, a box, a value out
+        /// of a box, or a widening.
+        fn adapted(
+            &mut self,
+            from: &str,
+            source: u16,
+            to: &str,
+            target: u16,
+            where_from: &str,
+        ) -> Result<(), Diagnostic> {
+            let refused = |why: &str| {
+                fail(
+                    "ED060",
+                    "A lambda's value cannot be put where it is wanted.",
+                )
+                .with_context(format!("In: {where_from}"))
+                .with_context(format!("From {from} to {to}: {why}"))
+            };
+
+            match (a_primitive(from), a_primitive(to)) {
+                (false, false) => {
+                    self.moved(Kept::Reference, target, source);
+                    if from != to && to != "Ljava/lang/Object;" {
+                        self.cast(target, to);
+                    }
+                }
+                (true, true) => {
+                    let Some(widening) = widens(from, to) else {
+                        return Err(refused("one does not widen into the other"));
+                    };
+                    match widening {
+                        None => self.moved(Kept::of(from), target, source),
+                        Some(opcode) => {
+                            // The instruction names its registers in four bits,
+                            // so it is done in the ones kept low for it.
+                            self.moved(Kept::of(from), SPARE_IN, source);
+                            self.code.push(Insn::raw(vec![
+                                opcode | (SPARE_OUT << 8) | (SPARE_IN << 12),
+                            ]));
+                            self.moved(Kept::of(to), target, SPARE_OUT);
+                        }
+                    }
+                }
+                // A primitive where an object is wanted, which is the box.
+                (true, false) => {
+                    let Some((box_class, _)) = boxes(from) else {
+                        return Err(refused("it is not a primitive with a box"));
+                    };
+                    let width = width_of(from);
+                    self.moved(Kept::of(from), SPARE_IN, source);
+                    self.call(
+                        0x0071,
+                        MethodRef {
+                            class: box_class.to_string(),
+                            name: "valueOf".to_string(),
+                            return_type: box_class.to_string(),
+                            parameters: vec![from.to_string()],
+                        },
+                        SPARE_IN,
+                        width,
+                    );
+                    self.result(Kept::Reference, target);
+                    if to != "Ljava/lang/Object;" && to != box_class {
+                        self.cast(target, to);
+                    }
+                }
+                // An object where a primitive is wanted, which is the value out
+                // of the box.
+                (false, true) => {
+                    let Some((box_class, taken)) = boxes(to) else {
+                        return Err(refused("it is not a primitive with a box"));
+                    };
+                    self.moved(Kept::Reference, SPARE_IN, source);
+                    self.cast(SPARE_IN, box_class);
+                    self.call(
+                        0x006e,
+                        MethodRef {
+                            class: box_class.to_string(),
+                            name: taken.to_string(),
+                            return_type: to.to_string(),
+                            parameters: Vec::new(),
+                        },
+                        SPARE_IN,
+                        1,
+                    );
+                    self.result(Kept::of(to), target);
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Everything a lambda needs to become a class of its own.
+    struct Recipe<'a> {
+        /// The name the class is given, as a descriptor.
+        named: &'a str,
+        /// The interface it implements, and any it is also marked with.
+        interface: &'a str,
+        markers: &'a [String],
+        /// The interface's own method: its name, its descriptor as the
+        /// interface declares it, and any bridges asked for beside it.
+        method: &'a str,
+        sam: &'a str,
+        bridges: &'a [String],
+        /// What actually runs, and how it is reached.
+        kind: u8,
+        body: (String, String, String),
+        /// What the lambda took with it from where it was written.
+        captured: &'a [String],
+    }
+
+    /// The class a lambda comes to.
+    ///
+    /// The format says all of this in one instruction: the JVM works out a
+    /// class as the method runs, from the interface, the method that holds the
+    /// body, and whatever was captured. Dalvik has no such instruction, so the
+    /// class is written here instead -- the captured values as fields, a
+    /// constructor that takes them, and the interface's own method calling the
+    /// body with whatever converting Java would have done on the way.
+    fn a_lambda(recipe: &Recipe<'_>) -> Result<crate::dexwrite::Class, Diagnostic> {
+        let mut out = crate::dexwrite::Class::named(
+            recipe.named,
+            "Ljava/lang/Object;",
+            // public final synthetic
+            0x0011 | 0x1000,
+        );
+        out.interfaces.push(recipe.interface.to_string());
+        for one in recipe.markers {
+            if one != recipe.interface {
+                out.interfaces.push(one.clone());
+            }
+        }
+
+        let held: Vec<(FieldRef, String)> = recipe
+            .captured
+            .iter()
+            .enumerate()
+            .map(|(at, descriptor)| {
+                (
+                    FieldRef {
+                        class: recipe.named.to_string(),
+                        name: format!("arg${at}"),
+                        descriptor: descriptor.clone(),
+                    },
+                    descriptor.clone(),
+                )
+            })
+            .collect();
+        for (reference, _) in &held {
+            out.instance_fields.push(crate::dexwrite::Field {
+                reference: reference.clone(),
+                // private final synthetic
+                access_flags: 0x0002 | 0x0010 | 0x1000,
+            });
+        }
+
+        out.direct_methods
+            .push(a_lambda_constructor(recipe, &held)?);
+        out.virtual_methods
+            .push(a_lambda_method(recipe, &held, recipe.sam)?);
+        for bridge in recipe.bridges {
+            if bridge == recipe.sam {
+                continue;
+            }
+            out.virtual_methods
+                .push(a_lambda_method(recipe, &held, bridge)?);
+        }
+        Ok(out)
+    }
+
+    /// The constructor, which takes what was captured and puts it away.
+    fn a_lambda_constructor(
+        recipe: &Recipe<'_>,
+        held: &[(FieldRef, String)],
+    ) -> Result<Method, Diagnostic> {
+        let words: u16 = recipe.captured.iter().map(|one| width_of(one)).sum();
+        let inputs = 1 + words;
+        let registers = LOW + inputs;
+        let this = registers - inputs;
+
+        let mut writing = Writing::new();
+        writing.call(
+            0x0070,
+            MethodRef {
+                class: "Ljava/lang/Object;".to_string(),
+                name: "<init>".to_string(),
+                return_type: "V".to_string(),
+                parameters: Vec::new(),
+            },
+            this,
+            1,
+        );
+        writing.moved(Kept::Reference, SELF, this);
+        let mut at = this + 1;
+        for (reference, descriptor) in held {
+            let kept = Kept::of(descriptor);
+            writing.moved(kept, SPARE_IN, at);
+            writing.code.push(Insn::pointing(
+                vec![
+                    (0x0059 + field_kind(descriptor)) | (SPARE_IN << 8) | (SELF << 12),
+                    0,
+                ],
+                1,
+                Operand::Field(reference.clone()),
+            ));
+            at += width_of(descriptor);
+        }
+        writing.code.push(Insn::raw(vec![0x000e]));
+
+        Ok(Method {
+            reference: MethodRef {
+                class: recipe.named.to_string(),
+                name: "<init>".to_string(),
+                return_type: "V".to_string(),
+                parameters: recipe.captured.to_vec(),
+            },
+            // public synthetic, because it is called from the class the lambda
+            // was written in and a private one would not be reachable.
+            access_flags: 0x0001 | 0x1000,
+            registers,
+            inputs,
+            outputs: writing.outputs.max(1),
+            instructions: writing.code,
+            tries: Vec::new(),
+        })
+    }
+
+    /// Which `iget`/`iput` a field of this kind takes, as a step along from the
+    /// first of them.
+    fn field_kind(descriptor: &str) -> u16 {
+        match descriptor.chars().next() {
+            Some('J') | Some('D') => 1,
+            Some('L') | Some('[') => 2,
+            Some('Z') => 3,
+            Some('B') => 4,
+            Some('C') => 5,
+            Some('S') => 6,
+            _ => 0,
+        }
+    }
+
+    /// The interface's own method, which calls the body.
+    fn a_lambda_method(
+        recipe: &Recipe<'_>,
+        held: &[(FieldRef, String)],
+        sam: &str,
+    ) -> Result<Method, Diagnostic> {
+        let where_from = format!("{}.{}{sam}", recipe.named, recipe.method);
+        let refused = |why: &str| {
+            fail("ED061", "A lambda cannot be written out as a class.")
+                .with_context(format!("In: {where_from}"))
+                .with_context(why.to_string())
+        };
+
+        let Some((given, gives)) = split_descriptor(sam) else {
+            return Err(refused(
+                "the interface's method has a descriptor that will not read",
+            ));
+        };
+        let (body_class, body_name, body_descriptor) = &recipe.body;
+        let Some((wanted, returns)) = split_descriptor(body_descriptor) else {
+            return Err(refused("the body has a descriptor that will not read"));
+        };
+
+        // What the call takes, in order, and what the call is.
+        let mut wants: Vec<String> = Vec::new();
+        let makes = recipe.kind == 8;
+        if !makes && matches!(recipe.kind, 5 | 7 | 9) {
+            wants.push(body_class.clone());
+        }
+        wants.extend(wanted.iter().cloned());
+
+        let mut haves: Vec<String> = recipe.captured.to_vec();
+        haves.extend(given.iter().cloned());
+        if haves.len() != wants.len() {
+            return Err(refused(&format!(
+                "it was given {} values and the body takes {}",
+                haves.len(),
+                wants.len()
+            )));
+        }
+
+        let run_words: u16 = wants.iter().map(|one| width_of(one)).sum::<u16>() + u16::from(makes);
+        let inputs: u16 = 1 + given.iter().map(|one| width_of(one)).sum::<u16>();
+        // The low registers to work in, the run the call is made from, four
+        // for what comes back and what it is turned into, and the parameters.
+        let run = LOW;
+        let answer = run + run_words;
+        let turned = answer + 2;
+        let registers = turned + 2 + inputs;
+        if registers > 255 {
+            return Err(refused(
+                "it needs more registers than the instructions can name",
+            ));
+        }
+        let this = registers - inputs;
+
+        let mut writing = Writing::new();
+        writing.moved(Kept::Reference, SELF, this);
+
+        // The object being made, where this is a reference to a constructor.
+        let mut slot = run;
+        if makes {
+            writing.code.push(Insn::pointing(
+                vec![0x0022 | (slot << 8), 0],
+                1,
+                Operand::Type(body_class.clone()),
+            ));
+            slot += 1;
+        }
+
+        let mut parameter = this + 1;
+        for (at, (have, want)) in haves.iter().zip(wants.iter()).enumerate() {
+            let source = if at < held.len() {
+                // Out of a field, into the two registers kept for it.
+                let (reference, descriptor) = &held[at];
+                writing.code.push(Insn::pointing(
+                    vec![
+                        (0x0052 + field_kind(descriptor)) | (SPARE_IN << 8) | (SELF << 12),
+                        0,
+                    ],
+                    1,
+                    Operand::Field(reference.clone()),
+                ));
+                SPARE_IN
+            } else {
+                let register = parameter;
+                parameter += width_of(have);
+                register
+            };
+            writing.adapted(have, source, want, slot, &where_from)?;
+            slot += width_of(want);
+        }
+
+        let opcode = match recipe.kind {
+            5 => 0x006eu16,
+            6 => 0x0071,
+            9 => 0x0072,
+            7 | 8 => 0x0070,
+            other => {
+                return Err(refused(&format!(
+                    "the body is reached in a way this does not write ({other})"
+                )))
+            }
+        };
+        writing.call(
+            opcode,
+            MethodRef {
+                class: body_class.clone(),
+                name: body_name.clone(),
+                return_type: returns.clone(),
+                parameters: wanted.clone(),
+            },
+            run,
+            run_words,
+        );
+
+        if gives == "V" {
+            writing.code.push(Insn::raw(vec![0x000e]));
+        } else {
+            let (came, from) = if makes {
+                (body_class.clone(), run)
+            } else {
+                if returns == "V" {
+                    return Err(refused(
+                        "the body gives nothing back and the interface wants something",
+                    ));
+                }
+                writing.result(Kept::of(&returns), answer);
+                (returns.clone(), answer)
+            };
+            writing.adapted(&came, from, &gives, turned, &where_from)?;
+            let back = match Kept::of(&gives) {
+                Kept::Reference => 0x0011u16,
+                Kept::Wide | Kept::Half => 0x0010,
+                Kept::Number => 0x000f,
+            };
+            writing.code.push(Insn::raw(vec![back | (turned << 8)]));
+        }
+
+        Ok(Method {
+            reference: MethodRef {
+                class: recipe.named.to_string(),
+                name: recipe.method.to_string(),
+                return_type: gives.clone(),
+                parameters: given.clone(),
+            },
+            access_flags: 0x0001,
+            registers,
+            inputs,
+            outputs: writing.outputs,
+            instructions: writing.code,
+            tries: Vec::new(),
+        })
+    }
+
     /// What a whole class comes to.
-    pub fn translate_class(class: &jvm::Class) -> Result<crate::dexwrite::Class, Diagnostic> {
+    pub fn translate_class(class: &jvm::Class) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
         // The reader hands back names the way a person writes them, with dots,
         // because that is what a report wants. A dex descriptor wants the
         // internal form with slashes. Reading one as the other produces a
@@ -19294,8 +19973,9 @@ pub mod dalvik {
             }
         }
 
+        let mut made = Synthesised::new(&descriptor);
         for method in &class.methods {
-            let translated = translate_method(class, method, &descriptor)?;
+            let translated = translate_method(class, method, &descriptor, &mut made)?;
             // Constructors, static methods and private ones are called without
             // asking what the object is; everything else is dispatched on it.
             let direct = method.access_flags & (0x0008 | 0x0002) != 0
@@ -19308,13 +19988,18 @@ pub mod dalvik {
             }
         }
 
-        Ok(out)
+        // The class itself first, and then whatever had to be written to stand
+        // in for something the format says in one instruction.
+        let mut every = vec![out];
+        every.append(&mut made.made);
+        Ok(every)
     }
 
     fn translate_method(
         class: &jvm::Class,
         method: &jvm::Member,
         owner: &str,
+        made: &mut Synthesised,
     ) -> Result<Method, Diagnostic> {
         let (parameters, returns) = split_descriptor(&method.descriptor).ok_or_else(|| {
             fail("ED002", "A method descriptor could not be read.")
@@ -19350,7 +20035,7 @@ pub mod dalvik {
         // somewhere to keep the values while it works, and that is above the
         // stack. Only the shuffles that reach downwards need it, so a method
         // without one of them is laid out as it always was.
-        let room = if code.max_locals > 255
+        let mut room = if code.max_locals > 255
             || code
                 .bytes
                 .iter()
@@ -19360,6 +20045,37 @@ pub mod dalvik {
         } else {
             0
         };
+        // A lambda is made out of what it captured, and the values have to be
+        // in a row for the call that makes it. How long a row is not known
+        // until the call is read, so the widest one the class has anywhere is
+        // the room kept for it.
+        if code.bytes.contains(&0xba) {
+            for constant in &class.constants {
+                let jvm::Constant::InvokeDynamic(_, what) = constant else {
+                    continue;
+                };
+                let Some(jvm::Constant::NameAndType(_, descriptor)) =
+                    class.constants.get(usize::from(*what))
+                else {
+                    continue;
+                };
+                let Some(descriptor) =
+                    class
+                        .constants
+                        .get(usize::from(*descriptor))
+                        .and_then(|held| match held {
+                            jvm::Constant::Utf8(text) => Some(text),
+                            _ => None,
+                        })
+                else {
+                    continue;
+                };
+                if let Some((parameters, _)) = split_descriptor(descriptor) {
+                    let words: u16 = parameters.iter().map(|one| width_of(one)).sum();
+                    room = room.max(1 + words);
+                }
+            }
+        }
         // And most of the one-operand instructions name their registers in
         // four bits, which reaches the first sixteen and no further. A method
         // that needs more than that keeps the first few for them.
@@ -19381,7 +20097,7 @@ pub mod dalvik {
             .with_context(format!("Registers: {total}")));
         }
 
-        let mut translator = Translator::new(class, code, low);
+        let mut translator = Translator::new(class, code, low, made);
 
         // The parameters arrive at the top and belong at the bottom.
         let mut at = low + code.max_locals + code.max_stack + room;
@@ -25742,7 +26458,7 @@ public final class R {{
         for (name, bytes) in produced {
             let class = crate::jvm::read(&bytes)
                 .map_err(|error| error.with_context(format!("Class: {name}")))?;
-            out.push(
+            out.extend(
                 crate::dalvik::translate_class(&class)
                     .map_err(|error| error.with_context(format!("Class: {name}")))?,
             );
@@ -30801,6 +31517,72 @@ public class Written {
         }
     }
 
+    public interface Named {
+        String of(int which);
+    }
+
+    public interface Counted {
+        int count(String what);
+    }
+
+    public interface Made {
+        Object make(String from);
+    }
+
+    public interface Boxed {
+        Object of(long value);
+    }
+
+    public interface Taken {
+        long of(Object value);
+    }
+
+    public static Named plain() {
+        return which -> "n" + which;
+    }
+
+    public Named capturing(String prefix, int step) {
+        return which -> prefix + (which + step) + count;
+    }
+
+    public Named bound() {
+        return this::named;
+    }
+
+    private String named(int which) {
+        return "b" + which + count;
+    }
+
+    public static Counted lengths() {
+        return String::length;
+    }
+
+    public static Made makers() {
+        return StringBuilder::new;
+    }
+
+    public static Boxed boxing() {
+        return Long::valueOf;
+    }
+
+    public static Taken taking() {
+        return value -> ((Long) value).longValue();
+    }
+
+    // A generic interface, whose method is erased to Object in and Object out:
+    // the value has to be cast on the way in and boxed on the way out.
+    public static java.util.function.Function<String, Integer> erased() {
+        return String::length;
+    }
+
+    public static java.util.function.Supplier<String> supplying(String held) {
+        return () -> held + "!";
+    }
+
+    public static java.util.function.BiFunction<Long, Long, Long> adding() {
+        return Long::sum;
+    }
+
     public static int many(int seed) {
         int a0 = seed, a1 = a0 + 1, a2 = a1 + 1, a3 = a2 + 1, a4 = a3 + 1;
         int a5 = a4 + 1, a6 = a5 + 1, a7 = a6 + 1, a8 = a7 + 1, a9 = a8 + 1;
@@ -30857,21 +31639,24 @@ public class Written {
 
         let mut refused = Vec::new();
         let mut joined = 0;
+        let mut every: Vec<crate::dexwrite::Class> = Vec::new();
         for path in &written {
             let bytes = std::fs::read(path).unwrap();
             let class = crate::jvm::read(&bytes)
                 .unwrap_or_else(|error| panic!("{} does not read: {error:?}", path.display()));
             let translated = crate::dalvik::translate_class(&class)
                 .unwrap_or_else(|error| panic!("{} does not translate: {error:?}", path.display()));
-            refused.extend(what_the_runtime_would_refuse(&translated));
+            for one in &translated {
+                refused.extend(what_the_runtime_would_refuse(one));
+            }
+            every.extend(translated.iter().cloned());
             // Strings joined together are written as a dynamic call, and what
             // it stands for is a builder handed one piece at a time. Which
             // pieces, and which `append` takes each, is the whole of what the
             // call meant -- so it is read back out and compared.
             for method in translated
-                .direct_methods
                 .iter()
-                .chain(translated.virtual_methods.iter())
+                .flat_map(|one| one.direct_methods.iter().chain(one.virtual_methods.iter()))
             {
                 let wanted: &[&str] = match method.reference.name.as_str() {
                     "joined" => &[
@@ -30917,6 +31702,81 @@ public class Written {
             refused.join("\n  ")
         );
         assert_eq!(joined, 2, "both joined strings were read");
+
+        // A lambda becomes a class of its own, written out beside the one it
+        // came from. Those go into the package like any other, so the package
+        // is written and read back.
+        let names: Vec<&str> = every
+            .iter()
+            .map(|one| one.descriptor.as_str())
+            .filter(|one| one.contains("$$Lambda$"))
+            .collect();
+        assert!(
+            names.len() >= 10,
+            "a lambda for each one written: {names:?}"
+        );
+        // What each one came to, checked where it says something: a method
+        // reference with nothing captured keeps nothing; a generic interface
+        // is erased, so the value is cast on the way in and boxed on the way
+        // out, and both have to be there.
+        let by_interface = |wanted: &str| -> &crate::dexwrite::Class {
+            every
+                .iter()
+                .find(|one| one.interfaces.iter().any(|held| held == wanted))
+                .unwrap_or_else(|| panic!("nothing implements {wanted}"))
+        };
+
+        let counted = by_interface("Lcom/my/app/Written$Counted;");
+        assert!(
+            counted.instance_fields.is_empty(),
+            "a method reference that captured nothing keeps nothing"
+        );
+        let count = counted
+            .virtual_methods
+            .iter()
+            .find(|one| one.reference.name == "count")
+            .expect("it has the interface's method");
+        assert_eq!(count.reference.parameters, vec!["Ljava/lang/String;"]);
+        assert_eq!(count.reference.return_type, "I");
+
+        let erased = by_interface("Ljava/util/function/Function;");
+        let apply = erased
+            .virtual_methods
+            .iter()
+            .find(|one| one.reference.name == "apply")
+            .expect("it has the interface's method");
+        assert_eq!(apply.reference.parameters, vec!["Ljava/lang/Object;"]);
+        assert_eq!(apply.reference.return_type, "Ljava/lang/Object;");
+        let told: Vec<String> = apply
+            .instructions
+            .iter()
+            .filter_map(|one| match &one.operand {
+                crate::dexwrite::Operand::Type(descriptor) => Some(format!("cast {descriptor}")),
+                crate::dexwrite::Operand::Method(call) => {
+                    Some(format!("{}.{}", call.class, call.name))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            told,
+            vec![
+                "cast Ljava/lang/String;",
+                "Ljava/lang/String;.length",
+                "Ljava/lang/Integer;.valueOf",
+            ],
+            "the value is cast on the way in and boxed on the way out"
+        );
+
+        let dex = crate::dexwrite::write(&every, &[]).expect("the dex is written");
+        if let Some((_, held)) = dexdump(&dex) {
+            for one in &names {
+                assert!(
+                    held.iter().any(|found| found == one),
+                    "{one} is not in the package: {held:?}"
+                );
+            }
+        }
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
             "javac conformance: {} classes another compiler wrote translate and hold up",
@@ -31040,7 +31900,10 @@ public class Written {
             let class = a_method_of("()V", 8, 1, written(after));
             let translated = crate::dalvik::translate_class(&class)
                 .unwrap_or_else(|error| panic!("{what} does not translate: {error:?}"));
-            let refused = what_the_runtime_would_refuse(&translated);
+            let refused: Vec<String> = translated
+                .iter()
+                .flat_map(what_the_runtime_would_refuse)
+                .collect();
             assert!(
                 refused.is_empty(),
                 "{what}: the runtime would refuse it: {refused:?}"
@@ -31076,7 +31939,9 @@ public class Written {
                     .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
                 let translated = crate::dalvik::translate_class(&class)
                     .unwrap_or_else(|error| panic!("{name} does not translate: {error:?}"));
-                refused.extend(what_the_runtime_would_refuse(&translated));
+                for one in &translated {
+                    refused.extend(what_the_runtime_would_refuse(one));
+                }
             }
         }
         assert!(classes >= 7, "only {classes} classes were read");
