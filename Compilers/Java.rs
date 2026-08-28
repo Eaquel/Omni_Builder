@@ -3419,6 +3419,9 @@ impl Parser {
         let nested = self.is_word("class")
             || self.is_word("interface")
             || self.is_word("enum")
+            // `@interface` written inside a class: an annotation type of its
+            // own, which is a type like any other and not a member.
+            || (self.is_mark("@") && matches!(self.ahead(1), Token::Keyword("interface")))
             || (matches!(&self.here().token, Token::Identifier(word) if word == "record")
                 && matches!(self.ahead(1), Token::Identifier(_)));
         if nested {
@@ -5331,8 +5334,52 @@ pub struct KnownClass {
 }
 
 impl Classpath {
+    /// A classpath that already knows the standard library.
+    ///
+    /// This is what a compiler with nothing handed to it should still be able
+    /// to answer for: `String`, `List`, `Map`, a stream, a `Path`, a
+    /// `BigDecimal`. Reading it costs one parse, kept for the life of the
+    /// process, and every caller after that gets a copy.
     pub fn new() -> Classpath {
+        Classpath::the_library().clone()
+    }
+
+    /// Nothing at all: no library, no jars. What the library itself is built
+    /// on, and what a test wanting to prove something is not being assumed
+    /// asks for.
+    pub fn nothing() -> Classpath {
         Classpath::default()
+    }
+
+    /// The standard library, read once and kept.
+    fn the_library() -> &'static Classpath {
+        static HELD: std::sync::OnceLock<Classpath> = std::sync::OnceLock::new();
+        HELD.get_or_init(|| {
+            let mut found = Classpath::default();
+            let mut units = Vec::new();
+            for (_, text) in THE_LIBRARY {
+                // Written here and read here: what it holds is checked by the
+                // tests below, which name every class in it.
+                if let Ok(held) = parse(text) {
+                    units.extend(held);
+                }
+            }
+            // Every one of them first, so that a class can name one written
+            // after it -- `String` implements `CharSequence`, and `Collection`
+            // hands back an `Iterator`.
+            for unit in &units {
+                found.shell(unit);
+            }
+            for unit in &units {
+                found.declare(unit);
+            }
+            // `Object` extends nothing, and a shell gives everything the same
+            // parent. Left alone it would be its own.
+            if let Some(held) = found.known.get_mut("java/lang/Object") {
+                held.superclass = None;
+            }
+            found
+        })
     }
 
     /// Adds what a type declared in this compilation says about itself,
@@ -8507,6 +8554,2646 @@ fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<Strin
     exists(&in_lang).then_some(in_lang)
 }
 
+/// The standard library, written out as the Java it is.
+///
+/// A compiler on a device has no jar to read. What it has is this: every class
+/// a person reaches for, with its type parameters, what it extends, and the
+/// shape of every method -- written as Java because Java is the language that
+/// says those things, and marked `native` because the bodies really are
+/// somewhere else. None of it is compiled. It is read the same way a class
+/// file handed over is read, through the same parser and the same `declare`,
+/// which is what makes `import java.util.List;` mean something with nothing
+/// on the classpath at all.
+///
+/// Two rules hold throughout. Nothing here uses a wildcard: `Comparator<? super
+/// T>` is written `Comparator<T>`, which erases the same and binds better. And
+/// nothing here is guessed: a method that is not in this list is not a method
+/// this compiler will write a call to, and it says so by name rather than
+/// emitting a call the device would refuse.
+const THE_LIBRARY: &[(&str, &str)] = &[
+    (
+        "java.lang",
+        r####"
+package java.lang;
+
+public class Object {
+    public native Object();
+    public native boolean equals(Object other);
+    public native int hashCode();
+    public native String toString();
+    public native Class getClass();
+    public native void notify();
+    public native void notifyAll();
+    public native void wait();
+    public native void wait(long millis);
+}
+
+public interface CharSequence {
+    int length();
+    char charAt(int index);
+    CharSequence subSequence(int start, int end);
+    String toString();
+    boolean isEmpty();
+}
+
+public interface Comparable<T> {
+    int compareTo(T other);
+}
+
+public interface Iterable<T> {
+    java.util.Iterator<T> iterator();
+}
+
+public interface Runnable {
+    void run();
+}
+
+public interface AutoCloseable {
+    void close();
+}
+
+public interface Cloneable { }
+
+public interface Appendable {
+    Appendable append(CharSequence held);
+}
+
+public class String implements CharSequence, Comparable<String> {
+    public native String();
+    public native String(String other);
+    public native String(char[] value);
+    public native String(char[] value, int offset, int count);
+    public native String(byte[] value);
+    public native int length();
+    public native boolean isEmpty();
+    public native boolean isBlank();
+    public native char charAt(int index);
+    public native int codePointAt(int index);
+    public native int indexOf(int letter);
+    public native int indexOf(int letter, int from);
+    public native int indexOf(String held);
+    public native int indexOf(String held, int from);
+    public native int lastIndexOf(int letter);
+    public native int lastIndexOf(String held);
+    public native String substring(int from);
+    public native String substring(int from, int to);
+    public native CharSequence subSequence(int start, int end);
+    public native String concat(String other);
+    public native String replace(char from, char to);
+    public native String replace(CharSequence from, CharSequence to);
+    public native String replaceAll(String pattern, String with);
+    public native String replaceFirst(String pattern, String with);
+    public native boolean matches(String pattern);
+    public native String[] split(String pattern);
+    public native String[] split(String pattern, int limit);
+    public native String toLowerCase();
+    public native String toUpperCase();
+    public native String trim();
+    public native String strip();
+    public native String repeat(int times);
+    public native boolean startsWith(String held);
+    public native boolean startsWith(String held, int from);
+    public native boolean endsWith(String held);
+    public native boolean contains(CharSequence held);
+    public native boolean equalsIgnoreCase(String other);
+    public native int compareTo(String other);
+    public native int compareToIgnoreCase(String other);
+    public native char[] toCharArray();
+    public native byte[] getBytes();
+    public native String intern();
+    public native String formatted(Object... parts);
+    public native java.util.stream.IntStream chars();
+    public static native String valueOf(int value);
+    public static native String valueOf(long value);
+    public static native String valueOf(float value);
+    public static native String valueOf(double value);
+    public static native String valueOf(boolean value);
+    public static native String valueOf(char value);
+    public static native String valueOf(char[] value);
+    public static native String valueOf(Object value);
+    public static native String format(String pattern, Object... parts);
+    public static native String join(CharSequence between, CharSequence... parts);
+    public static native String join(CharSequence between, Iterable<CharSequence> parts);
+    public static native String copyValueOf(char[] value);
+}
+
+public class StringBuilder implements CharSequence, Appendable {
+    public native StringBuilder();
+    public native StringBuilder(int capacity);
+    public native StringBuilder(String held);
+    public native StringBuilder(CharSequence held);
+    public native StringBuilder append(String held);
+    public native StringBuilder append(CharSequence held);
+    public native StringBuilder append(Object held);
+    public native StringBuilder append(int held);
+    public native StringBuilder append(long held);
+    public native StringBuilder append(float held);
+    public native StringBuilder append(double held);
+    public native StringBuilder append(boolean held);
+    public native StringBuilder append(char held);
+    public native StringBuilder append(char[] held);
+    public native StringBuilder insert(int at, String held);
+    public native StringBuilder insert(int at, Object held);
+    public native StringBuilder insert(int at, char held);
+    public native StringBuilder insert(int at, int held);
+    public native StringBuilder delete(int from, int to);
+    public native StringBuilder deleteCharAt(int at);
+    public native StringBuilder replace(int from, int to, String held);
+    public native StringBuilder reverse();
+    public native void setLength(int held);
+    public native int length();
+    public native char charAt(int index);
+    public native void setCharAt(int index, char held);
+    public native int indexOf(String held);
+    public native int lastIndexOf(String held);
+    public native CharSequence subSequence(int start, int end);
+    public native String substring(int from);
+    public native String substring(int from, int to);
+    public native String toString();
+}
+
+public class StringBuffer implements CharSequence, Appendable {
+    public native StringBuffer();
+    public native StringBuffer(String held);
+    public native StringBuffer append(String held);
+    public native StringBuffer append(CharSequence held);
+    public native StringBuffer append(Object held);
+    public native StringBuffer append(int held);
+    public native StringBuffer append(char held);
+    public native int length();
+    public native char charAt(int index);
+    public native CharSequence subSequence(int start, int end);
+    public native String toString();
+}
+
+public class Number {
+    public native int intValue();
+    public native long longValue();
+    public native float floatValue();
+    public native double doubleValue();
+    public native byte byteValue();
+    public native short shortValue();
+}
+
+public class Integer extends Number implements Comparable<Integer> {
+    public static final int MAX_VALUE;
+    public static final int MIN_VALUE;
+    public static final int SIZE;
+    public static final int BYTES;
+    public native Integer(int value);
+    public native int intValue();
+    public native int compareTo(Integer other);
+    public static native Integer valueOf(int value);
+    public static native Integer valueOf(String held);
+    public static native int parseInt(String held);
+    public static native int parseInt(String held, int radix);
+    public static native String toString(int value);
+    public static native String toString(int value, int radix);
+    public static native String toBinaryString(int value);
+    public static native String toHexString(int value);
+    public static native String toOctalString(int value);
+    public static native int compare(int left, int right);
+    public static native int hashCode(int value);
+    public static native int max(int left, int right);
+    public static native int min(int left, int right);
+    public static native int sum(int left, int right);
+    public static native int signum(int value);
+    public static native int bitCount(int value);
+    public static native int highestOneBit(int value);
+    public static native int reverse(int value);
+}
+
+public class Long extends Number implements Comparable<Long> {
+    public static final long MAX_VALUE;
+    public static final long MIN_VALUE;
+    public native Long(long value);
+    public native long longValue();
+    public native int compareTo(Long other);
+    public static native Long valueOf(long value);
+    public static native long parseLong(String held);
+    public static native String toString(long value);
+    public static native String toBinaryString(long value);
+    public static native String toHexString(long value);
+    public static native int compare(long left, long right);
+    public static native int hashCode(long value);
+    public static native long max(long left, long right);
+    public static native long min(long left, long right);
+    public static native long sum(long left, long right);
+    public static native int signum(long value);
+    public static native int bitCount(long value);
+}
+
+public class Short extends Number implements Comparable<Short> {
+    public static final short MAX_VALUE;
+    public static final short MIN_VALUE;
+    public native Short(short value);
+    public native short shortValue();
+    public native int compareTo(Short other);
+    public static native Short valueOf(short value);
+    public static native short parseShort(String held);
+    public static native int compare(short left, short right);
+    public static native int hashCode(short value);
+    public static native String toString(short value);
+}
+
+public class Byte extends Number implements Comparable<Byte> {
+    public static final byte MAX_VALUE;
+    public static final byte MIN_VALUE;
+    public native Byte(byte value);
+    public native byte byteValue();
+    public native int compareTo(Byte other);
+    public static native Byte valueOf(byte value);
+    public static native byte parseByte(String held);
+    public static native int compare(byte left, byte right);
+    public static native int hashCode(byte value);
+    public static native String toString(byte value);
+}
+
+public class Float extends Number implements Comparable<Float> {
+    public static final float MAX_VALUE;
+    public static final float MIN_VALUE;
+    public static final float NaN;
+    public static final float POSITIVE_INFINITY;
+    public static final float NEGATIVE_INFINITY;
+    public native Float(float value);
+    public native float floatValue();
+    public native int compareTo(Float other);
+    public native boolean isNaN();
+    public static native Float valueOf(float value);
+    public static native float parseFloat(String held);
+    public static native int compare(float left, float right);
+    public static native int hashCode(float value);
+    public static native String toString(float value);
+    public static native int floatToIntBits(float value);
+    public static native float intBitsToFloat(int value);
+}
+
+public class Double extends Number implements Comparable<Double> {
+    public static final double MAX_VALUE;
+    public static final double MIN_VALUE;
+    public static final double NaN;
+    public static final double POSITIVE_INFINITY;
+    public static final double NEGATIVE_INFINITY;
+    public native Double(double value);
+    public native double doubleValue();
+    public native int compareTo(Double other);
+    public native boolean isNaN();
+    public native boolean isInfinite();
+    public static native Double valueOf(double value);
+    public static native double parseDouble(String held);
+    public static native int compare(double left, double right);
+    public static native int hashCode(double value);
+    public static native String toString(double value);
+    public static native boolean isNaN(double value);
+    public static native long doubleToLongBits(double value);
+    public static native double longBitsToDouble(long value);
+}
+
+public class Boolean implements Comparable<Boolean> {
+    public static final Boolean TRUE;
+    public static final Boolean FALSE;
+    public native Boolean(boolean value);
+    public native boolean booleanValue();
+    public native int compareTo(Boolean other);
+    public static native Boolean valueOf(boolean value);
+    public static native boolean parseBoolean(String held);
+    public static native int compare(boolean left, boolean right);
+    public static native int hashCode(boolean value);
+    public static native String toString(boolean value);
+    public static native boolean logicalAnd(boolean left, boolean right);
+    public static native boolean logicalOr(boolean left, boolean right);
+}
+
+public class Character implements Comparable<Character> {
+    public static final char MAX_VALUE;
+    public static final char MIN_VALUE;
+    public native Character(char value);
+    public native char charValue();
+    public native int compareTo(Character other);
+    public static native Character valueOf(char value);
+    public static native boolean isDigit(char value);
+    public static native boolean isLetter(char value);
+    public static native boolean isLetterOrDigit(char value);
+    public static native boolean isWhitespace(char value);
+    public static native boolean isUpperCase(char value);
+    public static native boolean isLowerCase(char value);
+    public static native char toUpperCase(char value);
+    public static native char toLowerCase(char value);
+    public static native int compare(char left, char right);
+    public static native int hashCode(char value);
+    public static native String toString(char value);
+    public static native int getNumericValue(char value);
+}
+
+public class Math {
+    public static final double PI;
+    public static final double E;
+    public static native int abs(int value);
+    public static native long abs(long value);
+    public static native float abs(float value);
+    public static native double abs(double value);
+    public static native int max(int left, int right);
+    public static native long max(long left, long right);
+    public static native float max(float left, float right);
+    public static native double max(double left, double right);
+    public static native int min(int left, int right);
+    public static native long min(long left, long right);
+    public static native float min(float left, float right);
+    public static native double min(double left, double right);
+    public static native double pow(double value, double by);
+    public static native double sqrt(double value);
+    public static native double cbrt(double value);
+    public static native double floor(double value);
+    public static native double ceil(double value);
+    public static native double rint(double value);
+    public static native long round(double value);
+    public static native int round(float value);
+    public static native double random();
+    public static native double log(double value);
+    public static native double log10(double value);
+    public static native double exp(double value);
+    public static native double sin(double value);
+    public static native double cos(double value);
+    public static native double tan(double value);
+    public static native double atan2(double y, double x);
+    public static native double hypot(double x, double y);
+    public static native double toRadians(double value);
+    public static native double toDegrees(double value);
+    public static native int floorDiv(int left, int right);
+    public static native int floorMod(int left, int right);
+    public static native int addExact(int left, int right);
+    public static native int multiplyExact(int left, int right);
+}
+
+public class System {
+    public static final java.io.PrintStream out;
+    public static final java.io.PrintStream err;
+    public static final java.io.InputStream in;
+    public static native long currentTimeMillis();
+    public static native long nanoTime();
+    public static native void arraycopy(Object from, int at, Object into, int to, int count);
+    public static native String getProperty(String name);
+    public static native String getProperty(String name, String fallback);
+    public static native String getenv(String name);
+    public static native void exit(int code);
+    public static native void gc();
+    public static native int identityHashCode(Object held);
+    public static native String lineSeparator();
+}
+
+public class Class<T> {
+    public native String getName();
+    public native String getSimpleName();
+    public native String getCanonicalName();
+    public native boolean isInstance(Object held);
+    public native boolean isInterface();
+    public native boolean isArray();
+    public native boolean isEnum();
+    public native boolean isRecord();
+    public native boolean isPrimitive();
+    public native Class getSuperclass();
+    public native Class[] getInterfaces();
+    public native T newInstance();
+    public native java.lang.reflect.Method getDeclaredMethod(String name, Class... taken);
+    public native java.lang.reflect.Method getMethod(String name, Class... taken);
+    public native java.lang.reflect.Method[] getDeclaredMethods();
+    public native java.lang.reflect.Method[] getMethods();
+    public native java.lang.reflect.Field getDeclaredField(String name);
+    public native java.lang.reflect.Field getField(String name);
+    public native java.lang.reflect.Field[] getDeclaredFields();
+    public native java.lang.reflect.Field[] getFields();
+    public native java.lang.reflect.Constructor getDeclaredConstructor(Class... taken);
+    public native java.lang.annotation.Annotation getAnnotation(Class held);
+    public native java.lang.annotation.Annotation[] getAnnotations();
+    public native boolean isAnnotationPresent(Class held);
+    public native T[] getEnumConstants();
+    public native java.lang.reflect.RecordComponent[] getRecordComponents();
+    public static native Class forName(String name);
+}
+
+public class Enum<E> implements Comparable<E> {
+    public native String name();
+    public native int ordinal();
+    public native int compareTo(E other);
+    public native Class getDeclaringClass();
+    public static native Enum valueOf(Class held, String name);
+}
+
+public class Record { }
+
+public class Void { }
+
+public class Thread implements Runnable {
+    public native Thread();
+    public native Thread(Runnable job);
+    public native Thread(Runnable job, String name);
+    public native void start();
+    public native void run();
+    public native void join();
+    public native void join(long millis);
+    public native void interrupt();
+    public native boolean isAlive();
+    public native boolean isInterrupted();
+    public native void setName(String name);
+    public native String getName();
+    public native void setDaemon(boolean held);
+    public native void setPriority(int held);
+    public native long getId();
+    public static native void sleep(long millis);
+    public static native Thread currentThread();
+    public static native void yield();
+}
+
+public class Throwable {
+    public native Throwable();
+    public native Throwable(String message);
+    public native Throwable(String message, Throwable cause);
+    public native Throwable(Throwable cause);
+    public native String getMessage();
+    public native String getLocalizedMessage();
+    public native Throwable getCause();
+    public native Throwable initCause(Throwable cause);
+    public native void printStackTrace();
+    public native StackTraceElement[] getStackTrace();
+    public native void addSuppressed(Throwable held);
+    public native Throwable[] getSuppressed();
+}
+
+public class StackTraceElement {
+    public native String getClassName();
+    public native String getMethodName();
+    public native String getFileName();
+    public native int getLineNumber();
+}
+
+public class Exception extends Throwable {
+    public native Exception();
+    public native Exception(String message);
+    public native Exception(String message, Throwable cause);
+    public native Exception(Throwable cause);
+}
+
+public class RuntimeException extends Exception {
+    public native RuntimeException();
+    public native RuntimeException(String message);
+    public native RuntimeException(String message, Throwable cause);
+    public native RuntimeException(Throwable cause);
+}
+
+public class Error extends Throwable {
+    public native Error();
+    public native Error(String message);
+    public native Error(String message, Throwable cause);
+}
+
+public class IllegalArgumentException extends RuntimeException {
+    public native IllegalArgumentException();
+    public native IllegalArgumentException(String message);
+    public native IllegalArgumentException(String message, Throwable cause);
+    public native IllegalArgumentException(Throwable cause);
+}
+
+public class IllegalStateException extends RuntimeException {
+    public native IllegalStateException();
+    public native IllegalStateException(String message);
+    public native IllegalStateException(String message, Throwable cause);
+}
+
+public class NullPointerException extends RuntimeException {
+    public native NullPointerException();
+    public native NullPointerException(String message);
+}
+
+public class ArithmeticException extends RuntimeException {
+    public native ArithmeticException();
+    public native ArithmeticException(String message);
+}
+
+public class IndexOutOfBoundsException extends RuntimeException {
+    public native IndexOutOfBoundsException();
+    public native IndexOutOfBoundsException(String message);
+}
+
+public class ArrayIndexOutOfBoundsException extends IndexOutOfBoundsException {
+    public native ArrayIndexOutOfBoundsException();
+    public native ArrayIndexOutOfBoundsException(String message);
+}
+
+public class StringIndexOutOfBoundsException extends IndexOutOfBoundsException {
+    public native StringIndexOutOfBoundsException();
+    public native StringIndexOutOfBoundsException(String message);
+}
+
+public class ClassCastException extends RuntimeException {
+    public native ClassCastException();
+    public native ClassCastException(String message);
+}
+
+public class NumberFormatException extends IllegalArgumentException {
+    public native NumberFormatException();
+    public native NumberFormatException(String message);
+}
+
+public class UnsupportedOperationException extends RuntimeException {
+    public native UnsupportedOperationException();
+    public native UnsupportedOperationException(String message);
+}
+
+public class InterruptedException extends Exception {
+    public native InterruptedException();
+    public native InterruptedException(String message);
+}
+
+public class CloneNotSupportedException extends Exception {
+    public native CloneNotSupportedException();
+    public native CloneNotSupportedException(String message);
+}
+
+public class ClassNotFoundException extends Exception {
+    public native ClassNotFoundException();
+    public native ClassNotFoundException(String message);
+}
+
+public class NoSuchMethodException extends Exception {
+    public native NoSuchMethodException();
+    public native NoSuchMethodException(String message);
+}
+
+public class NoSuchFieldException extends Exception {
+    public native NoSuchFieldException();
+    public native NoSuchFieldException(String message);
+}
+
+public class SecurityException extends RuntimeException {
+    public native SecurityException();
+    public native SecurityException(String message);
+}
+
+public class AssertionError extends Error {
+    public native AssertionError();
+    public native AssertionError(Object message);
+}
+
+public class OutOfMemoryError extends Error {
+    public native OutOfMemoryError();
+    public native OutOfMemoryError(String message);
+}
+
+public class StackOverflowError extends Error {
+    public native StackOverflowError();
+}
+
+public class IncompatibleClassChangeError extends Error {
+    public native IncompatibleClassChangeError();
+    public native IncompatibleClassChangeError(String message);
+}
+
+public class MatchException extends RuntimeException {
+    public native MatchException(String message, Throwable cause);
+}
+
+public class ArrayStoreException extends RuntimeException {
+    public native ArrayStoreException();
+    public native ArrayStoreException(String message);
+}
+
+public class NegativeArraySizeException extends RuntimeException {
+    public native NegativeArraySizeException();
+    public native NegativeArraySizeException(String message);
+}
+
+// The annotations the language itself writes. `@Override` and
+// `@SuppressWarnings` are read by the compiler and go no further, which is
+// what SOURCE retention means; the rest are written into the class file so
+// that reflection can see them.
+
+public @interface Override { }
+
+public @interface SuppressWarnings {
+    String[] value();
+}
+
+@java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+public @interface Deprecated { }
+
+@java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+public @interface FunctionalInterface { }
+
+@java.lang.annotation.Retention(java.lang.annotation.RetentionPolicy.RUNTIME)
+public @interface SafeVarargs { }
+"####,
+    ),
+    (
+        "java.lang.annotation",
+        r####"
+package java.lang.annotation;
+
+public interface Annotation {
+    Class annotationType();
+}
+
+public class RetentionPolicy extends java.lang.Enum<RetentionPolicy> {
+    public static final RetentionPolicy SOURCE;
+    public static final RetentionPolicy CLASS;
+    public static final RetentionPolicy RUNTIME;
+    public static native RetentionPolicy valueOf(String name);
+    public static native RetentionPolicy[] values();
+}
+
+public class ElementType extends java.lang.Enum<ElementType> {
+    public static final ElementType TYPE;
+    public static final ElementType FIELD;
+    public static final ElementType METHOD;
+    public static final ElementType PARAMETER;
+    public static final ElementType CONSTRUCTOR;
+    public static final ElementType LOCAL_VARIABLE;
+    public static final ElementType ANNOTATION_TYPE;
+    public static final ElementType PACKAGE;
+    public static final ElementType TYPE_PARAMETER;
+    public static final ElementType TYPE_USE;
+    public static final ElementType RECORD_COMPONENT;
+    public static native ElementType valueOf(String name);
+    public static native ElementType[] values();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Retention {
+    RetentionPolicy value();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Target {
+    ElementType[] value();
+}
+
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Documented { }
+
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Inherited { }
+
+@Retention(RetentionPolicy.RUNTIME)
+public @interface Repeatable {
+    Class value();
+}
+"####,
+    ),
+    (
+        "java.lang.reflect",
+        r####"
+package java.lang.reflect;
+
+public interface Member {
+    String getName();
+    int getModifiers();
+}
+
+public class AccessibleObject {
+    public native void setAccessible(boolean held);
+    public native boolean isAccessible();
+    public native java.lang.annotation.Annotation getAnnotation(Class held);
+    public native java.lang.annotation.Annotation[] getAnnotations();
+    public native boolean isAnnotationPresent(Class held);
+}
+
+public class Method extends AccessibleObject implements Member {
+    public native String getName();
+    public native int getModifiers();
+    public native Class getReturnType();
+    public native Class[] getParameterTypes();
+    public native int getParameterCount();
+    public native Object invoke(Object on, Object... parts);
+    public native Class getDeclaringClass();
+    public native Object getDefaultValue();
+    public native boolean isVarArgs();
+    public native boolean isSynthetic();
+    public native boolean isBridge();
+}
+
+public class Field extends AccessibleObject implements Member {
+    public native String getName();
+    public native int getModifiers();
+    public native Class getType();
+    public native Object get(Object on);
+    public native void set(Object on, Object value);
+    public native int getInt(Object on);
+    public native Class getDeclaringClass();
+}
+
+public class Constructor extends AccessibleObject implements Member {
+    public native String getName();
+    public native int getModifiers();
+    public native Class[] getParameterTypes();
+    public native Object newInstance(Object... parts);
+}
+
+public class RecordComponent {
+    public native String getName();
+    public native Class getType();
+    public native Method getAccessor();
+}
+
+public class Modifier {
+    public static final int PUBLIC;
+    public static final int PRIVATE;
+    public static final int PROTECTED;
+    public static final int STATIC;
+    public static final int FINAL;
+    public static final int ABSTRACT;
+    public static final int NATIVE;
+    public static final int SYNCHRONIZED;
+    public static native boolean isPublic(int flags);
+    public static native boolean isPrivate(int flags);
+    public static native boolean isProtected(int flags);
+    public static native boolean isStatic(int flags);
+    public static native boolean isFinal(int flags);
+    public static native boolean isAbstract(int flags);
+    public static native boolean isNative(int flags);
+    public static native String toString(int flags);
+}
+
+public class Array {
+    public static native Object newInstance(Class held, int length);
+    public static native int getLength(Object held);
+    public static native Object get(Object held, int at);
+    public static native void set(Object held, int at, Object value);
+}
+
+public class InvocationTargetException extends java.lang.Exception {
+    public native Throwable getTargetException();
+    public native Throwable getCause();
+}
+"####,
+    ),
+    (
+        "java.io",
+        r####"
+package java.io;
+
+public interface Serializable { }
+
+public interface Closeable extends java.lang.AutoCloseable {
+    void close();
+}
+
+public interface Flushable {
+    void flush();
+}
+
+public class IOException extends java.lang.Exception {
+    public native IOException();
+    public native IOException(String message);
+    public native IOException(String message, Throwable cause);
+    public native IOException(Throwable cause);
+}
+
+public class FileNotFoundException extends IOException {
+    public native FileNotFoundException();
+    public native FileNotFoundException(String message);
+}
+
+public class UncheckedIOException extends java.lang.RuntimeException {
+    public native UncheckedIOException(IOException cause);
+    public native UncheckedIOException(String message, IOException cause);
+}
+
+public class InputStream implements Closeable {
+    public native int read();
+    public native int read(byte[] into);
+    public native int read(byte[] into, int at, int count);
+    public native byte[] readAllBytes();
+    public native long skip(long count);
+    public native int available();
+    public native void close();
+}
+
+public class OutputStream implements Closeable, Flushable {
+    public native void write(int one);
+    public native void write(byte[] held);
+    public native void write(byte[] held, int at, int count);
+    public native void flush();
+    public native void close();
+}
+
+public class ByteArrayInputStream extends InputStream {
+    public native ByteArrayInputStream(byte[] held);
+}
+
+public class ByteArrayOutputStream extends OutputStream {
+    public native ByteArrayOutputStream();
+    public native ByteArrayOutputStream(int size);
+    public native byte[] toByteArray();
+    public native int size();
+    public native void reset();
+    public native String toString();
+}
+
+public class FileInputStream extends InputStream {
+    public native FileInputStream(String name);
+    public native FileInputStream(File held);
+}
+
+public class FileOutputStream extends OutputStream {
+    public native FileOutputStream(String name);
+    public native FileOutputStream(String name, boolean append);
+    public native FileOutputStream(File held);
+}
+
+public class BufferedInputStream extends InputStream {
+    public native BufferedInputStream(InputStream from);
+}
+
+public class BufferedOutputStream extends OutputStream {
+    public native BufferedOutputStream(OutputStream into);
+}
+
+public class PrintStream extends OutputStream {
+    public native PrintStream(OutputStream into);
+    public native void print(String held);
+    public native void print(Object held);
+    public native void print(int held);
+    public native void print(long held);
+    public native void print(float held);
+    public native void print(double held);
+    public native void print(boolean held);
+    public native void print(char held);
+    public native void print(char[] held);
+    public native void println();
+    public native void println(String held);
+    public native void println(Object held);
+    public native void println(int held);
+    public native void println(long held);
+    public native void println(float held);
+    public native void println(double held);
+    public native void println(boolean held);
+    public native void println(char held);
+    public native void println(char[] held);
+    public native PrintStream printf(String pattern, Object... parts);
+    public native PrintStream format(String pattern, Object... parts);
+}
+
+public class Reader implements Closeable {
+    public native int read();
+    public native int read(char[] into);
+    public native void close();
+}
+
+public class Writer implements Closeable, Flushable {
+    public native void write(String held);
+    public native void write(int one);
+    public native void write(char[] held);
+    public native Writer append(CharSequence held);
+    public native void flush();
+    public native void close();
+}
+
+public class InputStreamReader extends Reader {
+    public native InputStreamReader(InputStream from);
+    public native InputStreamReader(InputStream from, String charset);
+}
+
+public class OutputStreamWriter extends Writer {
+    public native OutputStreamWriter(OutputStream into);
+}
+
+public class BufferedReader extends Reader {
+    public native BufferedReader(Reader from);
+    public native String readLine();
+    public native java.util.stream.Stream<String> lines();
+}
+
+public class BufferedWriter extends Writer {
+    public native BufferedWriter(Writer into);
+    public native void newLine();
+}
+
+public class FileReader extends InputStreamReader {
+    public native FileReader(String name);
+    public native FileReader(File held);
+}
+
+public class FileWriter extends OutputStreamWriter {
+    public native FileWriter(String name);
+    public native FileWriter(String name, boolean append);
+    public native FileWriter(File held);
+}
+
+public class StringWriter extends Writer {
+    public native StringWriter();
+    public native String toString();
+}
+
+public class StringReader extends Reader {
+    public native StringReader(String held);
+}
+
+public class PrintWriter extends Writer {
+    public native PrintWriter(Writer into);
+    public native PrintWriter(OutputStream into);
+    public native void print(String held);
+    public native void print(Object held);
+    public native void println(String held);
+    public native void println(Object held);
+    public native void println();
+    public native PrintWriter printf(String pattern, Object... parts);
+}
+
+public class File implements Comparable<File> {
+    public static final String separator;
+    public native File(String path);
+    public native File(String parent, String child);
+    public native File(File parent, String child);
+    public native String getName();
+    public native String getPath();
+    public native String getAbsolutePath();
+    public native String getParent();
+    public native File getParentFile();
+    public native File getAbsoluteFile();
+    public native boolean exists();
+    public native boolean isFile();
+    public native boolean isDirectory();
+    public native boolean canRead();
+    public native boolean canWrite();
+    public native long length();
+    public native long lastModified();
+    public native boolean delete();
+    public native boolean mkdir();
+    public native boolean mkdirs();
+    public native boolean createNewFile();
+    public native boolean renameTo(File into);
+    public native String[] list();
+    public native File[] listFiles();
+    public native int compareTo(File other);
+}
+"####,
+    ),
+    (
+        "java.util",
+        r####"
+package java.util;
+
+public interface Iterator<E> {
+    boolean hasNext();
+    E next();
+    default void remove() { }
+    default void forEachRemaining(java.util.function.Consumer<E> what) { }
+}
+
+public interface ListIterator<E> extends Iterator<E> {
+    boolean hasPrevious();
+    E previous();
+    int nextIndex();
+    int previousIndex();
+    void set(E one);
+    void add(E one);
+}
+
+public interface Collection<E> extends java.lang.Iterable<E> {
+    int size();
+    boolean isEmpty();
+    boolean contains(Object one);
+    boolean add(E one);
+    boolean remove(Object one);
+    boolean containsAll(Collection<E> held);
+    boolean addAll(Collection<E> held);
+    boolean removeAll(Collection<E> held);
+    boolean retainAll(Collection<E> held);
+    void clear();
+    Object[] toArray();
+    Iterator<E> iterator();
+    default java.util.stream.Stream<E> stream() { return null; }
+    default boolean removeIf(java.util.function.Predicate<E> when) { return false; }
+    default void forEach(java.util.function.Consumer<E> what) { }
+}
+
+public interface List<E> extends Collection<E> {
+    E get(int at);
+    E set(int at, E one);
+    void add(int at, E one);
+    E remove(int at);
+    int indexOf(Object one);
+    int lastIndexOf(Object one);
+    ListIterator<E> listIterator();
+    List<E> subList(int from, int to);
+    void sort(Comparator<E> by);
+    void replaceAll(java.util.function.UnaryOperator<E> what);
+    static <T> List<T> of();
+    static <T> List<T> of(T one);
+    static <T> List<T> of(T one, T two);
+    static <T> List<T> of(T one, T two, T three);
+    static <T> List<T> copyOf(Collection<T> held);
+}
+
+public interface Set<E> extends Collection<E> {
+    static <T> Set<T> of();
+    static <T> Set<T> of(T one);
+    static <T> Set<T> of(T one, T two);
+    static <T> Set<T> copyOf(Collection<T> held);
+}
+
+public interface SortedSet<E> extends Set<E> {
+    E first();
+    E last();
+    SortedSet<E> headSet(E to);
+    SortedSet<E> tailSet(E from);
+    SortedSet<E> subSet(E from, E to);
+    Comparator<E> comparator();
+}
+
+public interface NavigableSet<E> extends SortedSet<E> {
+    E floor(E one);
+    E ceiling(E one);
+    E lower(E one);
+    E higher(E one);
+    E pollFirst();
+    E pollLast();
+    NavigableSet<E> descendingSet();
+}
+
+public interface Queue<E> extends Collection<E> {
+    boolean offer(E one);
+    E poll();
+    E peek();
+    E element();
+}
+
+public interface Deque<E> extends Queue<E> {
+    void addFirst(E one);
+    void addLast(E one);
+    E pollFirst();
+    E pollLast();
+    E peekFirst();
+    E peekLast();
+    E removeFirst();
+    E removeLast();
+    void push(E one);
+    E pop();
+    Iterator<E> descendingIterator();
+}
+
+public interface Map<K, V> {
+    public interface Entry<K, V> {
+        K getKey();
+        V getValue();
+        V setValue(V one);
+    }
+    int size();
+    boolean isEmpty();
+    boolean containsKey(Object key);
+    boolean containsValue(Object value);
+    V get(Object key);
+    V put(K key, V value);
+    V remove(Object key);
+    void clear();
+    Set<K> keySet();
+    Collection<V> values();
+    Set<Entry<K, V>> entrySet();
+    V getOrDefault(Object key, V fallback);
+    V putIfAbsent(K key, V value);
+    V computeIfAbsent(K key, java.util.function.Function<K, V> what);
+    V computeIfPresent(K key, java.util.function.BiFunction<K, V, V> what);
+    V compute(K key, java.util.function.BiFunction<K, V, V> what);
+    V merge(K key, V value, java.util.function.BiFunction<V, V, V> what);
+    void putAll(Map<K, V> held);
+    void forEach(java.util.function.BiConsumer<K, V> what);
+    static <A, B> Map<A, B> of();
+    static <A, B> Map<A, B> of(A key, B value);
+    static <A, B> Map<A, B> copyOf(Map<A, B> held);
+}
+
+public interface SortedMap<K, V> extends Map<K, V> {
+    K firstKey();
+    K lastKey();
+    SortedMap<K, V> headMap(K to);
+    SortedMap<K, V> tailMap(K from);
+    Comparator<K> comparator();
+}
+
+public interface NavigableMap<K, V> extends SortedMap<K, V> {
+    K floorKey(K key);
+    K ceilingKey(K key);
+    K lowerKey(K key);
+    K higherKey(K key);
+    Map.Entry<K, V> firstEntry();
+    Map.Entry<K, V> lastEntry();
+    Map.Entry<K, V> pollFirstEntry();
+    Map.Entry<K, V> pollLastEntry();
+    NavigableMap<K, V> descendingMap();
+}
+
+public interface Comparator<T> {
+    int compare(T left, T right);
+    default Comparator<T> reversed() { return null; }
+    default Comparator<T> thenComparing(Comparator<T> then) { return null; }
+    default <V> Comparator<T> thenComparing(java.util.function.Function<T, V> by) { return null; }
+    static <X> Comparator<X> naturalOrder();
+    static <X> Comparator<X> reverseOrder();
+    static <X, Y> Comparator<X> comparing(java.util.function.Function<X, Y> by);
+    static <X> Comparator<X> comparingInt(java.util.function.ToIntFunction<X> by);
+    static <X> Comparator<X> comparingLong(java.util.function.ToLongFunction<X> by);
+    static <X> Comparator<X> comparingDouble(java.util.function.ToDoubleFunction<X> by);
+}
+
+public class AbstractCollection<E> implements Collection<E> { }
+
+public class AbstractList<E> extends AbstractCollection<E> implements List<E> { }
+
+public class ArrayList<E> extends AbstractList<E> implements List<E> {
+    public native ArrayList();
+    public native ArrayList(int capacity);
+    public native ArrayList(Collection<E> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean contains(Object one);
+    public native boolean add(E one);
+    public native void add(int at, E one);
+    public native boolean remove(Object one);
+    public native E remove(int at);
+    public native E get(int at);
+    public native E set(int at, E one);
+    public native int indexOf(Object one);
+    public native int lastIndexOf(Object one);
+    public native void clear();
+    public native boolean addAll(Collection<E> held);
+    public native boolean removeAll(Collection<E> held);
+    public native boolean retainAll(Collection<E> held);
+    public native boolean containsAll(Collection<E> held);
+    public native Object[] toArray();
+    public native Iterator<E> iterator();
+    public native ListIterator<E> listIterator();
+    public native List<E> subList(int from, int to);
+    public native void sort(Comparator<E> by);
+    public native void replaceAll(java.util.function.UnaryOperator<E> what);
+    public native boolean removeIf(java.util.function.Predicate<E> when);
+    public native void forEach(java.util.function.Consumer<E> what);
+    public native java.util.stream.Stream<E> stream();
+    public native void ensureCapacity(int held);
+    public native void trimToSize();
+}
+
+public class LinkedList<E> extends AbstractList<E> implements List<E>, Deque<E> {
+    public native LinkedList();
+    public native LinkedList(Collection<E> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean contains(Object one);
+    public native boolean add(E one);
+    public native void add(int at, E one);
+    public native boolean remove(Object one);
+    public native E remove(int at);
+    public native E get(int at);
+    public native E set(int at, E one);
+    public native int indexOf(Object one);
+    public native void clear();
+    public native boolean addAll(Collection<E> held);
+    public native Iterator<E> iterator();
+    public native Object[] toArray();
+    public native java.util.stream.Stream<E> stream();
+    public native boolean offer(E one);
+    public native E poll();
+    public native E peek();
+    public native E element();
+    public native void addFirst(E one);
+    public native void addLast(E one);
+    public native E pollFirst();
+    public native E pollLast();
+    public native E peekFirst();
+    public native E peekLast();
+    public native E removeFirst();
+    public native E removeLast();
+    public native E getFirst();
+    public native E getLast();
+    public native void push(E one);
+    public native E pop();
+    public native Iterator<E> descendingIterator();
+}
+
+public class ArrayDeque<E> extends AbstractCollection<E> implements Deque<E> {
+    public native ArrayDeque();
+    public native ArrayDeque(int capacity);
+    public native ArrayDeque(Collection<E> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean add(E one);
+    public native void clear();
+    public native Iterator<E> iterator();
+    public native boolean offer(E one);
+    public native E poll();
+    public native E peek();
+    public native E element();
+    public native void addFirst(E one);
+    public native void addLast(E one);
+    public native E pollFirst();
+    public native E pollLast();
+    public native E peekFirst();
+    public native E peekLast();
+    public native E removeFirst();
+    public native E removeLast();
+    public native void push(E one);
+    public native E pop();
+    public native Iterator<E> descendingIterator();
+    public native java.util.stream.Stream<E> stream();
+}
+
+public class Vector<E> extends AbstractList<E> implements List<E> {
+    public native Vector();
+    public native int size();
+    public native boolean add(E one);
+    public native E get(int at);
+    public native Iterator<E> iterator();
+}
+
+public class Stack<E> extends Vector<E> {
+    public native Stack();
+    public native E push(E one);
+    public native E pop();
+    public native E peek();
+    public native boolean empty();
+    public native int search(Object one);
+}
+
+public class AbstractSet<E> extends AbstractCollection<E> implements Set<E> { }
+
+public class HashSet<E> extends AbstractSet<E> implements Set<E> {
+    public native HashSet();
+    public native HashSet(int capacity);
+    public native HashSet(Collection<E> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean contains(Object one);
+    public native boolean add(E one);
+    public native boolean remove(Object one);
+    public native void clear();
+    public native boolean addAll(Collection<E> held);
+    public native boolean removeAll(Collection<E> held);
+    public native boolean retainAll(Collection<E> held);
+    public native boolean containsAll(Collection<E> held);
+    public native Iterator<E> iterator();
+    public native Object[] toArray();
+    public native java.util.stream.Stream<E> stream();
+    public native boolean removeIf(java.util.function.Predicate<E> when);
+    public native void forEach(java.util.function.Consumer<E> what);
+}
+
+public class LinkedHashSet<E> extends HashSet<E> {
+    public native LinkedHashSet();
+    public native LinkedHashSet(int capacity);
+    public native LinkedHashSet(Collection<E> held);
+}
+
+public class TreeSet<E> extends AbstractSet<E> implements NavigableSet<E> {
+    public native TreeSet();
+    public native TreeSet(Comparator<E> by);
+    public native TreeSet(Collection<E> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean contains(Object one);
+    public native boolean add(E one);
+    public native boolean remove(Object one);
+    public native void clear();
+    public native Iterator<E> iterator();
+    public native java.util.stream.Stream<E> stream();
+    public native E first();
+    public native E last();
+    public native E floor(E one);
+    public native E ceiling(E one);
+    public native E lower(E one);
+    public native E higher(E one);
+    public native E pollFirst();
+    public native E pollLast();
+    public native NavigableSet<E> descendingSet();
+}
+
+public class AbstractMap<K, V> implements Map<K, V> { }
+
+public class HashMap<K, V> extends AbstractMap<K, V> implements Map<K, V> {
+    public native HashMap();
+    public native HashMap(int capacity);
+    public native HashMap(Map<K, V> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean containsKey(Object key);
+    public native boolean containsValue(Object value);
+    public native V get(Object key);
+    public native V put(K key, V value);
+    public native V remove(Object key);
+    public native void clear();
+    public native Set<K> keySet();
+    public native Collection<V> values();
+    public native Set<Map.Entry<K, V>> entrySet();
+    public native V getOrDefault(Object key, V fallback);
+    public native V putIfAbsent(K key, V value);
+    public native V computeIfAbsent(K key, java.util.function.Function<K, V> what);
+    public native V computeIfPresent(K key, java.util.function.BiFunction<K, V, V> what);
+    public native V compute(K key, java.util.function.BiFunction<K, V, V> what);
+    public native V merge(K key, V value, java.util.function.BiFunction<V, V, V> what);
+    public native void putAll(Map<K, V> held);
+    public native void forEach(java.util.function.BiConsumer<K, V> what);
+}
+
+public class LinkedHashMap<K, V> extends HashMap<K, V> {
+    public native LinkedHashMap();
+    public native LinkedHashMap(int capacity);
+    public native LinkedHashMap(Map<K, V> held);
+}
+
+public class TreeMap<K, V> extends AbstractMap<K, V> implements NavigableMap<K, V> {
+    public native TreeMap();
+    public native TreeMap(Comparator<K> by);
+    public native TreeMap(Map<K, V> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean containsKey(Object key);
+    public native boolean containsValue(Object value);
+    public native V get(Object key);
+    public native V put(K key, V value);
+    public native V remove(Object key);
+    public native void clear();
+    public native Set<K> keySet();
+    public native Collection<V> values();
+    public native Set<Map.Entry<K, V>> entrySet();
+    public native V getOrDefault(Object key, V fallback);
+    public native void putAll(Map<K, V> held);
+    public native void forEach(java.util.function.BiConsumer<K, V> what);
+    public native K firstKey();
+    public native K lastKey();
+    public native K floorKey(K key);
+    public native K ceilingKey(K key);
+    public native K lowerKey(K key);
+    public native K higherKey(K key);
+    public native Map.Entry<K, V> firstEntry();
+    public native Map.Entry<K, V> lastEntry();
+    public native Map.Entry<K, V> pollFirstEntry();
+    public native Map.Entry<K, V> pollLastEntry();
+    public native NavigableMap<K, V> descendingMap();
+    public native SortedMap<K, V> headMap(K to);
+    public native SortedMap<K, V> tailMap(K from);
+}
+
+public class EnumMap<K extends java.lang.Enum<K>, V> extends AbstractMap<K, V> implements Map<K, V> {
+    public native EnumMap(java.lang.Class held);
+    public native EnumMap(Map<K, V> held);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean containsKey(Object key);
+    public native V get(Object key);
+    public native V put(K key, V value);
+    public native V remove(Object key);
+    public native void clear();
+    public native Set<K> keySet();
+    public native Collection<V> values();
+    public native Set<Map.Entry<K, V>> entrySet();
+    public native void forEach(java.util.function.BiConsumer<K, V> what);
+}
+
+public class EnumSet<E extends java.lang.Enum<E>> extends AbstractSet<E> implements Set<E> {
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> noneOf(java.lang.Class held);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> allOf(java.lang.Class held);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> of(T one);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> of(T one, T two);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> of(T one, T two, T three);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> of(T one, T two, T three, T four);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> range(T from, T to);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> complementOf(EnumSet<T> held);
+    public static native <T extends java.lang.Enum<T>> EnumSet<T> copyOf(Collection<T> held);
+}
+
+public class Arrays {
+    public static native <T> List<T> asList(T... held);
+    public static native void sort(int[] held);
+    public static native void sort(long[] held);
+    public static native void sort(double[] held);
+    public static native void sort(char[] held);
+    public static native void sort(byte[] held);
+    public static native void sort(Object[] held);
+    public static native <T> void sort(T[] held, Comparator<T> by);
+    public static native String toString(int[] held);
+    public static native String toString(long[] held);
+    public static native String toString(double[] held);
+    public static native String toString(float[] held);
+    public static native String toString(char[] held);
+    public static native String toString(byte[] held);
+    public static native String toString(short[] held);
+    public static native String toString(boolean[] held);
+    public static native String toString(Object[] held);
+    public static native String deepToString(Object[] held);
+    public static native boolean equals(int[] left, int[] right);
+    public static native boolean equals(Object[] left, Object[] right);
+    public static native boolean deepEquals(Object[] left, Object[] right);
+    public static native int hashCode(int[] held);
+    public static native int hashCode(Object[] held);
+    public static native int[] copyOf(int[] held, int length);
+    public static native long[] copyOf(long[] held, int length);
+    public static native double[] copyOf(double[] held, int length);
+    public static native char[] copyOf(char[] held, int length);
+    public static native byte[] copyOf(byte[] held, int length);
+    public static native boolean[] copyOf(boolean[] held, int length);
+    public static native <T> T[] copyOf(T[] held, int length);
+    public static native int[] copyOfRange(int[] held, int from, int to);
+    public static native <T> T[] copyOfRange(T[] held, int from, int to);
+    public static native void fill(int[] held, int with);
+    public static native void fill(long[] held, long with);
+    public static native void fill(double[] held, double with);
+    public static native void fill(char[] held, char with);
+    public static native void fill(boolean[] held, boolean with);
+    public static native void fill(Object[] held, Object with);
+    public static native int binarySearch(int[] held, int of);
+    public static native int binarySearch(Object[] held, Object of);
+    public static native java.util.stream.Stream stream(Object[] held);
+    public static native java.util.stream.IntStream stream(int[] held);
+}
+
+public class Collections {
+    public static native void sort(List held);
+    public static native <T> void sort(List<T> held, Comparator<T> by);
+    public static native void reverse(List held);
+    public static native void shuffle(List held);
+    public static native void swap(List held, int left, int right);
+    public static native <T> T max(Collection<T> held);
+    public static native <T> T max(Collection<T> held, Comparator<T> by);
+    public static native <T> T min(Collection<T> held);
+    public static native <T> T min(Collection<T> held, Comparator<T> by);
+    public static native <T> List<T> unmodifiableList(List<T> held);
+    public static native <T> Set<T> unmodifiableSet(Set<T> held);
+    public static native <K, V> Map<K, V> unmodifiableMap(Map<K, V> held);
+    public static native <T> List<T> emptyList();
+    public static native <T> Set<T> emptySet();
+    public static native <K, V> Map<K, V> emptyMap();
+    public static native <T> List<T> singletonList(T one);
+    public static native <T> Set<T> singleton(T one);
+    public static native <T> boolean addAll(Collection<T> held, T... more);
+    public static native <T> List<T> nCopies(int count, T one);
+    public static native int frequency(Collection held, Object one);
+    public static native <T> List<T> synchronizedList(List<T> held);
+    public static native <K, V> Map<K, V> synchronizedMap(Map<K, V> held);
+}
+
+public class Objects {
+    public static native boolean equals(Object left, Object right);
+    public static native boolean deepEquals(Object left, Object right);
+    public static native int hashCode(Object one);
+    public static native int hash(Object... parts);
+    public static native String toString(Object one);
+    public static native String toString(Object one, String fallback);
+    public static native <T> T requireNonNull(T one);
+    public static native <T> T requireNonNull(T one, String message);
+    public static native <T> T requireNonNullElse(T one, T fallback);
+    public static native boolean isNull(Object one);
+    public static native boolean nonNull(Object one);
+    public static native int compare(Object left, Object right, Comparator by);
+}
+
+public class Optional<T> {
+    public static native <X> Optional<X> of(X one);
+    public static native <X> Optional<X> ofNullable(X one);
+    public static native <X> Optional<X> empty();
+    public native boolean isPresent();
+    public native boolean isEmpty();
+    public native T get();
+    public native T orElse(T fallback);
+    public native T orElseGet(java.util.function.Supplier<T> fallback);
+    public native T orElseThrow();
+    public native void ifPresent(java.util.function.Consumer<T> what);
+    public native Optional<T> filter(java.util.function.Predicate<T> when);
+    public native <R> Optional<R> map(java.util.function.Function<T, R> what);
+    public native <R> Optional<R> flatMap(java.util.function.Function<T, Optional<R>> what);
+    public native java.util.stream.Stream<T> stream();
+}
+
+public class OptionalInt {
+    public native boolean isPresent();
+    public native boolean isEmpty();
+    public native int getAsInt();
+    public native int orElse(int fallback);
+}
+
+public class OptionalLong {
+    public native boolean isPresent();
+    public native long getAsLong();
+    public native long orElse(long fallback);
+}
+
+public class OptionalDouble {
+    public native boolean isPresent();
+    public native double getAsDouble();
+    public native double orElse(double fallback);
+}
+
+public class Random {
+    public native Random();
+    public native Random(long seed);
+    public native int nextInt();
+    public native int nextInt(int bound);
+    public native long nextLong();
+    public native double nextDouble();
+    public native float nextFloat();
+    public native boolean nextBoolean();
+    public native double nextGaussian();
+    public native void setSeed(long seed);
+    public native java.util.stream.IntStream ints(long count);
+}
+
+public class Scanner implements java.lang.AutoCloseable {
+    public native Scanner(java.io.InputStream from);
+    public native Scanner(String from);
+    public native boolean hasNext();
+    public native boolean hasNextLine();
+    public native boolean hasNextInt();
+    public native String next();
+    public native String nextLine();
+    public native int nextInt();
+    public native long nextLong();
+    public native double nextDouble();
+    public native void close();
+}
+
+public class StringJoiner {
+    public native StringJoiner(CharSequence between);
+    public native StringJoiner(CharSequence between, CharSequence before, CharSequence after);
+    public native StringJoiner add(CharSequence one);
+    public native int length();
+    public native String toString();
+}
+
+public class UUID {
+    public static native UUID randomUUID();
+    public static native UUID fromString(String held);
+    public native String toString();
+    public native long getMostSignificantBits();
+    public native long getLeastSignificantBits();
+}
+
+public class Date implements Comparable<Date> {
+    public native Date();
+    public native Date(long millis);
+    public native long getTime();
+    public native void setTime(long millis);
+    public native boolean before(Date other);
+    public native boolean after(Date other);
+    public native int compareTo(Date other);
+}
+
+public class Calendar {
+    public static final int YEAR;
+    public static final int MONTH;
+    public static final int DAY_OF_MONTH;
+    public static final int HOUR_OF_DAY;
+    public static final int MINUTE;
+    public static final int SECOND;
+    public static native Calendar getInstance();
+    public native int get(int field);
+    public native void set(int field, int value);
+    public native void add(int field, int amount);
+    public native Date getTime();
+    public native void setTime(Date held);
+    public native long getTimeInMillis();
+}
+
+public class GregorianCalendar extends Calendar {
+    public native GregorianCalendar();
+}
+
+public class TimeZone {
+    public static native TimeZone getDefault();
+    public static native TimeZone getTimeZone(String id);
+    public native String getID();
+    public native int getRawOffset();
+}
+
+public class Locale {
+    public static final Locale US;
+    public static final Locale UK;
+    public static final Locale ROOT;
+    public static final Locale ENGLISH;
+    public static final Locale FRANCE;
+    public static final Locale GERMANY;
+    public native Locale(String language);
+    public native Locale(String language, String country);
+    public native String getLanguage();
+    public native String getCountry();
+    public static native Locale getDefault();
+}
+
+public class BitSet {
+    public native BitSet();
+    public native BitSet(int size);
+    public native void set(int at);
+    public native void set(int at, boolean held);
+    public native void clear(int at);
+    public native boolean get(int at);
+    public native int cardinality();
+    public native int length();
+    public native int nextSetBit(int from);
+}
+
+public class NoSuchElementException extends java.lang.RuntimeException {
+    public native NoSuchElementException();
+    public native NoSuchElementException(String message);
+}
+
+public class ConcurrentModificationException extends java.lang.RuntimeException {
+    public native ConcurrentModificationException();
+    public native ConcurrentModificationException(String message);
+}
+
+public class InputMismatchException extends NoSuchElementException {
+    public native InputMismatchException();
+    public native InputMismatchException(String message);
+}
+"####,
+    ),
+    (
+        "java.util.function",
+        r####"
+package java.util.function;
+
+public interface Function<T, R> {
+    R apply(T one);
+    default <V> Function<T, V> andThen(Function<R, V> then) { return null; }
+    default <V> Function<V, R> compose(Function<V, T> before) { return null; }
+    static <X> Function<X, X> identity() { return null; }
+}
+
+public interface BiFunction<T, U, R> {
+    R apply(T one, U two);
+}
+
+public interface Supplier<T> {
+    T get();
+}
+
+public interface Consumer<T> {
+    void accept(T one);
+    default Consumer<T> andThen(Consumer<T> then) { return null; }
+}
+
+public interface BiConsumer<T, U> {
+    void accept(T one, U two);
+}
+
+public interface Predicate<T> {
+    boolean test(T one);
+    default Predicate<T> negate() { return null; }
+    default Predicate<T> and(Predicate<T> other) { return null; }
+    default Predicate<T> or(Predicate<T> other) { return null; }
+    static <X> Predicate<X> isEqual(Object one) { return null; }
+    static <X> Predicate<X> not(Predicate<X> one) { return null; }
+}
+
+public interface BiPredicate<T, U> {
+    boolean test(T one, U two);
+}
+
+public interface UnaryOperator<T> extends Function<T, T> {
+    static <X> UnaryOperator<X> identity() { return null; }
+}
+
+public interface BinaryOperator<T> extends BiFunction<T, T, T> {
+    static <X> BinaryOperator<X> minBy(java.util.Comparator<X> by) { return null; }
+    static <X> BinaryOperator<X> maxBy(java.util.Comparator<X> by) { return null; }
+}
+
+public interface ToIntFunction<T> {
+    int applyAsInt(T one);
+}
+
+public interface ToLongFunction<T> {
+    long applyAsLong(T one);
+}
+
+public interface ToDoubleFunction<T> {
+    double applyAsDouble(T one);
+}
+
+public interface IntToLongFunction {
+    long applyAsLong(int one);
+}
+
+public interface IntToDoubleFunction {
+    double applyAsDouble(int one);
+}
+
+public interface IntFunction<R> {
+    R apply(int one);
+}
+
+public interface IntPredicate {
+    boolean test(int one);
+}
+
+public interface IntUnaryOperator {
+    int applyAsInt(int one);
+}
+
+public interface IntBinaryOperator {
+    int applyAsInt(int left, int right);
+}
+
+public interface IntConsumer {
+    void accept(int one);
+}
+
+public interface IntSupplier {
+    int getAsInt();
+}
+
+public interface LongUnaryOperator {
+    long applyAsLong(long one);
+}
+
+public interface LongConsumer {
+    void accept(long one);
+}
+
+public interface DoubleUnaryOperator {
+    double applyAsDouble(double one);
+}
+
+public interface DoubleConsumer {
+    void accept(double one);
+}
+
+public interface BooleanSupplier {
+    boolean getAsBoolean();
+}
+"####,
+    ),
+    (
+        "java.util.stream",
+        r####"
+package java.util.stream;
+
+public interface BaseStream<T, S extends BaseStream<T, S>> extends java.lang.AutoCloseable {
+    java.util.Iterator<T> iterator();
+    S sequential();
+    S parallel();
+    void close();
+}
+
+public interface Stream<T> extends BaseStream<T, Stream<T>> {
+    <R> Stream<R> map(java.util.function.Function<T, R> what);
+    IntStream mapToInt(java.util.function.ToIntFunction<T> what);
+    LongStream mapToLong(java.util.function.ToLongFunction<T> what);
+    DoubleStream mapToDouble(java.util.function.ToDoubleFunction<T> what);
+    <R> Stream<R> flatMap(java.util.function.Function<T, Stream<R>> what);
+    Stream<T> filter(java.util.function.Predicate<T> when);
+    Stream<T> distinct();
+    Stream<T> sorted();
+    Stream<T> sorted(java.util.Comparator<T> by);
+    Stream<T> limit(long count);
+    Stream<T> skip(long count);
+    Stream<T> peek(java.util.function.Consumer<T> what);
+    Stream<T> takeWhile(java.util.function.Predicate<T> when);
+    Stream<T> dropWhile(java.util.function.Predicate<T> when);
+    void forEach(java.util.function.Consumer<T> what);
+    void forEachOrdered(java.util.function.Consumer<T> what);
+    Object[] toArray();
+    java.util.List<T> toList();
+    <R> R collect(Collector<T, Object, R> into);
+    T reduce(T start, java.util.function.BinaryOperator<T> what);
+    java.util.Optional<T> reduce(java.util.function.BinaryOperator<T> what);
+    long count();
+    boolean anyMatch(java.util.function.Predicate<T> when);
+    boolean allMatch(java.util.function.Predicate<T> when);
+    boolean noneMatch(java.util.function.Predicate<T> when);
+    java.util.Optional<T> findFirst();
+    java.util.Optional<T> findAny();
+    java.util.Optional<T> min(java.util.Comparator<T> by);
+    java.util.Optional<T> max(java.util.Comparator<T> by);
+    static <X> Stream<X> of(X... held);
+    static <X> Stream<X> empty();
+    static <X> Stream<X> concat(Stream<X> left, Stream<X> right);
+    static <X> Stream<X> iterate(X start, java.util.function.UnaryOperator<X> what);
+    static <X> Stream<X> generate(java.util.function.Supplier<X> what);
+}
+
+public interface IntStream extends BaseStream<java.lang.Integer, IntStream> {
+    IntStream map(java.util.function.IntUnaryOperator what);
+    IntStream filter(java.util.function.IntPredicate when);
+    <R> Stream<R> mapToObj(java.util.function.IntFunction<R> what);
+    LongStream mapToLong(java.util.function.IntToLongFunction what);
+    DoubleStream asDoubleStream();
+    Stream<java.lang.Integer> boxed();
+    IntStream distinct();
+    IntStream sorted();
+    IntStream limit(long count);
+    IntStream skip(long count);
+    void forEach(java.util.function.IntConsumer what);
+    int sum();
+    long count();
+    java.util.OptionalInt min();
+    java.util.OptionalInt max();
+    java.util.OptionalDouble average();
+    int[] toArray();
+    boolean anyMatch(java.util.function.IntPredicate when);
+    boolean allMatch(java.util.function.IntPredicate when);
+    int reduce(int start, java.util.function.IntBinaryOperator what);
+    static IntStream range(int from, int to);
+    static IntStream rangeClosed(int from, int to);
+    static IntStream of(int... held);
+}
+
+public interface LongStream extends BaseStream<java.lang.Long, LongStream> {
+    LongStream map(java.util.function.LongUnaryOperator what);
+    Stream<java.lang.Long> boxed();
+    long sum();
+    long count();
+    long[] toArray();
+    static LongStream range(long from, long to);
+    static LongStream of(long... held);
+}
+
+public interface DoubleStream extends BaseStream<java.lang.Double, DoubleStream> {
+    DoubleStream map(java.util.function.DoubleUnaryOperator what);
+    Stream<java.lang.Double> boxed();
+    double sum();
+    long count();
+    java.util.OptionalDouble average();
+    double[] toArray();
+    static DoubleStream of(double... held);
+}
+
+public interface Collector<T, A, R> { }
+
+public class Collectors {
+    public static native <T> Collector<T, Object, java.util.List<T>> toList();
+    public static native <T> Collector<T, Object, java.util.Set<T>> toSet();
+    public static native <T> Collector<T, Object, java.util.List<T>> toUnmodifiableList();
+    public static native <T, K, V> Collector<T, Object, java.util.Map<K, V>> toMap(java.util.function.Function<T, K> key, java.util.function.Function<T, V> value);
+    public static native <T> Collector<T, Object, java.lang.String> joining();
+    public static native <T> Collector<T, Object, java.lang.String> joining(java.lang.CharSequence between);
+    public static native <T> Collector<T, Object, java.lang.String> joining(java.lang.CharSequence between, java.lang.CharSequence before, java.lang.CharSequence after);
+    public static native <T, K> Collector<T, Object, java.util.Map<K, java.util.List<T>>> groupingBy(java.util.function.Function<T, K> by);
+    public static native <T, K, A, D> Collector<T, Object, java.util.Map<K, D>> groupingBy(java.util.function.Function<T, K> by, Collector<T, A, D> then);
+    public static native <T> Collector<T, Object, java.util.Map<java.lang.Boolean, java.util.List<T>>> partitioningBy(java.util.function.Predicate<T> when);
+    public static native <T, U, A, R> Collector<T, Object, R> mapping(java.util.function.Function<T, U> what, Collector<U, A, R> then);
+    public static native <T> Collector<T, Object, java.lang.Long> counting();
+    public static native <T> Collector<T, Object, java.lang.Integer> summingInt(java.util.function.ToIntFunction<T> by);
+    public static native <T> Collector<T, Object, java.lang.Long> summingLong(java.util.function.ToLongFunction<T> by);
+    public static native <T> Collector<T, Object, java.lang.Double> summingDouble(java.util.function.ToDoubleFunction<T> by);
+    public static native <T> Collector<T, Object, java.lang.Double> averagingInt(java.util.function.ToIntFunction<T> by);
+    public static native <T> Collector<T, Object, java.util.Optional<T>> minBy(java.util.Comparator<T> by);
+    public static native <T> Collector<T, Object, java.util.Optional<T>> maxBy(java.util.Comparator<T> by);
+}
+
+"####,
+    ),
+    (
+        "java.util.concurrent",
+        r####"
+package java.util.concurrent;
+
+public interface Callable<V> {
+    V call();
+}
+
+public interface Future<V> {
+    V get();
+    boolean isDone();
+    boolean cancel(boolean interrupt);
+    boolean isCancelled();
+}
+
+public interface Executor {
+    void execute(java.lang.Runnable job);
+}
+
+public interface ExecutorService extends Executor {
+    <T> Future<T> submit(Callable<T> job);
+    Future submit(java.lang.Runnable job);
+    void shutdown();
+    java.util.List<java.lang.Runnable> shutdownNow();
+    boolean isShutdown();
+    boolean isTerminated();
+    boolean awaitTermination(long amount, TimeUnit unit);
+}
+
+public class Executors {
+    public static native ExecutorService newSingleThreadExecutor();
+    public static native ExecutorService newFixedThreadPool(int size);
+    public static native ExecutorService newCachedThreadPool();
+}
+
+public class TimeUnit extends java.lang.Enum<TimeUnit> {
+    public static final TimeUnit NANOSECONDS;
+    public static final TimeUnit MICROSECONDS;
+    public static final TimeUnit MILLISECONDS;
+    public static final TimeUnit SECONDS;
+    public static final TimeUnit MINUTES;
+    public static final TimeUnit HOURS;
+    public static final TimeUnit DAYS;
+    public native void sleep(long amount);
+    public native long toMillis(long amount);
+    public native long toSeconds(long amount);
+    public static native TimeUnit valueOf(String name);
+    public static native TimeUnit[] values();
+}
+
+public class CountDownLatch {
+    public native CountDownLatch(int count);
+    public native void countDown();
+    public native void await();
+    public native boolean await(long amount, TimeUnit unit);
+    public native long getCount();
+}
+
+public class ConcurrentHashMap<K, V> extends java.util.AbstractMap<K, V> implements java.util.Map<K, V> {
+    public native ConcurrentHashMap();
+    public native ConcurrentHashMap(int capacity);
+    public native int size();
+    public native boolean isEmpty();
+    public native boolean containsKey(Object key);
+    public native boolean containsValue(Object value);
+    public native V get(Object key);
+    public native V put(K key, V value);
+    public native V remove(Object key);
+    public native void clear();
+    public native java.util.Set<K> keySet();
+    public native java.util.Collection<V> values();
+    public native java.util.Set<java.util.Map.Entry<K, V>> entrySet();
+    public native V getOrDefault(Object key, V fallback);
+    public native V putIfAbsent(K key, V value);
+    public native V computeIfAbsent(K key, java.util.function.Function<K, V> what);
+    public native void forEach(java.util.function.BiConsumer<K, V> what);
+}
+
+public class CopyOnWriteArrayList<E> extends java.util.AbstractList<E> implements java.util.List<E> {
+    public native CopyOnWriteArrayList();
+    public native int size();
+    public native boolean add(E one);
+    public native E get(int at);
+    public native java.util.Iterator<E> iterator();
+}
+
+public class ConcurrentLinkedQueue<E> extends java.util.AbstractCollection<E> implements java.util.Queue<E> {
+    public native ConcurrentLinkedQueue();
+    public native int size();
+    public native boolean add(E one);
+    public native boolean offer(E one);
+    public native E poll();
+    public native E peek();
+    public native E element();
+    public native java.util.Iterator<E> iterator();
+}
+
+public class TimeoutException extends java.lang.Exception {
+    public native TimeoutException();
+    public native TimeoutException(String message);
+}
+
+public class ExecutionException extends java.lang.Exception {
+    public native ExecutionException(Throwable cause);
+}
+"####,
+    ),
+    (
+        "java.util.concurrent.atomic",
+        r####"
+package java.util.concurrent.atomic;
+
+public class AtomicInteger extends java.lang.Number {
+    public native AtomicInteger();
+    public native AtomicInteger(int value);
+    public native int get();
+    public native void set(int value);
+    public native int incrementAndGet();
+    public native int decrementAndGet();
+    public native int getAndIncrement();
+    public native int getAndDecrement();
+    public native int addAndGet(int by);
+    public native int getAndAdd(int by);
+    public native int getAndSet(int value);
+    public native boolean compareAndSet(int expected, int value);
+    public native int intValue();
+    public native long longValue();
+    public native double doubleValue();
+}
+
+public class AtomicLong extends java.lang.Number {
+    public native AtomicLong();
+    public native AtomicLong(long value);
+    public native long get();
+    public native void set(long value);
+    public native long incrementAndGet();
+    public native long decrementAndGet();
+    public native long getAndIncrement();
+    public native long addAndGet(long by);
+    public native boolean compareAndSet(long expected, long value);
+    public native long longValue();
+    public native int intValue();
+}
+
+public class AtomicBoolean {
+    public native AtomicBoolean();
+    public native AtomicBoolean(boolean value);
+    public native boolean get();
+    public native void set(boolean value);
+    public native boolean getAndSet(boolean value);
+    public native boolean compareAndSet(boolean expected, boolean value);
+}
+
+public class AtomicReference<V> {
+    public native AtomicReference();
+    public native AtomicReference(V value);
+    public native V get();
+    public native void set(V value);
+    public native V getAndSet(V value);
+    public native boolean compareAndSet(V expected, V value);
+    public native V updateAndGet(java.util.function.UnaryOperator<V> what);
+}
+"####,
+    ),
+    (
+        "java.util.regex",
+        r####"
+package java.util.regex;
+
+public class Pattern {
+    public static final int CASE_INSENSITIVE;
+    public static final int MULTILINE;
+    public static final int DOTALL;
+    public static native Pattern compile(String held);
+    public static native Pattern compile(String held, int flags);
+    public static native boolean matches(String pattern, CharSequence held);
+    public static native String quote(String held);
+    public native Matcher matcher(CharSequence held);
+    public native String pattern();
+    public native String[] split(CharSequence held);
+    public native java.util.stream.Stream<String> splitAsStream(CharSequence held);
+}
+
+public class Matcher {
+    public native boolean matches();
+    public native boolean find();
+    public native boolean lookingAt();
+    public native String group();
+    public native String group(int at);
+    public native String group(String name);
+    public native int groupCount();
+    public native int start();
+    public native int start(int at);
+    public native int end();
+    public native int end(int at);
+    public native String replaceAll(String with);
+    public native String replaceFirst(String with);
+    public native Matcher reset();
+}
+
+public class PatternSyntaxException extends java.lang.IllegalArgumentException {
+    public native String getPattern();
+    public native String getDescription();
+    public native int getIndex();
+}
+"####,
+    ),
+    (
+        "java.math",
+        r####"
+package java.math;
+
+public class BigInteger extends java.lang.Number implements Comparable<BigInteger> {
+    public static final BigInteger ZERO;
+    public static final BigInteger ONE;
+    public static final BigInteger TWO;
+    public static final BigInteger TEN;
+    public native BigInteger(String held);
+    public native BigInteger add(BigInteger other);
+    public native BigInteger subtract(BigInteger other);
+    public native BigInteger multiply(BigInteger other);
+    public native BigInteger divide(BigInteger other);
+    public native BigInteger mod(BigInteger other);
+    public native BigInteger remainder(BigInteger other);
+    public native BigInteger pow(int by);
+    public native BigInteger negate();
+    public native BigInteger abs();
+    public native BigInteger gcd(BigInteger other);
+    public native int signum();
+    public native int compareTo(BigInteger other);
+    public native int intValue();
+    public native long longValue();
+    public native double doubleValue();
+    public native String toString();
+    public native String toString(int radix);
+    public static native BigInteger valueOf(long value);
+}
+
+public class BigDecimal extends java.lang.Number implements Comparable<BigDecimal> {
+    public static final BigDecimal ZERO;
+    public static final BigDecimal ONE;
+    public static final BigDecimal TEN;
+    public native BigDecimal(String held);
+    public native BigDecimal(double value);
+    public native BigDecimal(int value);
+    public native BigDecimal add(BigDecimal other);
+    public native BigDecimal subtract(BigDecimal other);
+    public native BigDecimal multiply(BigDecimal other);
+    public native BigDecimal divide(BigDecimal other);
+    public native BigDecimal divide(BigDecimal other, int scale, RoundingMode how);
+    public native BigDecimal setScale(int scale, RoundingMode how);
+    public native BigDecimal negate();
+    public native BigDecimal abs();
+    public native int scale();
+    public native int signum();
+    public native int compareTo(BigDecimal other);
+    public native double doubleValue();
+    public native int intValue();
+    public native long longValue();
+    public native String toString();
+    public native String toPlainString();
+    public static native BigDecimal valueOf(long value);
+    public static native BigDecimal valueOf(double value);
+}
+
+public class RoundingMode extends java.lang.Enum<RoundingMode> {
+    public static final RoundingMode UP;
+    public static final RoundingMode DOWN;
+    public static final RoundingMode CEILING;
+    public static final RoundingMode FLOOR;
+    public static final RoundingMode HALF_UP;
+    public static final RoundingMode HALF_DOWN;
+    public static final RoundingMode HALF_EVEN;
+    public static native RoundingMode valueOf(String name);
+    public static native RoundingMode[] values();
+}
+"####,
+    ),
+    (
+        "java.time.temporal",
+        r####"
+package java.time.temporal;
+
+public interface TemporalAccessor { }
+
+public interface Temporal extends TemporalAccessor { }
+
+public interface TemporalAmount { }
+
+public interface TemporalUnit { }
+
+public class ChronoUnit extends java.lang.Enum<ChronoUnit> implements TemporalUnit {
+    public static final ChronoUnit NANOS;
+    public static final ChronoUnit MILLIS;
+    public static final ChronoUnit SECONDS;
+    public static final ChronoUnit MINUTES;
+    public static final ChronoUnit HOURS;
+    public static final ChronoUnit DAYS;
+    public static final ChronoUnit WEEKS;
+    public static final ChronoUnit MONTHS;
+    public static final ChronoUnit YEARS;
+    public native long between(Temporal from, Temporal to);
+    public static native ChronoUnit valueOf(String name);
+    public static native ChronoUnit[] values();
+}
+"####,
+    ),
+    (
+        "java.time.chrono",
+        r####"
+package java.time.chrono;
+
+public interface ChronoLocalDate extends java.time.temporal.Temporal, Comparable<ChronoLocalDate> { }
+
+public interface ChronoLocalDateTime<D> extends java.time.temporal.Temporal, Comparable<ChronoLocalDateTime<D>> { }
+
+public interface ChronoZonedDateTime<D> extends java.time.temporal.Temporal, Comparable<ChronoZonedDateTime<D>> { }
+"####,
+    ),
+    (
+        "java.time",
+        r####"
+package java.time;
+
+public class Duration implements Comparable<Duration>, java.time.temporal.TemporalAmount {
+    public static final Duration ZERO;
+    public static native Duration ofDays(long amount);
+    public static native Duration ofHours(long amount);
+    public static native Duration ofMinutes(long amount);
+    public static native Duration ofSeconds(long amount);
+    public static native Duration ofMillis(long amount);
+    public static native Duration ofNanos(long amount);
+    public static native Duration between(java.time.temporal.Temporal from, java.time.temporal.Temporal to);
+    public native long toDays();
+    public native long toHours();
+    public native long toMinutes();
+    public native long toSeconds();
+    public native long toMillis();
+    public native long toNanos();
+    public native Duration plus(Duration other);
+    public native Duration minus(Duration other);
+    public native Duration multipliedBy(long by);
+    public native boolean isZero();
+    public native boolean isNegative();
+    public native int compareTo(Duration other);
+}
+
+public class Instant implements Comparable<Instant>, java.time.temporal.Temporal {
+    public static final Instant EPOCH;
+    public static native Instant now();
+    public static native Instant ofEpochMilli(long millis);
+    public static native Instant ofEpochSecond(long seconds);
+    public native long toEpochMilli();
+    public native long getEpochSecond();
+    public native Instant plusSeconds(long amount);
+    public native Instant plusMillis(long amount);
+    public native Instant minusSeconds(long amount);
+    public native boolean isBefore(Instant other);
+    public native boolean isAfter(Instant other);
+    public native int compareTo(Instant other);
+    public native String toString();
+}
+
+public class LocalDate implements java.time.chrono.ChronoLocalDate {
+    public static final LocalDate MIN;
+    public static final LocalDate MAX;
+    public static native LocalDate now();
+    public static native LocalDate of(int year, int month, int day);
+    public static native LocalDate parse(CharSequence held);
+    public static native LocalDate ofEpochDay(long day);
+    public native int getYear();
+    public native int getMonthValue();
+    public native int getDayOfMonth();
+    public native int getDayOfYear();
+    public native LocalDate plusDays(long amount);
+    public native LocalDate plusWeeks(long amount);
+    public native LocalDate plusMonths(long amount);
+    public native LocalDate plusYears(long amount);
+    public native LocalDate minusDays(long amount);
+    public native LocalDate minusMonths(long amount);
+    public native LocalDate minusYears(long amount);
+    public native LocalDate withDayOfMonth(int day);
+    public native long toEpochDay();
+    public native LocalDateTime atStartOfDay();
+    public native boolean isBefore(java.time.chrono.ChronoLocalDate other);
+    public native boolean isAfter(java.time.chrono.ChronoLocalDate other);
+    public native boolean isEqual(java.time.chrono.ChronoLocalDate other);
+    public native boolean isLeapYear();
+    public native int lengthOfMonth();
+    public native int lengthOfYear();
+    public native int compareTo(java.time.chrono.ChronoLocalDate other);
+    public native String format(java.time.format.DateTimeFormatter how);
+    public native String toString();
+}
+
+public class LocalTime implements Comparable<LocalTime>, java.time.temporal.Temporal {
+    public static final LocalTime MIN;
+    public static final LocalTime MAX;
+    public static final LocalTime NOON;
+    public static native LocalTime now();
+    public static native LocalTime of(int hour, int minute);
+    public static native LocalTime of(int hour, int minute, int second);
+    public static native LocalTime parse(CharSequence held);
+    public native int getHour();
+    public native int getMinute();
+    public native int getSecond();
+    public native LocalTime plusHours(long amount);
+    public native LocalTime plusMinutes(long amount);
+    public native LocalTime plusSeconds(long amount);
+    public native boolean isBefore(LocalTime other);
+    public native boolean isAfter(LocalTime other);
+    public native int compareTo(LocalTime other);
+    public native String format(java.time.format.DateTimeFormatter how);
+    public native String toString();
+}
+
+public class LocalDateTime implements java.time.chrono.ChronoLocalDateTime<LocalDate> {
+    public static native LocalDateTime now();
+    public static native LocalDateTime of(int year, int month, int day, int hour, int minute);
+    public static native LocalDateTime of(int year, int month, int day, int hour, int minute, int second);
+    public static native LocalDateTime of(LocalDate day, LocalTime time);
+    public static native LocalDateTime parse(CharSequence held);
+    public native int getYear();
+    public native int getMonthValue();
+    public native int getDayOfMonth();
+    public native int getHour();
+    public native int getMinute();
+    public native int getSecond();
+    public native LocalDate toLocalDate();
+    public native LocalTime toLocalTime();
+    public native LocalDateTime plusDays(long amount);
+    public native LocalDateTime plusHours(long amount);
+    public native LocalDateTime plusMinutes(long amount);
+    public native LocalDateTime plusSeconds(long amount);
+    public native LocalDateTime minusDays(long amount);
+    public native boolean isBefore(java.time.chrono.ChronoLocalDateTime<LocalDate> other);
+    public native boolean isAfter(java.time.chrono.ChronoLocalDateTime<LocalDate> other);
+    public native int compareTo(java.time.chrono.ChronoLocalDateTime<LocalDate> other);
+    public native String format(java.time.format.DateTimeFormatter how);
+    public native String toString();
+}
+
+public class ZoneId {
+    public static native ZoneId systemDefault();
+    public static native ZoneId of(String name);
+    public native String getId();
+}
+
+public class ZonedDateTime implements java.time.chrono.ChronoZonedDateTime<LocalDate> {
+    public static native ZonedDateTime now();
+    public static native ZonedDateTime now(ZoneId where);
+    public native LocalDateTime toLocalDateTime();
+    public native LocalDate toLocalDate();
+    public native Instant toInstant();
+    public native int getYear();
+    public native int getHour();
+    public native int compareTo(java.time.chrono.ChronoZonedDateTime<LocalDate> other);
+    public native String format(java.time.format.DateTimeFormatter how);
+    public native String toString();
+}
+
+public class Period implements java.time.temporal.TemporalAmount {
+    public static native Period ofDays(int amount);
+    public static native Period ofMonths(int amount);
+    public static native Period ofYears(int amount);
+    public static native Period between(LocalDate from, LocalDate to);
+    public native int getYears();
+    public native int getMonths();
+    public native int getDays();
+    public native long toTotalMonths();
+}
+
+public class DateTimeException extends java.lang.RuntimeException {
+    public native DateTimeException(String message);
+}
+"####,
+    ),
+    (
+        "java.time.format",
+        r####"
+package java.time.format;
+
+public class DateTimeFormatter {
+    public static final DateTimeFormatter ISO_LOCAL_DATE;
+    public static final DateTimeFormatter ISO_LOCAL_TIME;
+    public static final DateTimeFormatter ISO_LOCAL_DATE_TIME;
+    public static final DateTimeFormatter ISO_INSTANT;
+    public static final DateTimeFormatter ISO_DATE;
+    public static native DateTimeFormatter ofPattern(String pattern);
+    public static native DateTimeFormatter ofPattern(String pattern, java.util.Locale where);
+    public native String format(java.time.temporal.TemporalAccessor held);
+    public native DateTimeFormatter withLocale(java.util.Locale where);
+}
+
+public class DateTimeParseException extends java.time.DateTimeException {
+    public native DateTimeParseException(String message, CharSequence held, int at);
+    public native String getParsedString();
+    public native int getErrorIndex();
+}
+"####,
+    ),
+    (
+        "java.text",
+        r####"
+package java.text;
+
+public class Format {
+    public native String format(Object held);
+}
+
+public class DateFormat extends Format {
+    public static final int SHORT;
+    public static final int MEDIUM;
+    public static final int LONG;
+    public static final int FULL;
+    public native String format(java.util.Date held);
+    public native java.util.Date parse(String held);
+    public native void setTimeZone(java.util.TimeZone held);
+    public static native DateFormat getDateInstance();
+    public static native DateFormat getTimeInstance();
+    public static native DateFormat getDateTimeInstance();
+}
+
+public class SimpleDateFormat extends DateFormat {
+    public native SimpleDateFormat(String pattern);
+    public native SimpleDateFormat(String pattern, java.util.Locale where);
+    public native String format(java.util.Date held);
+    public native java.util.Date parse(String held);
+    public native void applyPattern(String pattern);
+    public native String toPattern();
+}
+
+public class NumberFormat extends Format {
+    public native String format(double held);
+    public native String format(long held);
+    public native Number parse(String held);
+    public native void setMaximumFractionDigits(int held);
+    public native void setMinimumFractionDigits(int held);
+    public native void setGroupingUsed(boolean held);
+    public static native NumberFormat getInstance();
+    public static native NumberFormat getInstance(java.util.Locale where);
+    public static native NumberFormat getNumberInstance();
+    public static native NumberFormat getPercentInstance();
+    public static native NumberFormat getCurrencyInstance();
+}
+
+public class DecimalFormat extends NumberFormat {
+    public native DecimalFormat(String pattern);
+    public native void applyPattern(String pattern);
+}
+
+public class ParseException extends java.lang.Exception {
+    public native ParseException(String message, int at);
+    public native int getErrorOffset();
+}
+"####,
+    ),
+    (
+        "java.nio",
+        r####"
+package java.nio.charset;
+
+public class Charset {
+    public static native Charset forName(String name);
+    public static native Charset defaultCharset();
+    public native String name();
+}
+
+public class StandardCharsets {
+    public static final Charset UTF_8;
+    public static final Charset US_ASCII;
+    public static final Charset ISO_8859_1;
+    public static final Charset UTF_16;
+}
+"####,
+    ),
+    (
+        "java.nio.file.attribute",
+        r####"
+package java.nio.file.attribute;
+
+public interface FileAttribute<T> {
+    String name();
+    T value();
+}
+"####,
+    ),
+    (
+        "java.nio.file",
+        r####"
+package java.nio.file;
+
+public interface OpenOption { }
+
+public interface CopyOption { }
+
+public class LinkOption extends java.lang.Enum<LinkOption> implements OpenOption, CopyOption {
+    public static final LinkOption NOFOLLOW_LINKS;
+    public static native LinkOption valueOf(String name);
+    public static native LinkOption[] values();
+}
+
+public class StandardOpenOption extends java.lang.Enum<StandardOpenOption> implements OpenOption {
+    public static final StandardOpenOption READ;
+    public static final StandardOpenOption WRITE;
+    public static final StandardOpenOption APPEND;
+    public static final StandardOpenOption CREATE;
+    public static final StandardOpenOption CREATE_NEW;
+    public static final StandardOpenOption TRUNCATE_EXISTING;
+    public static native StandardOpenOption valueOf(String name);
+    public static native StandardOpenOption[] values();
+}
+
+public class StandardCopyOption extends java.lang.Enum<StandardCopyOption> implements CopyOption {
+    public static final StandardCopyOption REPLACE_EXISTING;
+    public static final StandardCopyOption COPY_ATTRIBUTES;
+    public static final StandardCopyOption ATOMIC_MOVE;
+    public static native StandardCopyOption valueOf(String name);
+    public static native StandardCopyOption[] values();
+}
+
+public class FileVisitOption extends java.lang.Enum<FileVisitOption> {
+    public static final FileVisitOption FOLLOW_LINKS;
+    public static native FileVisitOption valueOf(String name);
+    public static native FileVisitOption[] values();
+}
+
+public interface Path extends Comparable<Path> {
+    Path getFileName();
+    Path getParent();
+    Path resolve(String other);
+    Path resolve(Path other);
+    Path toAbsolutePath();
+    Path normalize();
+    java.io.File toFile();
+    String toString();
+    int getNameCount();
+    Path getName(int at);
+    boolean startsWith(String other);
+    boolean endsWith(String other);
+    static Path of(String first, String... more) { return null; }
+}
+
+public class Paths {
+    public static native Path get(String first, String... more);
+}
+
+public class Files {
+    public static native boolean exists(Path held, LinkOption... how);
+    public static native boolean notExists(Path held, LinkOption... how);
+    public static native boolean isDirectory(Path held, LinkOption... how);
+    public static native boolean isRegularFile(Path held, LinkOption... how);
+    public static native boolean isReadable(Path held);
+    public static native boolean isWritable(Path held);
+    public static native long size(Path held);
+    public static native byte[] readAllBytes(Path held);
+    public static native java.util.List<String> readAllLines(Path held);
+    public static native String readString(Path held);
+    public static native Path write(Path held, byte[] what, OpenOption... how);
+    public static native Path writeString(Path held, CharSequence what, OpenOption... how);
+    public static native Path createDirectory(Path held, java.nio.file.attribute.FileAttribute... how);
+    public static native Path createDirectories(Path held, java.nio.file.attribute.FileAttribute... how);
+    public static native Path createFile(Path held, java.nio.file.attribute.FileAttribute... how);
+    public static native void delete(Path held);
+    public static native boolean deleteIfExists(Path held);
+    public static native Path copy(Path from, Path to, CopyOption... how);
+    public static native Path move(Path from, Path to, CopyOption... how);
+    public static native java.util.stream.Stream<Path> list(Path held);
+    public static native java.util.stream.Stream<Path> walk(Path held, FileVisitOption... how);
+    public static native java.util.stream.Stream<String> lines(Path held);
+    public static native java.io.BufferedReader newBufferedReader(Path held);
+    public static native java.io.BufferedWriter newBufferedWriter(Path held, OpenOption... how);
+    public static native java.io.InputStream newInputStream(Path held, OpenOption... how);
+    public static native java.io.OutputStream newOutputStream(Path held, OpenOption... how);
+}
+
+public class NoSuchFileException extends java.io.IOException {
+    public native NoSuchFileException(String message);
+}
+
+public class FileAlreadyExistsException extends java.io.IOException {
+    public native FileAlreadyExistsException(String message);
+}
+"####,
+    ),
+    (
+        "java.net",
+        r####"
+package java.net;
+
+public class URI implements Comparable<URI> {
+    public native URI(String held);
+    public native String getScheme();
+    public native String getHost();
+    public native int getPort();
+    public native String getPath();
+    public native String getQuery();
+    public native URL toURL();
+    public native int compareTo(URI other);
+    public native String toString();
+    public static native URI create(String held);
+}
+
+public class URL {
+    public native URL(String held);
+    public native String getProtocol();
+    public native String getHost();
+    public native int getPort();
+    public native String getPath();
+    public native java.io.InputStream openStream();
+    public native URLConnection openConnection();
+    public native String toString();
+}
+
+public class URLConnection {
+    public native void connect();
+    public native void setRequestProperty(String name, String value);
+    public native void setConnectTimeout(int millis);
+    public native void setReadTimeout(int millis);
+    public native java.io.InputStream getInputStream();
+    public native java.io.OutputStream getOutputStream();
+    public native void setDoOutput(boolean held);
+    public native String getContentType();
+    public native int getContentLength();
+}
+
+public class HttpURLConnection extends URLConnection {
+    public static final int HTTP_OK;
+    public static final int HTTP_NOT_FOUND;
+    public native void setRequestMethod(String name);
+    public native int getResponseCode();
+    public native String getResponseMessage();
+    public native void disconnect();
+    public native java.io.InputStream getErrorStream();
+}
+
+public class URLEncoder {
+    public static native String encode(String held, String charset);
+}
+
+public class URLDecoder {
+    public static native String decode(String held, String charset);
+}
+
+public class MalformedURLException extends java.io.IOException {
+    public native MalformedURLException(String message);
+}
+
+public class UnknownHostException extends java.io.IOException {
+    public native UnknownHostException(String message);
+}
+"####,
+    ),
+];
+
 const WELL_KNOWN: &[&str] = &[
     "java/lang/Object",
     "java/lang/String",
@@ -10320,7 +13007,11 @@ impl Emitter<'_> {
         if given.len() == wanted.len() {
             if let Some(last) = given.last() {
                 let peeked = self.type_of(last, line)?;
-                if peeked.may_be_given_to(&Type::Array(element.clone())) {
+                // Really an array of the right shape, and not merely a
+                // reference: `Type::may_be_given_to` waves any reference
+                // through to any other, and `asList("a")` handed one string
+                // straight into a call wanting the array.
+                if self.reaches(&peeked, &Type::Array(element.clone())) {
                     return self.arguments_for(wanted, given, line);
                 }
             }
@@ -13403,9 +16094,21 @@ impl Emitter<'_> {
         self.op2(0xbb, class);
         self.pushes(&Type::Object(named.to_string(), Vec::new()));
         self.duplicates();
-        let init = self.pool.method(named, "<init>", "()V", false);
+        // `MatchException` has no constructor taking nothing -- the one the
+        // language uses takes a message and a cause, and there is neither
+        // here. `IncompatibleClassChangeError` does.
+        let taken = if named == "java/lang/MatchException" {
+            self.op(0x01);
+            self.op(0x01);
+            self.pushes_raw(Verified::Null);
+            self.pushes_raw(Verified::Null);
+            "(Ljava/lang/String;Ljava/lang/Throwable;)V"
+        } else {
+            "()V"
+        };
+        let init = self.pool.method(named, "<init>", taken, false);
         self.op2(0xb7, init);
-        self.pops(1);
+        self.pops(1 + i32::from(taken != "()V") * 2);
         self.op(0xbf);
         self.set_depth(0);
         let _ = line;
@@ -20076,14 +22779,7 @@ public class More {
 
     #[test]
     fn the_other_half_of_ordinary_java_gives_back_what_javac_gives_back() {
-        let Some(platform) = crate::builder::platform_jar() else {
-            eprintln!("java: no android.jar on this machine");
-            return;
-        };
-        let bytes = std::fs::read(&platform).expect("the platform jar");
-        let mut classpath = empty();
-        classpath.learn_jar(&bytes).expect("must be read");
-
+        let classpath = empty();
         let produced = compile(THE_OTHER_HALF_OF_IT, &classpath).expect("must compile");
         match jvm_runs(&produced, "com.my.app.More") {
             None => eprintln!("java: no JVM here to run the other half"),
@@ -20295,14 +22991,7 @@ public class Third {
 
     #[test]
     fn a_generic_interface_a_checked_exception_and_a_sealed_switch_all_run() {
-        let Some(platform) = crate::builder::platform_jar() else {
-            eprintln!("java: no android.jar on this machine");
-            return;
-        };
-        let bytes = std::fs::read(&platform).expect("the platform jar");
-        let mut classpath = empty();
-        classpath.learn_jar(&bytes).expect("must be read");
-
+        let classpath = empty();
         let produced = compile(THE_THIRD_HALF_OF_IT, &classpath).expect("must compile");
         match jvm_runs(&produced, "com.my.app.Third") {
             None => eprintln!("java: no JVM here to run it"),
@@ -20406,14 +23095,7 @@ public class Flow {
 
     #[test]
     fn a_stream_worked_from_end_to_end_gives_back_what_javac_gives_back() {
-        let Some(platform) = crate::builder::platform_jar() else {
-            eprintln!("java: no android.jar on this machine");
-            return;
-        };
-        let bytes = std::fs::read(&platform).expect("the platform jar");
-        let mut classpath = empty();
-        classpath.learn_jar(&bytes).expect("must be read");
-
+        let classpath = empty();
         let produced = compile(STREAMS_AND_WHAT_THEY_INFER, &classpath).expect("must compile");
         match jvm_runs(&produced, "com.my.app.Flow") {
             None => eprintln!("java: no JVM here to run a stream"),
@@ -20572,14 +23254,7 @@ public class Last {
 
     #[test]
     fn an_iterator_a_thread_and_a_lambda_in_a_loop_all_run() {
-        let Some(platform) = crate::builder::platform_jar() else {
-            eprintln!("java: no android.jar on this machine");
-            return;
-        };
-        let bytes = std::fs::read(&platform).expect("the platform jar");
-        let mut classpath = empty();
-        classpath.learn_jar(&bytes).expect("must be read");
-
+        let classpath = empty();
         let produced = compile(THE_REST_OF_WHAT_IS_WRITTEN, &classpath).expect("must compile");
         match jvm_runs(&produced, "com.my.app.Last") {
             None => eprintln!("java: no JVM here to run it"),
@@ -20741,14 +23416,7 @@ public class Twist {
 
     #[test]
     fn the_corners_of_the_language_give_back_what_javac_gives_back() {
-        let Some(platform) = crate::builder::platform_jar() else {
-            eprintln!("java: no android.jar on this machine");
-            return;
-        };
-        let bytes = std::fs::read(&platform).expect("the platform jar");
-        let mut classpath = empty();
-        classpath.learn_jar(&bytes).expect("must be read");
-
+        let classpath = empty();
         let produced = compile(THE_CORNERS_OF_IT, &classpath).expect("must compile");
         match jvm_runs(&produced, "com.my.app.Twist") {
             None => eprintln!("java: no JVM here to run the corners"),
@@ -20914,14 +23582,7 @@ public class Edge {
 
     #[test]
     fn the_edges_of_the_language_give_back_what_javac_gives_back() {
-        let Some(platform) = crate::builder::platform_jar() else {
-            eprintln!("java: no android.jar on this machine");
-            return;
-        };
-        let bytes = std::fs::read(&platform).expect("the platform jar");
-        let mut classpath = empty();
-        classpath.learn_jar(&bytes).expect("must be read");
-
+        let classpath = empty();
         let produced = compile(THE_EDGES_OF_IT, &classpath).expect("must compile");
         match jvm_runs(&produced, "com.my.app.Edge") {
             None => eprintln!("java: no JVM here to run the edges"),
@@ -21151,6 +23812,303 @@ public class MainActivity extends Activity {
             assert!(said.contains("MainActivity.onCreate"), "{said}");
         }
         eprintln!("java: the screen somebody actually writes, all the way to a dex");
+    }
+
+    /// The standard library, leaned on hard, with nothing handed over: readers
+    /// and writers, `BigInteger` and `BigDecimal` with a rounding mode, dates
+    /// and a format for them, a regular expression with groups, an atomic, a
+    /// deque, a `StringJoiner`, a `TreeMap` and its `headMap`, `groupingBy`,
+    /// an `IntStream`, `merge` on a map, and the string and arithmetic helpers
+    /// underneath all of it.
+    ///
+    /// No jar. Every one of those names is answered by the library written
+    /// into this file, and the answer is `javac`'s.
+    const THE_LIBRARY_LEANED_ON: &str = r####"
+package com.my.app;
+
+import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.time.Duration;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.StringJoiner;
+import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+public class Everything {
+
+    static String readAll(String from) throws IOException {
+        BufferedReader in = new BufferedReader(
+            new InputStreamReader(new ByteArrayInputStream(from.getBytes())));
+        StringBuilder out = new StringBuilder();
+        String line = in.readLine();
+        while (line != null) {
+            out.append(line).append('/');
+            line = in.readLine();
+        }
+        in.close();
+        return out.toString();
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        out.append(readAll("one\ntwo\nthree")).append(' ');
+
+        ByteArrayOutputStream sink = new ByteArrayOutputStream();
+        sink.write('a');
+        sink.write("bc".getBytes());
+        out.append(sink.size()).append(sink.toString()).append(' ');
+
+        StringWriter paper = new StringWriter();
+        PrintWriter pen = new PrintWriter(paper);
+        pen.print("wrote ");
+        pen.println(42);
+        pen.flush();
+        out.append(paper.toString().trim()).append(' ');
+
+        BigInteger big = new BigInteger("123456789012345678901234567890");
+        out.append(big.multiply(BigInteger.TWO).mod(BigInteger.valueOf(97))).append(' ');
+        BigDecimal money = new BigDecimal("10.005");
+        out.append(money.setScale(2, RoundingMode.HALF_UP)).append(' ');
+        out.append(BigDecimal.valueOf(1).divide(BigDecimal.valueOf(4))).append(' ');
+
+        LocalDate day = LocalDate.of(2024, 2, 29);
+        out.append(day).append('/').append(day.plusDays(1)).append('/')
+           .append(day.isLeapYear()).append(' ');
+        out.append(day.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"))).append(' ');
+        LocalDateTime when = LocalDateTime.of(2024, 1, 2, 3, 4);
+        out.append(when.getHour()).append(when.getMinute()).append(' ');
+        out.append(Duration.ofMinutes(90).toHours()).append(' ');
+
+        Pattern digits = Pattern.compile("(\\d+)-(\\d+)");
+        Matcher found = digits.matcher("ab 12-34 cd");
+        out.append(found.find()).append(found.group(1)).append(found.group(2)).append(' ');
+        out.append("a1b2c3".replaceAll("\\d", "")).append(' ');
+        out.append(Pattern.matches("[a-z]+", "abc")).append(' ');
+
+        AtomicInteger counted = new AtomicInteger(5);
+        counted.incrementAndGet();
+        out.append(counted.getAndAdd(4)).append(counted.get()).append(' ');
+
+        Deque<String> stack = new ArrayDeque<String>();
+        stack.push("x");
+        stack.push("y");
+        out.append(stack.pop()).append(stack.peek()).append(stack.size()).append(' ');
+
+        StringJoiner joiner = new StringJoiner(", ", "[", "]");
+        joiner.add("a").add("b");
+        out.append(joiner.toString()).append(' ');
+
+        TreeMap<String, Integer> sorted = new TreeMap<String, Integer>();
+        sorted.put("b", 2);
+        sorted.put("a", 1);
+        sorted.put("c", 3);
+        out.append(sorted.firstKey()).append(sorted.lastKey())
+           .append(sorted.headMap("c")).append(' ');
+
+        Map<String, List<String>> grouped = Arrays.asList("apple", "avocado", "beet")
+            .stream()
+            .collect(Collectors.groupingBy(one -> one.substring(0, 1)));
+        out.append(grouped.get("a").size()).append(grouped.get("b")).append(' ');
+
+        out.append(IntStream.rangeClosed(1, 5).filter(i -> i % 2 == 1).sum()).append(' ');
+        out.append(IntStream.of(3, 1, 2).sorted().boxed().collect(Collectors.toList())).append(' ');
+
+        Optional<String> maybe = Arrays.asList("a", "bb", "ccc").stream()
+            .filter(one -> one.length() == 2)
+            .findFirst();
+        out.append(maybe.orElse("none")).append(' ');
+
+        List<Integer> numbers = new ArrayList<Integer>(Arrays.asList(5, 3, 9));
+        Collections.sort(numbers);
+        out.append(numbers).append(Collections.max(numbers)).append(' ');
+
+        Map<String, Integer> counts = new HashMap<String, Integer>();
+        for (String one : "a b a c b a".split(" ")) {
+            counts.merge(one, 1, (l, r) -> l + r);
+        }
+        out.append(new TreeMap<String, Integer>(counts)).append(' ');
+
+        out.append(String.join("-", "x", "y", "z")).append(' ');
+        out.append("  padded  ".strip()).append('|').append("ab".repeat(3)).append(' ');
+        out.append(Integer.toHexString(255)).append(Long.toBinaryString(5L)).append(' ');
+        out.append(Math.floorMod(-7, 3)).append(Math.floorDiv(-7, 3)).append(' ');
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn the_standard_library_answers_for_itself_with_nothing_handed_over() {
+        let produced = compile(THE_LIBRARY_LEANED_ON, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Everything") {
+            None => eprintln!("java: no JVM here to run the standard library"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "one/two/three/ 3abc wrote 42 7 10.01 0.25 \
+                     2024-02-29/2024-03-01/true 29.02.2024 34 1 true1234 abc true 610 \
+                     yx1 [a, b] ac{a=1, b=2} 2[beet] 9 [1, 2, 3] bb [3, 5, 9]9 \
+                     {a=3, b=2, c=1} x-y-z padded|ababab ff101 2-3"
+                );
+                eprintln!("java: the standard library, leaned on, with nothing handed over");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// Every method in here belongs to something other than the class it is
+    /// called on: a superclass, or a `default` written on an interface.
+    ///
+    /// The library in this file says `ArrayList.stream()` and `TreeMap
+    /// .getOrDefault(...)` the way a person would write them, and the class
+    /// files it produces name them on the class rather than on whatever
+    /// declares them -- which is what `javac` does, and which the JVM resolves
+    /// by walking up. This is the test that says so, because getting it wrong
+    /// is a `NoSuchMethodError` at run time and nothing at all before it.
+    const WHAT_IS_INHERITED_RATHER_THAN_DECLARED: &str = r####"
+package com.my.app;
+
+import java.text.SimpleDateFormat;
+import java.time.ZonedDateTime;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Date;
+import java.util.EnumMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.Locale;
+import java.util.TimeZone;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.stream.Collectors;
+
+public class Handed {
+
+    enum Side { LEFT, RIGHT }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        // Every one of these is a method the class itself does not declare:
+        // it comes from a superclass, or from a `default` on an interface.
+        ArrayList<String> rows = new ArrayList<String>(Arrays.asList("a", "bb"));
+        out.append(rows.stream().count());
+        out.append(rows.containsAll(Arrays.asList("a")));
+
+        ArrayDeque<String> deque = new ArrayDeque<String>(Arrays.asList("x"));
+        out.append(deque.stream().count()).append(' ');
+
+        Collection<String> held = rows;
+        StringBuilder seen = new StringBuilder();
+        held.forEach(one -> seen.append(one));
+        out.append(seen).append(' ');
+
+        HashSet<String> set = new HashSet<String>(Arrays.asList("p", "q", "r"));
+        out.append(set.addAll(Arrays.asList("s")));
+        out.append(set.containsAll(Arrays.asList("p")));
+        out.append(set.removeAll(Arrays.asList("q")));
+        out.append(set.retainAll(Arrays.asList("p", "r", "s")));
+        out.append(set.removeIf(one -> one.equals("s")));
+        out.append(set.stream().sorted().collect(Collectors.toList()));
+        StringBuilder each = new StringBuilder();
+        set.forEach(one -> each.append(one));
+        out.append(each.length()).append(' ');
+
+        LinkedList<String> chain = new LinkedList<String>();
+        out.append(chain.isEmpty());
+        chain.add("one");
+        out.append(chain.iterator().next());
+        out.append(chain.stream().count()).append(' ');
+
+        TreeMap<String, Integer> sorted = new TreeMap<String, Integer>();
+        out.append(sorted.isEmpty());
+        sorted.put("k", 1);
+        out.append(sorted.getOrDefault("k", 0)).append(sorted.getOrDefault("z", 9)).append(' ');
+
+        TreeSet<String> tree = new TreeSet<String>(Arrays.asList("m", "n"));
+        out.append(tree.stream().count()).append(' ');
+
+        EnumMap<Side, String> sides = new EnumMap<Side, String>(Side.class);
+        out.append(sides.isEmpty());
+        sides.put(Side.LEFT, "l");
+        StringBuilder both = new StringBuilder();
+        sides.forEach((key, value) -> both.append(key).append(value));
+        out.append(both).append(' ');
+
+        ConcurrentLinkedQueue<String> queue = new ConcurrentLinkedQueue<String>();
+        queue.add("first");
+        out.append(queue.element()).append(' ');
+
+        SimpleDateFormat when = new SimpleDateFormat("yyyy", Locale.US);
+        when.setTimeZone(TimeZone.getTimeZone("UTC"));
+        out.append(when.format(new Date(0L)));
+        out.append(when.parse("1999").getClass().getSimpleName()).append(' ');
+
+        ZonedDateTime now = ZonedDateTime.now();
+        out.append(now.compareTo(now)).append(now.toInstant().equals(now.toInstant()));
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn a_method_a_class_inherits_is_still_a_method_it_answers() {
+        let produced =
+            compile(WHAT_IS_INHERITED_RATHER_THAN_DECLARED, &empty()).expect("must compile");
+        match jvm_runs(&produced, "com.my.app.Handed") {
+            None => eprintln!("java: no JVM here to run what is inherited"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "2true1 abb truetruetruefalsetrue[p, r]2 trueone1 true19 2 \
+                     trueLEFTl first 1970Date 0true"
+                );
+                eprintln!("java: what a class inherits, it answers");
+            }
+        }
     }
 
     #[test]
@@ -22307,14 +25265,7 @@ public class Boxed {
     /// The answer is `javac`'s: `3 x pear 1 applepear`.
     #[test]
     fn the_java_a_person_writes_against_a_library_gets_the_same_answer_javac_gets() {
-        let Some(platform) = crate::builder::platform_jar() else {
-            eprintln!("java: no android.jar on this machine");
-            return;
-        };
-        let bytes = std::fs::read(&platform).expect("the platform jar");
-        let mut classpath = empty();
-        classpath.learn_jar(&bytes).expect("must be read");
-
+        let classpath = empty();
         let source = r#"
             package com.my.app;
 
@@ -22392,6 +25343,188 @@ public class Boxed {
                 eprintln!("java: an ordinary afternoon's Java, against the platform jar, ran");
             }
         }
+    }
+
+    #[test]
+    fn the_library_reads_and_holds_what_it_says_it_holds() {
+        // Every source in it parses. A mistake in one would otherwise be a
+        // class quietly missing from the classpath and a call refused for a
+        // reason nobody could see.
+        for (named, text) in THE_LIBRARY {
+            parse(text).unwrap_or_else(|why| panic!("{named}: {why:?}"));
+        }
+
+        let held = Classpath::new();
+        assert!(held.len() > 200, "only {} classes", held.len());
+        for wanted in [
+            "java/lang/Object",
+            "java/lang/String",
+            "java/lang/StringBuilder",
+            "java/lang/Integer",
+            "java/lang/Math",
+            "java/lang/System",
+            "java/lang/Thread",
+            "java/lang/Exception",
+            "java/util/List",
+            "java/util/ArrayList",
+            "java/util/Map",
+            "java/util/Map$Entry",
+            "java/util/HashMap",
+            "java/util/Arrays",
+            "java/util/Collections",
+            "java/util/Objects",
+            "java/util/Optional",
+            "java/util/Comparator",
+            "java/util/function/Function",
+            "java/util/function/Predicate",
+            "java/util/stream/Stream",
+            "java/util/stream/Collectors",
+            "java/util/concurrent/atomic/AtomicInteger",
+            "java/util/regex/Pattern",
+            "java/io/File",
+            "java/io/PrintStream",
+            "java/io/IOException",
+            "java/math/BigDecimal",
+            "java/time/LocalDate",
+            "java/text/SimpleDateFormat",
+            "java/nio/file/Files",
+            "java/net/URL",
+        ] {
+            assert!(held.get(wanted).is_some(), "{wanted} is missing");
+        }
+
+        // Object is nobody's child, whatever a shell says.
+        assert_eq!(held.get("java/lang/Object").unwrap().superclass, None);
+        // A class knows what it implements, which is the road to a method.
+        assert!(held
+            .ancestors("java/lang/String")
+            .contains(&"java/lang/CharSequence".to_string()));
+        assert!(held
+            .ancestors("java/util/ArrayList")
+            .contains(&"java/util/Collection".to_string()));
+        // And an interface written here is an interface, which is what says
+        // `invokeinterface` rather than `invokevirtual`.
+        assert!(held.get("java/util/List").unwrap().interface);
+        assert!(!held.get("java/util/ArrayList").unwrap().interface);
+
+        // `List<E>.get` hands back the E, which is the one thing the erased
+        // descriptor cannot say.
+        let get = held
+            .find_methods("java/util/List", "get", 1)
+            .into_iter()
+            .next()
+            .expect("List.get");
+        assert_eq!(get.returns_variable, Some(0));
+        assert!(get.interface);
+
+        eprintln!(
+            "java: {} classes of standard library, read from source",
+            held.len()
+        );
+    }
+
+    #[test]
+    fn the_library_says_the_same_shapes_the_runtime_does() {
+        let held = Classpath::new();
+        let shape = |owner: &str, name: &str, arity: usize| -> String {
+            held.find_methods(owner, name, arity)
+                .first()
+                .map(|one| one.descriptor())
+                .unwrap_or_else(|| format!("<no {owner}.{name}/{arity}>"))
+        };
+        for (owner, name, arity, wanted) in [
+            ("java/lang/String", "substring", 1, "(I)Ljava/lang/String;"),
+            (
+                "java/lang/String",
+                "format",
+                2,
+                "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/String;",
+            ),
+            ("java/lang/StringBuilder", "setLength", 1, "(I)V"),
+            ("java/lang/Math", "max", 2, "(II)I"),
+            ("java/util/List", "get", 1, "(I)Ljava/lang/Object;"),
+            (
+                "java/util/Map",
+                "put",
+                2,
+                "(Ljava/lang/Object;Ljava/lang/Object;)Ljava/lang/Object;",
+            ),
+            (
+                "java/util/EnumMap",
+                "put",
+                2,
+                "(Ljava/lang/Enum;Ljava/lang/Object;)Ljava/lang/Object;",
+            ),
+            (
+                "java/util/EnumSet",
+                "of",
+                2,
+                "(Ljava/lang/Enum;Ljava/lang/Enum;)Ljava/util/EnumSet;",
+            ),
+            (
+                "java/util/Arrays",
+                "asList",
+                1,
+                "([Ljava/lang/Object;)Ljava/util/List;",
+            ),
+            (
+                "java/util/Collections",
+                "addAll",
+                2,
+                "(Ljava/util/Collection;[Ljava/lang/Object;)Z",
+            ),
+            (
+                "java/util/Collections",
+                "max",
+                1,
+                "(Ljava/util/Collection;)Ljava/lang/Object;",
+            ),
+            (
+                "java/nio/file/Files",
+                "exists",
+                2,
+                "(Ljava/nio/file/Path;[Ljava/nio/file/LinkOption;)Z",
+            ),
+            (
+                "java/time/LocalDate",
+                "isBefore",
+                1,
+                "(Ljava/time/chrono/ChronoLocalDate;)Z",
+            ),
+            (
+                "java/time/Duration",
+                "between",
+                2,
+                "(Ljava/time/temporal/Temporal;Ljava/time/temporal/Temporal;)Ljava/time/Duration;",
+            ),
+            (
+                "java/time/format/DateTimeFormatter",
+                "format",
+                1,
+                "(Ljava/time/temporal/TemporalAccessor;)Ljava/lang/String;",
+            ),
+            (
+                "java/lang/MatchException",
+                "<init>",
+                2,
+                "(Ljava/lang/String;Ljava/lang/Throwable;)V",
+            ),
+        ] {
+            assert_eq!(shape(owner, name, arity), wanted, "{owner}.{name}");
+        }
+
+        // A field's type, which is what a `getstatic` claims.
+        let field = |owner: &str, name: &str| -> String {
+            held.find_field(owner, name)
+                .map(|(_, (_, what, _))| what.descriptor())
+                .unwrap_or_else(|| format!("<no {owner}#{name}>"))
+        };
+        assert_eq!(field("java/lang/Boolean", "TRUE"), "Ljava/lang/Boolean;");
+        assert_eq!(field("java/lang/Integer", "MAX_VALUE"), "I");
+        assert_eq!(field("java/lang/System", "out"), "Ljava/io/PrintStream;");
+        assert_eq!(field("java/lang/Math", "PI"), "D");
+
+        eprintln!("java: the library says the shapes the runtime says");
     }
 
     #[test]
@@ -23217,8 +26350,9 @@ public class Boxed {
         let (_, bytes) = compile_one(library, &empty()).unwrap();
         let class = crate::jvm::read(&bytes).unwrap();
         let mut classpath = Classpath::new();
+        let before = classpath.len();
         classpath.learn(&class).unwrap();
-        assert_eq!(classpath.len(), 1);
+        assert_eq!(classpath.len(), before + 1);
 
         let caller = r#"
             package com.my.app;
