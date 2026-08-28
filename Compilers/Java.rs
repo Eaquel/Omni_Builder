@@ -2727,6 +2727,14 @@ pub struct Unit {
     /// Its instance is held in a field, and a name this class cannot find is
     /// looked for there before it is refused.
     pub outer: Option<String>,
+    /// Whether this is the class a lambda came to.
+    ///
+    /// A lambda's body belongs to the method it was written in: `holds(one)`
+    /// inside a `default Rule<T> and(...)` means the interface's `holds`, not
+    /// the one this class is being written to hold. `javac` keeps the body in
+    /// the enclosing class and hands it a method handle; this writes a class,
+    /// so the difference has to be written down.
+    pub stands_for_a_lambda: bool,
     /// What a `sealed` type permits to extend it. Empty for everything else.
     /// This is what `sealed` comes to in a class file: a list, checked by the
     /// runtime rather than by the compiler alone.
@@ -3539,6 +3547,7 @@ impl Parser {
             static_setup,
             outer: None,
             permits,
+            stands_for_a_lambda: false,
             annotation,
             annotations,
             static_imports: Vec::new(),
@@ -4474,6 +4483,27 @@ impl Parser {
                 }
                 let (line, column) = (self.line(), self.column());
                 self.eat_word("final");
+                // `try (one; ...)`: something already made and already named,
+                // which Java has allowed since 9. It is the same thing as a
+                // resource written out, with a name nobody can collide with.
+                if matches!(self.here().token, Token::Identifier(_))
+                    && matches!(self.ahead(1), Token::Punctuation(";" | ")"))
+                {
+                    let named = self.want_name()?;
+                    resources.push(Positioned {
+                        node: Statement::Declare {
+                            what: Written::Inferred,
+                            name: format!("$closing{}", resources.len()),
+                            value: Some(Expression::Name(named)),
+                        },
+                        line,
+                        column,
+                    });
+                    if !self.eat_mark(";") {
+                        break;
+                    }
+                    continue;
+                }
                 let node = self.declaration()?;
                 let Statement::Declare { value: Some(_), .. } = &node else {
                     return Err(at(
@@ -6446,6 +6476,8 @@ struct Emitter<'a> {
     /// The classes written inside this method, and what has to be handed to
     /// each of them to make one.
     locally: Vec<Locally>,
+    /// Whether the method being written is a bridge nobody wrote.
+    writing_a_bridge: bool,
     static_: bool,
     /// What this method said it returns. A `return` is checked against it, and
     /// the first version of this did not do that -- so `int f() { return
@@ -6500,6 +6532,7 @@ impl<'a> Emitter<'a> {
             expecting: None,
             taken_apart: 0,
             locally: Vec::new(),
+            writing_a_bridge: false,
             static_,
             returns: Type::Void,
             slots: Vec::new(),
@@ -13614,9 +13647,15 @@ impl Emitter<'_> {
             other => other,
         };
         let Some(on) = on else {
-            let mut theirs: Vec<Method> = self
-                .unit
-                .methods
+            // A lambda's body belongs to the method it was written in, so a
+            // bare call in one means the enclosing class's method -- never the
+            // one this class was written to hold, which is the lambda itself.
+            let mine: &[Method] = if self.unit.stands_for_a_lambda && !self.writing_a_bridge {
+                &[]
+            } else {
+                &self.unit.methods
+            };
+            let mut theirs: Vec<Method> = mine
                 .iter()
                 .filter(|held| held.name == name && held.parameters.len() == arguments.len())
                 .cloned()
@@ -13625,9 +13664,7 @@ impl Emitter<'_> {
             // from its fixed ones upwards, so counting is not enough to find
             // one.
             if theirs.is_empty() {
-                theirs = self
-                    .unit
-                    .methods
+                theirs = mine
                     .iter()
                     .filter(|held| {
                         held.name == name
@@ -13708,6 +13745,11 @@ impl Emitter<'_> {
                         let shaped =
                             with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
                         self.arguments_for_signature(&shaped, arguments, line)?;
+                        let taken: i32 = signature
+                            .parameters
+                            .iter()
+                            .map(|one| i32::from(one.width()))
+                            .sum();
                         let descriptor = signature.descriptor();
                         let index = self.pool.method(
                             &signature.owner,
@@ -13715,12 +13757,20 @@ impl Emitter<'_> {
                             &descriptor,
                             signature.interface,
                         );
-                        self.op2(if signature.static_ { 0xb8 } else { 0xb6 }, index);
-                        let taken: i32 = signature
-                            .parameters
-                            .iter()
-                            .map(|one| i32::from(one.width()))
-                            .sum();
+                        // A method of an interface is reached with
+                        // `invokeinterface`, whatever it is being reached
+                        // from: the enclosing class of a lambda written in a
+                        // `default` method is that interface.
+                        match (signature.static_, signature.interface) {
+                            (true, _) => self.op2(0xb8, index),
+                            (false, false) => self.op2(0xb6, index),
+                            (false, true) => {
+                                self.code.push(0xb9);
+                                self.code.extend_from_slice(&index.to_be_bytes());
+                                self.code.push((taken + 1) as u8);
+                                self.code.push(0);
+                            }
+                        }
                         let popped = taken + i32::from(!signature.static_);
                         self.pops(popped);
                         self.pushes(&signature.returns);
@@ -17223,7 +17273,7 @@ impl Emitter<'_> {
         line: u32,
     ) -> Result<Type, Diagnostic> {
         let target = self.resolve(what, line)?;
-        self.synthesise(target, arguments, body, line)
+        self.synthesise(target, arguments, body, false, line)
     }
 
     /// `x -> ...`: the one method of an interface, written where it is
@@ -17365,7 +17415,7 @@ impl Emitter<'_> {
             }],
             instance_setup: Vec::new(),
         };
-        self.synthesise(target, &[], &made, line)
+        self.synthesise(target, &[], &made, true, line)
     }
 
     /// `Type::method`, `value::method` and `Type::new`.
@@ -17632,6 +17682,7 @@ impl Emitter<'_> {
         target: Type,
         arguments: &[Expression],
         body: &Body,
+        stands_for_a_lambda: bool,
         line: u32,
     ) -> Result<Type, Diagnostic> {
         let Type::Object(named, _) = target.clone() else {
@@ -17878,6 +17929,7 @@ impl Emitter<'_> {
             static_setup: body.static_setup.clone(),
             outer: outer.clone(),
             permits: Vec::new(),
+            stands_for_a_lambda,
             annotation: false,
             annotations: Vec::new(),
             static_imports: self.unit.static_imports.clone(),
@@ -19870,6 +19922,10 @@ pub fn compile_unit_in_nest(
             method.modifiers.static_,
             &mut made,
         );
+        // A bridge hands over to the method beside it, and says so with
+        // `this.` -- which in a class written for a lambda would otherwise
+        // mean the class the lambda was written in.
+        emitter.writing_a_bridge = method.bridge;
         emitter.open();
         if !method.modifiers.static_ {
             emitter.declare("this", Type::Object(this_class.clone(), Vec::new()));
@@ -26079,6 +26135,334 @@ public class Reading extends Exception {
                      table:1 not a number at 5/5"
                 );
                 eprintln!("java: four files, two packages, and javac's answer");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// Bridges, switches and the numbers at the edges: an abstract generic
+    /// class overridden twice with the type filled in and one of its methods
+    /// narrowed as well, an interface inheriting its one method and a class
+    /// reaching past it with `Named.super`, a `try` that closes something
+    /// already made, three shapes of `switch` including one over strings, a
+    /// labelled `break` out of a `try` with a `finally`, a `return` out of a
+    /// `synchronized` block inside a loop, and what the numbers do at the ends
+    /// of their ranges.
+    const BRIDGES_AND_SWITCHES: &str = r####"
+public class Gen {
+
+    static abstract class Box<T> {
+        abstract T get();
+        T orElse(T fallback) { T held = get(); return held == null ? fallback : held; }
+        @Override public String toString() { return "box(" + get() + ")"; }
+    }
+
+    static class IntBox extends Box<Integer> {
+        private final Integer held;
+        IntBox(Integer held) { this.held = held; }
+        @Override Integer get() { return held; }
+    }
+
+    static class TextBox extends Box<String> {
+        @Override String get() { return "text"; }
+        @Override String orElse(String fallback) { return get() + fallback; }
+    }
+
+    interface Maker<T> { T make(); }
+    interface Named extends Maker<String> { default String make() { return "named"; } }
+
+    static class Shouting implements Named {
+        @Override public String make() { return Named.super.make().toUpperCase(); }
+    }
+
+    static class Held implements AutoCloseable {
+        private final StringBuilder log;
+        private final String name;
+        Held(StringBuilder log, String name) { this.log = log; this.name = name; }
+        public void close() { log.append('c').append(name); }
+    }
+
+    static String weekday(int of) {
+        switch (of) {
+            case 1: case 7: return "weekend";
+            case 2: case 3: case 4: case 5: case 6: return "weekday";
+            default: return "none";
+        }
+    }
+
+    static int spread(int of) {
+        switch (of) {
+            case 1: return 1;
+            case 100: return 2;
+            case 10000: return 3;
+            case 1000000: return 4;
+            default: return 0;
+        }
+    }
+
+    static String word(String of) {
+        switch (of) {
+            case "Aa": return "one";
+            case "BB": return "two";
+            case "": return "empty";
+            default: return "other";
+        }
+    }
+
+    static String looping() {
+        StringBuilder out = new StringBuilder();
+        outer:
+        for (int i = 0; i < 4; i++) {
+            try {
+                if (i == 1) continue;
+                if (i == 3) break outer;
+                out.append(i);
+            } finally {
+                out.append('f');
+            }
+        }
+        return out.toString();
+    }
+
+    static int guarded(int of) {
+        synchronized (Gen.class) {
+            for (int i = 0; i < 10; i++) {
+                if (i == of) return i * 2;
+            }
+        }
+        return -1;
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        Box<Integer> box = new IntBox(7);
+        out.append(box.get() + 1).append(box.orElse(0)).append(box).append(' ');
+        Box<String> text = new TextBox();
+        out.append(text.get()).append(text.orElse("!")).append(' ');
+        Box<Integer> empty = new IntBox(null);
+        out.append(empty.orElse(9)).append(' ');
+
+        Maker<String> maker = new Shouting();
+        out.append(maker.make()).append(' ');
+
+        StringBuilder log = new StringBuilder();
+        Held one = new Held(log, "1");
+        try (one; Held two = new Held(log, "2")) {
+            log.append('b');
+        }
+        out.append(log).append(' ');
+
+        out.append(weekday(1)).append(weekday(3)).append(weekday(9)).append(' ');
+        out.append(spread(1)).append(spread(10000)).append(spread(5)).append(' ');
+        out.append(word("Aa")).append(word("BB")).append(word("")).append(word("z")).append(' ');
+        out.append(looping()).append(' ');
+        out.append(guarded(3)).append(guarded(20)).append(' ');
+
+        String escaped = "Aé\t|\"";
+        out.append(escaped.length()).append(escaped.charAt(0)).append(' ');
+
+        char[] letters = {'a', 'b', 'c'};
+        out.append(new String(letters, 1, 2)).append(' ');
+
+        out.append(Integer.valueOf(127) == Integer.valueOf(127))
+           .append(Integer.valueOf(1000) == Integer.valueOf(1000)).append(' ');
+
+        long big = Long.MAX_VALUE;
+        out.append(big + 1).append(' ');
+        out.append((int) 3.99).append((int) -3.99).append((long) 1e19).append(' ');
+        out.append(1 / 0.0).append('/').append(-1 / 0.0).append('/').append(0.0 / 0.0);
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn bridges_switches_and_the_edges_of_numbers_all_run() {
+        let produced = compile(BRIDGES_AND_SWITCHES, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Gen") {
+            None => eprintln!("java: no JVM here to run the bridges"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "87box(7) texttext! 9 NAMED bc2c1 weekendweekdaynone 130 \
+                     onetwoemptyother 0ff2ff 6-1 5A bc truefalse \
+                     -9223372036854775808 3-39223372036854775807 Infinity/-Infinity/NaN"
+                );
+                eprintln!("java: bridges, switches, and the edges of numbers");
+            }
+        }
+
+        let translated: Vec<_> = produced
+            .iter()
+            .map(|(file, held)| {
+                let class = crate::jvm::read(held).unwrap_or_else(|_| panic!("read {file}"));
+                crate::dalvik::translate_class(&class)
+                    .unwrap_or_else(|refused| panic!("{file} to Dalvik: {refused:?}"))
+            })
+            .collect();
+        let dex = crate::dexwrite::write(&translated, &[]).expect("and reach a dex");
+        let mut sink = crate::diag::Sink::new();
+        crate::dex::read(&dex, &mut sink).expect("which our own reader reads");
+        assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
+    }
+
+    /// A lambda written inside a `default` method, which is the one place
+    /// where what `this` means decides whether the program runs or spins:
+    /// `holds(one)` inside `default Rule<T> and(...)` is the interface's, not
+    /// the one the lambda is being written to be.
+    ///
+    /// With it: a generic interface with a static factory taking explicit type
+    /// arguments, an enum whose constants answer for themselves and are
+    /// switched over, a generic method flipping a map, varargs handed nothing
+    /// and handed an array, a generic method with a bound, nested loops with
+    /// `break` and `continue`, and a list of lists.
+    const A_LAMBDA_IN_A_DEFAULT_METHOD: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public class Big {
+
+    interface Rule<T> {
+        boolean holds(T one);
+        default Rule<T> and(Rule<T> other) {
+            return value -> holds(value) && other.holds(value);
+        }
+        static <X> Rule<X> always() { return one -> true; }
+    }
+
+    static class Chain<T> {
+        private final List<Rule<T>> rules = new ArrayList<Rule<T>>();
+        Chain<T> add(Rule<T> one) { rules.add(one); return this; }
+        boolean all(T value) {
+            for (Rule<T> one : rules) {
+                if (!one.holds(value)) return false;
+            }
+            return true;
+        }
+    }
+
+    enum Kind {
+        SMALL(1) { String said() { return "small" + weight(); } },
+        LARGE(9) { String said() { return "large" + weight(); } };
+
+        private final int weight;
+        Kind(int weight) { this.weight = weight; }
+        int weight() { return weight; }
+        abstract String said();
+
+        static Kind of(int size) { return size < 5 ? SMALL : LARGE; }
+    }
+
+    static <K, V> Map<V, K> flipped(Map<K, V> of) {
+        Map<V, K> out = new HashMap<V, K>();
+        for (Map.Entry<K, V> one : of.entrySet()) out.put(one.getValue(), one.getKey());
+        return out;
+    }
+
+    static int sum(int... of) {
+        int total = 0;
+        for (int one : of) total += one;
+        return total;
+    }
+
+    static <T extends Comparable<T>> T middle(List<T> of) {
+        List<T> copy = new ArrayList<T>(of);
+        java.util.Collections.sort(copy);
+        return copy.get(copy.size() / 2);
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        Rule<String> notEmpty = one -> !one.isEmpty();
+        Rule<String> shortEnough = one -> one.length() < 4;
+        out.append(notEmpty.and(shortEnough).holds("abc"))
+           .append(notEmpty.and(shortEnough).holds("abcde"))
+           .append(Rule.<String>always().holds("")).append(' ');
+
+        Chain<String> chain = new Chain<String>().add(notEmpty).add(shortEnough);
+        out.append(chain.all("ab")).append(chain.all("")).append(' ');
+
+        out.append(Kind.of(2).said()).append('/').append(Kind.of(7).said()).append(' ');
+        for (Kind one : Kind.values()) out.append(one.name()).append(one.ordinal());
+        out.append(' ');
+        switch (Kind.of(9)) {
+            case SMALL -> out.append("s");
+            case LARGE -> out.append("l");
+        }
+        out.append(' ');
+
+        Map<String, Integer> ages = new HashMap<String, Integer>();
+        ages.put("a", 1);
+        ages.put("b", 2);
+        Map<Integer, String> back = flipped(ages);
+        out.append(back.get(2)).append(back.size()).append(' ');
+
+        out.append(sum()).append(sum(1)).append(sum(1, 2, 3)).append(sum(new int[] {4, 5}))
+           .append(' ');
+
+        out.append(middle(Arrays.asList(3, 1, 2))).append(middle(Arrays.asList("b", "a", "c")))
+           .append(' ');
+
+        StringBuilder deep = new StringBuilder();
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) {
+                if (j > i) continue;
+                if (i == 2 && j == 2) break;
+                deep.append(i).append(j);
+            }
+        }
+        out.append(deep).append(' ');
+
+        int[] counts = new int[5];
+        for (String one : "a bb ccc dddd".split(" ")) counts[one.length()]++;
+        out.append(Arrays.toString(counts)).append(' ');
+
+        List<List<String>> nested = new ArrayList<List<String>>();
+        nested.add(Arrays.asList("x", "y"));
+        nested.add(new ArrayList<String>());
+        nested.get(1).add("z");
+        out.append(nested).append(nested.get(0).get(1)).append(' ');
+
+        out.append(String.valueOf(new StringBuilder("rev").reverse())).append(' ');
+        out.append("a,b,,c,".split(",").length).append("a,b,,c,".split(",", -1).length);
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn a_lambda_written_in_a_default_method_calls_the_interface_it_was_written_in() {
+        let produced = compile(A_LAMBDA_IN_A_DEFAULT_METHOD, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Big") {
+            None => eprintln!("java: no JVM here to run a lambda in a default method"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "truefalsetrue truefalse small1/large9 SMALL0LARGE1 l b2 0169 2b \
+                     0010112021 [0, 1, 1, 1, 1] [[x, y], [z]]y ver 45"
+                );
+                eprintln!("java: a lambda in a default method calls what it was written in");
             }
         }
 
