@@ -8343,43 +8343,106 @@ pub mod resources {
 
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum Kind {
+        Anim,
+        Animator,
         Bool,
         Color,
         Dimension,
         Drawable,
+        Font,
         Id,
         Integer,
+        Interpolator,
+        Layout,
+        Menu,
         Mipmap,
+        Raw,
         String,
         Style,
+        Transition,
+        Xml,
     }
 
     impl Kind {
         pub const fn as_str(self) -> &'static str {
             match self {
+                Kind::Anim => "anim",
+                Kind::Animator => "animator",
                 Kind::Bool => "bool",
                 Kind::Color => "color",
                 Kind::Dimension => "dimen",
                 Kind::Drawable => "drawable",
+                Kind::Font => "font",
                 Kind::Id => "id",
                 Kind::Integer => "integer",
+                Kind::Interpolator => "interpolator",
+                Kind::Layout => "layout",
+                Kind::Menu => "menu",
                 Kind::Mipmap => "mipmap",
+                Kind::Raw => "raw",
                 Kind::String => "string",
                 Kind::Style => "style",
+                Kind::Transition => "transition",
+                Kind::Xml => "xml",
             }
         }
 
         pub const ALL: &'static [Kind] = &[
+            Kind::Anim,
+            Kind::Animator,
             Kind::Bool,
             Kind::Color,
             Kind::Dimension,
             Kind::Drawable,
+            Kind::Font,
             Kind::Id,
             Kind::Integer,
+            Kind::Interpolator,
+            Kind::Layout,
+            Kind::Menu,
             Kind::Mipmap,
+            Kind::Raw,
             Kind::String,
             Kind::Style,
+            Kind::Transition,
+            Kind::Xml,
         ];
+
+        /// Whether what this kind holds is a file in the package rather than a
+        /// value in the table. A `layout` is a compiled XML sitting at
+        /// `res/layout/main.xml`, and the entry for it is the path; a `string`
+        /// is the text itself.
+        pub const fn is_a_file(self) -> bool {
+            matches!(
+                self,
+                Kind::Anim
+                    | Kind::Animator
+                    | Kind::Drawable
+                    | Kind::Font
+                    | Kind::Interpolator
+                    | Kind::Layout
+                    | Kind::Menu
+                    | Kind::Mipmap
+                    | Kind::Raw
+                    | Kind::Transition
+                    | Kind::Xml
+            )
+        }
+
+        /// Whether a file of this kind is XML that becomes binary XML in the
+        /// package. A `raw` file is carried as it is; a `layout` is compiled.
+        pub const fn is_compiled_xml(self) -> bool {
+            matches!(
+                self,
+                Kind::Anim
+                    | Kind::Animator
+                    | Kind::Interpolator
+                    | Kind::Layout
+                    | Kind::Menu
+                    | Kind::Transition
+                    | Kind::Xml
+            )
+        }
 
         pub fn parse(value: &str) -> Option<Kind> {
             Kind::ALL
@@ -8968,6 +9031,36 @@ pub mod resources {
             )
         }
 
+        /// Declares an `id` the way `@+id/save` in a layout does.
+        ///
+        /// An identifier is all it is: nothing is stored against it, and
+        /// `findViewById(R.id.save)` is the whole of what it is for. Written
+        /// twice in one project it is still one identifier, which is why a
+        /// name already declared is not an error here.
+        pub fn declare_id(&mut self, name: &str, origin: &str, sink: &mut Sink) -> bool {
+            if validate_name(name).is_err() {
+                return true;
+            }
+            if self
+                .entries
+                .iter()
+                .any(|held| held.kind == Kind::Id && held.name == name)
+            {
+                return true;
+            }
+            self.push(
+                Entry {
+                    kind: Kind::Id,
+                    name: name.to_string(),
+                    config: Config::DEFAULT,
+                    value: Value::Empty,
+                    origin: origin.to_string(),
+                    position: Position::default(),
+                },
+                sink,
+            )
+        }
+
         fn push(&mut self, entry: Entry, sink: &mut Sink) -> bool {
             if self.entries.len() >= MAX_ENTRIES {
                 sink.emit(
@@ -9395,7 +9488,17 @@ pub mod resources {
                 }
             },
             Kind::Id => Some(Value::Empty),
-            Kind::Drawable | Kind::Mipmap | Kind::Style => {
+            Kind::Anim
+            | Kind::Animator
+            | Kind::Drawable
+            | Kind::Font
+            | Kind::Interpolator
+            | Kind::Layout
+            | Kind::Menu
+            | Kind::Mipmap
+            | Kind::Raw
+            | Kind::Transition
+            | Kind::Xml => {
                 sink.emit(
                     reject(
                         "E9045",
@@ -9404,6 +9507,18 @@ pub mod resources {
                         position,
                     )
                     .with_suggestion("It is declared by the file that holds it."),
+                );
+                None
+            }
+            Kind::Style => {
+                sink.emit(
+                    reject(
+                        "E9045",
+                        format!("A {kind} cannot be given a value in a values file."),
+                        origin,
+                        position,
+                    )
+                    .with_suggestion("A style is written as a `<style>` with items inside it."),
                 );
                 None
             }
@@ -14931,12 +15046,195 @@ pub mod axml {
 
     const TYPE_REFERENCE: u8 = 0x01;
     const TYPE_STRING: u8 = 0x03;
+    const TYPE_FLOAT: u8 = 0x04;
+    const TYPE_DIMENSION: u8 = 0x05;
+    const TYPE_FRACTION: u8 = 0x06;
     const TYPE_INT_DEC: u8 = 0x10;
     const TYPE_INT_HEX: u8 = 0x11;
     const TYPE_INT_BOOLEAN: u8 = 0x12;
+    const TYPE_INT_COLOR_ARGB8: u8 = 0x1c;
+    const TYPE_INT_COLOR_RGB8: u8 = 0x1d;
+    const TYPE_INT_COLOR_ARGB4: u8 = 0x1e;
+    const TYPE_INT_COLOR_RGB4: u8 = 0x1f;
 
     const NO_ENTRY: u32 = 0xffff_ffff;
     const BOOLEAN_TRUE: u32 = 0xffff_ffff;
+
+    /// A number with a unit, as the four bytes a device reads.
+    ///
+    /// The low four bits are the unit, the two above them say where the point
+    /// sits, and the top twenty-four are the number itself. Writing `16dp` as
+    /// the text `16dp` instead produces a layout the inflater throws on, so it
+    /// is written the way the platform packs it and no other way.
+    fn packed(value: f64, unit: u8) -> u32 {
+        let negative = value < 0.0;
+        let held = if negative { -value } else { value };
+        let bits = (held * f64::from(1u32 << 23) + 0.5) as u64;
+        let (radix, shift) = if bits & 0x7f_ffff == 0 {
+            (0u32, 23u32)
+        } else if bits & 0xffff_ffff_ff80_0000 == 0 {
+            (3, 0)
+        } else if bits & 0xffff_ffff_8000_0000 == 0 {
+            (2, 8)
+        } else if bits & 0xffff_ff80_0000_0000 == 0 {
+            (1, 16)
+        } else {
+            (0, 23)
+        };
+        let mantissa = ((bits >> shift) & 0xff_ffff) as u32;
+        let mantissa = if negative {
+            mantissa.wrapping_neg() & 0xff_ffff
+        } else {
+            mantissa
+        };
+        (mantissa << 8) | (radix << 4) | u32::from(unit)
+    }
+
+    /// `16dp`, `14sp`, `2px` and the rest, as the unit the platform numbers
+    /// them by. Nothing where what follows the number is not a unit.
+    fn dimension(raw: &str) -> Option<u32> {
+        for (suffix, unit) in [
+            ("dip", 1u8),
+            ("dp", 1),
+            ("sp", 2),
+            ("px", 0),
+            ("pt", 3),
+            ("in", 4),
+            ("mm", 5),
+        ] {
+            if let Some(number) = raw.strip_suffix(suffix) {
+                let value: f64 = number.trim().parse().ok()?;
+                return Some(packed(value, unit));
+            }
+        }
+        None
+    }
+
+    /// `50%` of the thing itself, and `50%p` of what it is inside.
+    fn fraction(raw: &str) -> Option<u32> {
+        let (number, unit) = match raw.strip_suffix("%p") {
+            Some(number) => (number, 1u8),
+            None => (raw.strip_suffix('%')?, 0),
+        };
+        let value: f64 = number.trim().parse().ok()?;
+        Some(packed(value / 100.0, unit))
+    }
+
+    /// `#rgb`, `#argb`, `#rrggbb` and `#aarrggbb`, each with the kind the
+    /// platform reads it back as.
+    fn colour(raw: &str) -> Option<(u8, u32)> {
+        let digits = raw.strip_prefix('#')?;
+        if !digits.chars().all(|held| held.is_ascii_hexdigit()) {
+            return None;
+        }
+        let widen = |held: &str| -> Option<u32> {
+            let mut out = String::with_capacity(held.len() * 2);
+            for one in held.chars() {
+                out.push(one);
+                out.push(one);
+            }
+            u32::from_str_radix(&out, 16).ok()
+        };
+        match digits.len() {
+            3 => Some((TYPE_INT_COLOR_RGB4, 0xff00_0000 | widen(digits)?)),
+            4 => Some((TYPE_INT_COLOR_ARGB4, widen(digits)?)),
+            6 => Some((
+                TYPE_INT_COLOR_RGB8,
+                0xff00_0000 | u32::from_str_radix(digits, 16).ok()?,
+            )),
+            8 => Some((TYPE_INT_COLOR_ARGB8, u32::from_str_radix(digits, 16).ok()?)),
+            _ => None,
+        }
+    }
+
+    /// What the framework says an attribute accepts, and the names it gives
+    /// its own values.
+    fn what_it_accepts(local: &str) -> Option<(&'static str, &'static [(&'static str, u32)])> {
+        crate::compilers::android::THE_FRAMEWORK_ATTRIBUTES
+            .iter()
+            .find(|(name, _, _, _)| *name == local)
+            .map(|(_, _, formats, symbols)| (*formats, *symbols))
+    }
+
+    /// One attribute's value, typed the way the attribute says it should be.
+    ///
+    /// `android:orientation="vertical"` is the number one; `16dp` is a packed
+    /// dimension; `center|top` is two flags added together. What the attribute
+    /// does not accept is not tried: an `enum` that also accepts a dimension
+    /// is `match_parent` first and a number second, which is the order the
+    /// platform reads them in.
+    fn typed_for(local: &str, raw: &str) -> Option<(u8, u32)> {
+        let (formats, symbols) = what_it_accepts(local)?;
+        let accepts = |what: &str| formats.split('|').any(|held| held == what);
+
+        // A name the attribute gives one of its own values, or several of them
+        // added together where it takes flags.
+        if !symbols.is_empty() {
+            let found = |one: &str| {
+                symbols
+                    .iter()
+                    .find(|(name, _)| *name == one.trim())
+                    .map(|(_, value)| *value)
+            };
+            if accepts("flags") {
+                let mut held = 0u32;
+                let mut every = !raw.is_empty();
+                for one in raw.split('|') {
+                    match found(one) {
+                        Some(value) => held |= value,
+                        None => {
+                            every = false;
+                            break;
+                        }
+                    }
+                }
+                if every {
+                    return Some((TYPE_INT_HEX, held));
+                }
+            } else if let Some(value) = found(raw) {
+                return Some((TYPE_INT_DEC, value));
+            }
+        }
+
+        if accepts("color") {
+            if let Some(held) = colour(raw) {
+                return Some(held);
+            }
+        }
+        if accepts("dimension") {
+            if let Some(held) = dimension(raw) {
+                return Some((TYPE_DIMENSION, held));
+            }
+        }
+        if accepts("fraction") {
+            if let Some(held) = fraction(raw) {
+                return Some((TYPE_FRACTION, held));
+            }
+        }
+        if accepts("boolean") {
+            match raw {
+                "true" => return Some((TYPE_INT_BOOLEAN, BOOLEAN_TRUE)),
+                "false" => return Some((TYPE_INT_BOOLEAN, 0)),
+                _ => {}
+            }
+        }
+        if accepts("integer") || accepts("enum") || accepts("flags") {
+            if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+                if let Ok(value) = u32::from_str_radix(hex, 16) {
+                    return Some((TYPE_INT_HEX, value));
+                }
+            }
+            if let Ok(value) = raw.parse::<i32>() {
+                return Some((TYPE_INT_DEC, value as u32));
+            }
+        }
+        if accepts("float") {
+            if let Ok(value) = raw.parse::<f32>() {
+                return Some((TYPE_FLOAT, value.to_bits()));
+            }
+        }
+        None
+    }
 
     pub const ATTRIBUTES: &[(&str, u32)] = &[
         ("theme", 0x0101_0000),
@@ -14982,10 +15280,28 @@ pub mod axml {
         ("hasFragileUserData", 0x0101_059a),
     ];
 
+    /// What the framework calls an attribute, as the number a binary XML file
+    /// carries.
+    ///
+    /// The list above first, because two of its rows -- `compileSdkVersion`
+    /// and the codename beside it -- are attributes the platform keeps to
+    /// itself and does not put in `android.R.attr`, and because every other
+    /// row of it is one `aapt2` has agreed with. Then the platform's own,
+    /// which is where the fifteen hundred a layout reaches for live.
     pub fn attribute_id(name: &str) -> Option<u32> {
-        ATTRIBUTES
+        if let Some((_, id)) = ATTRIBUTES.iter().find(|(known, _)| *known == name) {
+            return Some(*id);
+        }
+        framework_id("attr", name)
+    }
+
+    /// The same question for any kind of framework resource, which is what
+    /// `@android:id/text1` and `@android:style/Theme` are asking.
+    pub fn framework_id(kind: &str, name: &str) -> Option<u32> {
+        crate::compilers::android::THE_FRAMEWORK_IDENTIFIERS
             .iter()
-            .find(|(known, _)| *known == name)
+            .find(|(held, _)| *held == kind)
+            .and_then(|(_, rows)| rows.iter().find(|(known, _)| *known == name))
             .map(|(_, id)| *id)
     }
 
@@ -15129,7 +15445,13 @@ pub mod axml {
                 continue;
             }
             pool.add_other(local);
-            if matches!(classify(&attribute.value)?, Value::Text) {
+            // A typed value keeps the text it was written as beside it, which
+            // is what `aapt2` writes and what a dump reads back. So anything
+            // that is not a reference has its text in the pool, whether the
+            // value written out beside it is the text or a number.
+            if !attribute.value.starts_with('@')
+                || matches!(classify(&attribute.value)?, Value::Text)
+            {
                 pool.add_other(&attribute.value);
             }
         }
@@ -15252,17 +15574,31 @@ pub mod axml {
             out.extend_from_slice(&namespace.to_le_bytes());
             out.extend_from_slice(&pool.index_of(local)?.to_le_bytes());
 
-            let value = classify(raw)?;
-            let (raw_index, kind, data) = match value {
-                Value::Text => {
-                    let index = pool.index_of(raw)?;
-                    (index, TYPE_STRING, index)
-                }
-                Value::Reference(id) => (NO_ENTRY, TYPE_REFERENCE, id),
-                Value::Boolean(true) => (NO_ENTRY, TYPE_INT_BOOLEAN, BOOLEAN_TRUE),
-                Value::Boolean(false) => (NO_ENTRY, TYPE_INT_BOOLEAN, 0),
-                Value::Decimal(number) => (NO_ENTRY, TYPE_INT_DEC, number as u32),
-                Value::Hex(number) => (NO_ENTRY, TYPE_INT_HEX, number),
+            // A reference is settled before anything else: `@0x7f060000` is
+            // an identifier whatever the attribute says it accepts. After
+            // that, what the framework says this attribute takes decides how
+            // the value is written -- and only for the framework's own, since
+            // an attribute nobody declared has nothing saying what it holds.
+            let typed = if raw.starts_with('@') || uri.is_empty() {
+                None
+            } else {
+                typed_for(local, raw)
+            };
+            let (raw_index, kind, data) = match typed {
+                // The text is kept beside the typed value, which is what
+                // `aapt2` writes and what a person reading a dump sees.
+                Some((kind, data)) => (pool.index_of(raw)?, kind, data),
+                None => match classify(raw)? {
+                    Value::Text => {
+                        let index = pool.index_of(raw)?;
+                        (index, TYPE_STRING, index)
+                    }
+                    Value::Reference(id) => (NO_ENTRY, TYPE_REFERENCE, id),
+                    Value::Boolean(true) => (NO_ENTRY, TYPE_INT_BOOLEAN, BOOLEAN_TRUE),
+                    Value::Boolean(false) => (NO_ENTRY, TYPE_INT_BOOLEAN, 0),
+                    Value::Decimal(number) => (NO_ENTRY, TYPE_INT_DEC, number as u32),
+                    Value::Hex(number) => (NO_ENTRY, TYPE_INT_HEX, number),
+                },
             };
             out.extend_from_slice(&raw_index.to_le_bytes());
             out.extend_from_slice(&8u16.to_le_bytes());
@@ -18669,14 +19005,90 @@ pub mod scaffold {
         found
     }
 
+    /// Every values file the project holds, whichever folder and whichever
+    /// name.
+    ///
+    /// A person writes `strings.xml` and then `colors.xml` and `dimens.xml`
+    /// and `arrays.xml` beside it, in `values` and in `values-tr` and in
+    /// `values-night`, and every one of them is read. What each holds is
+    /// decided by the elements inside it, not by the name of the file.
     pub fn values_files(root: &str) -> Vec<(String, String)> {
         let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
         let mut found = Vec::new();
-        for (locale, _) in LOCALES {
-            let folder = values_folder(locale);
-            let path = format!("{base}/{folder}/{STRINGS_FILE}");
-            if let Ok(text) = std::fs::read_to_string(&path) {
-                found.push((folder, text));
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return found;
+        };
+        let mut folders: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name == "values" || name.starts_with("values-"))
+            .collect();
+        folders.sort();
+        for folder in folders {
+            let Ok(inside) = std::fs::read_dir(format!("{base}/{folder}")) else {
+                continue;
+            };
+            let mut files: Vec<std::path::PathBuf> = inside
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|held| held == "xml"))
+                .collect();
+            // In a settled order, so two builds of one project come out the
+            // same way.
+            files.sort();
+            for path in files {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    found.push((folder.clone(), text));
+                }
+            }
+        }
+        found
+    }
+
+    /// Every resource the project holds as a file of its own: a layout, a
+    /// menu, a drawable, an animation, whatever is in `res` and is not a
+    /// values folder.
+    ///
+    /// The folder decides the kind and the qualifiers; the file name, without
+    /// its extension, is the name it is reached by. Nothing here reads the
+    /// file: what is in it is the resource, and the build decides what to do
+    /// with it.
+    pub fn resource_files(root: &str) -> Vec<Supplied> {
+        let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return found;
+        };
+        let mut folders: Vec<String> = entries
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter(|name| name != "values" && !name.starts_with("values-"))
+            .collect();
+        folders.sort();
+        for folder in folders {
+            let Ok(inside) = std::fs::read_dir(format!("{base}/{folder}")) else {
+                continue;
+            };
+            let mut files: Vec<std::path::PathBuf> =
+                inside.flatten().map(|entry| entry.path()).collect();
+            files.sort();
+            for path in files {
+                if path.is_dir() {
+                    continue;
+                }
+                let Some(name) = path.file_name().and_then(|held| held.to_str()) else {
+                    continue;
+                };
+                let Ok(bytes) = std::fs::read(&path) else {
+                    continue;
+                };
+                found.push(Supplied {
+                    folder: folder.clone(),
+                    name: name.to_string(),
+                    bytes,
+                });
             }
         }
         found
@@ -23241,6 +23653,9 @@ pub mod builder {
         pub icon: Option<Vec<u8>>,
         pub launcher: Vec<crate::scaffold::Supplied>,
         pub values: Vec<(String, String)>,
+        /// Every resource the project holds as a file of its own: a layout, a
+        /// menu, a drawable, whatever `res` holds outside a values folder.
+        pub resources: Vec<crate::scaffold::Supplied>,
     }
 
     pub struct Icons {
@@ -23269,15 +23684,45 @@ pub mod builder {
             .collect())
     }
 
+    /// Every `@+id/name` written anywhere in an XML resource.
+    ///
+    /// A layout declares the identifiers it uses, and `findViewById(R.id.save)`
+    /// is how the code reaches them. They are found before the table is
+    /// compiled, because an identifier that is not in it is one the generated
+    /// `R` does not carry.
+    fn ids_declared_in(element: &crate::xml::Element, into: &mut Vec<String>) {
+        for attribute in &element.attributes {
+            let Some(reference) = crate::resources::Reference::parse(&attribute.value) else {
+                continue;
+            };
+            if reference.declares
+                && reference.kind == crate::resources::Kind::Id
+                && !into.contains(&reference.name)
+            {
+                into.push(reference.name.clone());
+            }
+        }
+        for child in &element.children {
+            ids_declared_in(child, into);
+        }
+    }
+
+    pub fn compile_resources_for_test(
+        project: &Project,
+        sink: &mut Sink,
+    ) -> Result<Option<Icons>, Diagnostic> {
+        compile_resources(project, sink)
+    }
+
     fn compile_resources(project: &Project, sink: &mut Sink) -> Result<Option<Icons>, Diagnostic> {
         let set = launcher_icons(project)?;
-        if set.is_empty() && project.values.is_empty() {
+        if set.is_empty() && project.values.is_empty() && project.resources.is_empty() {
             return Ok(None);
         }
 
         let mut table =
             crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
-        let mut files = Vec::with_capacity(set.len());
+        let mut files = Vec::with_capacity(set.len() + project.resources.len());
 
         for made in &set {
             let entry = entry_for(&made.folder, &made.name);
@@ -23289,6 +23734,59 @@ pub mod builder {
                 .with_context(format!("Entry: {entry}")));
             }
             files.push((entry, made.bytes.clone()));
+        }
+
+        // Every other file in `res`: a layout, a menu, a drawable, whatever is
+        // there. Each is an entry in the table pointing at where it sits in
+        // the package, and each XML one is parsed here so the identifiers it
+        // declares are in the table before the table is compiled.
+        let mut compiling: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
+        for held in &project.resources {
+            // The launcher icons above are read off the same folders. One
+            // resource is one entry, and registering it twice is what the
+            // table refuses.
+            if files
+                .iter()
+                .any(|(entry, _)| *entry == format!("res/{}/{}", held.folder, held.name))
+            {
+                continue;
+            }
+            let (kind, _) =
+                crate::resources::Config::parse_directory(&held.folder).map_err(|why| {
+                    fail("EB046", "A resource folder is not one this build reads.")
+                        .with_context(format!("Folder: {}", held.folder))
+                        .with_context(format!("Reported: {why}"))
+                })?;
+            let entry = format!("res/{}/{}", held.folder, held.name);
+            if !table.read_file(&held.folder, &held.name, &entry, sink) {
+                return Err(
+                    fail("EB047", "A resource could not be given an identifier.")
+                        .with_context(format!("Entry: {entry}")),
+                );
+            }
+            if kind.is_compiled_xml() {
+                let mut named = crate::diag::Sink::new();
+                let text = String::from_utf8_lossy(&held.bytes).to_string();
+                let Some(parsed) = crate::xml::parse(&text, &entry, &mut named) else {
+                    return Err(fail("EB048", "A resource file could not be read as XML.")
+                        .with_context(format!("File: {entry}"))
+                        .with_suggestion(
+                            "A layout, a menu and an animation are XML, and one that does                              not parse would be written into the package as bytes no device                              can read.",
+                        ));
+                };
+                let mut declared = Vec::new();
+                ids_declared_in(&parsed, &mut declared);
+                for name in declared {
+                    if !table.declare_id(&name, &entry, sink) {
+                        return Err(fail("EB049", "An identifier could not be declared.")
+                            .with_context(format!("File: {entry}"))
+                            .with_context(format!("Identifier: {name}")));
+                    }
+                }
+                compiling.push((entry, held.clone()));
+            } else {
+                files.push((entry, held.bytes.clone()));
+            }
         }
 
         for (folder, text) in &project.values {
@@ -23313,6 +23811,27 @@ pub mod builder {
         let compiled = table
             .compile(sink)
             .ok_or_else(|| fail("EB041", "The resource table could not be built."))?;
+
+        // And now the identifiers are settled, every XML resource is written
+        // as the binary XML a device reads, with each `@string/x` in it
+        // replaced by the number it came to.
+        for (entry, held) in compiling {
+            let mut named = crate::diag::Sink::new();
+            let text = String::from_utf8_lossy(&held.bytes).to_string();
+            let Some(mut parsed) = crate::xml::parse(&text, &entry, &mut named) else {
+                return Err(fail("EB048", "A resource file could not be read as XML.")
+                    .with_context(format!("File: {entry}")));
+            };
+            resolve_references(&mut parsed, Some(&compiled))?;
+            let bytes = crate::axml::encode(&parsed).map_err(|why| {
+                why.with_context(format!("File: {entry}"))
+                    .with_suggestion(
+                        "Every attribute a resource carries is written with the identifier                          the platform gives it. One this build cannot name would be dropped                          by Android without a word, so it is refused instead.",
+                    )
+            })?;
+            files.push((entry, bytes));
+        }
+
         Ok(Some(Icons { compiled, files }))
     }
 
@@ -23330,6 +23849,26 @@ pub mod builder {
             let Some(reference) = crate::resources::Reference::parse(&attribute.value) else {
                 continue;
             };
+            // `@android:id/text1` and `@android:style/Theme.NoTitleBar` name
+            // the framework's own, which the project does not hold and does
+            // not have to: the platform gave them their numbers.
+            if reference.package.as_deref() == Some("android") {
+                let Some(found) =
+                    crate::axml::framework_id(reference.kind.as_str(), &reference.name)
+                else {
+                    return Err(fail(
+                        "EB045",
+                        "That is not a resource the platform declares.",
+                    )
+                    .with_context(format!("Attribute: {}", attribute.name))
+                    .with_context(format!("Value: {}", attribute.value))
+                    .with_suggestion(
+                        "Every identifier the platform hands out is written into this                          build. A name that is not among them is one no device has.",
+                    ));
+                };
+                attribute.value = format!("@0x{found:08x}");
+                continue;
+            }
             let resolved = compiled
                 .and_then(|table| table.id(reference.kind, &reference.name))
                 .ok_or_else(|| {
@@ -23435,6 +23974,7 @@ pub mod builder {
             icon: None,
             launcher: Vec::new(),
             values: Vec::new(),
+            resources: Vec::new(),
         }
     }
 
@@ -23545,6 +24085,7 @@ pub mod builder {
             icon: None,
             launcher: Vec::new(),
             values: Vec::new(),
+            resources: Vec::new(),
         })
     }
 
@@ -23560,6 +24101,7 @@ pub mod builder {
         project.icon = crate::scaffold::icon_bytes(root);
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
+        project.resources = crate::scaffold::resource_files(root);
 
         // The identifiers the resource table hands out, worked out here rather
         // than at packaging time, because `R.string.app_name` is how a person
@@ -27166,6 +27708,268 @@ mod tests {
         assert!(!sink.has_blocking());
     }
 
+    const A_LAYOUT: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp"
+    android:background="@color/back">
+
+    <TextView
+        android:id="@+id/title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/app_name"
+        android:textSize="@dimen/big"
+        android:textColor="@color/ink"
+        android:gravity="center" />
+
+    <EditText
+        android:id="@+id/entry"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="@string/hint"
+        android:inputType="text" />
+
+    <Button
+        android:id="@+id/save"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center_horizontal"
+        android:text="@string/save"
+        android:enabled="true" />
+
+    <ListView
+        android:id="@+id/list"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1" />
+</LinearLayout>
+"####;
+
+    const A_MENU: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:id="@+id/clear"
+        android:title="@string/clear"
+        android:showAsAction="never" />
+</menu>
+"####;
+
+    const THE_WORDS: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Omni</string>
+    <string name="hint">say something</string>
+    <string name="save">Save</string>
+    <string name="clear">Clear</string>
+</resources>
+"####;
+
+    const THE_COLOURS: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="back">#101014</color>
+    <color name="ink">#FFFFFF</color>
+</resources>
+"####;
+
+    const THE_SIZES: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="big">28sp</dimen>
+</resources>
+"####;
+
+    const A_MANIFEST: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.my.app">
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
+    <application android:label="@string/app_name" android:allowBackup="false">
+        <activity android:name=".Screen" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+"####;
+
+    /// A layout, a menu and three values files become a package aapt2 reads
+    /// back the way it wrote its own.
+    ///
+    /// This is the shape of every Android project: XML in `Res`, identifiers
+    /// declared by `@+id` where they are used, `@string` and `@color` and
+    /// `@dimen` pointing at values, and code reaching all of it through `R`.
+    /// What comes out is compared with what `aapt2` makes of the same folder,
+    /// attribute for attribute.
+    #[test]
+    fn a_layout_and_a_menu_become_what_aapt2_makes_of_them() {
+        let directory = temp_directory("omni-layout");
+        let res = directory.join("Res");
+        for folder in ["layout", "menu", "values"] {
+            std::fs::create_dir_all(res.join(folder)).unwrap();
+        }
+        // The declaration has to be the first thing in the file, and a raw
+        // string written in Rust begins with the newline after its quote.
+        for (path, text) in [
+            ("layout/screen.xml", A_LAYOUT),
+            ("menu/main.xml", A_MENU),
+            ("values/strings.xml", THE_WORDS),
+            ("values/colors.xml", THE_COLOURS),
+            ("values/dimens.xml", THE_SIZES),
+        ] {
+            std::fs::write(res.join(path), text.trim_start()).unwrap();
+        }
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            A_MANIFEST.trim_start(),
+        )
+        .unwrap();
+        let root = directory.to_str().unwrap().to_string();
+
+        let mut project = super::builder::from_manifest(A_MANIFEST).expect("the manifest reads");
+        project.values = super::scaffold::values_files(&root);
+        project.resources = super::scaffold::resource_files(&root);
+        assert_eq!(project.values.len(), 3, "three values files");
+        assert_eq!(project.resources.len(), 2, "a layout and a menu");
+
+        let mut sink = crate::diag::Sink::new();
+        let icons = super::builder::compile_resources_for_test(&project, &mut sink)
+            .expect("the resources compile")
+            .expect("and there are some");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        // Every `@+id` written in the layout and the menu is an identifier the
+        // generated `R` carries, which is what `findViewById` reaches through.
+        let named: Vec<&str> = icons
+            .compiled
+            .assignments()
+            .iter()
+            .filter(|(kind, _, _)| *kind == crate::resources::Kind::Id)
+            .map(|(_, name, _)| name.as_str())
+            .collect();
+        for one in ["clear", "entry", "list", "save", "title"] {
+            assert!(named.contains(&one), "R.id.{one} is missing from {named:?}");
+        }
+        for (kind, name) in [
+            (crate::resources::Kind::Layout, "screen"),
+            (crate::resources::Kind::Menu, "main"),
+            (crate::resources::Kind::Color, "back"),
+            (crate::resources::Kind::Dimension, "big"),
+            (crate::resources::Kind::String, "app_name"),
+        ] {
+            assert!(
+                icons.compiled.id(kind, name).is_some(),
+                "R.{kind}.{name} is missing"
+            );
+        }
+        // And each XML resource is in the package as the binary XML a device
+        // reads, not as the text it was written in.
+        for entry in ["res/layout/screen.xml", "res/menu/main.xml"] {
+            let (_, bytes) = icons
+                .files
+                .iter()
+                .find(|(held, _)| held == entry)
+                .unwrap_or_else(|| panic!("{entry} is missing"));
+            assert_eq!(&bytes[..2], &[0x03, 0x00], "{entry} is not binary XML");
+        }
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let mut made = crate::diag::Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut made)
+            .expect("the package is written");
+        assert!(!made.has_blocking(), "{:?}", made.entries());
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("layout conformance: aapt2 is not available here");
+            return;
+        };
+        let ours = directory.join("ours.apk");
+        std::fs::write(&ours, &outcome.package).unwrap();
+
+        // The same folder, through the platform's own tool.
+        let compiled = directory.join("compiled.zip");
+        let made = std::process::Command::new(&aapt2)
+            .args(["compile", "--dir"])
+            .arg(res.to_str().unwrap())
+            .arg("-o")
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "aapt2 could not compile the folder: {}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+        let Some(platform) = crate::builder::platform_jar() else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("layout conformance: no android.jar to link against");
+            return;
+        };
+        let theirs = directory.join("theirs.apk");
+        let linked = std::process::Command::new(&aapt2)
+            .arg("link")
+            .arg("-o")
+            .arg(theirs.to_str().unwrap())
+            .arg("-I")
+            .arg(&platform)
+            .arg("--manifest")
+            .arg(directory.join("AndroidManifest.xml").to_str().unwrap())
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "aapt2 could not link the folder: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+
+        let dump = |apk: &std::path::Path, file: &str| -> Vec<String> {
+            let out = std::process::Command::new(&aapt2)
+                .args(["dump", "xmltree"])
+                .arg(apk.to_str().unwrap())
+                .args(["--file", file])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "aapt2 refused {file} in {}: {}",
+                apk.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let text = String::from_utf8_lossy(&out.stdout).to_string();
+            // The raw text beside a typed value is not what the device reads,
+            // and the order attributes come out in is the writer's own.
+            let mut lines: Vec<String> = text
+                .lines()
+                .map(|one| match one.find(" (Raw:") {
+                    Some(at) => one[..at].trim().to_string(),
+                    None => one.trim().to_string(),
+                })
+                .collect();
+            lines.sort();
+            lines
+        };
+        for file in ["res/layout/screen.xml", "res/menu/main.xml"] {
+            assert_eq!(
+                dump(&ours, file),
+                dump(&theirs, file),
+                "{file} is not what aapt2 makes of it"
+            );
+        }
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "layout conformance: a layout and a menu agree with aapt2 attribute for attribute"
+        );
+    }
+
     #[test]
     fn an_unmodelled_element_is_reported_not_skipped() {
         let (_, sink) = values("<resources><plurals name=\"p\">x</plurals></resources>");
@@ -29604,6 +30408,7 @@ mod tests {
             icon: None,
             launcher: Vec::new(),
             values: Vec::new(),
+            resources: Vec::new(),
         }
     }
 
@@ -30294,6 +31099,7 @@ mod tests {
                 icon: None,
                 launcher: Vec::new(),
                 values: Vec::new(),
+                resources: Vec::new(),
             };
             let mut sink = Sink::new();
             let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
