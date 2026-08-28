@@ -3209,6 +3209,54 @@ impl Parser {
         Ok(found)
     }
 
+    /// Where a type argument list written at `ahead` ends, or `ahead` itself
+    /// where none is written.
+    ///
+    /// `List<String> words` is a declaration and `a < b > c` is not, and
+    /// nothing but what follows tells them apart. The arguments are stepped
+    /// over, balanced, and what is on the other side decides. `>>` closes two
+    /// at once, which is what makes `Map<String, List<Integer>>` one token
+    /// short of what it looks like.
+    fn past_type_arguments(&self, ahead: usize) -> Option<usize> {
+        if !matches!(self.ahead(ahead), Token::Punctuation("<")) {
+            return Some(ahead);
+        }
+        let mut ahead = ahead;
+        let mut depth = 0usize;
+        loop {
+            match self.ahead(ahead) {
+                Token::Punctuation("<") => depth += 1,
+                Token::Punctuation(">") => depth -= 1,
+                Token::Punctuation(">>") => {
+                    if depth < 2 {
+                        return None;
+                    }
+                    depth -= 2;
+                }
+                Token::Punctuation(">>>") => {
+                    if depth < 3 {
+                        return None;
+                    }
+                    depth -= 3;
+                }
+                // Nothing a type argument list holds, so this was a
+                // comparison after all.
+                Token::Identifier(_)
+                | Token::Punctuation(".")
+                | Token::Punctuation(",")
+                | Token::Punctuation("?")
+                | Token::Punctuation("[")
+                | Token::Punctuation("]")
+                | Token::Keyword(_) => {}
+                _ => return None,
+            }
+            ahead += 1;
+            if depth == 0 {
+                return Some(ahead);
+            }
+        }
+    }
+
     /// Whether what follows starts a local variable declaration rather than an
     /// expression. `Foo bar` is a declaration; `foo.bar()` is not.
     fn looks_like_declaration(&self) -> bool {
@@ -3232,40 +3280,9 @@ impl Parser {
                 // not, and nothing but what follows tells them apart. The
                 // arguments are stepped over, balanced, and what is on the
                 // other side decides.
-                if matches!(self.ahead(ahead), Token::Punctuation("<")) {
-                    let mut depth = 0usize;
-                    loop {
-                        match self.ahead(ahead) {
-                            Token::Punctuation("<") => depth += 1,
-                            Token::Punctuation(">") => depth -= 1,
-                            Token::Punctuation(">>") => {
-                                if depth < 2 {
-                                    return false;
-                                }
-                                depth -= 2;
-                            }
-                            Token::Punctuation(">>>") => {
-                                if depth < 3 {
-                                    return false;
-                                }
-                                depth -= 3;
-                            }
-                            // Nothing a type argument list holds, so this was
-                            // a comparison after all.
-                            Token::Identifier(_)
-                            | Token::Punctuation(".")
-                            | Token::Punctuation(",")
-                            | Token::Punctuation("?")
-                            | Token::Punctuation("[")
-                            | Token::Punctuation("]")
-                            | Token::Keyword(_) => {}
-                            _ => return false,
-                        }
-                        ahead += 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
+                match self.past_type_arguments(ahead) {
+                    Some(past) => ahead = past,
+                    None => return false,
                 }
                 // Then any number of `[]`.
                 while matches!(self.ahead(ahead), Token::Punctuation("["))
@@ -4594,14 +4611,18 @@ impl Parser {
             ));
         }
 
+        if resources.is_empty() {
+            return Ok(Statement::Try {
+                body,
+                catches,
+                finally,
+            });
+        }
+
         // Each resource becomes its own `try`, innermost last, so that they
         // are closed in the reverse of the order they were opened -- which is
         // what the language says and what anything holding a lock depends on.
-        let mut inner = Statement::Try {
-            body,
-            catches,
-            finally,
-        };
+        let mut inner = Statement::Block(body);
         for resource in resources.into_iter().rev() {
             let Statement::Declare { name, .. } = &resource.node else {
                 unreachable!("a resource is a declaration");
@@ -4634,7 +4655,22 @@ impl Parser {
                 },
             ]);
         }
-        Ok(inner)
+        // And what was written to catch goes around the whole of that, closes
+        // included. A `close` that throws is caught by the `catch` written
+        // beside it: the resources belong to the `try`, and so does the
+        // closing of them.
+        if catches.is_empty() && finally.is_none() {
+            return Ok(inner);
+        }
+        Ok(Statement::Try {
+            body: vec![Positioned {
+                node: inner,
+                line,
+                column,
+            }],
+            catches,
+            finally,
+        })
     }
 
     fn braced_block(&mut self) -> Result<Vec<Positioned<Statement>>, Diagnostic> {
@@ -4933,6 +4969,12 @@ impl Parser {
                 return false;
             }
             ahead += 1;
+            // `(List<String>[]) held` and `(Map<String, Integer>) held` are
+            // casts, and what they are cast to is written with its arguments.
+            match self.past_type_arguments(ahead) {
+                Some(past) => ahead = past,
+                None => return false,
+            }
             if matches!(self.ahead(ahead), Token::Punctuation(".")) {
                 ahead += 1;
                 continue;
@@ -6439,6 +6481,10 @@ struct Locally {
 struct Pending {
     at: usize,
     from: usize,
+    /// What the slots held where the jump was written. Where it lands, that
+    /// is one of the roads arriving, and the frame there may claim only what
+    /// every road agrees on.
+    slots: Vec<Verified>,
 }
 
 /// What the verifier is told is in a slot.
@@ -6898,12 +6944,37 @@ impl<'a> Emitter<'a> {
         Pending {
             at: self.code.len() - 2,
             from,
+            slots: self.slots.clone(),
         }
     }
 
     fn land(&mut self, pending: Pending) {
+        // The jump arrives here, so this is reachable and what it carried is
+        // one of the things the frame here has to be true of.
+        if self.reachable {
+            self.only_what_every_road_agrees_on(&pending.slots);
+        } else {
+            self.slots = pending.slots.clone();
+            self.reachable = true;
+        }
         let to = self.code.len();
         self.land_at(pending, to);
+    }
+
+    /// Narrows the slots to what this road and the one already here both say.
+    ///
+    /// A local one road filled in and the other did not holds nothing a frame
+    /// may name: `String said;` before a `switch` is a String on the arm that
+    /// assigned it and nothing at all on the arm that has not run yet, and the
+    /// frame where those two meet has to say the second.
+    fn only_what_every_road_agrees_on(&mut self, other: &[Verified]) {
+        let wide = self.slots.len().max(other.len());
+        self.slots.resize(wide, Verified::Top);
+        for at in 0..wide {
+            if other.get(at) != Some(&self.slots[at]) {
+                self.slots[at] = Verified::Top;
+            }
+        }
     }
 
     /// Where a jump goes, when that is somewhere other than here.
@@ -6936,6 +7007,23 @@ impl<'a> Emitter<'a> {
         // A local that has gone out of scope is nothing the verifier may read,
         // and a frame written after this must not claim otherwise.
         self.slots.truncate(usize::from(self.next_slot));
+    }
+
+    /// A slot for a local nothing has been put in yet.
+    ///
+    /// The name is known and the slot is reserved, but the verifier is told
+    /// nothing about what is in it. `String said;` in front of a `switch` that
+    /// fills it in on every arm is exactly this: a frame at one of those arms
+    /// that claimed a String would be claiming something no path arriving
+    /// there can honour, and the verifier refuses the class rather than the
+    /// path.
+    fn declare_with_nothing_in_it(&mut self, name: &str, what: Type) -> u16 {
+        let slot = self.declare(name, what);
+        let at = usize::from(slot);
+        if at < self.slots.len() {
+            self.slots[at] = Verified::Top;
+        }
+        slot
     }
 
     fn declare(&mut self, name: &str, what: Type) -> u16 {
@@ -8590,13 +8678,21 @@ impl Standing {
                     Some(boxed) => Type::Object(boxed.to_string(), Vec::new()),
                     None => actual.clone(),
                 };
+                let nothing = Type::Object("java/lang/Object".to_string(), Vec::new());
+                // Object is what a variable erased to in the first place, so
+                // being handed one says nothing about what it stands for:
+                // `mapped(names, String::length)` learns what B is from the
+                // reference and leaves A to the list, which does know.
+                if actual == nothing {
+                    return;
+                }
                 match out.iter_mut().find(|(held, _)| held == name) {
                     // Bound twice to two different things, which is what
                     // `asList(1, 2.5, 3L)` does. What they have in common is
                     // more than Object and less than either; Object is the
                     // part of it this can say without inventing anything.
                     Some((_, before)) if *before != actual => {
-                        *before = Type::Object("java/lang/Object".to_string(), Vec::new());
+                        *before = nothing;
                     }
                     Some(_) => {}
                     None => out.push((name.clone(), actual)),
@@ -10147,6 +10243,7 @@ public interface Collection<E> extends java.lang.Iterable<E> {
     boolean retainAll(Collection<E> held);
     void clear();
     Object[] toArray();
+    <T> T[] toArray(T[] into);
     Iterator<E> iterator();
     default java.util.stream.Stream<E> stream() { return null; }
     default boolean removeIf(java.util.function.Predicate<E> when) { return false; }
@@ -11400,6 +11497,50 @@ public class Instant implements Comparable<Instant>, java.time.temporal.Temporal
     public native String toString();
 }
 
+public class DayOfWeek implements java.time.temporal.TemporalAccessor {
+    public static final DayOfWeek MONDAY;
+    public static final DayOfWeek TUESDAY;
+    public static final DayOfWeek WEDNESDAY;
+    public static final DayOfWeek THURSDAY;
+    public static final DayOfWeek FRIDAY;
+    public static final DayOfWeek SATURDAY;
+    public static final DayOfWeek SUNDAY;
+    public static native DayOfWeek of(int day);
+    public static native DayOfWeek valueOf(String name);
+    public static native DayOfWeek[] values();
+    public native int getValue();
+    public native String name();
+    public native int ordinal();
+    public native DayOfWeek plus(long amount);
+    public native DayOfWeek minus(long amount);
+    public native String toString();
+}
+
+public class Month implements java.time.temporal.TemporalAccessor {
+    public static final Month JANUARY;
+    public static final Month FEBRUARY;
+    public static final Month MARCH;
+    public static final Month APRIL;
+    public static final Month MAY;
+    public static final Month JUNE;
+    public static final Month JULY;
+    public static final Month AUGUST;
+    public static final Month SEPTEMBER;
+    public static final Month OCTOBER;
+    public static final Month NOVEMBER;
+    public static final Month DECEMBER;
+    public static native Month of(int month);
+    public static native Month valueOf(String name);
+    public static native Month[] values();
+    public native int getValue();
+    public native String name();
+    public native int ordinal();
+    public native int length(boolean leap);
+    public native Month plus(long amount);
+    public native Month minus(long amount);
+    public native String toString();
+}
+
 public class LocalDate implements java.time.chrono.ChronoLocalDate {
     public static final LocalDate MIN;
     public static final LocalDate MAX;
@@ -11411,8 +11552,14 @@ public class LocalDate implements java.time.chrono.ChronoLocalDate {
     public native int getMonthValue();
     public native int getDayOfMonth();
     public native int getDayOfYear();
-    public native LocalDate plusDays(long amount);
+    public native DayOfWeek getDayOfWeek();
+    public native Month getMonth();
     public native LocalDate plusWeeks(long amount);
+    public native LocalDate minusWeeks(long amount);
+    public native LocalDate withYear(int year);
+    public native LocalDate withMonth(int month);
+    public native LocalDate withDayOfYear(int day);
+    public native LocalDate plusDays(long amount);
     public native LocalDate plusMonths(long amount);
     public native LocalDate plusYears(long amount);
     public native LocalDate minusDays(long amount);
@@ -11975,6 +12122,9 @@ impl Emitter<'_> {
             self.op2(base, slot);
         }
         self.pops(i32::from(what.width()));
+        // And from here on the verifier may be told what is in it. A local
+        // declared with nothing in it holds nothing until this happens.
+        self.slot_holds(slot, what);
     }
 
     /// Widens what is on the stack, when Java says it happens on its own.
@@ -12349,6 +12499,28 @@ impl Emitter<'_> {
                     self.pushes(&target);
                     return Ok(target);
                 }
+                // `(int) held` where `held` is an Integer: the box is opened
+                // first, and whatever comes out is then narrowed like any
+                // other number. `(char) held` on a Character is the same.
+                let found = if found.is_reference() && !target.is_reference() {
+                    match self.box_or_unbox(&found, &target) {
+                        Some(opened) => opened,
+                        None => {
+                            return Err(at(
+                                "EJ201",
+                                line,
+                                1,
+                                format!(
+                                    "A {} does not become a {}.",
+                                    found.readable(),
+                                    target.readable()
+                                ),
+                            ))
+                        }
+                    }
+                } else {
+                    found
+                };
                 // A narrowing cast is written out, unlike a widening one which
                 // Java does on its own.
                 let opcode = match (&found, &target) {
@@ -13755,15 +13927,54 @@ impl Emitter<'_> {
             self.load(local.slot, &local.what);
             descriptor.push_str(&local.what.descriptor());
         }
-        // What the person wrote, against the constructor they wrote.
-        let wanted = self
-            .classpath
-            .find_methods(&held.internal, "<init>", arguments.len())
-            .into_iter()
-            .next();
+        // What the person wrote, against the constructor they wrote. What was
+        // written is at the end of it: the instance around this one and every
+        // local it carries were put in front, and nobody wrote those.
+        let unwritten = usize::from(held.outer.is_some()) + held.captured.len();
+        let all = arguments.len() + unwritten;
+        // A class written inside a method is not on the classpath: it was
+        // written here and is emitted beside this one, so its constructors are
+        // read from what was written rather than from a class file.
+        let written_here = self
+            .made
+            .iter()
+            .find(|one| one.internal_name() == held.internal)
+            .and_then(|one| {
+                one.methods
+                    .iter()
+                    .find(|method| method.constructor && method.parameters.len() == all)
+                    .cloned()
+            });
+        let wanted = match &written_here {
+            Some(method) => {
+                let mut parameters = Vec::new();
+                for (what, _) in &method.parameters {
+                    parameters.push(self.resolve(what, line)?);
+                }
+                Some(Signature {
+                    owner: held.internal.clone(),
+                    name: "<init>".to_string(),
+                    parameters,
+                    returns: Type::Void,
+                    static_: false,
+                    interface: false,
+                    variadic: method.variadic,
+                    abstract_: false,
+                    returns_variable: None,
+                    parameter_variables: Vec::new(),
+                    taken_stands_for: Vec::new(),
+                    returns_stands_for: Standing::Fixed,
+                })
+            }
+            None => self
+                .classpath
+                .find_methods(&held.internal, "<init>", all)
+                .into_iter()
+                .next(),
+        };
         match wanted {
             Some(found) => {
-                let mine = found.parameters.clone();
+                let mine = found.parameters[unwritten.min(found.parameters.len())..].to_vec();
                 self.arguments_for(&mine, arguments, line)?;
                 for one in &mine {
                     descriptor.push_str(&one.descriptor());
@@ -14634,7 +14845,7 @@ impl Emitter<'_> {
         // What the arguments say, and which of them say nothing:
         // `setPositiveButton("yes", (dialog, at) -> ...)` is decided entirely
         // by the first of them.
-        let anything = how_loosely(arguments);
+        let anything = self.how_loosely_here(arguments);
         let mut given = Vec::with_capacity(arguments.len());
         for (at, expression) in arguments.iter().enumerate() {
             if anything[at] != Loosely::No {
@@ -14780,12 +14991,23 @@ impl Emitter<'_> {
         let last = signature.parameters.len().saturating_sub(1);
         for (at, one) in arguments.iter().enumerate() {
             // A lambda has no type until it has a target, and the target is
-            // what is being worked out. It says nothing here.
+            // what is being worked out. What it gives back is not waiting on
+            // that, though: `map(p -> p.name())` on a `Stream<Person>` knows
+            // its parameter is a Person and so knows the answer is a String,
+            // and that is the whole of what `Stream<R>` was waiting to hear.
             if matches!(
                 one,
                 Expression::Lambda { .. } | Expression::MethodRef { .. }
             ) {
-                given.push(Type::Object("java/lang/Object".to_string(), Vec::new()));
+                let want = signature.parameters.get(at.min(last)).cloned();
+                let said = want
+                    .filter(|_| at <= last)
+                    .and_then(|want| self.what_it_would_come_to(one, &want, line));
+                given.push(
+                    said.unwrap_or_else(|| {
+                        Type::Object("java/lang/Object".to_string(), Vec::new())
+                    }),
+                );
                 continue;
             }
             // A call written as an argument works its own type variables out
@@ -14807,6 +15029,114 @@ impl Emitter<'_> {
         }
         self.expecting = outside;
         Ok(given)
+    }
+
+    /// What interface a lambda or a method reference written here stands for,
+    /// with what it gives back put back into it.
+    ///
+    /// The parameter says which interface and what it takes; only what comes
+    /// out is left to work out, and working it out is what tells the call what
+    /// its own answer holds. Nothing where the parameter is not an interface
+    /// with one method, or where the body cannot be typed without a target of
+    /// its own -- and nothing is what was said before this existed, so a case
+    /// this cannot answer is no worse off.
+    fn what_it_would_come_to(
+        &mut self,
+        written: &Expression,
+        want: &Type,
+        line: u32,
+    ) -> Option<Type> {
+        let Type::Object(named, held) = want else {
+            return None;
+        };
+        let sam = self.the_one_method_of(named, line).ok()?;
+        // Which of the interface's own type parameters its one method gives
+        // back. Anything else -- a method that gives back a fixed type, or an
+        // array of one -- was never waiting on the body.
+        let Standing::OfTheClass(which) = sam.returns_stands_for else {
+            return None;
+        };
+        let shaped = as_written(&sam, held);
+        let produced = match written {
+            Expression::Lambda {
+                parameters,
+                body,
+                expression,
+                ..
+            } => {
+                if parameters.len() != shaped.parameters.len() {
+                    return None;
+                }
+                // `x -> x.name()` is the one written as an expression, and its
+                // value is what it gives back. A braced one says so with a
+                // `return`, and the first one found is what it comes to --
+                // every other one has to come to the same thing anyway.
+                let returns = if *expression {
+                    match body.first().map(|held| &held.node) {
+                        Some(Statement::Express(value)) => value.clone(),
+                        _ => return None,
+                    }
+                } else {
+                    body.iter().find_map(|held| match &held.node {
+                        Statement::Return(Some(expression)) => Some(expression.clone()),
+                        _ => None,
+                    })?
+                };
+                self.open();
+                for ((written, name), what) in parameters.iter().zip(shaped.parameters.iter()) {
+                    let what = match written {
+                        Some(written) => self.resolve(written, line).unwrap_or(what.clone()),
+                        None => what.clone(),
+                    };
+                    self.declare(name, what);
+                }
+                let found = self.type_of(&returns, line);
+                self.close();
+                found.ok()?
+            }
+            Expression::MethodRef { on, name, .. } => {
+                let owner = match on.as_ref() {
+                    Expression::Name(maybe) if self.meant_as_a_class(maybe) => {
+                        self.resolve_class(maybe, line).ok()?
+                    }
+                    other => match written_as_a_path(other)
+                        .filter(|path| {
+                            self.meant_as_a_class(path.split('.').next().unwrap_or_default())
+                        })
+                        .and_then(|path| resolve_named(self.classpath, self.unit, &path))
+                    {
+                        Some(found) => found,
+                        None => match self.type_of(other, line).ok()? {
+                            Type::Object(found, _) => found,
+                            _ => return None,
+                        },
+                    },
+                };
+                if name == "new" {
+                    Type::Object(owner, Vec::new())
+                } else {
+                    // Written with the object it is called on in front, or
+                    // without it. Either way what comes back is the same.
+                    let takes = shaped.parameters.len();
+                    let found = self
+                        .find_signature(&owner, name, takes)
+                        .or_else(|| self.find_signature(&owner, name, takes.saturating_sub(1)))?;
+                    found.returns
+                }
+            }
+            _ => return None,
+        };
+        if produced == Type::Void
+            || produced == Type::Object("java/lang/Object".to_string(), Vec::new())
+        {
+            return None;
+        }
+        let mut filled = held.clone();
+        while filled.len() <= which {
+            filled.push(Type::Object("java/lang/Object".to_string(), Vec::new()));
+        }
+        filled[which] = produced;
+        Some(Type::Object(named.clone(), filled))
     }
 
     /// Puts the cast erasure implies in front of a value the descriptor called
@@ -14945,7 +15275,7 @@ impl Emitter<'_> {
         }
         // What each argument says about which of these is meant, and which of
         // them say nothing at all.
-        let anything = how_loosely(arguments);
+        let anything = self.how_loosely_here(arguments);
         let mut given = Vec::with_capacity(arguments.len());
         for (at, one) in arguments.iter().enumerate() {
             if anything[at] != Loosely::No {
@@ -15002,7 +15332,7 @@ impl Emitter<'_> {
         let mut total = 0u32;
         let last = candidate.parameters.len().saturating_sub(1);
         for (at, have) in given.iter().enumerate() {
-            if anything.get(at) == Some(&Loosely::Anywhere) {
+            if matches!(anything.get(at), Some(Loosely::Anywhere(_))) {
                 continue;
             }
             let want = match candidate.parameters.get(at) {
@@ -15043,7 +15373,15 @@ impl Emitter<'_> {
         // What says nothing here still fits, and everything else still
         // decides: `setNegativeButton("no", null)` is settled by the "no".
         let matched = |at: usize, have: &Type, want: &Type| match anything.get(at) {
-            Some(Loosely::Anywhere) => true,
+            // What is written can only stand for an interface whose one
+            // method takes as many arguments as it was written with.
+            Some(Loosely::Anywhere(counts)) => {
+                counts.is_empty()
+                    || match self.how_many_the_one_method_takes(want) {
+                        Some(takes) => counts.contains(&takes),
+                        None => true,
+                    }
+            }
             Some(Loosely::AnyReference) => want.is_reference(),
             _ => match round {
                 0 => want == have,
@@ -15881,8 +16219,7 @@ impl Emitter<'_> {
                         // A local with no value written on it is not readable
                         // until one is, so nothing is stored and nothing is
                         // zeroed: the slot simply exists.
-                        let slot = self.declare(name, target);
-                        let _ = slot;
+                        self.declare_with_nothing_in_it(name, target);
                         return Ok(());
                     }
                 }
@@ -16782,6 +17119,12 @@ impl Emitter<'_> {
         let over_held = over.clone();
         let dispatch = self.dispatch_for(over, arms, line)?;
 
+        // What the slots held where the dispatch was written. Every arm is
+        // jumped to from there, so no arm may be told more than this -- and
+        // an arm fallen into from the one before is told what the two agree
+        // on.
+        let at_the_dispatch = self.slots.clone();
+
         // The arms, in the order they were written, because that is the order
         // one falls into the next.
         let mut default_at: Option<usize> = None;
@@ -16790,6 +17133,11 @@ impl Emitter<'_> {
             targets.push(at_here);
             if arm.labels.is_empty() && arm.pattern.is_none() {
                 default_at = Some(at_here);
+            }
+            if self.reachable {
+                self.only_what_every_road_agrees_on(&at_the_dispatch);
+            } else {
+                self.slots = at_the_dispatch.clone();
             }
             self.set_depth(0);
             self.a_branch_lands_here();
@@ -16817,6 +17165,16 @@ impl Emitter<'_> {
 
         let after = self.code.len();
         let arrives = default_at.is_none() || !ends.is_empty();
+        // With no `default` written, the dispatch itself lands past the whole
+        // switch, and that road carries what was true where it was written.
+        if default_at.is_none() {
+            if self.reachable {
+                self.only_what_every_road_agrees_on(&at_the_dispatch);
+            } else {
+                self.slots = at_the_dispatch.clone();
+                self.reachable = true;
+            }
+        }
         dispatch.settle(self, &targets, default_at.unwrap_or(after));
         for pending in ends {
             self.land(pending);
@@ -17997,6 +18355,74 @@ impl Emitter<'_> {
     }
 
     /// The one method an interface has, which is what a lambda stands for.
+    /// What each argument says about which signature is meant, with what this
+    /// compilation knows brought to bear on a method reference.
+    ///
+    /// `Person::name` can be written as a `Function` and not as a
+    /// `Comparator`, and only the methods `Person` declares say so: an
+    /// instance method named through its class takes the object it is called
+    /// on in front of what it was declared with, and a static one does not.
+    fn how_loosely_here(&self, arguments: &[Expression]) -> Vec<Loosely> {
+        let mut said = how_loosely(arguments);
+        for (at, argument) in arguments.iter().enumerate() {
+            let Expression::MethodRef { on, name, .. } = argument else {
+                continue;
+            };
+            let named = match on.as_ref() {
+                Expression::Name(maybe) if self.meant_as_a_class(maybe) => {
+                    self.resolve_class(maybe, 1).ok()
+                }
+                other => written_as_a_path(other)
+                    .filter(|path| {
+                        self.meant_as_a_class(path.split('.').next().unwrap_or_default())
+                    })
+                    .and_then(|path| resolve_named(self.classpath, self.unit, &path)),
+            };
+            let Some(owner) = named else {
+                continue;
+            };
+            let mut counts: Vec<usize> = Vec::new();
+            // Nobody writes a method taking more than this, and stopping
+            // somewhere is what makes asking by arity an answerable question.
+            for arity in 0..=8usize {
+                let held = if name == "new" {
+                    self.classpath.find_methods(&owner, "<init>", arity)
+                } else {
+                    self.classpath.find_methods(&owner, name, arity)
+                };
+                for found in held {
+                    let takes = if found.static_ || name == "new" {
+                        arity
+                    } else {
+                        arity + 1
+                    };
+                    if !counts.contains(&takes) {
+                        counts.push(takes);
+                    }
+                }
+            }
+            if !counts.is_empty() {
+                said[at] = Loosely::Anywhere(counts);
+            }
+        }
+        said
+    }
+
+    /// How many arguments the one method of an interface takes, where what is
+    /// written is an interface with one method at all.
+    ///
+    /// Nothing where it is not: a `String` parameter says nothing about how a
+    /// lambda handed to the same call was written, and a call with one of each
+    /// is decided by the other one.
+    fn how_many_the_one_method_takes(&self, what: &Type) -> Option<usize> {
+        let Type::Object(named, _) = what else {
+            return None;
+        };
+        self.the_one_method_of(named, 1)
+            .ok()
+            .map(|found| found.parameters.len())
+    }
+
     fn the_one_method_of(&self, named: &str, line: u32) -> Result<Signature, Diagnostic> {
         // A lambda stands for an interface and nothing else. `Object` is the
         // one that turns up, because it is what a return type or a declaration
@@ -18160,6 +18586,15 @@ impl Emitter<'_> {
             let Some(local) = self.local(name) else {
                 continue;
             };
+            // A name this class holds itself, or inherits, is that field and
+            // not the local of the same name written outside it. Java reads
+            // the class before it reads the method around the class, and a
+            // capture here would quietly read the wrong one.
+            if body.fields.iter().any(|held| held.name == *name)
+                || self.classpath.find_field(&named, name).is_some()
+            {
+                continue;
+            }
             if captured.iter().any(|held| held.slot == local.slot) {
                 continue;
             }
@@ -18458,11 +18893,32 @@ impl Emitter<'_> {
         for held in first.instance_setup.iter().chain(first.static_setup.iter()) {
             names_in_statement(&held.node, &mut wanted);
         }
+        // What this class holds itself, or inherits, is read from the class
+        // and not captured from the method around it.
+        let mut its_own: Vec<String> = first.fields.iter().map(|held| held.name.clone()).collect();
+        let above = first
+            .extends
+            .iter()
+            .chain(first.implements.iter())
+            .filter_map(|named| resolve_named(self.classpath, self.unit, named))
+            .collect::<Vec<_>>();
+        for owner in &above {
+            if let Some(known) = self.classpath.get(owner) {
+                its_own.extend(known.fields.iter().map(|(name, _, _)| name.clone()));
+            }
+        }
         let mut captured: Vec<Local> = Vec::new();
         for name in &wanted {
             let Some(local) = self.local(name) else {
                 continue;
             };
+            if its_own.contains(name)
+                || above
+                    .iter()
+                    .any(|owner| self.classpath.find_field(owner, name).is_some())
+            {
+                continue;
+            }
             if captured.iter().any(|held| held.slot == local.slot) {
                 continue;
             }
@@ -19704,10 +20160,15 @@ fn reached_the_same_way_twice(expression: &Expression) -> bool {
 /// the target is what is being chosen -- so they fit wherever they are put and
 /// say nothing. `null` says almost as little: it fits anything that is not a
 /// number.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 enum Loosely {
     No,
-    Anywhere,
+    /// Fits wherever it is put, except that the interface it stands for has to
+    /// take a number of arguments it can be written with. Empty where even
+    /// that is unknown. `thenComparing(Person::name)` is decided by this and
+    /// nothing else: `Comparator` takes two and `Function` takes one, and the
+    /// reference can only be written as one.
+    Anywhere(Vec<usize>),
     AnyReference,
 }
 
@@ -19716,7 +20177,11 @@ fn how_loosely(arguments: &[Expression]) -> Vec<Loosely> {
     arguments
         .iter()
         .map(|one| match one {
-            Expression::Lambda { .. } | Expression::MethodRef { .. } => Loosely::Anywhere,
+            Expression::Lambda { parameters, .. } => Loosely::Anywhere(vec![parameters.len()]),
+            // A method reference can be written as the method itself or as
+            // the method with the object it is called on in front, and which
+            // of the two it is here is exactly what is being decided.
+            Expression::MethodRef { .. } => Loosely::Anywhere(Vec::new()),
             Expression::Null => Loosely::AnyReference,
             _ => Loosely::No,
         })
@@ -26564,6 +27029,618 @@ public class Reading extends Exception {
 "####,
         ),
     ];
+
+    /// What a program leans on the library for: a checked exception declared
+    /// and caught, two resources where the second throws on the way out and
+    /// the `catch` beside them sees it, a `default` inherited from two
+    /// interfaces where one extends the other, an anonymous class filling one
+    /// in, an atomic counter, a deque used as a stack and as a queue, a linked
+    /// list sorted, a sorted set and a sorted map, `computeIfAbsent` and
+    /// `merge` and `getOrDefault`, `removeIf` and `replaceAll` and `subList`,
+    /// `Objects`, arbitrary-precision arithmetic both ways, a date printed and
+    /// formatted, a regular expression walked and replaced, a `switch` over a
+    /// char and one over a pattern with a guard, and what `format` does with
+    /// every conversion an ordinary program writes.
+    const WHAT_THE_LIBRARY_IS_FOR: &str = r####"
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.LocalDate;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public class Library {
+
+    static class TooDeep extends Exception {
+        final int depth;
+        TooDeep(String said, int depth) { super(said); this.depth = depth; }
+    }
+
+    static class Closes implements AutoCloseable {
+        final String name;
+        final StringBuilder log;
+        Closes(String name, StringBuilder log) { this.name = name; this.log = log; }
+        public void close() throws Exception {
+            log.append("close:").append(name).append(' ');
+            if (name.equals("bad")) throw new IllegalStateException("shut " + name);
+        }
+    }
+
+    static int deep(int at) throws TooDeep {
+        if (at > 3) throw new TooDeep("too far", at);
+        return at * 2;
+    }
+
+    interface Greets { default String hello() { return "hi"; } }
+    interface Shouts extends Greets { default String hello() { return "HI"; } }
+    static class Both implements Greets, Shouts { }
+
+    static Greets quiet() {
+        return new Greets() {
+            @Override public String hello() { return "..."; }
+        };
+    }
+
+    @SafeVarargs
+    static <T> List<T> listOf(T... held) {
+        List<T> out = new ArrayList<T>();
+        for (T one : held) out.add(one);
+        return out;
+    }
+
+    public static void main(String[] args) throws Exception {
+        StringBuilder out = new StringBuilder();
+
+        try {
+            out.append(deep(2)).append('/');
+            out.append(deep(9));
+        } catch (TooDeep e) {
+            out.append("caught ").append(e.getMessage()).append(e.depth);
+        }
+        out.append(' ');
+
+        StringBuilder log = new StringBuilder();
+        try (Closes one = new Closes("ok", log); Closes two = new Closes("bad", log)) {
+            log.append("body ");
+        } catch (IllegalStateException e) {
+            log.append("saw ").append(e.getMessage());
+        }
+        out.append(log).append(' ');
+
+        out.append(new Both().hello()).append(quiet().hello()).append(' ');
+
+        AtomicInteger counted = new AtomicInteger(5);
+        counted.incrementAndGet();
+        counted.addAndGet(4);
+        out.append(counted.get()).append('/').append(counted.getAndSet(0)).append('/').append(counted.get()).append(' ');
+
+        Deque<String> stack = new ArrayDeque<String>();
+        stack.push("a");
+        stack.push("b");
+        stack.addLast("z");
+        out.append(stack.pop()).append(stack.peekLast()).append(stack.size()).append(' ');
+
+        List<Integer> linked = new LinkedList<Integer>();
+        Collections.addAll(linked, 3, 1, 2);
+        Collections.sort(linked);
+        out.append(linked).append(Collections.max(linked)).append(Collections.min(linked)).append(' ');
+
+        Set<String> sorted = new TreeSet<String>();
+        sorted.add("pear");
+        sorted.add("apple");
+        sorted.add("pear");
+        out.append(sorted).append(sorted.size()).append(' ');
+
+        Map<String, Integer> tree = new TreeMap<String, Integer>();
+        tree.put("b", 2);
+        tree.put("a", 1);
+        out.append(tree).append(tree.getOrDefault("c", 9)).append(' ');
+
+        Map<String, List<String>> grouped = new HashMap<String, List<String>>();
+        for (String word : new String[] {"ant", "ape", "bat", "ant"}) {
+            grouped.computeIfAbsent(word.substring(0, 1), k -> new ArrayList<String>()).add(word);
+        }
+        List<String> keys = new ArrayList<String>(grouped.keySet());
+        Collections.sort(keys);
+        for (String key : keys) out.append(key).append(grouped.get(key));
+        out.append(' ');
+
+        Map<String, Integer> counts = new HashMap<String, Integer>();
+        counts.put("x", 1);
+        counts.merge("x", 5, (a, b) -> a + b);
+        counts.merge("y", 7, (a, b) -> a + b);
+        counts.putIfAbsent("x", 99);
+        out.append(counts.get("x")).append('/').append(counts.get("y")).append(' ');
+
+        List<Integer> numbers = new ArrayList<Integer>(listOf(1, 2, 3, 4, 5, 6));
+        numbers.removeIf(n -> n % 2 == 0);
+        numbers.replaceAll(n -> n * 10);
+        out.append(numbers).append(numbers.subList(1, 3)).append(' ');
+
+        Set<String> seen = new HashSet<String>(listOf("a", "b"));
+        out.append(seen.contains("a")).append(seen.contains("c")).append(' ');
+
+        Iterator<Integer> walk = numbers.iterator();
+        int total = 0;
+        while (walk.hasNext()) total += walk.next();
+        out.append(total).append(' ');
+
+        out.append(Objects.equals("a", "a")).append(Objects.equals(null, "a"))
+           .append('/').append(Objects.toString(null, "none"))
+           .append('/').append(Objects.requireNonNull("kept")).append(' ');
+
+        BigInteger big = BigInteger.valueOf(2).pow(70).add(BigInteger.ONE);
+        out.append(big).append('/').append(big.mod(BigInteger.valueOf(7))).append(' ');
+        BigDecimal money = new BigDecimal("10.25").multiply(new BigDecimal("3"));
+        out.append(money).append('/').append(money.compareTo(BigDecimal.ZERO)).append(' ');
+
+        LocalDate day = LocalDate.of(2024, 2, 29);
+        out.append(day).append('/').append(day.plusDays(1)).append('/').append(day.getDayOfWeek())
+           .append('/').append(day.format(DateTimeFormatter.ofPattern("dd.MM.yyyy"))).append(' ');
+
+        Pattern found = Pattern.compile("([a-z]+)(\\d+)");
+        Matcher at = found.matcher("ab12 cd345");
+        while (at.find()) out.append(at.group(1)).append('=').append(at.group(2)).append(';');
+        out.append("a1b2".replaceAll("\\d", "#")).append(' ');
+
+        char which = 'b';
+        switch (which) {
+            case 'a' -> out.append("first");
+            case 'b' -> out.append("second");
+            default -> out.append("other");
+        }
+        out.append(' ');
+
+        Object held = Integer.valueOf(7);
+        String said = switch (held) {
+            case Integer i when i > 5 -> "big " + i;
+            case Integer i -> "small " + i;
+            case String s -> "text " + s;
+            default -> "?";
+        };
+        out.append(said).append(' ');
+
+        out.append(String.format("%5s|%-5s|%05d|%+.3f|%x|%c|%b", "r", "l", 42, 2.5, 255, 'z', true));
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn what_the_library_is_for_gives_back_what_javac_gives_back() {
+        let produced = compile(WHAT_THE_LIBRARY_IS_FOR, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Library") {
+            None => eprintln!("java: no JVM here to run what the library is for"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "4/caught too far9 body close:bad close:ok saw shut bad HI... \
+                     10/10/0 bz2 [1, 2, 3]31 [apple, pear]2 {a=1, b=2}9 a[ant, \
+                     ape, ant]b[bat] 6/7 [10, 30, 50][30, 50] truefalse 90 truefalse/none/kept \
+                     1180591620717411303425/3 30.75/1 2024-02-29/2024-03-01/THURSDAY/29.02.2024 \
+                     ab=12;cd=345;a#b# second big 7     r|l    |00042|+2.500|ff|z|true"
+                );
+                eprintln!("java: what the library is for, and javac's answer");
+            }
+        }
+    }
+
+    /// What is written where a type has to be worked out: an enum with a body
+    /// per constant, a sealed interface switched over exhaustively, comparator
+    /// chains with `thenComparing` and `reversed`, `groupingBy` with a
+    /// downstream, a `map` handed a method reference and then another,
+    /// `flatMap`, `reduce`, `distinct`, `Optional` mapped and filtered and
+    /// fallen back on, functions composed both ways, a type witness written
+    /// out, `Arrays.sort` with a comparator and `System.arraycopy`, a map that
+    /// keeps its order, and what the wrappers parse.
+    const WHAT_HAS_TO_BE_WORKED_OUT: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+import java.util.stream.Stream;
+
+public class Wide {
+
+    enum Kind {
+        SMALL(1) { String said() { return "small" + weight; } },
+        BIG(10) { String said() { return "big" + weight; } };
+
+        final int weight;
+        Kind(int weight) { this.weight = weight; }
+        abstract String said();
+        static Kind of(int n) { return n < 5 ? SMALL : BIG; }
+    }
+
+    sealed interface Node permits Leaf, Fork {}
+    record Leaf(int value) implements Node {}
+    record Fork(Node left, Node right) implements Node {}
+
+    static int total(Node one) {
+        return switch (one) {
+            case Leaf l -> l.value();
+            case Fork f -> total(f.left()) + total(f.right());
+        };
+    }
+
+    static class Person {
+        final String name;
+        final int age;
+        Person(String name, int age) { this.name = name; this.age = age; }
+        String name() { return name; }
+        int age() { return age; }
+        @Override public String toString() { return name + "(" + age + ")"; }
+    }
+
+    static <T> T firstOr(List<T> of, T fallback) {
+        return of.isEmpty() ? fallback : of.get(0);
+    }
+
+    static <A, B, C> Function<A, C> then(Function<A, B> one, Function<B, C> two) {
+        return a -> two.apply(one.apply(a));
+    }
+
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        for (Kind k : Kind.values()) out.append(k.name()).append('=').append(k.said()).append(k.ordinal());
+        out.append('/').append(Kind.valueOf("BIG").weight).append('/').append(Kind.of(3));
+        switch (Kind.of(9)) {
+            case SMALL: out.append("!s"); break;
+            case BIG: out.append("!b"); break;
+        }
+        out.append(' ');
+
+        Node tree = new Fork(new Leaf(1), new Fork(new Leaf(2), new Leaf(3)));
+        out.append(total(tree)).append('/').append(tree).append(' ');
+
+        List<Person> people = new ArrayList<Person>();
+        people.add(new Person("ada", 36));
+        people.add(new Person("bob", 24));
+        people.add(new Person("cy", 36));
+        people.add(new Person("dee", 24));
+
+        List<Person> sorted = new ArrayList<Person>(people);
+        sorted.sort(Comparator.comparing(Person::age).thenComparing(Person::name).reversed());
+        out.append(sorted).append(' ');
+
+        Map<Integer, List<String>> byAge = people.stream()
+            .collect(Collectors.groupingBy(Person::age,
+                     Collectors.mapping(Person::name, Collectors.toList())));
+        List<Integer> ages = new ArrayList<Integer>(byAge.keySet());
+        java.util.Collections.sort(ages);
+        for (Integer age : ages) out.append(age).append(byAge.get(age));
+        out.append(' ');
+
+        String names = people.stream()
+            .filter(p -> p.age() > 25)
+            .map(Person::name)
+            .map(String::toUpperCase)
+            .sorted()
+            .collect(Collectors.joining(",", "[", "]"));
+        out.append(names).append(' ');
+
+        int sum = IntStream.rangeClosed(1, 5).map(n -> n * n).sum();
+        out.append(sum).append('/')
+           .append(Stream.of(1, 2, 3, 4).reduce(0, Integer::sum)).append('/')
+           .append(Stream.of("a", "bb", "a").distinct().count()).append(' ');
+
+        List<Integer> flat = Stream.of(List.of(1, 2), List.of(3), List.of())
+            .flatMap(List::stream)
+            .map(o -> (Integer) o)
+            .collect(Collectors.toList());
+        out.append(flat).append(' ');
+
+        Optional<Person> oldest = people.stream().max(Comparator.comparingInt(Person::age));
+        out.append(oldest.map(Person::name).orElse("none")).append('/')
+           .append(Optional.<String>empty().orElseGet(() -> "made")).append('/')
+           .append(Optional.of("x").filter(s -> s.isEmpty()).isPresent()).append(' ');
+
+        Function<Integer, Integer> twice = n -> n * 2;
+        Function<Integer, String> say = n -> "n" + n;
+        out.append(twice.andThen(say).apply(4)).append('/')
+           .append(say.compose(twice).apply(5)).append('/')
+           .append(then(twice, say).apply(6)).append(' ');
+
+        Predicate<String> empty = String::isEmpty;
+        BiFunction<String, Integer, String> cut = (s, n) -> s.substring(0, n);
+        Supplier<List<String>> made = ArrayList::new;
+        out.append(empty.negate().test("x")).append('/')
+           .append(cut.apply("abcdef", 3)).append('/')
+           .append(made.get().size()).append(' ');
+
+        out.append(Wide.<String>firstOr(new ArrayList<String>(), "gone")).append('/')
+           .append(firstOr(List.of(7, 8), 0)).append(' ');
+
+        int[] numbers = {5, 3, 9, 1};
+        Arrays.sort(numbers);
+        int[] copied = Arrays.copyOf(numbers, 6);
+        System.arraycopy(numbers, 0, copied, 2, 4);
+        out.append(Arrays.toString(numbers)).append(Arrays.toString(copied)).append(' ');
+
+        Integer[] boxed = {5, 3, 9, 1};
+        Arrays.sort(boxed, Comparator.reverseOrder());
+        out.append(Arrays.toString(boxed)).append(' ');
+
+        Map<String, Integer> kept = new LinkedHashMap<String, Integer>();
+        kept.put("one", 1);
+        kept.put("two", 2);
+        for (Map.Entry<String, Integer> at : kept.entrySet()) out.append(at.getKey()).append(at.getValue());
+        out.append(' ');
+
+        out.append(Integer.parseInt("42") + Integer.valueOf("8")).append('/')
+           .append(Integer.toBinaryString(10)).append('/')
+           .append(Long.parseLong("100") * 2).append('/')
+           .append(Double.parseDouble("1.5") + 1).append('/')
+           .append(Character.isDigit('7')).append('/')
+           .append(String.valueOf(true)).append(' ');
+
+        out.append(String.format("%s-%d-%.2f", "s", 3, 1.5)).append(' ');
+
+        StringBuilder made2 = new StringBuilder("abcdef");
+        made2.insert(3, "-").reverse().deleteCharAt(0);
+        out.append(made2);
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn what_has_to_be_worked_out_gives_back_what_javac_gives_back() {
+        let produced = compile(WHAT_HAS_TO_BE_WORKED_OUT, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Wide") {
+            None => eprintln!("java: no JVM here to run what has to be worked out"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(said.trim(), "SMALL=small10BIG=big101/10/SMALL!b 6/Fork[left=Leaf[value=1], \
+                     right=Fork[left=Leaf[value=2], right=Leaf[value=3]]] [cy(36), \
+                     ada(36), dee(24), bob(24)] 24[bob, dee]36[ada, cy] [ADA,CY] \
+                     55/10/2 [1, 2, 3] ada/made/false n8/n10/n12 true/abc/0 gone/7 \
+                     [1, 3, 5, 9][1, 3, 1, 3, 5, 9] [9, 5, 3, 1] one1two2 50/1010/200/2.5/true/true \
+                     s-3-1.50 ed-cba");
+                eprintln!("java: what has to be worked out, and javac's answer");
+            }
+        }
+    }
+
+    /// What a class inherits and what shadows what: a `default` method leaning
+    /// on a constant the interface declares, three levels of override with the
+    /// return narrowed twice, `super.shown()` reaching a `default` the
+    /// superclass never declared, every `String` and `Math` and wrapper method
+    /// an ordinary program reaches for, every compound assignment, a `switch`
+    /// with a `default` written between two cases and a local assigned on
+    /// every arm of it, a `finally` around a `finally` around a `return`, an
+    /// array of a generic type, `clone` on an array of objects, an anonymous
+    /// class whose inherited field has the same name as a local outside it, a
+    /// local class taking an argument and carrying a local, and a labelled
+    /// block broken out of.
+    const WHAT_SHADOWS_WHAT: &str = r####"
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class Edges {
+
+    interface Named {
+        String PREFIX = "n:";
+        String name();
+        default String shown() { return PREFIX + name(); }
+    }
+
+    static abstract class Base implements Named {
+        protected final String held;
+        Base(String held) { this.held = held; }
+        public String name() { return held; }
+        abstract Base copy();
+        Object value() { return held; }
+    }
+
+    static class Word extends Base {
+        Word(String held) { super(held); }
+        @Override Word copy() { return new Word(held); }
+        @Override String value() { return held.toUpperCase(); }
+    }
+
+    static class Louder extends Word implements Named {
+        Louder(String held) { super(held); }
+        @Override Louder copy() { return new Louder(held); }
+        @Override String value() { return super.value() + "!"; }
+        @Override public String shown() { return "L" + super.shown(); }
+    }
+
+    static String stringy(String at) {
+        StringBuilder out = new StringBuilder();
+        out.append(at.indexOf('b')).append(at.lastIndexOf('b'))
+           .append('/').append(at.substring(2, 5))
+           .append('/').append(Arrays.toString(at.split("b", 2)))
+           .append('/').append("  pad  ".trim())
+           .append('/').append("ab".repeat(3))
+           .append('/').append(String.join("-", "x", "y", "z"))
+           .append('/').append(at.contains("cd")).append(at.startsWith("ab")).append(at.endsWith("f"))
+           .append('/').append("a".compareTo("b")).append("A".equalsIgnoreCase("a"))
+           .append('/').append(new String(at.toCharArray(), 1, 3))
+           .append('/').append(String.valueOf(new char[] {'h', 'i'}))
+           .append('/').append(at.replace("ab", "AB"))
+           .append('/').append(at.charAt(0)).append((int) at.charAt(0))
+           .append('/').append(at.isEmpty()).append("".isEmpty());
+        return out.toString();
+    }
+
+    static String numbers() {
+        StringBuilder out = new StringBuilder();
+        out.append(Math.floor(-1.5)).append(',').append(Math.ceil(1.2)).append(',')
+           .append(Math.round(2.5)).append(',').append(Math.round(-2.5)).append(',')
+           .append(Math.pow(2, 10)).append(',').append(Math.sqrt(16.0)).append(',')
+           .append(Math.min(1, 2)).append(Math.max(1.5, 2.5)).append(',')
+           .append(Integer.MIN_VALUE).append(',').append(Long.MAX_VALUE).append(',')
+           .append(Integer.compare(3, 4)).append(Long.compare(4, 3)).append(Double.compare(1.0, 1.0));
+        long mask = 0xFF00FF00L;
+        out.append(',').append(mask >> 8).append(',').append(mask >>> 8).append(',').append(mask & 0xFFL);
+        int i = 7;
+        i += 3; i -= 1; i *= 2; i /= 3; i %= 4; i <<= 2; i >>= 1; i |= 8; i &= 12; i ^= 5;
+        out.append(',').append(i);
+        char c = 'a';
+        c += 2;
+        out.append(',').append(c).append((char) ('a' + 3));
+        double d = 7;
+        out.append(',').append(d / 2).append(',').append(7 / 2).append(',').append(7 % 3).append(',').append(-7 / 2);
+        return out.toString();
+    }
+
+    static String branchy(int n) {
+        String said;
+        switch (n) {
+            case 0:
+            case 1:
+                said = "low";
+                break;
+            default:
+                said = "other";
+                break;
+            case 9:
+                said = "nine";
+        }
+        String again = switch (n) {
+            case 0, 1 -> "L";
+            case 9 -> "N";
+            default -> { yield "O" + n; }
+        };
+        return said + again;
+    }
+
+    static int tricky(int n) {
+        int count = 0;
+        try {
+            try {
+                if (n == 0) throw new RuntimeException("no");
+                count += 1;
+                return count;
+            } finally {
+                count += 10;
+            }
+        } catch (RuntimeException e) {
+            count += 100;
+            return count;
+        } finally {
+            count += 1000;
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void main(String[] args) {
+        StringBuilder out = new StringBuilder();
+
+        List<Base> all = new ArrayList<Base>();
+        all.add(new Word("ab"));
+        all.add(new Louder("cd"));
+        for (Base one : all) {
+            Base twin = one.copy();
+            out.append(twin.shown()).append('=').append(twin.value()).append(twin.getClass().getSimpleName()).append(' ');
+        }
+        Named as = all.get(1);
+        out.append(as.shown()).append('/').append(Named.PREFIX).append(' ');
+
+        out.append(stringy("abcdef")).append(' ');
+        out.append(numbers()).append(' ');
+        out.append(branchy(0)).append(branchy(5)).append(branchy(9)).append(' ');
+        out.append(tricky(0)).append('/').append(tricky(1)).append(' ');
+
+        Integer small = 100, sameSmall = 100;
+        out.append(small.equals(sameSmall)).append((int) small + 1).append(' ');
+
+        List<String>[] rows = (List<String>[]) new List[2];
+        rows[0] = new ArrayList<String>();
+        rows[0].add("in");
+        rows[1] = List.of("of");
+        out.append(rows[0]).append(rows[1]).append(rows.length).append(' ');
+
+        Base[] copied = all.toArray(new Base[0]);
+        Base[] cloned = copied.clone();
+        out.append(cloned.length).append(cloned[0].name()).append(copied[1] == cloned[1]).append(' ');
+
+        Object held = all.get(0);
+        out.append(held instanceof Word).append(held instanceof Louder)
+           .append(all.get(1) instanceof Word).append(' ');
+
+        Base made = new Base("anon") {
+            @Override Base copy() { return this; }
+            @Override Object value() { return "anon" + held.length(); }
+        };
+        out.append(made.value()).append(made.shown()).append(' ');
+
+        class Local {
+            final int by;
+            Local(int by) { this.by = by; }
+            int of(int n) { return n * by + all.size(); }
+        }
+        out.append(new Local(3).of(4)).append(' ');
+
+        int total = 0;
+        found:
+        {
+            for (int i = 0; i < 5; i++) {
+                if (i == 3) break found;
+                total += i;
+            }
+            total = -1;
+        }
+        out.append(total).append(' ');
+
+        Object what = true ? Integer.valueOf(1) : "text";
+        out.append(what).append(what.getClass().getSimpleName());
+
+        System.out.println(out.toString().trim());
+    }
+}
+"####;
+
+    #[test]
+    fn what_shadows_what_gives_back_what_javac_gives_back() {
+        let produced = compile(WHAT_SHADOWS_WHAT, &empty()).expect("must compile");
+        match jvm_runs(&produced, "Edges") {
+            None => eprintln!("java: no JVM here to run what shadows what"),
+            Some(Err(said)) => panic!("{said}"),
+            Some(Ok(said)) => {
+                assert_eq!(
+                    said.trim(),
+                    "n:ab=ABWord Ln:cd=CD!Louder Ln:cd/n: 11/cde/[a, cdef]/pad/\
+                     ababab/x-y-z/truetruetrue/-1true/bcd/hi/ABcdef/a97/falsetrue \
+                     -2.0,2.0,3,-2,1024.0,4.0,12.5,-2147483648,9223372036854775807,\
+                     -110,16711935,16711935,0,9,cd,3.5,3,1,-3 lowLotherO5nineN \
+                     110/1 true101 [in][of]2 2abtrue truefalsetrue anon4n:anon \
+                     14 3 1Integer"
+                );
+                eprintln!("java: what shadows what, and javac's answer");
+            }
+        }
+    }
 
     /// What is left of ordinary Java once the shapes already tested are set
     /// aside: an interface with a `private` method, a `default` that leans on

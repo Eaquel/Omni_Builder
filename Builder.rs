@@ -14085,7 +14085,17 @@ pub mod rsa {
         wrapping.copy_from_slice(&derived);
         check(&container_tag_key(&wrapping))?;
         let plain = crate::cipher::decrypt_cbc(&wrapping, &iv, sealed_data)?;
-        parse_pkcs8(&plain)
+        // A wrong password decrypts to noise, and noise fails the padding
+        // check about two hundred and fifty five times out of two hundred and
+        // fifty six. The last time it gets past it and fails here instead --
+        // and it means the same thing, so it says the same thing.
+        parse_pkcs8(&plain).map_err(|_| {
+            fail(
+                "EK002",
+                "The password is wrong, or the data is not what it claims.",
+            )
+            .with_suggestion("Nothing is returned from a key whose contents do not read back.")
+        })
     }
 
     pub fn parse_private_key(bytes: &[u8]) -> Result<PrivateKey, Diagnostic> {
@@ -35048,6 +35058,13 @@ public final class MainActivity extends Activity {
 
         let wrong = super::rsa::open_pkcs8(&sealed, "not the password").unwrap_err();
         assert_eq!(wrong.code, "EK002");
+
+        // One wrong password in every two hundred and fifty six decrypts to
+        // something whose last byte passes for padding, and what is left is
+        // read rather than rejected. It is still a wrong password: whatever
+        // the reading makes of it, one answer comes back.
+        let bad = super::rsa::open_pkcs8(&sealed, "wrong in another way").unwrap_err();
+        assert_eq!(bad.code, "EK002");
 
         let Some(tool) = openssl() else {
             eprintln!("keystore conformance: openssl is not available here");
