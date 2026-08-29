@@ -17290,6 +17290,240 @@ pub mod dexwrite {
         left.encode_utf16().cmp(right.encode_utf16())
     }
 
+    /// How many of one thing a dex file can hold.
+    ///
+    /// An instruction names a method, a field, a type or a string by an index
+    /// of sixteen bits, so a file that holds more of one of them than that has
+    /// entries nothing in it can reach. This is the wall every application
+    /// walks into once it carries enough of other people's code.
+    const MOST_OF_ONE_THING: usize = 65_536;
+
+    /// What one class needs the file to hold, by name rather than by number.
+    #[derive(Default)]
+    struct Needs {
+        types: Vec<String>,
+        strings: Vec<String>,
+        fields: Vec<FieldRef>,
+        methods: Vec<MethodRef>,
+    }
+
+    impl Needs {
+        fn kind(&mut self, descriptor: &str) {
+            if !self.types.iter().any(|held| held == descriptor) {
+                self.types.push(descriptor.to_string());
+            }
+        }
+
+        fn text(&mut self, value: &str) {
+            if !self.strings.iter().any(|held| held == value) {
+                self.strings.push(value.to_string());
+            }
+        }
+
+        fn field(&mut self, reference: &FieldRef) {
+            self.kind(&reference.class);
+            self.kind(&reference.descriptor);
+            self.text(&reference.name);
+            if !self.fields.contains(reference) {
+                self.fields.push(reference.clone());
+            }
+        }
+
+        fn method(&mut self, reference: &MethodRef) {
+            self.kind(&reference.class);
+            self.kind(&reference.return_type);
+            for one in &reference.parameters {
+                self.kind(one);
+            }
+            self.text(&reference.name);
+            self.text(&reference.shorty());
+            if !self.methods.contains(reference) {
+                self.methods.push(reference.clone());
+            }
+        }
+
+        fn annotation(&mut self, one: &crate::jvm::Annotation) {
+            self.kind(&one.descriptor);
+            for (name, held) in &one.values {
+                self.text(name);
+                self.element(held);
+            }
+        }
+
+        fn element(&mut self, held: &crate::jvm::Element) {
+            use crate::jvm::Element;
+            match held {
+                Element::Text(text) => self.text(text),
+                Element::Class(descriptor) => self.kind(descriptor),
+                Element::Enum { descriptor, name } => {
+                    self.field(&FieldRef {
+                        class: descriptor.clone(),
+                        name: name.clone(),
+                        descriptor: descriptor.clone(),
+                    });
+                }
+                Element::Nested(inside) => self.annotation(inside),
+                Element::List(held) => {
+                    for one in held {
+                        self.element(one);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Everything one class asks the file it goes in to hold.
+    fn needs_of(class: &Class) -> Needs {
+        let mut needs = Needs::default();
+        needs.kind(&class.descriptor);
+        needs.kind(&class.superclass);
+        for one in &class.interfaces {
+            needs.kind(one);
+        }
+        if let Some(source) = &class.source_file {
+            needs.text(source);
+        }
+        for one in &class.annotations {
+            needs.annotation(one);
+        }
+        for field in class.fields() {
+            needs.field(&field.reference);
+            for one in &field.annotations {
+                needs.annotation(one);
+            }
+        }
+        for method in class.methods() {
+            needs.method(&method.reference);
+            for one in method
+                .annotations
+                .iter()
+                .chain(method.parameter_annotations.iter().flatten())
+            {
+                needs.annotation(one);
+            }
+            for instruction in &method.instructions {
+                match &instruction.operand {
+                    Operand::None => {}
+                    Operand::Method(reference) => needs.method(reference),
+                    Operand::Field(reference) => needs.field(reference),
+                    Operand::Type(descriptor) => needs.kind(descriptor),
+                    Operand::Text(text) => needs.text(text),
+                }
+            }
+            for one in &method.tries {
+                for (caught, _) in &one.catches {
+                    if let Some(descriptor) = caught {
+                        needs.kind(descriptor);
+                    }
+                }
+            }
+        }
+        needs
+    }
+
+    /// Every class, in as many files as it takes.
+    ///
+    /// A package may carry more than one dex file, and the platform reads
+    /// `classes.dex`, `classes2.dex` and so on in order. Which class goes in
+    /// which is settled here: classes are taken in the order they were given
+    /// and put in the file being filled until one of them would not fit, and
+    /// then a new file is started. Nothing is reordered, so the same
+    /// application comes out the same way every time.
+    pub fn write_all(classes: &[Class], extra: &[MethodRef]) -> Result<Vec<Vec<u8>>, Diagnostic> {
+        write_all_holding(classes, extra, MOST_OF_ONE_THING)
+    }
+
+    /// The same, with the wall put where the caller says. Nothing but a test
+    /// moves it: an application reaches the real one soon enough, and a test
+    /// that had to build one that big would take longer than the thing it is
+    /// checking.
+    pub fn write_all_holding(
+        classes: &[Class],
+        extra: &[MethodRef],
+        most: usize,
+    ) -> Result<Vec<Vec<u8>>, Diagnostic> {
+        if classes.is_empty() {
+            return Err(fail("EW010", "A dex file must define at least one class."));
+        }
+
+        let mut shared = Needs::default();
+        for one in extra {
+            shared.method(one);
+        }
+
+        let mut parts: Vec<Vec<Class>> = Vec::new();
+        let mut here: Vec<Class> = Vec::new();
+        let mut running = Needs::default();
+        for class in classes {
+            let needs = needs_of(class);
+            let would = |mine: &[String], theirs: &[String]| -> usize {
+                mine.len() + theirs.iter().filter(|one| !mine.contains(one)).count()
+            };
+            let types = would(&running.types, &needs.types) + shared.types.len();
+            let strings = would(&running.strings, &needs.strings) + shared.strings.len();
+            let fields = running.fields.len()
+                + needs
+                    .fields
+                    .iter()
+                    .filter(|one| !running.fields.contains(one))
+                    .count()
+                + shared.fields.len();
+            let methods = running.methods.len()
+                + needs
+                    .methods
+                    .iter()
+                    .filter(|one| !running.methods.contains(one))
+                    .count()
+                + shared.methods.len();
+
+            let over = types > most || strings > most || fields > most || methods > most;
+            if over && here.is_empty() {
+                return Err(fail(
+                    "EW006",
+                    "One class asks a dex file to hold more than an instruction can name.",
+                )
+                .with_context(format!("Class: {}", class.descriptor)));
+            }
+            if over {
+                parts.push(std::mem::take(&mut here));
+                running = Needs::default();
+            }
+
+            let needs = if over { needs_of(class) } else { needs };
+            for one in needs.types {
+                running.kind(&one);
+            }
+            for one in needs.strings {
+                running.text(&one);
+            }
+            for one in needs.fields {
+                running.field(&one);
+            }
+            for one in needs.methods {
+                running.method(&one);
+            }
+            here.push(class.clone());
+        }
+        parts.push(here);
+
+        let mut out = Vec::with_capacity(parts.len());
+        for part in &parts {
+            out.push(write(part, extra)?);
+        }
+        Ok(out)
+    }
+
+    /// What the file holding this many classes is called. The first has no
+    /// number, and the platform reads them in this order.
+    pub fn dex_named(which: usize) -> String {
+        if which == 0 {
+            "classes.dex".to_string()
+        } else {
+            format!("classes{}.dex", which + 1)
+        }
+    }
+
     pub fn write(classes: &[Class], extra: &[MethodRef]) -> Result<Vec<u8>, Diagnostic> {
         if classes.is_empty() {
             return Err(fail("EW010", "A dex file must define at least one class."));
@@ -25255,6 +25489,7 @@ pub mod bundle {
     pub const CONFIG_ENTRY: &str = "BundleConfig.pb";
     pub const MANIFEST_ENTRY: &str = "base/manifest/AndroidManifest.xml";
     pub const DEX_ENTRY: &str = "base/dex/classes.dex";
+    pub const DEX_FOLDER: &str = "base/dex/";
     pub const LIB_PREFIX: &str = "base/lib/";
 
     const NODE_ELEMENT: u32 = 1;
@@ -25839,8 +26074,15 @@ pub mod bundle {
 
         let carries_code = !project.code.is_empty();
         if carries_code {
-            let classes = crate::dexwrite::write(&project.code, &project.references)?;
-            archive.add(DEX_ENTRY, classes)?;
+            for (which, held) in crate::dexwrite::write_all(&project.code, &project.references)?
+                .into_iter()
+                .enumerate()
+            {
+                archive.add(
+                    format!("{DEX_FOLDER}{}", crate::dexwrite::dex_named(which)),
+                    held,
+                )?;
+            }
         }
 
         for (name, contents) in &project.files {
@@ -28167,8 +28409,15 @@ public final class R {{
             }
         }
         if !project.code.is_empty() {
-            let classes = crate::dexwrite::write(&project.code, &project.references)?;
-            archive.add("classes.dex", classes)?;
+            // More than one where one will not hold it. The platform reads
+            // them in order, and has since long before the oldest this builds
+            // for.
+            for (which, held) in crate::dexwrite::write_all(&project.code, &project.references)?
+                .into_iter()
+                .enumerate()
+            {
+                archive.add(crate::dexwrite::dex_named(which), held)?;
+            }
         }
         for (name, bytes) in &project.files {
             if name == "AndroidManifest.xml" {
@@ -34042,6 +34291,88 @@ public class Written {
             }
         }
         out
+    }
+
+    /// A package carries as many dex files as it takes.
+    ///
+    /// An instruction names a method, a field, a type or a string by sixteen
+    /// bits, so one file holds sixty-five thousand of each and no more. Every
+    /// application that carries enough of other people's code walks into that
+    /// wall, and until now this stopped there. Now the classes are put in as
+    /// many files as they need, and the platform reads them in order.
+    #[test]
+    fn a_package_carries_as_many_dex_files_as_it_takes() {
+        let classpath = crate::compilers::java::Classpath::new();
+        let mut classes = Vec::new();
+        for source in [A_PROGRAM_THAT_USES_THE_LOT, A_PROGRAM_OF_THE_SUGARED_KIND] {
+            for (name, bytes) in crate::compilers::java::compile(source.trim_start(), &classpath)
+                .expect("the program compiles")
+            {
+                let class = crate::jvm::read(&bytes)
+                    .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
+                classes.extend(crate::dalvik::translate_class(&class).expect("it translates"));
+            }
+        }
+        assert!(classes.len() > 4, "there is something to split");
+
+        // One file, because nothing here is anywhere near the wall.
+        let whole = crate::dexwrite::write_all(&classes, &[]).expect("one file");
+        assert_eq!(whole.len(), 1, "nothing here needs more than one");
+
+        // And the same classes with the wall moved in, which is the only way
+        // to reach it without building an application the size of one that
+        // really does.
+        // The wall moved in far enough that these classes reach it, which is
+        // the only way to reach it without building an application the size of
+        // one that really does.
+        let mut parts = None;
+        for most in [64usize, 80, 96, 112, 128, 160, 192, 224, 256, 320] {
+            let Ok(held) = crate::dexwrite::write_all_holding(&classes, &[], most) else {
+                continue;
+            };
+            if held.len() > 1 {
+                parts = Some(held);
+                break;
+            }
+        }
+        let parts = parts.expect("some wall these classes run into");
+        assert!(parts.len() > 1, "only {} files came out", parts.len());
+
+        let mut held: Vec<String> = Vec::new();
+        for (which, one) in parts.iter().enumerate() {
+            let mut sink = crate::diag::Sink::new();
+            let read = crate::dex::read(one, &mut sink).expect("each one reads back");
+            assert!(!sink.has_blocking(), "{:?}", sink.entries());
+            let whole = crate::dex::integrity(one).expect("each one is whole");
+            assert!(
+                whole.self_consistent(),
+                "{} does not check out",
+                super::dexwrite::dex_named(which)
+            );
+            held.extend(read.class_names().iter().map(|name| name.to_string()));
+        }
+
+        let mut wanted: Vec<String> = classes
+            .iter()
+            .map(|one| crate::dex::descriptor_to_source(&one.descriptor))
+            .collect();
+        wanted.sort();
+        held.sort();
+        assert_eq!(held, wanted, "every class is in exactly one of the files");
+
+        // The names the platform looks for, in the order it looks for them.
+        assert_eq!(super::dexwrite::dex_named(0), "classes.dex");
+        assert_eq!(super::dexwrite::dex_named(1), "classes2.dex");
+        assert_eq!(super::dexwrite::dex_named(9), "classes10.dex");
+
+        if let Some((_, names)) = dexdump(&parts[1]) {
+            assert!(!names.is_empty(), "dexdump reads the second one too");
+        }
+        eprintln!(
+            "multidex: {} classes across {} files that all read back",
+            classes.len(),
+            parts.len()
+        );
     }
 
     /// A finished dex, read the way the runtime reads one.
