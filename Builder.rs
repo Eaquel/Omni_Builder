@@ -9471,6 +9471,34 @@ pub mod resources {
             }
         }
 
+        /// Whether this already holds that resource for those devices.
+        pub fn holds(&self, kind: Kind, name: &str, config: Config) -> bool {
+            self.entries
+                .iter()
+                .any(|held| held.kind == kind && held.name == name && held.config == config)
+        }
+
+        /// Takes from another table whatever this one does not already have.
+        ///
+        /// A library's resources sit underneath the project's: where both
+        /// declare the same thing for the same devices, the project's is the
+        /// one that ships, quietly, because overriding a library's resource is
+        /// a thing an application is meant to be able to do. What comes back
+        /// is what was taken.
+        pub fn take_what_is_missing(&mut self, other: Table, sink: &mut Sink) -> Vec<Entry> {
+            let mut taken = Vec::new();
+            for entry in other.entries {
+                if self.holds(entry.kind, &entry.name, entry.config) {
+                    continue;
+                }
+                let held = entry.clone();
+                if self.push(entry, sink) {
+                    taken.push(held);
+                }
+            }
+            taken
+        }
+
         pub fn read_values(&mut self, text: &str, origin: &str, sink: &mut Sink) -> bool {
             self.read_values_for(text, origin, Config::DEFAULT, sink)
         }
@@ -27460,6 +27488,15 @@ pub mod builder {
         /// Every resource the project holds as a file of its own: a layout, a
         /// menu, a drawable, whatever `res` holds outside a values folder.
         pub resources: Vec<crate::scaffold::Supplied>,
+        /// The same again, out of the Android libraries the project depends
+        /// on. These sit underneath the project's own: where both declare the
+        /// same thing for the same devices, the project's is the one that
+        /// ships, which is what overriding a library's resource means.
+        pub library_values: Vec<(String, String)>,
+        pub library_resources: Vec<crate::scaffold::Supplied>,
+        /// The packages those libraries are written in, each of which needs an
+        /// `R` of its own with the numbers this build handed out.
+        pub library_packages: Vec<String>,
     }
 
     pub struct Icons {
@@ -27627,6 +27664,57 @@ pub mod builder {
                          read, so a mistake in one stops the build rather than shipping \
                          an application that is missing its words on those devices.",
                     ));
+            }
+        }
+
+        // And underneath all of it, whatever the Android libraries brought.
+        // A library's resource is used where the project does not declare one
+        // of its own for the same devices, and is left out where it does.
+        if !project.library_values.is_empty() || !project.library_resources.is_empty() {
+            let mut theirs =
+                crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
+            let mut carried: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
+            for held in &project.library_resources {
+                let entry = format!("res/{}/{}", held.folder, held.name);
+                if files.iter().any(|(one, _)| *one == entry)
+                    || compiling.iter().any(|(one, _)| *one == entry)
+                {
+                    continue;
+                }
+                if !theirs.read_file(&held.folder, &held.name, &entry, sink) {
+                    return Err(fail("EB050", "A library's resource could not be read.")
+                        .with_context(format!("Entry: {entry}")));
+                }
+                carried.push((entry, held.clone()));
+            }
+            for (folder, text) in &project.library_values {
+                let origin = format!("{}/{}", folder, crate::scaffold::STRINGS_FILE);
+                let config =
+                    crate::resources::Config::parse_values_directory(folder).map_err(|why| {
+                        fail("EB043", "A resource folder is not one this build reads.")
+                            .with_context(format!("Folder: {folder}"))
+                            .with_context(format!("Reported: {why}"))
+                    })?;
+                if !theirs.read_values_for(text, &origin, config, sink) {
+                    return Err(fail("EB044", "A library's values file could not be read.")
+                        .with_context(format!("File: {origin}")));
+                }
+            }
+
+            let taken = table.take_what_is_missing(theirs, sink);
+            for (entry, held) in carried {
+                if !taken.iter().any(|one| one.origin == entry) {
+                    continue;
+                }
+                if held.name.ends_with(".xml")
+                    && crate::resources::Config::parse_directory(&held.folder)
+                        .map(|(kind, _)| kind.is_compiled_xml())
+                        .unwrap_or(false)
+                {
+                    compiling.push((entry, held));
+                } else {
+                    files.push((entry, held.bytes));
+                }
             }
         }
 
@@ -27800,6 +27888,9 @@ pub mod builder {
             launcher: Vec::new(),
             values: Vec::new(),
             resources: Vec::new(),
+            library_values: Vec::new(),
+            library_resources: Vec::new(),
+            library_packages: Vec::new(),
         }
     }
 
@@ -27913,6 +28004,9 @@ pub mod builder {
             launcher: Vec::new(),
             values: Vec::new(),
             resources: Vec::new(),
+            library_values: Vec::new(),
+            library_resources: Vec::new(),
+            library_packages: Vec::new(),
         })
     }
 
@@ -27930,6 +28024,13 @@ pub mod builder {
         project.values = crate::scaffold::values_files(root);
         project.resources = crate::scaffold::resource_files(root);
 
+        // And what the Android libraries brought with them, which sits
+        // underneath the project's own.
+        let brought = brought_by_libraries(root)?;
+        project.library_values = brought.values;
+        project.library_resources = brought.resources;
+        project.library_packages = brought.packages;
+
         // The identifiers the resource table hands out, worked out here rather
         // than at packaging time, because `R.string.app_name` is how a person
         // reaches a resource and the compiler needs the number behind it.
@@ -27944,6 +28045,16 @@ pub mod builder {
             let package = parsed.as_ref().map(package_name).unwrap_or_default();
             if !package.is_empty() {
                 sources.push(("R.java".to_string(), r_source(&package, &icons.compiled)));
+            }
+            // A library's own `R` was written when the library was built, with
+            // numbers that mean nothing here. One is written for each of them
+            // with the numbers this build handed out, and it wins over the one
+            // the library brought because it is compiled rather than unpacked.
+            for held in &project.library_packages {
+                if held.is_empty() || *held == package {
+                    continue;
+                }
+                sources.push((format!("{held}/R.java"), r_source(held, &icons.compiled)));
             }
         }
 
@@ -28142,6 +28253,96 @@ public final class R {{
                 ));
         }
         Ok(out)
+    }
+
+    /// What an Android library brings besides its code: the resources it
+    /// declares, the values files among them, the package it is written in,
+    /// and the manifest it asks to have merged.
+    #[derive(Default)]
+    pub struct Brought {
+        pub values: Vec<(String, String)>,
+        pub resources: Vec<crate::scaffold::Supplied>,
+        pub packages: Vec<String>,
+        pub manifests: Vec<String>,
+    }
+
+    /// Everything the Android libraries a project depends on bring with them.
+    ///
+    /// They are read in a settled order and land underneath the project's own,
+    /// so a project that overrides a library's string keeps its own and a
+    /// project that does not gets the library's.
+    pub fn brought_by_libraries(root: &str) -> Result<Brought, Diagnostic> {
+        let mut out = Brought::default();
+        for path in packaged_jars(root) {
+            if path.extension().is_none_or(|held| held != "aar") {
+                continue;
+            }
+            let where_from = path.display().to_string();
+            let bytes = std::fs::read(&path).map_err(|why| {
+                fail("EB045", "A dependency could not be read.")
+                    .with_context(format!("Path: {where_from}"))
+                    .with_context(format!("Reason: {why}"))
+            })?;
+            let mut sink = Sink::new();
+            let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+                return Err(fail("EB046", "A dependency is not an archive this reads.")
+                    .with_context(format!("Path: {where_from}")));
+            };
+
+            let mut entries: Vec<&crate::archive::Entry> = archive
+                .entries()
+                .iter()
+                .filter(|entry| !entry.is_directory())
+                .collect();
+            entries.sort_by(|left, right| left.name.cmp(&right.name));
+
+            for entry in entries {
+                if entry.name == "AndroidManifest.xml" {
+                    let held = entry_bytes(&bytes, entry, &where_from)?;
+                    let text = String::from_utf8_lossy(&held).to_string();
+                    if let Some(package) = package_of(&text) {
+                        if !out.packages.contains(&package) {
+                            out.packages.push(package);
+                        }
+                    }
+                    out.manifests.push(text);
+                    continue;
+                }
+                let Some(rest) = entry.name.strip_prefix("res/") else {
+                    continue;
+                };
+                let Some((folder, name)) = rest.split_once('/') else {
+                    continue;
+                };
+                if name.contains('/') {
+                    continue;
+                }
+                let held = entry_bytes(&bytes, entry, &where_from)?;
+                if folder == crate::resources::Config::VALUES_DIRECTORY
+                    || folder.starts_with("values-")
+                {
+                    out.values.push((
+                        folder.to_string(),
+                        String::from_utf8_lossy(&held).to_string(),
+                    ));
+                    continue;
+                }
+                out.resources.push(crate::scaffold::Supplied {
+                    folder: folder.to_string(),
+                    name: name.to_string(),
+                    bytes: held,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// The package a manifest declares, which is the package a library's `R`
+    /// is written in.
+    fn package_of(manifest: &str) -> Option<String> {
+        let mut sink = Sink::new();
+        let root = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink)?;
+        root.attribute("package").map(|held| held.to_string())
     }
 
     /// The jars a project brings with it that have to go into the package.
@@ -34776,7 +34977,49 @@ public final class Greeting {
         )
         .unwrap();
         aar.add("R.txt", Vec::new()).unwrap();
+        // What a library really brings: its own strings and its own layout,
+        // one of which this application overrides and the rest of which it
+        // takes as they are.
+        aar.add(
+            "res/values/values.xml",
+            b"<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<resources>
+<string name=\"lib_only\">from the library</string>
+<string name=\"lib_shared\">the library's own</string>
+<color name=\"lib_tint\">#ff203040</color>
+</resources>
+"
+            .to_vec(),
+        )
+        .unwrap();
+        aar.add(
+            "res/layout/lib_row.xml",
+            b"<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<TextView xmlns:android=\"http://schemas.android.com/apk/res/android\"
+    android:layout_width=\"match_parent\"
+    android:layout_height=\"wrap_content\"
+    android:text=\"@string/lib_only\" />
+"
+            .to_vec(),
+        )
+        .unwrap();
         std::fs::write(libraries.join("greeting.aar"), aar.finish().unwrap()).unwrap();
+
+        // The application says one of the library's strings differently, which
+        // is the whole point of a library's resources being underneath the
+        // application's.
+        let values = root
+            .join(super::scaffold::RES_FOLDER)
+            .join(super::scaffold::values_folder(super::scaffold::BASE_LOCALE));
+        let held = std::fs::read_to_string(values.join(super::scaffold::STRINGS_FILE)).unwrap();
+        std::fs::write(
+            values.join(super::scaffold::STRINGS_FILE),
+            held.replace(
+                "</resources>",
+                "    <string name=\"lib_shared\">the application's own</string>\n</resources>",
+            ),
+        )
+        .unwrap();
 
         std::fs::write(
             root.join(super::scaffold::JAVA_FOLDER)
@@ -34798,7 +35041,12 @@ public final class MainActivity extends Activity {
         view.setText(greeting.said()
                 + greeting.twice().size()
                 + greeting.later().get()
-                + new com.some.lib.Farewell().said());
+                + new com.some.lib.Farewell().said()
+                + getString(R.string.lib_only)
+                + getString(R.string.lib_shared)
+                + getString(com.some.lib.R.string.lib_only)
+                + R.color.lib_tint
+                + R.layout.lib_row);
         setContentView(view);
     }
 }
@@ -34825,6 +35073,33 @@ public final class MainActivity extends Activity {
                 "{wanted} is not in the package: {named:?}"
             );
         }
+        // The library's own strings and layout are in the table, and the one
+        // the application says differently is the application's.
+        let mut sink = crate::diag::Sink::new();
+        let icons = super::builder::compile_resources_for_test(&project, &mut sink)
+            .expect("the resources compile")
+            .expect("and there are some");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let said = |name: &str| -> String {
+            icons
+                .compiled
+                .entries()
+                .iter()
+                .find(|one| one.name == name)
+                .map(|one| one.value.to_source())
+                .unwrap_or_else(|| panic!("{name} is not in the table"))
+        };
+        assert_eq!(said("lib_only"), "from the library");
+        assert_eq!(said("lib_shared"), "the application's own");
+        assert_eq!(said("lib_tint"), "#ff203040");
+        assert!(
+            icons
+                .files
+                .iter()
+                .any(|(entry, _)| entry == "res/layout/lib_row.xml"),
+            "the library's layout is in the package"
+        );
+
         let mut refused = Vec::new();
         for one in &project.code {
             refused.extend(what_the_runtime_would_refuse(one));
@@ -37504,6 +37779,9 @@ public final class MainActivity extends Activity {
             launcher: Vec::new(),
             values: Vec::new(),
             resources: Vec::new(),
+            library_values: Vec::new(),
+            library_resources: Vec::new(),
+            library_packages: Vec::new(),
         }
     }
 
@@ -38195,6 +38473,9 @@ public final class MainActivity extends Activity {
                 launcher: Vec::new(),
                 values: Vec::new(),
                 resources: Vec::new(),
+                library_values: Vec::new(),
+                library_resources: Vec::new(),
+                library_packages: Vec::new(),
             };
             let mut sink = Sink::new();
             let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
