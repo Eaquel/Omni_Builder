@@ -6042,6 +6042,14 @@ impl Classpath {
             .iter()
             .filter_map(|named| resolve_named(self, unit, named))
             .collect();
+        // An `@interface` extends `java.lang.annotation.Annotation`, whether
+        // or not it says so -- the class file this writes says so, and code
+        // that reads one back has to be able to see it.
+        if unit.annotation {
+            known
+                .interfaces
+                .push("java/lang/annotation/Annotation".to_string());
+        }
         // And what each of them was handed: `Store<String, Person>` says which
         // of its own type parameters a `People` fills in with what.
         known.above = unit
@@ -11979,18 +11987,17 @@ impl Emitter<'_> {
     /// asked says what is wrong when it does not, because it is the one that
     /// knows what it was doing.
     fn fit(&mut self, found: &Type, wanted: &Type, line: u32) -> Result<bool, Diagnostic> {
-        if found.may_be_given_to(wanted) {
+        if self.may_be_given(found, wanted) {
             if !found.is_reference() && !wanted.is_reference() {
                 self.convert(found, wanted, line)?;
             }
-            // An Object going somewhere with a name gets the cast erasure
-            // implies. A method's own `<T>` is erased to Object with nothing
-            // to put back -- `javac` infers what T was from the call and casts
-            // here; this cannot infer, so it casts to where the value is going,
-            // which is the same instruction for the same reason.
-            if *found == Type::Object("java/lang/Object".to_string(), Vec::new())
-                && *wanted != *found
-            {
+            // Anything going somewhere further down the hierarchy gets the
+            // cast erasure implies. A method's own `<T>` is erased to its
+            // bound with nothing to put back -- `javac` infers what T was
+            // from the call and casts here; this cannot infer, so it casts to
+            // where the value is going, which is the same instruction for the
+            // same reason.
+            if found.is_reference() && *wanted != *found && !self.reaches(found, wanted) {
                 if let Type::Object(named, _) = wanted {
                     let index = self.pool.class(named);
                     self.op2(0xc0, index);
@@ -12007,6 +12014,42 @@ impl Emitter<'_> {
             self.convert(&now, wanted, line)?;
         }
         Ok(true)
+    }
+
+    /// Whether a value of one type may be handed to somewhere wanting
+    /// another, without a cast being written.
+    ///
+    /// For everything that is not a reference this is what the language says
+    /// about widening. For references it is subtyping, with two things
+    /// allowed on top: anything may be handed where an `Object` is wanted,
+    /// and an `Object` may be handed anywhere, because that is what erasure
+    /// leaves of a type variable and `fit` writes the cast `javac` would have
+    /// written. What is not allowed is handing a String where an Integer is
+    /// wanted -- which compiles to a package whose first call on it is one
+    /// the runtime refuses.
+    fn may_be_given(&self, found: &Type, wanted: &Type) -> bool {
+        if !found.is_reference() || !wanted.is_reference() {
+            return found.may_be_given_to(wanted);
+        }
+        if !self.reaches(found, wanted) {
+            // Down the hierarchy rather than up. `javac` wants a cast written
+            // for that and this does not, because erasure leaves a type
+            // variable as its bound rather than as itself: what
+            // `getAnnotation` gives back is written `Annotation` however it
+            // was called, and the developer's own type is underneath it. The
+            // cast is written into the class file all the same, so what runs
+            // is what `javac` would have run.
+            return self.reaches(wanted, found);
+        }
+        // What each of them was written holding is deliberately not asked
+        // about. `List<String>` and `List<Integer>` really are two unrelated
+        // types, and refusing one where the other is wanted would be right --
+        // but a wildcard is read here as what it erases to, so
+        // `List<? extends Number>` arrives as `List<Number>`, and refusing a
+        // `List<Integer>` there would refuse code the language allows. Until
+        // wildcards are carried through the type system, letting a little too
+        // much through is the side to be wrong on.
+        true
     }
 
     /// Puts a primitive in its box, or takes one out, when that is what the
@@ -12269,6 +12312,24 @@ impl Emitter<'_> {
                         1,
                         "`this` has no meaning in a static method.",
                     ));
+                }
+                // Inside a lambda, `this` is the object the lambda was written
+                // in and not the object the lambda came to. `javac` keeps the
+                // body in the enclosing class and so has nothing to do here;
+                // this writes a class, so the enclosing instance -- which that
+                // class was handed and holds -- is what `this` reads.
+                if self.unit.stands_for_a_lambda {
+                    if let Some(field) = self.unit.fields.iter().find(|held| held.name == OUTER) {
+                        let what = self.resolve(&field.what.clone(), line)?;
+                        self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
+                        let index =
+                            self.pool
+                                .field(&self.this_class.clone(), OUTER, &what.descriptor());
+                        self.op2(0xb4, index);
+                        self.pops(1);
+                        self.pushes(&what);
+                        return Ok(what);
+                    }
                 }
                 self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
                 Ok(Type::Object(self.this_class.clone(), Vec::new()))
@@ -15336,21 +15397,86 @@ impl Emitter<'_> {
             });
         }
         for round in 0..3 {
-            let mut best: Option<(u32, usize)> = None;
+            let mut able: Vec<(u32, usize)> = Vec::new();
             for (at, shape) in shapes.iter().enumerate() {
                 if !self.could_take(shape, &given, &anything, round) {
                     continue;
                 }
-                let cost = self.what_it_costs(shape, &given, &anything);
-                if best.is_none_or(|(held, _)| cost < held) {
-                    best = Some((cost, at));
+                able.push((self.what_it_costs(shape, &given, &anything), at));
+            }
+            let Some(cheapest) = able.iter().map(|(cost, _)| *cost).min() else {
+                continue;
+            };
+            able.retain(|(cost, _)| *cost == cheapest);
+            if able.len() == 1 {
+                return Ok(theirs.get(able[0].1).cloned());
+            }
+            // Two that cost the same are told apart by which is the more
+            // specific: one whose every parameter the other's would accept.
+            // Where neither is, the language says the call is ambiguous, and
+            // picking one would be this compiler deciding what the developer
+            // meant.
+            let mut narrowest: Option<usize> = None;
+            for (_, at) in &able {
+                let mine = &shapes[*at];
+                if able.iter().all(|(_, other)| {
+                    *other == *at || self.at_least_as_specific(mine, &shapes[*other])
+                }) {
+                    narrowest = Some(*at);
+                    break;
                 }
             }
-            if let Some((_, at)) = best {
+            if let Some(at) = narrowest {
                 return Ok(theirs.get(at).cloned());
             }
+            let named: Vec<String> = able
+                .iter()
+                .map(|(_, at)| {
+                    let held = &shapes[*at];
+                    format!(
+                        "{}({})",
+                        held.name,
+                        held.parameters
+                            .iter()
+                            .map(|one| one.readable())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                })
+                .collect();
+            return Err(at(
+                "EJ262",
+                line,
+                1,
+                format!(
+                    "`{}` here could be {} of these, and neither is more specific.",
+                    shapes[able[0].1].name,
+                    named.len()
+                ),
+            )
+            .with_context(format!("Written: {}", named.join(" or ")))
+            .with_suggestion(
+                "Say which by casting an argument to the type that one takes. The \
+                 language calls this ambiguous rather than choosing, and so does this.",
+            ));
         }
         Ok(theirs.first().cloned())
+    }
+
+    /// Whether one signature is at least as specific as another: every
+    /// argument it takes is one the other would take too.
+    ///
+    /// This is what decides between two methods that a call fits equally well,
+    /// and it is a question about the types alone rather than about the values
+    /// handed over.
+    fn at_least_as_specific(&self, mine: &Signature, other: &Signature) -> bool {
+        if mine.parameters.len() != other.parameters.len() {
+            return false;
+        }
+        mine.parameters
+            .iter()
+            .zip(other.parameters.iter())
+            .all(|(held, wanted)| held == wanted || self.reaches(held, wanted))
     }
 
     /// How far the values handed over are from what a signature wants, added
@@ -20135,11 +20261,16 @@ fn as_written(signature: &Signature, held: &[Type]) -> Signature {
     // index cannot: `Stream<T>.map` takes a `Function<? super T, ? extends
     // R>`, and a method reference written for it has to know that its
     // receiver is a T.
+    // Either what it takes or what it hands back may stand for one of the
+    // class's own type parameters. A `Supplier<T>` takes nothing and hands
+    // back a T, so asking only about what it takes would leave the lambda
+    // inside `Supplier<Supplier<String>>` with nothing to stand for.
     if !held.is_empty()
-        && signature
+        && (signature
             .taken_stands_for
             .iter()
             .any(Standing::mentions_the_class)
+            || signature.returns_stands_for.mentions_the_class())
     {
         let mut shaped = signature.clone();
         for (at, one) in shaped.parameters.iter_mut().enumerate() {
@@ -20986,7 +21117,10 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     default_value: None,
                     own_variables: Vec::new(),
                     own_bounds: Vec::new(),
-                    throws: Vec::new(),
+                    // What the method it hands over to may throw. A bridge
+                    // that said it threw nothing would be a bridge whose one
+                    // statement is not allowed to be there.
+                    throws: method.throws.clone(),
                 });
             }
         }
@@ -31854,6 +31988,385 @@ public class Screen extends Activity implements View.OnClickListener {
     }
 }
 "####;
+
+    /// Java as the language, not as a subset of it.
+    ///
+    /// Each of these is a program `javac` accepts, and each is one where the
+    /// meaning is in the part of the language that is easy to get wrong:
+    /// inferring a type argument from what a call is assigned to, reading a
+    /// wildcard, giving a lambda its parameter types from the interface it
+    /// stands for, choosing between overloads by the phases the language
+    /// defines. A developer writes ordinary Java and this has to be the same
+    /// compiler for it -- so what is checked is not only that this accepts
+    /// them, but that `javac` does too, which is what makes the battery Java
+    /// rather than a dialect of it.
+    #[test]
+    fn the_java_a_developer_writes_is_the_java_this_compiles() {
+        for (name, source) in PROBES {
+            if let Err(why) = compile(source, &Classpath::new()) {
+                panic!(
+                    "{name} is Java this does not compile: [{}] {}",
+                    why.code, why.message
+                );
+            }
+        }
+
+        // And the ones that are not Java. A compiler that accepts everything
+        // has not understood anything, so each of these has to be refused --
+        // and refused for the reason it is wrong.
+        for (name, source) in NOT_JAVA {
+            let refused = compile(source, &Classpath::new());
+            assert!(refused.is_err(), "{name} is not Java and was accepted");
+        }
+
+        let Some(javac) = find_a_java_tool("javac") else {
+            eprintln!(
+                "java semantics: {} programs compile; javac is not here to agree",
+                PROBES.len()
+            );
+            return;
+        };
+        let directory = std::env::temp_dir().join(format!(
+            "omni-semantics-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|held| held.as_nanos())
+                .unwrap_or_default()
+        ));
+        for (name, source) in PROBES {
+            let at = directory.join(name);
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(at.join("P.java"), source).unwrap();
+            let done = std::process::Command::new(&javac)
+                .arg("-d")
+                .arg(at.to_str().unwrap())
+                .arg(at.join("P.java").to_str().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                done.status.success(),
+                "{name} is in the battery and javac does not accept it:\n{}",
+                String::from_utf8_lossy(&done.stderr)
+            );
+        }
+        for (name, source) in NOT_JAVA {
+            let at = directory.join(format!("not-{name}"));
+            std::fs::create_dir_all(&at).unwrap();
+            std::fs::write(at.join("P.java"), source).unwrap();
+            let done = std::process::Command::new(&javac)
+                .arg("-d")
+                .arg(at.to_str().unwrap())
+                .arg(at.join("P.java").to_str().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                !done.status.success(),
+                "{name} is refused here and javac takes it, so the refusal is this \
+                 compiler's own rule"
+            );
+        }
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "java semantics: {} programs javac accepts compile here, and {} it refuses \
+             are refused here",
+            PROBES.len(),
+            NOT_JAVA.len()
+        );
+    }
+
+    /// Where the JDK's own tools are, when there are any.
+    fn find_a_java_tool(name: &str) -> Option<std::path::PathBuf> {
+        if let Ok(home) = std::env::var("JAVA_HOME") {
+            let held = std::path::Path::new(&home).join("bin").join(name);
+            if held.is_file() {
+                return Some(held);
+            }
+        }
+        let path = std::env::var("PATH").ok()?;
+        for one in path.split(':') {
+            let held = std::path::Path::new(one).join(name);
+            if held.is_file() {
+                return Some(held);
+            }
+        }
+        None
+    }
+
+    /// Programs that are not Java, each wrong in a way a compiler has to see.
+    ///
+    /// Two things `javac` refuses are not here, and both are worth saying out
+    /// loud. A write through an upper-bounded wildcard -- `List<? extends
+    /// Number> l; l.add(one)` -- is taken here, and so is handing a
+    /// `List<Integer>` where a `List<Number>` is wanted. Both are the same
+    /// gap: a wildcard is read as what it erases to, so `List<? extends
+    /// Number>` arrives as `List<Number>` and there is nothing left saying the
+    /// type argument was unknown. Refusing either would refuse code the
+    /// language allows, so what is let through is a mistake this does not
+    /// catch rather than one it gets wrong -- the call written is the call
+    /// `javac` writes for the same code, and nothing a developer runs behaves
+    /// differently. Catching them means carrying wildcards through the whole
+    /// of the type system, which is worth doing and is not done yet.
+    const NOT_JAVA: &[(&str, &str)] = &[
+        (
+            "ambiguous-overload",
+            "public class P { static void g(Object a, String b) { } static void g(String a, Object b) { } void f() { g(\"x\", \"y\"); } }",
+        ),
+        (
+            "lambda-wrong-arity",
+            "import java.util.function.*;\npublic class P { void f() { Supplier<String> s = (a) -> \"x\"; } }",
+        ),
+        (
+            "lambda-for-a-class",
+            "public class P { void f() { Object o = () -> 1; } }",
+        ),
+        (
+            "unrelated-reference-assignment",
+            "public class P { void f() { String s = Integer.valueOf(1); } }",
+        ),
+        (
+            "calling-what-nobody-declares",
+            "public class P { void f(String s) { s.nosuchmethod(); } }",
+        ),
+        (
+            "wrong-argument-type",
+            "public class P { static void g(String a) { } void f() { g(1); } }",
+        ),
+        (
+            "narrowing-without-a-cast",
+            "public class P { void f() { int a = 1L; } }",
+        ),
+        (
+            "unreported-checked-exception",
+            "import java.io.*;\npublic class P { void f() { throw new IOException(); } }",
+        ),
+        (
+            "returning-nothing",
+            "public class P { int f() { } }",
+        ),
+    ];
+
+    const PROBES: &[(&str, &str)] = &[
+        (
+            "inference-from-target",
+            "import java.util.*;\npublic class P { void f() { List<String> a = Collections.emptyList(); a.size(); } }",
+        ),
+        (
+            "inference-nested",
+            "import java.util.*;\npublic class P { void f() { Map<String, List<Integer>> m = new HashMap<>(); m.put(\"a\", new ArrayList<>()); } }",
+        ),
+        (
+            "inference-diamond-anonymous",
+            "import java.util.*;\npublic class P { void f() { Comparator<String> c = new Comparator<String>() { public int compare(String a, String b) { return 0; } }; } }",
+        ),
+        (
+            "inference-method-arg",
+            "import java.util.*;\npublic class P { static <T> List<T> of(T one) { return null; } void f() { List<String> a = of(\"x\"); a.size(); } }",
+        ),
+        (
+            "inference-lub",
+            "public class P { static <T> T pick(T a, T b) { return a; } void f() { Object o = pick(\"x\", Integer.valueOf(1)); } }",
+        ),
+        (
+            "capture-wildcard-read",
+            "import java.util.*;\npublic class P { void f(List<?> l) { Object o = l.get(0); o.hashCode(); } }",
+        ),
+        (
+            "capture-pass-through",
+            "import java.util.*;\npublic class P { static <T> void g(List<T> x) { } void f(List<?> l) { g(l); } }",
+        ),
+        (
+            "capture-extends",
+            "import java.util.*;\npublic class P { void f(List<? extends Number> l) { Number n = l.get(0); n.intValue(); } }",
+        ),
+        (
+            "poly-lambda-argument",
+            "import java.util.*;\npublic class P { void f(List<String> l) { l.sort((a, b) -> a.compareTo(b)); } }",
+        ),
+        (
+            "poly-conditional-widening",
+            "public class P { void f(boolean c) { long x = c ? 1 : 2L; System.out.println(x); } }",
+        ),
+        (
+            "poly-conditional-boxing",
+            "public class P { void f(boolean c) { Object o = c ? \"a\" : Integer.valueOf(1); o.hashCode(); } }",
+        ),
+        (
+            "poly-method-reference",
+            "import java.util.*;\npublic class P { void f(List<String> l) { l.forEach(System.out::println); } }",
+        ),
+        (
+            "poly-lambda-in-return",
+            "import java.util.function.*;\npublic class P { Supplier<String> f() { return () -> \"x\"; } }",
+        ),
+        (
+            "overload-widening-over-boxing",
+            "public class P { static void g(long a) { } static void g(Integer a) { } void f() { g(1); } }",
+        ),
+        (
+            "overload-boxing-over-varargs",
+            "public class P { static void g(Integer a) { } static void g(int... a) { } void f() { g(1); } }",
+        ),
+        (
+            "overload-most-specific",
+            "public class P { static void g(Object a) { } static void g(String a) { } void f() { g(\"x\"); } }",
+        ),
+        (
+            "overload-null",
+            "public class P { static void g(String a) { } static void g(Object a) { } void f() { g(null); } }",
+        ),
+        (
+            "overload-generic-and-raw",
+            "import java.util.*;\npublic class P { void f(List<String> l) { l.remove(0); l.remove(\"x\"); } }",
+        ),
+        (
+            "records",
+            "public record P(int a, String b) { public P { if (a < 0) throw new IllegalArgumentException(); } }",
+        ),
+        (
+            "sealed",
+            "public class P { sealed interface S permits A, B { } record A() implements S { } record B() implements S { } }",
+        ),
+        (
+            "switch-pattern",
+            "public class P { static String f(Object o) { return switch (o) { case Integer i -> \"int\" + i; case String s -> s; default -> \"?\"; }; } }",
+        ),
+        (
+            "switch-record-pattern",
+            "public class P { record R(int a, int b) { } static int f(Object o) { return switch (o) { case R(int a, int b) -> a + b; default -> 0; }; } }",
+        ),
+        (
+            "text-block",
+            "public class P { String f() { return \"\"\"\n            hello\n            \"\"\"; } }",
+        ),
+        (
+            "var-local",
+            "import java.util.*;\npublic class P { void f() { var a = new ArrayList<String>(); a.add(\"x\"); for (var s : a) { s.length(); } } }",
+        ),
+        (
+            "instanceof-pattern",
+            "public class P { int f(Object o) { if (o instanceof String s && s.length() > 2) { return s.length(); } return 0; } }",
+        ),
+        (
+            "enhanced-for-generic",
+            "import java.util.*;\npublic class P { int f(Map<String, Integer> m) { int n = 0; for (Map.Entry<String, Integer> e : m.entrySet()) { n += e.getValue(); } return n; } }",
+        ),
+        (
+            "static-import",
+            "import static java.lang.Math.max;\npublic class P { int f() { return max(1, 2); } }",
+        ),
+        (
+            "generic-class-bounds",
+            "public class P<T extends Comparable<T>> { T pick(T a, T b) { return a.compareTo(b) < 0 ? a : b; } }",
+        ),
+        (
+            "inner-generic",
+            "import java.util.*;\npublic class P { class Inner<T> { T held; } void f() { Inner<String> i = new Inner<>(); i.held = \"x\"; } }",
+        ),
+        (
+            "try-with-resources",
+            "import java.io.*;\npublic class P { void f(InputStream in) throws IOException { try (InputStream held = in) { held.read(); } } }",
+        ),
+        (
+            "varargs-generic",
+            "import java.util.*;\npublic class P { void f() { List<String> a = Arrays.asList(\"x\", \"y\"); a.size(); } }",
+        ),
+        (
+            "interface-default-and-static",
+            "public class P { interface I { default int a() { return 1; } static int b() { return 2; } } int f(I i) { return i.a() + I.b(); } }",
+        ),
+        (
+            "enum-with-body",
+            "public class P { enum E { A { int v() { return 1; } }, B { int v() { return 2; } }; abstract int v(); } int f() { return E.A.v(); } }",
+        ),
+        (
+            "nested-lambda-capture",
+            "import java.util.function.*;\npublic class P { Supplier<Supplier<String>> f(String s) { return () -> () -> s; } }",
+        ),
+        (
+            "generic-method-explicit",
+            "import java.util.*;\npublic class P { void f() { List<String> a = Collections.<String>emptyList(); a.size(); } }",
+        ),
+        (
+            "bounded-wildcard-argument",
+            "import java.util.*;\npublic class P { static double sum(List<? extends Number> l) { double n = 0; for (Number one : l) { n += one.doubleValue(); } return n; } }",
+        ),
+        (
+            "super-wildcard",
+            "import java.util.*;\npublic class P { static void fill(List<? super String> l) { l.add(\"x\"); } }",
+        ),
+        (
+            "array-covariance",
+            "public class P { void f() { Object[] a = new String[2]; a[0] = \"x\"; } }",
+        ),
+        (
+            "labelled-break",
+            "public class P { int f() { int n = 0; outer: for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) { if (j == 1) continue outer; n++; } } return n; } }",
+        ),
+        (
+            "generic-functional-parameter",
+            "import java.util.function.*;\npublic class P { void f() { Function<String, Integer> g = s -> s.length(); g.apply(\"x\"); } }",
+        ),
+        (
+            "generic-functional-nested-arg",
+            "import java.util.*;\npublic class P { void f(Map<String, List<String>> m) { m.computeIfAbsent(\"a\", k -> new ArrayList<>()).add(\"b\"); } }",
+        ),
+        (
+            "stream-map",
+            "import java.util.*;\nimport java.util.stream.*;\npublic class P { long f(List<String> l) { return l.stream().map(s -> s.length()).count(); } }",
+        ),
+        (
+            "comparator-comparing",
+            "import java.util.*;\npublic class P { void f(List<String> l) { l.sort(Comparator.comparing(String::length)); } }",
+        ),
+        (
+            "optional-map",
+            "import java.util.*;\npublic class P { int f(Optional<String> o) { return o.map(s -> s.length()).orElse(0); } }",
+        ),
+        (
+            "bifunction",
+            "import java.util.function.*;\npublic class P { int f() { BiFunction<String, String, Integer> g = (a, b) -> a.length() + b.length(); return g.apply(\"a\", \"b\"); } }",
+        ),
+        (
+            "generic-method-inferred-from-lambda",
+            "import java.util.function.*;\npublic class P { static <T, R> R use(T one, Function<T, R> f) { return f.apply(one); } int g() { return use(\"x\", s -> s.length()); } }",
+        ),
+        (
+            "wildcard-consumer",
+            "import java.util.function.*;\npublic class P { void f(Consumer<? super String> c) { c.accept(\"x\"); } }",
+        ),
+        (
+            "intersection-bound",
+            "import java.util.*;\npublic class P { static <T extends Comparable<T> & Cloneable> T pick(T a) { return a; } }",
+        ),
+        (
+            "recursive-generic",
+            "public class P<T extends P<T>> { T self() { return null; } }",
+        ),
+        (
+            "anonymous-generic-interface",
+            "import java.util.function.*;\npublic class P { Function<String, Integer> f() { return new Function<String, Integer>() { public Integer apply(String s) { return s.length(); } }; } }",
+        ),
+        (
+            "conditional-in-argument",
+            "public class P { void f(boolean c) { System.out.println(c ? 1 : \"x\"); } }",
+        ),
+        (
+            "ternary-generic",
+            "import java.util.*;\npublic class P { List<String> f(boolean c, List<String> a) { return c ? a : Collections.<String>emptyList(); } }",
+        ),
+        (
+            "array-of-generics",
+            "import java.util.*;\npublic class P { void f() { List<String>[] a = new List[2]; a[0] = new ArrayList<>(); } }",
+        ),
+        (
+            "static-nested-generic-call",
+            "import java.util.*;\npublic class P { void f() { Map<String, Integer> m = new TreeMap<>(); m.merge(\"a\", 1, Integer::sum); } }",
+        ),
+        (
+            "string-switch",
+            "public class P { int f(String s) { switch (s) { case \"a\": return 1; case \"b\": return 2; default: return 0; } } }",
+        ),
+    ];
 
     #[test]
     fn the_platform_is_the_whole_platform_with_no_jar_handed_over() {
