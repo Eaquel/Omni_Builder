@@ -8779,7 +8779,7 @@ pub mod resources {
         pub const SIZE_LARGE: u8 = 0x03;
         pub const SIZE_XLARGE: u8 = 0x04;
         pub const NOTLONG: u8 = 0x10;
-        pub const LONG: u8 = 0x20;
+        pub(super) const LONG: u8 = 0x20;
         pub const LTR: u8 = 0x40;
         pub const RTL: u8 = 0x80;
 
@@ -16887,6 +16887,9 @@ pub mod dexwrite {
         /// code units. A crash on a device names a file and a line out of
         /// this, and names only the method without it.
         pub lines: Vec<(u32, u32)>,
+        /// What was written on it, and on each of its parameters.
+        pub annotations: Vec<crate::jvm::Annotation>,
+        pub parameter_annotations: Vec<Vec<crate::jvm::Annotation>>,
         /// The stretches of this method that are inside a `try`, and where
         /// control goes when something is thrown out of them.
         pub tries: Vec<Try>,
@@ -16922,6 +16925,7 @@ pub mod dexwrite {
     pub struct Field {
         pub reference: FieldRef,
         pub access_flags: u32,
+        pub annotations: Vec<crate::jvm::Annotation>,
     }
 
     #[derive(Clone, Debug)]
@@ -16935,6 +16939,9 @@ pub mod dexwrite {
         pub interfaces: Vec<String>,
         pub access_flags: u32,
         pub source_file: Option<String>,
+        /// What was written on the class itself, which a library reads back at
+        /// run time.
+        pub annotations: Vec<crate::jvm::Annotation>,
         /// Constructors, static methods and anything private: everything that
         /// is called without asking what the object actually is.
         pub direct_methods: Vec<Method>,
@@ -16953,6 +16960,7 @@ pub mod dexwrite {
                 interfaces: Vec::new(),
                 access_flags,
                 source_file: None,
+                annotations: Vec::new(),
                 direct_methods: Vec::new(),
                 virtual_methods: Vec::new(),
                 static_fields: Vec::new(),
@@ -16997,6 +17005,8 @@ pub mod dexwrite {
             inputs: 1,
             outputs: 1,
             lines: Vec::new(),
+            annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             instructions: vec![
                 // invoke-direct {v0}, superclass.<init>()V
                 Insn::pointing(
@@ -17079,6 +17089,158 @@ pub mod dexwrite {
         }
     }
 
+    /// The kinds of value an annotation can hold, as the format numbers them.
+    mod value {
+        pub(super) const BYTE: u8 = 0x00;
+        pub(super) const SHORT: u8 = 0x02;
+        pub(super) const CHAR: u8 = 0x03;
+        pub(super) const INT: u8 = 0x04;
+        pub(super) const LONG: u8 = 0x06;
+        pub(super) const FLOAT: u8 = 0x10;
+        pub(super) const DOUBLE: u8 = 0x11;
+        pub(super) const STRING: u8 = 0x17;
+        pub(super) const TYPE: u8 = 0x18;
+        pub(super) const ENUM: u8 = 0x1b;
+        pub(super) const ARRAY: u8 = 0x1c;
+        pub(super) const ANNOTATION: u8 = 0x1d;
+        pub(super) const BOOLEAN: u8 = 0x1f;
+    }
+
+    /// Everything an annotation names, put into the pools so the writer can
+    /// point at it.
+    fn learn_annotation(pools: &mut Pools, one: &crate::jvm::Annotation) {
+        pools.kind(&one.descriptor);
+        for (name, held) in &one.values {
+            pools.string(name);
+            learn_element(pools, held);
+        }
+    }
+
+    fn learn_element(pools: &mut Pools, held: &crate::jvm::Element) {
+        use crate::jvm::Element;
+        match held {
+            Element::Text(text) => {
+                pools.string(text);
+            }
+            Element::Class(descriptor) => {
+                pools.kind(descriptor);
+            }
+            Element::Enum { descriptor, name } => {
+                pools.kind(descriptor);
+                pools.string(name);
+                let reference = FieldRef {
+                    class: descriptor.clone(),
+                    name: name.clone(),
+                    descriptor: descriptor.clone(),
+                };
+                if !pools.fields.contains(&reference) {
+                    pools.fields.push(reference);
+                }
+            }
+            Element::Nested(inside) => learn_annotation(pools, inside),
+            Element::List(held) => {
+                for one in held {
+                    learn_element(pools, one);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// One value, written the way an annotation carries it: a byte saying what
+    /// kind it is and how many bytes follow, and then those bytes.
+    ///
+    /// The format lets a number be written in as few bytes as it fits in. This
+    /// writes each in the width its kind has, which is always allowed and
+    /// never wrong.
+    fn write_element(
+        pools: &Pools,
+        held: &crate::jvm::Element,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Diagnostic> {
+        use crate::jvm::Element;
+        let sized = |out: &mut Vec<u8>, kind: u8, bytes: &[u8]| {
+            out.push(((bytes.len() as u8 - 1) << 5) | kind);
+            out.extend_from_slice(bytes);
+        };
+        match held {
+            Element::Byte(number) => sized(out, value::BYTE, &number.to_le_bytes()),
+            Element::Short(number) => sized(out, value::SHORT, &number.to_le_bytes()),
+            Element::Char(number) => sized(out, value::CHAR, &number.to_le_bytes()),
+            Element::Int(number) => sized(out, value::INT, &number.to_le_bytes()),
+            Element::Long(number) => sized(out, value::LONG, &number.to_le_bytes()),
+            Element::Float(bits) => sized(out, value::FLOAT, &bits.to_le_bytes()),
+            Element::Double(bits) => sized(out, value::DOUBLE, &bits.to_le_bytes()),
+            Element::Boolean(held) => out.push((u8::from(*held) << 5) | value::BOOLEAN),
+            Element::Text(text) => sized(
+                out,
+                value::STRING,
+                &pools.index_of_string(text)?.to_le_bytes(),
+            ),
+            Element::Class(descriptor) => sized(
+                out,
+                value::TYPE,
+                &pools.index_of_type(descriptor)?.to_le_bytes(),
+            ),
+            Element::Enum { descriptor, name } => {
+                let reference = FieldRef {
+                    class: descriptor.clone(),
+                    name: name.clone(),
+                    descriptor: descriptor.clone(),
+                };
+                sized(
+                    out,
+                    value::ENUM,
+                    &pools.index_of_field(&reference)?.to_le_bytes(),
+                )
+            }
+            Element::Nested(inside) => {
+                out.push(value::ANNOTATION);
+                write_annotation(pools, inside, out)?;
+            }
+            Element::List(held) => {
+                out.push(value::ARRAY);
+                uleb128(out, held.len() as u32);
+                for one in held {
+                    write_element(pools, one, out)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One annotation: what it is, and what each of its elements is set to,
+    /// with the elements in the order the format insists on.
+    fn write_annotation(
+        pools: &Pools,
+        one: &crate::jvm::Annotation,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Diagnostic> {
+        uleb128(out, pools.index_of_type(&one.descriptor)?);
+        uleb128(out, one.values.len() as u32);
+        let mut named: Vec<(u32, &crate::jvm::Element)> = Vec::with_capacity(one.values.len());
+        for (name, held) in &one.values {
+            named.push((pools.index_of_string(name)?, held));
+        }
+        named.sort_by_key(|(at, _)| *at);
+        for (at, held) in named {
+            uleb128(out, at);
+            write_element(pools, held, out)?;
+        }
+        Ok(())
+    }
+
+    /// One annotation on its own, with a byte in front saying who may see it.
+    fn write_annotation_item(
+        pools: &Pools,
+        one: &crate::jvm::Annotation,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let mut out = Vec::new();
+        out.push(one.visibility.as_byte());
+        write_annotation(pools, one, &mut out)?;
+        Ok(out)
+    }
+
     /// Where a method came from, in the shape the format keeps it.
     ///
     /// It is a little machine: a line to start at, then instructions that step
@@ -17141,6 +17303,23 @@ pub mod dexwrite {
             pools.kind(&class.superclass);
             for one in &class.interfaces {
                 pools.kind(one);
+            }
+            for one in &class.annotations {
+                learn_annotation(&mut pools, one);
+            }
+            for field in class.fields() {
+                for one in &field.annotations {
+                    learn_annotation(&mut pools, one);
+                }
+            }
+            for method in class.methods() {
+                for one in method
+                    .annotations
+                    .iter()
+                    .chain(method.parameter_annotations.iter().flatten())
+                {
+                    learn_annotation(&mut pools, one);
+                }
             }
             if let Some(source) = &class.source_file {
                 pools.string(source);
@@ -17400,6 +17579,210 @@ pub mod dexwrite {
             .copied()
             .find(|at| *at != 0);
 
+        // What was written on each class, field, method and parameter.
+        //
+        // The file is read section by section, and a section is walked from
+        // its first item onwards -- so everything of one kind has to sit
+        // together. That is why this is four passes: every annotation, then
+        // every set of them, then the lists of sets a method's parameters
+        // need, then the directory each class points at.
+        struct Wanted {
+            class: Vec<usize>,
+            fields: Vec<(u32, Vec<usize>)>,
+            methods: Vec<(u32, Vec<usize>)>,
+            parameters: Vec<(u32, Vec<Vec<usize>>)>,
+        }
+
+        /// The same, once each set is somewhere: where the class's own set
+        /// sits, and where each field's, method's and parameter's does.
+        struct Written {
+            class: u32,
+            fields: Vec<(u32, u32)>,
+            methods: Vec<(u32, u32)>,
+            parameters: Vec<(u32, Vec<u32>)>,
+        }
+
+        let mut wanted: Vec<Wanted> = Vec::with_capacity(classes.len());
+        let mut every: Vec<crate::jvm::Annotation> = Vec::new();
+        fn hold(
+            every: &mut Vec<crate::jvm::Annotation>,
+            held: &[crate::jvm::Annotation],
+        ) -> Vec<usize> {
+            held.iter()
+                .map(|one| {
+                    every.push(one.clone());
+                    every.len() - 1
+                })
+                .collect()
+        }
+        for class in classes {
+            let mut held = Wanted {
+                class: hold(&mut every, &class.annotations),
+                fields: Vec::new(),
+                methods: Vec::new(),
+                parameters: Vec::new(),
+            };
+            for field in class.fields() {
+                if field.annotations.is_empty() {
+                    continue;
+                }
+                held.fields.push((
+                    pools.index_of_field(&field.reference)?,
+                    hold(&mut every, &field.annotations),
+                ));
+            }
+            for method in class.methods() {
+                if !method.annotations.is_empty() {
+                    held.methods.push((
+                        pools.index_of_method(&method.reference)?,
+                        hold(&mut every, &method.annotations),
+                    ));
+                }
+                if method
+                    .parameter_annotations
+                    .iter()
+                    .all(|one| one.is_empty())
+                {
+                    continue;
+                }
+                let each = method
+                    .parameter_annotations
+                    .iter()
+                    .map(|one| hold(&mut every, one))
+                    .collect();
+                held.parameters
+                    .push((pools.index_of_method(&method.reference)?, each));
+            }
+            wanted.push(held);
+        }
+
+        let mut item_offsets: Vec<u32> = Vec::with_capacity(every.len());
+        let first_annotation_item = (!every.is_empty()).then_some((data_off + data.len()) as u32);
+        for one in &every {
+            item_offsets.push((data_off + data.len()) as u32);
+            data.extend_from_slice(&write_annotation_item(&pools, one)?);
+        }
+
+        // Every set of them, in the same order, so that a set is found by
+        // where it sits rather than by looking for it.
+        let mut set_offsets: Vec<u32> = Vec::new();
+        let set_of = |data: &mut Vec<u8>,
+                      set_offsets: &mut Vec<u32>,
+                      held: &[usize]|
+         -> Result<u32, Diagnostic> {
+            if held.is_empty() {
+                return Ok(0);
+            }
+            let mut written: Vec<(u32, u32)> = Vec::with_capacity(held.len());
+            for one in held {
+                let kind = pools.index_of_type(&every[*one].descriptor)?;
+                written.push((kind, item_offsets[*one]));
+            }
+            // A set is read by looking a type up in it, so it is sorted by
+            // type and holds each only once.
+            written.sort_by_key(|(kind, _)| *kind);
+            written.dedup_by_key(|(kind, _)| *kind);
+            while !(data_off + data.len()).is_multiple_of(4) {
+                data.push(0);
+            }
+            let at = (data_off + data.len()) as u32;
+            set_offsets.push(at);
+            data.extend_from_slice(&(written.len() as u32).to_le_bytes());
+            for (_, one) in &written {
+                data.extend_from_slice(&one.to_le_bytes());
+            }
+            Ok(at)
+        };
+
+        let mut sets: Vec<Written> = Vec::with_capacity(wanted.len());
+        for held in &wanted {
+            let on_the_class = set_of(&mut data, &mut set_offsets, &held.class)?;
+            let mut fields = Vec::new();
+            for (which, one) in &held.fields {
+                fields.push((*which, set_of(&mut data, &mut set_offsets, one)?));
+            }
+            let mut methods = Vec::new();
+            for (which, one) in &held.methods {
+                methods.push((*which, set_of(&mut data, &mut set_offsets, one)?));
+            }
+            let mut parameters = Vec::new();
+            for (which, each) in &held.parameters {
+                let mut list = Vec::with_capacity(each.len());
+                for one in each {
+                    list.push(set_of(&mut data, &mut set_offsets, one)?);
+                }
+                parameters.push((*which, list));
+            }
+            sets.push(Written {
+                class: on_the_class,
+                fields,
+                methods,
+                parameters,
+            });
+        }
+
+        // The lists of sets, one per method whose parameters were written on.
+        let mut list_offsets: Vec<Vec<(u32, u32)>> = Vec::with_capacity(sets.len());
+        let mut set_lists = 0u32;
+        let mut first_set_list = None;
+        for held in &sets {
+            let mut here = Vec::with_capacity(held.parameters.len());
+            for (which, each) in &held.parameters {
+                while !(data_off + data.len()).is_multiple_of(4) {
+                    data.push(0);
+                }
+                let at = (data_off + data.len()) as u32;
+                first_set_list.get_or_insert(at);
+                set_lists += 1;
+                data.extend_from_slice(&(each.len() as u32).to_le_bytes());
+                for one in each {
+                    data.extend_from_slice(&one.to_le_bytes());
+                }
+                here.push((*which, at));
+            }
+            list_offsets.push(here);
+        }
+
+        // And the directory each class points at.
+        let mut directory_offsets: Vec<u32> = Vec::with_capacity(classes.len());
+        let mut first_directory = None;
+        for (held, parameters) in sets.iter().zip(list_offsets.iter()) {
+            if held.class == 0
+                && held.fields.is_empty()
+                && held.methods.is_empty()
+                && parameters.is_empty()
+            {
+                directory_offsets.push(0);
+                continue;
+            }
+            let mut fields = held.fields.clone();
+            let mut methods = held.methods.clone();
+            let mut parameters = parameters.clone();
+            fields.sort_by_key(|(at, _)| *at);
+            methods.sort_by_key(|(at, _)| *at);
+            parameters.sort_by_key(|(at, _)| *at);
+            while !(data_off + data.len()).is_multiple_of(4) {
+                data.push(0);
+            }
+            let at = (data_off + data.len()) as u32;
+            directory_offsets.push(at);
+            first_directory.get_or_insert(at);
+            data.extend_from_slice(&held.class.to_le_bytes());
+            data.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+            data.extend_from_slice(&(methods.len() as u32).to_le_bytes());
+            data.extend_from_slice(&(parameters.len() as u32).to_le_bytes());
+            for list in [&fields, &methods, &parameters] {
+                for (which, held) in list {
+                    data.extend_from_slice(&which.to_le_bytes());
+                    data.extend_from_slice(&held.to_le_bytes());
+                }
+            }
+        }
+
+        let annotation_items = every.len() as u32;
+        let annotation_sets = set_offsets.len() as u32;
+        let first_annotation_set = set_offsets.first().copied();
+
         // Where each method says it came from, laid down first because a
         // code item points at it and has to know where it is.
         let mut debug_offsets: Vec<Vec<u32>> = Vec::new();
@@ -17631,6 +18014,22 @@ pub mod dexwrite {
         if let Some(first) = first_debug_item {
             map.push((0x2003, debug_items, first));
         }
+        if let Some(first) = first_annotation_item {
+            map.push((0x2004, annotation_items, first));
+        }
+        if let Some(first) = first_annotation_set {
+            map.push((0x1003, annotation_sets, first));
+        }
+        if let Some(first) = first_set_list {
+            map.push((0x1002, set_lists, first));
+        }
+        if let Some(first) = first_directory {
+            map.push((
+                0x2006,
+                directory_offsets.iter().filter(|at| **at != 0).count() as u32,
+                first,
+            ));
+        }
         if !pools.fields.is_empty() {
             map.push((0x0004, pools.fields.len() as u32, field_ids_off as u32));
         }
@@ -17717,7 +18116,7 @@ pub mod dexwrite {
                 }
                 None => out.extend_from_slice(&0xffff_ffffu32.to_le_bytes()),
             }
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&directory_offsets[index].to_le_bytes());
             out.extend_from_slice(&class_data_offsets[index].to_le_bytes());
             out.extend_from_slice(&0u32.to_le_bytes());
         }
@@ -20350,6 +20749,7 @@ pub mod dalvik {
                 reference: reference.clone(),
                 // private final synthetic
                 access_flags: 0x0002 | 0x0010 | 0x1000,
+                annotations: Vec::new(),
             });
         }
 
@@ -20421,6 +20821,8 @@ pub mod dalvik {
             outputs: writing.outputs.max(1),
             instructions: writing.code,
             lines: Vec::new(),
+            annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             tries: Vec::new(),
         })
     }
@@ -20591,8 +20993,138 @@ pub mod dalvik {
             outputs: writing.outputs,
             instructions: writing.code,
             lines: Vec::new(),
+            annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             tries: Vec::new(),
         })
+    }
+
+    /// What a class file says in an attribute and a dex file has nowhere else
+    /// to put.
+    ///
+    /// Erasure throws the types away and the class file keeps them in a
+    /// `Signature` attribute beside the descriptor. A dex file has no such
+    /// attribute, so the platform reads them out of an annotation instead --
+    /// and everything that asks a class what it really is at run time, from
+    /// `getGenericSuperclass` to the token a library uses to know it was handed
+    /// a `List<String>`, reads that annotation. The same goes for what a method
+    /// declares it throws, for which class is written inside which, and for
+    /// what the elements of an annotation fall back to.
+    fn what_the_platform_is_told(
+        class: &jvm::Class,
+        signature: Option<&str>,
+        throws: &[String],
+        defaults: Option<jvm::Annotation>,
+        on_the_class: bool,
+    ) -> Vec<jvm::Annotation> {
+        let mut out = Vec::new();
+        if let Some(signature) = signature {
+            out.push(jvm::Annotation {
+                descriptor: "Ldalvik/annotation/Signature;".to_string(),
+                visibility: jvm::Visibility::System,
+                values: vec![(
+                    "value".to_string(),
+                    jvm::Element::List(vec![jvm::Element::Text(signature.to_string())]),
+                )],
+            });
+        }
+        if !throws.is_empty() {
+            out.push(jvm::Annotation {
+                descriptor: "Ldalvik/annotation/Throws;".to_string(),
+                visibility: jvm::Visibility::System,
+                values: vec![(
+                    "value".to_string(),
+                    jvm::Element::List(
+                        throws
+                            .iter()
+                            .map(|one| jvm::Element::Class(format!("L{};", one.replace('.', "/"))))
+                            .collect(),
+                    ),
+                )],
+            });
+        }
+        if let Some(held) = defaults {
+            out.push(jvm::Annotation {
+                descriptor: "Ldalvik/annotation/AnnotationDefault;".to_string(),
+                visibility: jvm::Visibility::System,
+                values: vec![("value".to_string(), jvm::Element::Nested(held))],
+            });
+        }
+        if !on_the_class {
+            return out;
+        }
+
+        // Where this class is written inside another, and which classes are
+        // written inside it.
+        let internal = |name: &str| format!("L{};", name.replace('.', "/"));
+        let mine = internal(&class.name);
+        if let Some((inner, outer, simple, flags)) = class
+            .inner_classes
+            .iter()
+            .find(|(inner, _, _, _)| internal(inner) == mine)
+        {
+            let _ = inner;
+            out.push(jvm::Annotation {
+                descriptor: "Ldalvik/annotation/InnerClass;".to_string(),
+                visibility: jvm::Visibility::System,
+                values: vec![
+                    (
+                        "accessFlags".to_string(),
+                        jvm::Element::Int(i32::from(*flags)),
+                    ),
+                    (
+                        "name".to_string(),
+                        match simple {
+                            Some(held) => jvm::Element::Text(held.clone()),
+                            None => jvm::Element::List(Vec::new()),
+                        },
+                    ),
+                ],
+            });
+            // A class declared inside a method says so with the method; one
+            // declared inside a class says so with the class.
+            match &class.enclosing_method {
+                Some((inside, Some((name, descriptor)))) => {
+                    out.push(jvm::Annotation {
+                        descriptor: "Ldalvik/annotation/EnclosingMethod;".to_string(),
+                        visibility: jvm::Visibility::System,
+                        values: vec![(
+                            "value".to_string(),
+                            jvm::Element::Text(format!("{inside}.{name}{descriptor}")),
+                        )],
+                    });
+                }
+                _ => {
+                    if let Some(outer) = outer {
+                        out.push(jvm::Annotation {
+                            descriptor: "Ldalvik/annotation/EnclosingClass;".to_string(),
+                            visibility: jvm::Visibility::System,
+                            values: vec![(
+                                "value".to_string(),
+                                jvm::Element::Class(internal(outer)),
+                            )],
+                        });
+                    }
+                }
+            }
+        }
+
+        let inside: Vec<jvm::Element> = class
+            .inner_classes
+            .iter()
+            .filter(|(_, outer, simple, _)| {
+                outer.as_ref().map(|held| internal(held)) == Some(mine.clone()) && simple.is_some()
+            })
+            .map(|(inner, _, _, _)| jvm::Element::Class(internal(inner)))
+            .collect();
+        if !inside.is_empty() {
+            out.push(jvm::Annotation {
+                descriptor: "Ldalvik/annotation/MemberClasses;".to_string(),
+                visibility: jvm::Visibility::System,
+                values: vec![("value".to_string(), jvm::Element::List(inside))],
+            });
+        }
+        out
     }
 
     /// What a whole class comes to.
@@ -20618,6 +21150,30 @@ pub mod dalvik {
             .map(|one| format!("L{};", one.replace('.', "/")))
             .collect();
         out.source_file = class.source_file.clone();
+        out.annotations = class.annotations.clone();
+        // What an annotation type's elements fall back to, which the platform
+        // is told in an annotation of its own.
+        let defaults: Vec<(String, jvm::Element)> = class
+            .methods
+            .iter()
+            .filter_map(|one| {
+                one.annotation_default
+                    .as_ref()
+                    .map(|held| (one.name.clone(), held.clone()))
+            })
+            .collect();
+        let defaults = (!defaults.is_empty()).then(|| jvm::Annotation {
+            descriptor: descriptor.clone(),
+            visibility: jvm::Visibility::Build,
+            values: defaults,
+        });
+        out.annotations.extend(what_the_platform_is_told(
+            class,
+            class.signature.as_deref(),
+            &[],
+            defaults,
+            true,
+        ));
 
         for field in &class.fields {
             let entry = crate::dexwrite::Field {
@@ -20627,6 +21183,17 @@ pub mod dalvik {
                     descriptor: field.descriptor.clone(),
                 },
                 access_flags: u32::from(field.access_flags),
+                annotations: {
+                    let mut held = field.annotations.clone();
+                    held.extend(what_the_platform_is_told(
+                        class,
+                        field.signature.as_deref(),
+                        &[],
+                        None,
+                        false,
+                    ));
+                    held
+                },
             };
             if field.access_flags & 0x0008 != 0 {
                 out.static_fields.push(entry);
@@ -20655,6 +21222,19 @@ pub mod dalvik {
         let mut every = vec![out];
         every.append(&mut made.made);
         Ok(every)
+    }
+
+    /// What was written on a method, and what the platform is told beside it.
+    fn told_about(class: &jvm::Class, method: &jvm::Member) -> Vec<jvm::Annotation> {
+        let mut held = method.annotations.clone();
+        held.extend(what_the_platform_is_told(
+            class,
+            method.signature.as_deref(),
+            &method.throws,
+            None,
+            false,
+        ));
+        held
     }
 
     fn translate_method(
@@ -20690,6 +21270,8 @@ pub mod dalvik {
                 outputs: 0,
                 instructions: Vec::new(),
                 lines: Vec::new(),
+                annotations: told_about(class, method),
+                parameter_annotations: method.parameter_annotations.clone(),
                 tries: Vec::new(),
             });
         };
@@ -20805,6 +21387,8 @@ pub mod dalvik {
             outputs,
             instructions,
             lines,
+            annotations: told_about(class, method),
+            parameter_annotations: method.parameter_annotations.clone(),
             tries,
         })
     }
@@ -26951,6 +27535,7 @@ pub mod builder {
                 interfaces: Vec::new(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
+                annotations: Vec::new(),
                 // Up into the superclass, which for an activity is the
                 // activity: a constructor calling Object's instead would be a
                 // class the device refuses to load.
@@ -27063,6 +27648,7 @@ pub mod builder {
                 interfaces: Vec::new(),
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
+                annotations: Vec::new(),
                 // Up into the superclass, which for an activity is the
                 // activity: a constructor calling Object's instead would be a
                 // class the device refuses to load.
@@ -27706,6 +28292,12 @@ pub mod jvm {
         /// What it says it throws, the way a person writes them. This is what
         /// makes a call to it a call that has to be caught or declared.
         pub throws: Vec<String>,
+        /// What was written on it, and on each of its parameters.
+        pub annotations: Vec<Annotation>,
+        pub parameter_annotations: Vec<Vec<Annotation>>,
+        /// What an element of an annotation type falls back to, where it has
+        /// one.
+        pub annotation_default: Option<Element>,
     }
 
     /// A method body as the class file carries it.
@@ -27772,6 +28364,15 @@ pub mod jvm {
         /// The file it was written in, which is what a crash on a device
         /// names beside the line.
         pub source_file: Option<String>,
+        /// What was written on the class itself.
+        pub annotations: Vec<Annotation>,
+        /// The classes named inside this one, and this one where it is named
+        /// inside another: the inner class, the class it is in, the name it
+        /// was written with, and how it was declared.
+        pub inner_classes: Vec<(String, Option<String>, Option<String>, u16)>,
+        /// The method this class was declared inside, where it was: the class,
+        /// and the method's name and descriptor where it has one.
+        pub enclosing_method: Option<(String, Option<(String, String)>)>,
         /// How each `invokedynamic` in the class works out what it calls: the
         /// method handle that does the working out, and the constants it is
         /// handed. A lambda and a string joined together are both written this
@@ -27903,6 +28504,9 @@ pub mod jvm {
         let mut signature: Option<String> = None;
         let mut bootstrap: Vec<Bootstrap> = Vec::new();
         let mut source_file: Option<String> = None;
+        let mut annotations: Vec<Annotation> = Vec::new();
+        let mut inner_classes: Vec<(String, Option<String>, Option<String>, u16)> = Vec::new();
+        let mut enclosing_method: Option<(String, Option<(String, String)>)> = None;
         for _ in 0..attribute_count {
             let name_index = reader.u16()?;
             let length = reader.u32()?;
@@ -27910,6 +28514,53 @@ pub mod jvm {
             let content_start = reader.position();
             let content_length = reader.checked_length(u64::from(length))?;
 
+            if attribute_name == "RuntimeVisibleAnnotations"
+                || attribute_name == "RuntimeInvisibleAnnotations"
+            {
+                let content = reader.slice_at(content_start as u64, content_length as u64)?;
+                annotations.extend(read_annotations(
+                    content,
+                    &constants,
+                    attribute_name == "RuntimeVisibleAnnotations",
+                ));
+            }
+            // Which classes are written inside which, and under what name.
+            // A dex file has nowhere to say this but an annotation, and
+            // without it `getSimpleName` and `getEnclosingClass` are wrong.
+            if attribute_name == "InnerClasses" && content_length >= 2 {
+                let content = reader.slice_at(content_start as u64, content_length as u64)?;
+                let count = usize::from(u16::from_be_bytes([content[0], content[1]]));
+                for step in 0..count {
+                    let at = 2 + step * 8;
+                    let Some(row) = content.get(at..at + 8) else {
+                        break;
+                    };
+                    let index = |pair: &[u8]| u16::from_be_bytes([pair[0], pair[1]]);
+                    let Ok(inner) = class_name(&constants, index(&row[0..2]), "inner class") else {
+                        continue;
+                    };
+                    let outer = class_name(&constants, index(&row[2..4]), "outer class").ok();
+                    let simple = utf8(index(&row[4..6]), "inner name").ok();
+                    inner_classes.push((inner, outer, simple, index(&row[6..8])));
+                }
+            }
+            if attribute_name == "EnclosingMethod" && content_length >= 4 {
+                let content = reader.slice_at(content_start as u64, content_length as u64)?;
+                let held = u16::from_be_bytes([content[0], content[1]]);
+                let what = u16::from_be_bytes([content[2], content[3]]);
+                if let Ok(inside) = class_name(&constants, held, "enclosing class") {
+                    let method = match constants.get(usize::from(what)) {
+                        Some(Constant::NameAndType(name, descriptor)) => {
+                            match (utf8(*name, "method name"), utf8(*descriptor, "descriptor")) {
+                                (Ok(name), Ok(descriptor)) => Some((name, descriptor)),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    enclosing_method = Some((inside, method));
+                }
+            }
             if attribute_name == "SourceFile" && content_length == 2 {
                 let content = reader.slice_at(content_start as u64, 2)?;
                 let index = u16::from_be_bytes([content[0], content[1]]);
@@ -27952,6 +28603,9 @@ pub mod jvm {
             attributes,
             kotlin,
             source_file,
+            annotations,
+            inner_classes,
+            enclosing_method,
             bootstrap,
             signature,
         })
@@ -28131,6 +28785,206 @@ pub mod jvm {
         }
     }
 
+    /// One annotation, as it was written on a class, a field, a method or a
+    /// parameter.
+    ///
+    /// These are not decoration: a library reads them back at run time and
+    /// behaves differently for them. A package that drops them builds, runs,
+    /// and quietly does something else -- fields under the wrong names, a
+    /// request to the wrong address.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Annotation {
+        /// What it is, as a descriptor.
+        pub descriptor: String,
+        /// Who may see it. One the run time cannot see is still carried; the
+        /// tools read those, and the platform's own are for the platform.
+        pub visibility: Visibility,
+        pub values: Vec<(String, Element)>,
+    }
+
+    /// Who may look at an annotation.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Visibility {
+        /// Only what builds the application.
+        Build,
+        /// Anything, including the application itself while it runs.
+        Runtime,
+        /// The platform, which is how it is told the things a class file says
+        /// in an attribute and a dex file has nowhere else to put.
+        System,
+    }
+
+    impl Visibility {
+        pub const fn as_byte(self) -> u8 {
+            match self {
+                Visibility::Build => 0x00,
+                Visibility::Runtime => 0x01,
+                Visibility::System => 0x02,
+            }
+        }
+    }
+
+    /// What one element of an annotation is set to.
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Element {
+        Byte(i8),
+        Char(u16),
+        Double(u64),
+        Float(u32),
+        Int(i32),
+        Long(i64),
+        Short(i16),
+        Boolean(bool),
+        Text(String),
+        /// A constant of an enumeration: which enumeration, and which one.
+        Enum {
+            descriptor: String,
+            name: String,
+        },
+        /// A class named as a value, as a descriptor.
+        Class(String),
+        Nested(Annotation),
+        List(Vec<Element>),
+    }
+
+    /// The `RuntimeVisibleAnnotations` attribute and the three like it: a
+    /// count, and then one annotation each.
+    fn read_annotations(content: &[u8], constants: &[Constant], visible: bool) -> Vec<Annotation> {
+        if content.len() < 2 {
+            return Vec::new();
+        }
+        let count = usize::from(u16::from_be_bytes([content[0], content[1]]));
+        let mut at = 2usize;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let Some(one) = read_annotation(content, &mut at, constants, visible) else {
+                break;
+            };
+            out.push(one);
+        }
+        out
+    }
+
+    /// One annotation: what it is, and what each of its elements is set to.
+    fn read_annotation(
+        content: &[u8],
+        at: &mut usize,
+        constants: &[Constant],
+        visible: bool,
+    ) -> Option<Annotation> {
+        let descriptor = constant_utf8(constants, take_u16(content, at)?, "annotation").ok()?;
+        let count = usize::from(take_u16(content, at)?);
+        let mut values = Vec::with_capacity(count);
+        for _ in 0..count {
+            let name = constant_utf8(constants, take_u16(content, at)?, "element").ok()?;
+            let value = read_element(content, at, constants)?;
+            values.push((name, value));
+        }
+        Some(Annotation {
+            descriptor,
+            visibility: if visible {
+                Visibility::Runtime
+            } else {
+                Visibility::Build
+            },
+            values,
+        })
+    }
+
+    /// One element's value, which says its own kind in a single letter.
+    fn read_element(content: &[u8], at: &mut usize, constants: &[Constant]) -> Option<Element> {
+        let tag = *content.get(*at)?;
+        *at += 1;
+        let constant = |index: u16| constants.get(usize::from(index));
+        Some(match tag {
+            b'B' | b'C' | b'I' | b'S' | b'Z' => {
+                let Some(Constant::Integer(value)) = constant(take_u16(content, at)?) else {
+                    return None;
+                };
+                let value = *value;
+                match tag {
+                    b'B' => Element::Byte(value as i8),
+                    b'C' => Element::Char(value as u16),
+                    b'S' => Element::Short(value as i16),
+                    b'Z' => Element::Boolean(value != 0),
+                    _ => Element::Int(value),
+                }
+            }
+            b'J' => {
+                let Some(Constant::Long(value)) = constant(take_u16(content, at)?) else {
+                    return None;
+                };
+                Element::Long(*value)
+            }
+            b'F' => {
+                let Some(Constant::Float(bits)) = constant(take_u16(content, at)?) else {
+                    return None;
+                };
+                Element::Float(*bits)
+            }
+            b'D' => {
+                let Some(Constant::Double(bits)) = constant(take_u16(content, at)?) else {
+                    return None;
+                };
+                Element::Double(*bits)
+            }
+            b's' => Element::Text(
+                constant_utf8(constants, take_u16(content, at)?, "element text").ok()?,
+            ),
+            b'e' => {
+                let descriptor =
+                    constant_utf8(constants, take_u16(content, at)?, "enum type").ok()?;
+                let name = constant_utf8(constants, take_u16(content, at)?, "enum name").ok()?;
+                Element::Enum { descriptor, name }
+            }
+            b'c' => Element::Class(constant_utf8(constants, take_u16(content, at)?, "class").ok()?),
+            b'@' => Element::Nested(read_annotation(content, at, constants, true)?),
+            b'[' => {
+                let count = usize::from(take_u16(content, at)?);
+                let mut held = Vec::with_capacity(count);
+                for _ in 0..count {
+                    held.push(read_element(content, at, constants)?);
+                }
+                Element::List(held)
+            }
+            _ => return None,
+        })
+    }
+
+    fn take_u16(content: &[u8], at: &mut usize) -> Option<u16> {
+        let held = content.get(*at..*at + 2)?;
+        *at += 2;
+        Some(u16::from_be_bytes([held[0], held[1]]))
+    }
+
+    /// The `RuntimeVisibleParameterAnnotations` attribute: a count of
+    /// parameters, and then a set of annotations for each.
+    fn read_parameter_annotations(
+        content: &[u8],
+        constants: &[Constant],
+        visible: bool,
+    ) -> Vec<Vec<Annotation>> {
+        let Some(count) = content.first().copied() else {
+            return Vec::new();
+        };
+        let mut at = 1usize;
+        let mut out = Vec::with_capacity(usize::from(count));
+        for _ in 0..count {
+            let Some(how_many) = take_u16(content, &mut at) else {
+                break;
+            };
+            let mut held = Vec::with_capacity(usize::from(how_many));
+            for _ in 0..how_many {
+                let Some(one) = read_annotation(content, &mut at, constants, visible) else {
+                    break;
+                };
+                held.push(one);
+            }
+            out.push(held);
+        }
+        out
+    }
+
     fn read_members(
         reader: &mut Reader<'_>,
         constants: &[Constant],
@@ -28149,6 +29003,9 @@ pub mod jvm {
             let mut code = None;
             let mut signature = None;
             let mut throws: Vec<String> = Vec::new();
+            let mut annotations: Vec<Annotation> = Vec::new();
+            let mut parameter_annotations: Vec<Vec<Annotation>> = Vec::new();
+            let mut annotation_default: Option<Element> = None;
             for _ in 0..attribute_count {
                 let attribute_name_index = reader.u16()?;
                 let length = reader.u32()?;
@@ -28170,6 +29027,35 @@ pub mod jvm {
                 // A count, and then one class-pool index per exception. This
                 // is what a `throws` comes to, and the only place a class file
                 // records one.
+                if named == "RuntimeVisibleAnnotations" || named == "RuntimeInvisibleAnnotations" {
+                    let content = reader.slice_at(start as u64, length as u64)?;
+                    annotations.extend(read_annotations(
+                        content,
+                        constants,
+                        named == "RuntimeVisibleAnnotations",
+                    ));
+                }
+                if named == "RuntimeVisibleParameterAnnotations"
+                    || named == "RuntimeInvisibleParameterAnnotations"
+                {
+                    let content = reader.slice_at(start as u64, length as u64)?;
+                    let held = read_parameter_annotations(
+                        content,
+                        constants,
+                        named == "RuntimeVisibleParameterAnnotations",
+                    );
+                    if parameter_annotations.len() < held.len() {
+                        parameter_annotations.resize(held.len(), Vec::new());
+                    }
+                    for (into, one) in parameter_annotations.iter_mut().zip(held) {
+                        into.extend(one);
+                    }
+                }
+                if named == "AnnotationDefault" {
+                    let content = reader.slice_at(start as u64, length as u64)?;
+                    let mut at = 0usize;
+                    annotation_default = read_element(content, &mut at, constants);
+                }
                 if named == "Exceptions" && length >= 2 {
                     let content = reader.slice_at(start as u64, length as u64)?;
                     let how_many = usize::from(u16::from_be_bytes([content[0], content[1]]));
@@ -28199,6 +29085,9 @@ pub mod jvm {
                 code,
                 signature,
                 throws,
+                annotations,
+                parameter_annotations,
+                annotation_default,
             });
         }
         Ok(members)
@@ -32446,6 +33335,7 @@ mod tests {
     const A_PROGRAM_THAT_USES_THE_LOT: &str = r####"
 package com.my.app;
 
+@Deprecated
 public class Everything {
     private int count;
     private static String label = "omni";
@@ -32521,6 +33411,7 @@ public class Everything {
         return one == two || (one != null && one.equals(two));
     }
 
+    @Deprecated
     public int shifted(int value, long wide) {
         return (int) ((wide << value) >>> 3) ^ (value & 0xff);
     }
@@ -32653,7 +33544,63 @@ public class Sugared {
     const WHAT_JAVAC_WRITES: &str = r####"
 package com.my.app;
 
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+import java.lang.annotation.Target;
+
+@Written.Tagged(
+    value = "the class",
+    order = 3,
+    of = String.class,
+    kind = Written.Kind.FANCY,
+    also = {"a", "b"},
+    small = 7,
+    wide = 9223372036854775807L,
+    exact = 0.5,
+    rough = 1.5f,
+    letter = 'q',
+    flag = true)
 public class Written {
+    @Retention(RetentionPolicy.RUNTIME)
+    @Target({ElementType.TYPE, ElementType.FIELD, ElementType.METHOD, ElementType.PARAMETER})
+    public @interface Tagged {
+        String value();
+
+        int order() default 1;
+
+        Class<?> of() default Object.class;
+
+        Kind kind() default Kind.PLAIN;
+
+        String[] also() default {};
+
+        byte small() default 0;
+
+        long wide() default 0L;
+
+        double exact() default 0.0;
+
+        float rough() default 0.0f;
+
+        char letter() default 'a';
+
+        boolean flag() default false;
+    }
+
+    public enum Kind {
+        PLAIN,
+        FANCY
+    }
+
+    @Tagged("a field")
+    static String label;
+
+    @Tagged("a method")
+    public static int marked(@Tagged("a parameter") int by) {
+        return by + 1;
+    }
+
     int count;
     long total;
     static int[][] grid;
@@ -32985,6 +33932,68 @@ public class Written {
             }
         }
 
+        // What was written on the class, its field, its method and its
+        // parameter, read back out of the finished file the way the runtime
+        // reads it.
+        let mut told = annotations_in(&dex, "Lcom/my/app/Written;");
+        told.sort();
+        assert_eq!(
+            told,
+            vec![
+                "class seen Lcom/my/app/Written$Tagged;(also=[text \"a\", text \"b\"], \
+                 exact=double 0.5, flag=boolean true, \
+                 kind=enum Lcom/my/app/Written$Kind;.FANCY, letter=char 113, \
+                 of=class Ljava/lang/String;, order=int 3, rough=float 1.5, \
+                 small=byte 7, value=text \"the class\", wide=long 9223372036854775807)",
+                "class system Ldalvik/annotation/MemberClasses;(value=[\
+                 class Lcom/my/app/Written$Named;, class Lcom/my/app/Written$Counted;, \
+                 class Lcom/my/app/Written$Made;, class Lcom/my/app/Written$Boxed;, \
+                 class Lcom/my/app/Written$Taken;, class Lcom/my/app/Written$Kind;, \
+                 class Lcom/my/app/Written$Tagged;])",
+                "field Lcom/my/app/Written;.label seen \
+                 Lcom/my/app/Written$Tagged;(value=text \"a field\")",
+                "method seen Lcom/my/app/Written$Tagged;(value=text \"a method\")",
+                "method system Ldalvik/annotation/Signature;(value=[text \
+                 \"()Ljava/util/function/BiFunction<Ljava/lang/Long;Ljava/lang/Long;\
+                 Ljava/lang/Long;>;\"])",
+                "method system Ldalvik/annotation/Signature;(value=[text \
+                 \"()Ljava/util/function/Function<Ljava/lang/String;Ljava/lang/Integer;>;\"])",
+                "method system Ldalvik/annotation/Signature;(value=[text \
+                 \"(Ljava/lang/String;)Ljava/util/function/Supplier<Ljava/lang/String;>;\"])",
+                "parameter seen Lcom/my/app/Written$Tagged;(value=text \"a parameter\")",
+            ],
+            "the package does not say what was written on the class"
+        );
+
+        // The annotation type itself: what it keeps, which class it is written
+        // inside, and what its elements fall back to where they are not given.
+        let mut nested = annotations_in(&dex, "Lcom/my/app/Written$Tagged;");
+        nested.sort();
+        assert_eq!(
+            nested,
+            vec![
+                "class seen Ljava/lang/annotation/Retention;(value=enum \
+                 Ljava/lang/annotation/RetentionPolicy;.RUNTIME)",
+                "class seen Ljava/lang/annotation/Target;(value=[enum \
+                 Ljava/lang/annotation/ElementType;.TYPE, enum \
+                 Ljava/lang/annotation/ElementType;.FIELD, enum \
+                 Ljava/lang/annotation/ElementType;.METHOD, enum \
+                 Ljava/lang/annotation/ElementType;.PARAMETER])",
+                "class system Ldalvik/annotation/AnnotationDefault;(value=\
+                 Lcom/my/app/Written$Tagged;(also=[], exact=double 0, flag=boolean false, \
+                 kind=enum Lcom/my/app/Written$Kind;.PLAIN, letter=char 97, \
+                 of=class Ljava/lang/Object;, order=int 1, rough=float 0, small=byte 0, \
+                 wide=long 0))",
+                "class system Ldalvik/annotation/EnclosingClass;(value=class \
+                 Lcom/my/app/Written;)",
+                "class system Ldalvik/annotation/InnerClass;(accessFlags=int 9737, \
+                 name=text \"Tagged\")",
+                "method system Ldalvik/annotation/Signature;(value=[text \
+                 \"()Ljava/lang/Class<*>;\"])",
+            ],
+            "the annotation type does not say what it is"
+        );
+
         // And every line the class files came from is a line the finished
         // package says it came from, which is what a stack trace off a device
         // is made of.
@@ -33030,6 +34039,188 @@ public class Written {
                     out.push(call.parameters.join(","))
                 }
                 _ => {}
+            }
+        }
+        out
+    }
+
+    /// A finished dex, read the way the runtime reads one.
+    ///
+    /// This walks the file on its own: the class definitions, the directory
+    /// each points at, the sets those hold, the annotations in them and the
+    /// values in those. Nothing here went through anything that wrote the
+    /// file, so what comes back can be compared with what the class file said.
+    struct Reading<'a> {
+        bytes: &'a [u8],
+        strings: usize,
+        types: usize,
+        fields: usize,
+    }
+
+    impl Reading<'_> {
+        fn word(&self, at: usize) -> u32 {
+            u32::from_le_bytes([
+                self.bytes[at],
+                self.bytes[at + 1],
+                self.bytes[at + 2],
+                self.bytes[at + 3],
+            ])
+        }
+
+        fn uleb(&self, at: &mut usize) -> u32 {
+            let mut held = 0u32;
+            let mut shift = 0;
+            loop {
+                let byte = self.bytes[*at];
+                *at += 1;
+                held |= u32::from(byte & 0x7f) << shift;
+                if byte & 0x80 == 0 {
+                    return held;
+                }
+                shift += 7;
+            }
+        }
+
+        fn text(&self, index: u32) -> String {
+            let mut at = self.word(self.strings + index as usize * 4) as usize;
+            let _ = self.uleb(&mut at);
+            let end = self.bytes[at..].iter().position(|one| *one == 0).unwrap() + at;
+            String::from_utf8_lossy(&self.bytes[at..end]).to_string()
+        }
+
+        fn named(&self, index: u32) -> String {
+            self.text(self.word(self.types + index as usize * 4))
+        }
+
+        fn field_named(&self, index: u32) -> String {
+            let at = self.fields + index as usize * 8;
+            let class = u16::from_le_bytes([self.bytes[at], self.bytes[at + 1]]);
+            format!(
+                "{}.{}",
+                self.named(u32::from(class)),
+                self.text(self.word(at + 4))
+            )
+        }
+
+        fn value(&self, at: &mut usize) -> String {
+            let head = self.bytes[*at];
+            *at += 1;
+            let kind = head & 0x1f;
+            let width = usize::from(head >> 5) + 1;
+            let mut number = 0u64;
+            if !matches!(kind, 0x1c..=0x1f) {
+                for step in 0..width {
+                    number |= u64::from(self.bytes[*at + step]) << (step * 8);
+                }
+                *at += width;
+            }
+            match kind {
+                0x00 => format!("byte {}", number as u8 as i8),
+                0x02 => format!("short {}", number as u16 as i16),
+                0x03 => format!("char {}", number as u16),
+                0x04 => format!("int {}", number as u32 as i32),
+                0x06 => format!("long {}", number as i64),
+                0x10 => format!("float {}", f32::from_bits(number as u32)),
+                0x11 => format!("double {}", f64::from_bits(number)),
+                0x17 => format!("text {:?}", self.text(number as u32)),
+                0x18 => format!("class {}", self.named(number as u32)),
+                0x1b => format!("enum {}", self.field_named(number as u32)),
+                0x1c => {
+                    let held = self.uleb(at);
+                    let mut parts = Vec::new();
+                    for _ in 0..held {
+                        parts.push(self.value(at));
+                    }
+                    format!("[{}]", parts.join(", "))
+                }
+                0x1d => self.annotation(at),
+                0x1e => "null".to_string(),
+                0x1f => format!("boolean {}", head >> 5 != 0),
+                other => format!("kind {other:#04x}"),
+            }
+        }
+
+        fn annotation(&self, at: &mut usize) -> String {
+            let kind = self.named(self.uleb(at));
+            let count = self.uleb(at);
+            let mut parts = Vec::new();
+            for _ in 0..count {
+                let name = self.text(self.uleb(at));
+                parts.push(format!("{name}={}", self.value(at)));
+            }
+            format!("{kind}({})", parts.join(", "))
+        }
+    }
+
+    fn annotations_in(bytes: &[u8], wanted: &str) -> Vec<String> {
+        let reading = Reading {
+            bytes,
+            strings: u32::from_le_bytes([bytes[60], bytes[61], bytes[62], bytes[63]]) as usize,
+            types: u32::from_le_bytes([bytes[68], bytes[69], bytes[70], bytes[71]]) as usize,
+            fields: u32::from_le_bytes([bytes[84], bytes[85], bytes[86], bytes[87]]) as usize,
+        };
+        let class_defs_size = reading.word(96) as usize;
+        let class_defs_off = reading.word(100) as usize;
+
+        let mut out = Vec::new();
+        for index in 0..class_defs_size {
+            let row = class_defs_off + index * 32;
+            if reading.named(reading.word(row)) != wanted {
+                continue;
+            }
+            let directory = reading.word(row + 20) as usize;
+            if directory == 0 {
+                return out;
+            }
+            let on_the_class = reading.word(directory) as usize;
+            let fields = reading.word(directory + 4) as usize;
+            let methods = reading.word(directory + 8) as usize;
+            let parameters = reading.word(directory + 12) as usize;
+
+            let mut sets: Vec<(String, usize)> = Vec::new();
+            if on_the_class != 0 {
+                sets.push(("class".to_string(), on_the_class));
+            }
+            let mut walk = directory + 16;
+            for _ in 0..fields {
+                sets.push((
+                    format!("field {}", reading.field_named(reading.word(walk))),
+                    reading.word(walk + 4) as usize,
+                ));
+                walk += 8;
+            }
+            for _ in 0..methods {
+                sets.push(("method".to_string(), reading.word(walk + 4) as usize));
+                walk += 8;
+            }
+            for _ in 0..parameters {
+                let list = reading.word(walk + 4) as usize;
+                let held = reading.word(list) as usize;
+                for step in 0..held {
+                    let at = reading.word(list + 4 + step * 4) as usize;
+                    if at != 0 {
+                        sets.push(("parameter".to_string(), at));
+                    }
+                }
+                walk += 8;
+            }
+
+            for (what, set) in sets {
+                let held = reading.word(set) as usize;
+                for step in 0..held {
+                    let mut at = reading.word(set + 4 + step * 4) as usize;
+                    let visibility = bytes[at];
+                    at += 1;
+                    out.push(format!(
+                        "{what} {} {}",
+                        match visibility {
+                            1 => "seen",
+                            2 => "system",
+                            _ => "unseen",
+                        },
+                        reading.annotation(&mut at)
+                    ));
+                }
             }
         }
         out
@@ -33264,10 +34455,16 @@ public final class MainActivity extends Activity {
                 }),
                 signature: None,
                 throws: Vec::new(),
+                annotations: Vec::new(),
+                parameter_annotations: Vec::new(),
+                annotation_default: None,
             }],
             attributes: Vec::new(),
             kotlin: None,
             source_file: None,
+            annotations: Vec::new(),
+            inner_classes: Vec::new(),
+            enclosing_method: None,
             bootstrap: Vec::new(),
             signature: None,
         }
@@ -33353,6 +34550,7 @@ public final class MainActivity extends Activity {
         let classpath = crate::compilers::java::Classpath::new();
         let mut refused = Vec::new();
         let mut classes = 0;
+        let mut written: Vec<crate::dexwrite::Class> = Vec::new();
         for source in [A_PROGRAM_THAT_USES_THE_LOT, A_PROGRAM_OF_THE_SUGARED_KIND] {
             let produced = crate::compilers::java::compile(source.trim_start(), &classpath)
                 .expect("the program compiles");
@@ -33366,6 +34564,7 @@ public final class MainActivity extends Activity {
                 for one in &translated {
                     refused.extend(what_the_runtime_would_refuse(one));
                 }
+                written.extend(translated);
             }
         }
         assert!(classes >= 7, "only {classes} classes were read");
@@ -33373,6 +34572,21 @@ public final class MainActivity extends Activity {
             refused.is_empty(),
             "the runtime would refuse this:\n  {}",
             refused.join("\n  ")
+        );
+
+        // What this build's own compiler wrote on a class reaches the package
+        // too: an annotation the run time keeps is in the file, read back out
+        // of it the way the run time reads one.
+        let dex = crate::dexwrite::write(&written, &[]).expect("the dex is written");
+        let mut said = annotations_in(&dex, "Lcom/my/app/Everything;");
+        said.sort();
+        assert_eq!(
+            said,
+            vec![
+                "class seen Ljava/lang/Deprecated;()",
+                "method seen Ljava/lang/Deprecated;()",
+            ],
+            "what was written on the class is not in the package"
         );
 
         // And the same reading, on a class where a reference is moved as
@@ -33397,6 +34611,8 @@ public final class MainActivity extends Activity {
                 crate::dexwrite::Insn::raw(vec![0x0011]),
             ],
             lines: Vec::new(),
+            annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             tries: Vec::new(),
         });
         let said = what_the_runtime_would_refuse(&wrong);
@@ -36711,6 +37927,7 @@ public final class MainActivity extends Activity {
             interfaces: Vec::new(),
             access_flags: super::dexwrite::ACC_PUBLIC,
             source_file: Some("MainActivity.java".to_string()),
+            annotations: Vec::new(),
             direct_methods: vec![super::dexwrite::default_constructor(
                 "Lcom/omni/made/MainActivity;",
                 "Landroid/app/Activity;",
@@ -36744,6 +37961,7 @@ public final class MainActivity extends Activity {
                     descriptor: "I".to_string(),
                 },
                 access_flags: 0x2,
+                annotations: Vec::new(),
             },
             super::dexwrite::Field {
                 reference: super::dexwrite::FieldRef {
@@ -36752,6 +37970,7 @@ public final class MainActivity extends Activity {
                     descriptor: "Ljava/lang/String;".to_string(),
                 },
                 access_flags: 0x2,
+                annotations: Vec::new(),
             },
         ];
         class.static_fields = vec![super::dexwrite::Field {
@@ -36761,6 +37980,7 @@ public final class MainActivity extends Activity {
                 descriptor: "Ljava/lang/String;".to_string(),
             },
             access_flags: 0x8 | 0x10,
+            annotations: Vec::new(),
         }];
         class.virtual_methods = vec![super::dexwrite::Method {
             reference: super::dexwrite::MethodRef {
@@ -36776,6 +37996,8 @@ public final class MainActivity extends Activity {
             // return-void, which is the whole body.
             instructions: vec![super::dexwrite::Insn::raw(vec![0x000e])],
             lines: Vec::new(),
+            annotations: Vec::new(),
+            parameter_annotations: Vec::new(),
             tries: Vec::new(),
         }];
         class
