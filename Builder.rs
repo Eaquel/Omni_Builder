@@ -1361,19 +1361,19 @@ pub mod compiler {
     /// 12L is its own API level. Below 30 is a platform nothing here supports.
     ///
     /// The classes this build writes calls against are the platform's own as
-    /// of API 36, which is what `Android.rs` holds. A target above that is a
-    /// promise about behaviour rather than about classes: `targetSdkVersion`
-    /// is a number the device reads to decide which of its own defaults apply,
-    /// and a package built here runs on a newer Android whatever it says. So
-    /// 37 may be targeted and 38 may not, because 38 is a platform nobody has
-    /// yet described.
+    /// of API 37, read off the Android 17 `android.jar` and written out in
+    /// `Android.rs`. Targeting is a separate promise from calling:
+    /// `targetSdkVersion` is a number the device reads to decide which of its
+    /// own defaults apply, and a package built here runs on a newer Android
+    /// whatever it says. What may not be targeted is 38, because 38 is a
+    /// platform nobody has yet described.
     pub const OLDEST_API: u32 = 30;
     pub const NEWEST_API: u32 = 37;
 
     /// The newest platform whose classes this build has been given, which is
-    /// what a call is checked against. A target may be one above it; a class
-    /// may not.
-    pub const NEWEST_DESCRIBED_API: u32 = 36;
+    /// what a call is checked against. It never runs ahead of what may be
+    /// targeted, and as of Android 17 the two are the same release.
+    pub const NEWEST_DESCRIBED_API: u32 = 37;
 
     pub const fn api_is_supported(level: u32) -> bool {
         level >= OLDEST_API && level <= NEWEST_API
@@ -21932,7 +21932,7 @@ pub mod scaffold {
     pub const OLDEST_SUPPORTED: u32 = crate::compiler::OLDEST_API;
     pub const NEWEST_SUPPORTED: u32 = crate::compiler::NEWEST_API;
     /// What a new project is created targeting: the newest platform whose
-    /// classes are here, which is one below the newest that may be targeted.
+    /// classes are here.
     pub const NEWEST_DESCRIBED: u32 = crate::compiler::NEWEST_DESCRIBED_API;
 
     pub const DEFAULT_PACKAGE: &str = "com.my.app";
@@ -28650,10 +28650,19 @@ public final class R {{
             let Ok(entries) = std::fs::read_dir(root.join("platforms")) else {
                 continue;
             };
-            let mut platforms: Vec<std::path::PathBuf> =
-                entries.flatten().map(|entry| entry.path()).collect();
+            let mut platforms: Vec<(u32, u32, std::path::PathBuf)> = entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter_map(|path| {
+                    let level = api_level_of(&path)?;
+                    Some((level.0, level.1, path))
+                })
+                .collect();
+            // By the API level the folder names, not by the name: `android-9`
+            // sorts after `android-37` as text, and picking that one would
+            // hand a compilation a platform ten releases too old.
             platforms.sort();
-            for platform in platforms.into_iter().rev() {
+            for (_, _, platform) in platforms.into_iter().rev() {
                 let candidate = platform.join("android.jar");
                 if candidate.is_file() {
                     return Some(candidate);
@@ -28661,6 +28670,21 @@ public final class R {{
             }
         }
         None
+    }
+
+    /// The API level an SDK platform folder names, as a pair so that
+    /// `android-37.2` is read as 37 then 2 and settles above `android-37`.
+    ///
+    /// A folder whose name is not `android-<level>` is not a platform and is
+    /// left out rather than sorted somewhere arbitrary.
+    pub fn api_level_of(path: &std::path::Path) -> Option<(u32, u32)> {
+        let name = path.file_name()?.to_str()?;
+        let held = name.strip_prefix("android-")?;
+        let (major, minor) = match held.split_once('.') {
+            Some((major, minor)) => (major, minor.parse().ok()?),
+            None => (held, 0),
+        };
+        Some((major.parse().ok()?, minor))
     }
 
     fn gather_java(folder: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
@@ -38998,6 +39022,38 @@ public final class MainActivity extends Activity {
     }
 
     #[test]
+    fn the_newest_platform_is_the_one_with_the_highest_number() {
+        use super::builder::api_level_of;
+        use std::path::Path;
+
+        // `android-9` sorts after `android-37` as text. It is not newer.
+        let held =
+            |name: &str| api_level_of(Path::new("/opt/android-sdk/platforms").join(name).as_path());
+        assert_eq!(held("android-9"), Some((9, 0)));
+        assert_eq!(held("android-36"), Some((36, 0)));
+        assert_eq!(held("android-37.2"), Some((37, 2)));
+        assert!(held("android-37.2") > held("android-37"));
+        assert!(held("android-37") > held("android-36"));
+        assert!(held("android-36") > held("android-9"));
+
+        // A folder that is not a platform is not sorted, it is left out.
+        assert_eq!(held("android-TiramisuPrivacySandbox"), None);
+        assert_eq!(held("data"), None);
+        assert_eq!(held("android-"), None);
+
+        // And the jar this build actually finds is the newest one installed.
+        let Some(jar) = super::builder::platform_jar() else {
+            eprintln!("no android.jar on this machine");
+            return;
+        };
+        let level = api_level_of(jar.parent().unwrap()).expect("a platform folder");
+        assert!(
+            level.0 >= super::compiler::NEWEST_DESCRIBED_API,
+            "the platform found is {level:?}, older than the one described"
+        );
+    }
+
+    #[test]
     fn the_java_somebody_wrote_can_call_into_the_platform_it_was_handed() {
         // The whole point of a dependency: the person imports what they like
         // and it compiles. Nothing here is in the compiler's own table -- a
@@ -40478,7 +40534,10 @@ public final class MainActivity extends Activity {
         assert_eq!(listed[0].version_name, "1.0.0");
         assert_eq!(listed[0].version_code, 1);
         assert_eq!(listed[0].min_sdk, 30);
-        assert_eq!(listed[0].target_sdk, 36);
+        assert_eq!(
+            listed[0].target_sdk,
+            u64::from(super::scaffold::NEWEST_DESCRIBED)
+        );
         assert!(listed[0].icon.is_none());
 
         let entries = super::workspace::tree(&text).unwrap();
@@ -40901,12 +40960,16 @@ public final class MainActivity extends Activity {
         let tree = String::from_utf8_lossy(&dumped.stdout).to_string();
         assert!(dumped.status.success(), "{tree}");
 
+        let targets = format!(
+            "android:targetSdkVersion(0x01010270)={}",
+            crate::scaffold::NEWEST_DESCRIBED
+        );
         for expected in [
             "A: package=\"com.tr.yt\"",
             "android:versionCode(0x0101021b)=3",
             "android:versionName(0x0101021c)=\"1.0.0\"",
             "android:minSdkVersion(0x0101020c)=30",
-            "android:targetSdkVersion(0x01010270)=36",
+            targets.as_str(),
             "android:label(0x01010001)=@0x7f020000",
             "android:allowBackup(0x01010280)=false",
             "android:extractNativeLibs(0x010104ea)=false",
@@ -42004,8 +42067,8 @@ public final class MainActivity extends Activity {
         assert!(!super::compiler::api_is_supported(38));
 
         // What a call is checked against is the platform whose classes are
-        // here, which is one below the newest that may be targeted.
-        assert_eq!(super::compiler::NEWEST_DESCRIBED_API, 36);
+        // here, which is Android 17 and its own `android.jar`.
+        assert_eq!(super::compiler::NEWEST_DESCRIBED_API, 37);
         const {
             assert!(super::compiler::NEWEST_DESCRIBED_API <= super::compiler::NEWEST_API);
         }
@@ -42015,13 +42078,21 @@ public final class MainActivity extends Activity {
         assert_eq!(spec.min_sdk, 30);
         assert_eq!(spec.target_sdk, super::compiler::NEWEST_DESCRIBED_API);
 
-        // A target above what is described is still allowed, because a target
-        // is a number the device reads rather than a class anything calls.
+        // Android 17 may be targeted, and is what a project is made against.
         let held = super::scaffold::Spec::parse(
             "package=com.tr.yt;label=X;abis=arm64-v8a;languages=java;targetSdk=37",
         )
         .expect("Android 17 may be targeted");
         assert_eq!(held.target_sdk, 37);
+
+        // A platform nobody has described may not be targeted at all.
+        assert!(
+            super::scaffold::Spec::parse(
+                "package=com.tr.yt;label=X;abis=arm64-v8a;languages=java;targetSdk=38",
+            )
+            .is_err(),
+            "Android 18 is not a platform this build knows"
+        );
     }
 
     #[test]
@@ -44913,6 +44984,8 @@ Viewbinding   = false
         assert_eq!(project.version, "1.0.0");
         assert_eq!(project.edition.as_deref(), Some("01/01/2000"));
         assert_eq!(project.min_sdk, 30);
+        // What the directive's own manifest asks for, which is not the
+        // default: a manifest that names a platform gets the one it names.
         assert_eq!(project.target_sdk, 36);
         assert_eq!(project.compile_sdk, 36);
         assert_eq!(project.profile, Profile::Release);
@@ -44976,8 +45049,8 @@ Viewbinding   = false
         assert_eq!(project.name, "Tiny");
         assert_eq!(project.id, "com.omni.tiny");
         assert_eq!(project.min_sdk, 30);
-        assert_eq!(project.target_sdk, 36);
-        assert_eq!(project.compile_sdk, 36);
+        assert_eq!(project.target_sdk, crate::compiler::NEWEST_DESCRIBED_API);
+        assert_eq!(project.compile_sdk, crate::compiler::NEWEST_DESCRIBED_API);
         assert!(project.deterministic);
         assert!(project.provenance);
         assert!(project.verification);
