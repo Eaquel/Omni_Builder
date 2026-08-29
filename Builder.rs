@@ -23166,6 +23166,14 @@ pub mod scaffold {
     /// what to compile.
     pub const JAVA_FOLDER: &str = "Java";
 
+    /// The folder a project's assets live in.
+    ///
+    /// Whatever is in it is carried into the package as it was written, under
+    /// `assets`, which is where `AssetManager` looks. Nothing here is
+    /// compiled, renamed or given an identifier: a font, a database, a JSON
+    /// file somebody ships with the application.
+    pub const ASSETS_FOLDER: &str = "Assets";
+
     /// The folder a project's dependencies live in.
     ///
     /// A jar dropped in here is a jar the code may call into: `android.jar`
@@ -23839,6 +23847,45 @@ pub mod scaffold {
     /// its extension, is the name it is reached by. Nothing here reads the
     /// file: what is in it is the resource, and the build decides what to do
     /// with it.
+    /// Everything under the project's `Assets` folder, with the name it will
+    /// have in the package.
+    ///
+    /// Read in a settled order, so that two builds of the same folder produce
+    /// the same package. A folder inside a folder is kept: `Assets/fonts/a.ttf`
+    /// is `assets/fonts/a.ttf`, which is the path the application asks for.
+    pub fn asset_files(root: &str) -> Vec<(String, Vec<u8>)> {
+        let base = std::path::Path::new(root.trim_end_matches('/')).join(ASSETS_FOLDER);
+        let mut found = Vec::new();
+        gather_assets(&base, "", &mut found);
+        found.sort_by(|left, right| left.0.cmp(&right.0));
+        found
+    }
+
+    fn gather_assets(at: &std::path::Path, under: &str, found: &mut Vec<(String, Vec<u8>)>) {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            return;
+        };
+        let mut held: Vec<std::path::PathBuf> = entries.flatten().map(|one| one.path()).collect();
+        held.sort();
+        for path in held {
+            let Some(name) = path.file_name().and_then(|held| held.to_str()) else {
+                continue;
+            };
+            let inside = if under.is_empty() {
+                name.to_string()
+            } else {
+                format!("{under}/{name}")
+            };
+            if path.is_dir() {
+                gather_assets(&path, &inside, found);
+                continue;
+            }
+            if let Ok(bytes) = std::fs::read(&path) {
+                found.push((format!("assets/{inside}"), bytes));
+            }
+        }
+    }
+
     pub fn resource_files(root: &str) -> Vec<Supplied> {
         let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
         let mut found = Vec::new();
@@ -29477,6 +29524,22 @@ pub mod builder {
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
         project.resources = crate::scaffold::resource_files(root);
+        // What the project ships as it is, and what its libraries do. The
+        // project's own is written last and wins, so a library that carries a
+        // file of the same name does not overwrite it.
+        let mut carried: Vec<(String, Vec<u8>)> = Vec::new();
+        for (name, bytes) in brought
+            .carried
+            .iter()
+            .cloned()
+            .chain(crate::scaffold::asset_files(root))
+        {
+            match carried.iter_mut().find(|(held, _)| *held == name) {
+                Some(held) => held.1 = bytes,
+                None => carried.push((name, bytes)),
+            }
+        }
+        project.files.extend(carried);
         project.library_values = brought.values;
         project.library_resources = brought.resources;
         project.library_packages = brought.packages;
@@ -29668,7 +29731,7 @@ public final class R {{
     }
 
     /// One entry of an archive, as the bytes it holds.
-    fn entry_bytes(
+    pub(crate) fn entry_bytes(
         bytes: &[u8],
         entry: &crate::archive::Entry,
         where_from: &str,
@@ -29883,6 +29946,10 @@ public final class R {{
         pub resources: Vec<crate::scaffold::Supplied>,
         pub packages: Vec<String>,
         pub manifests: Vec<String>,
+        /// What the library ships beside its code: files under `assets`, and
+        /// the machine code under `jni`, each with the name it will have in
+        /// the package.
+        pub carried: Vec<(String, Vec<u8>)>,
     }
 
     /// Everything the Android libraries a project depends on bring with them.
@@ -29925,6 +29992,22 @@ public final class R {{
                         }
                     }
                     out.manifests.push(text);
+                    continue;
+                }
+                // What a library ships beside its code. `assets` is carried
+                // as it is; `jni/arm64-v8a/libx.so` is what the same file is
+                // called `lib/arm64-v8a/libx.so` in a package, which is the
+                // one rename an aar needs.
+                if entry.name.starts_with("assets/") {
+                    let held = entry_bytes(&bytes, entry, &where_from)?;
+                    out.carried.push((entry.name.clone(), held));
+                    continue;
+                }
+                if let Some(rest) = entry.name.strip_prefix("jni/") {
+                    if rest.contains('/') {
+                        let held = entry_bytes(&bytes, entry, &where_from)?;
+                        out.carried.push((format!("lib/{rest}"), held));
+                    }
                     continue;
                 }
                 let Some(rest) = entry.name.strip_prefix("res/") else {
@@ -30001,7 +30084,13 @@ public final class R {{
         already: &[String],
     ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
         let mut out: Vec<crate::dexwrite::Class> = Vec::new();
-        let mut held: Vec<String> = already.to_vec();
+        // Every class already accounted for, and where it came from, so that
+        // two libraries declaring the same class can be told apart from one
+        // library declaring it twice.
+        let mut held: Vec<(String, String)> = already
+            .iter()
+            .map(|one| (one.clone(), "the project's own code".to_string()))
+            .collect();
         for path in packaged_jars(root) {
             let bytes = std::fs::read(&path).map_err(|why| {
                 fail("EB045", "A dependency could not be read.")
@@ -30039,10 +30128,29 @@ public final class R {{
                             .with_context(format!("Entry: {}", entry.name))
                     })?;
                     let descriptor = format!("L{};", class.name.replace('.', "/"));
-                    if held.contains(&descriptor) {
-                        continue;
+                    let where_from = path.display().to_string();
+                    if let Some((_, before)) = held.iter().find(|(known, _)| *known == descriptor) {
+                        // The same jar carrying the same class twice is a jar
+                        // read twice -- an aar whose `classes.jar` is also
+                        // under `libs`, say -- and the second reading is the
+                        // same class. Two different ones is a package with two
+                        // answers to the same name, and which one a device
+                        // would load is not something to leave to the order
+                        // the folder was read in.
+                        if *before == where_from {
+                            continue;
+                        }
+                        return Err(fail("EB055", "Two dependencies declare the same class.")
+                            .with_context(format!("Class: {}", class.name))
+                            .with_context(format!("Declared in: {before}"))
+                            .with_context(format!("And in: {where_from}"))
+                            .with_suggestion(
+                                "Keep one of them. A package holding two classes of one \
+                             name loads whichever the runtime reaches first, which is \
+                             not something a build should decide by accident.",
+                            ));
                     }
-                    held.push(descriptor);
+                    held.push((descriptor, where_from));
                     out.extend(crate::dalvik::translate_class(&class).map_err(|error| {
                         error
                             .with_context(format!("In: {}", path.display()))
@@ -36962,7 +37070,22 @@ public final class Greeting {
             .to_vec(),
         )
         .unwrap();
+        // And what a library ships beside its code: files for the asset
+        // manager, and machine code for the one machine this builds for.
+        aar.add("assets/tokens.txt", b"from the library".to_vec())
+            .unwrap();
+        aar.add("assets/shared.txt", b"the library's own".to_vec())
+            .unwrap();
+        aar.add("jni/arm64-v8a/libgreeting.so", vec![0x7f; 2_048])
+            .unwrap();
         std::fs::write(libraries.join("greeting.aar"), aar.finish().unwrap()).unwrap();
+
+        // The application's own assets, one of which the library also ships.
+        let assets = root.join(super::scaffold::ASSETS_FOLDER);
+        std::fs::create_dir_all(assets.join("fonts")).unwrap();
+        std::fs::write(assets.join("notes.txt"), b"made here").unwrap();
+        std::fs::write(assets.join("shared.txt"), b"the application's own").unwrap();
+        std::fs::write(assets.join("fonts/a.ttf"), vec![1, 2, 3]).unwrap();
 
         // The application says one of the library's strings differently, which
         // is the whole point of a library's resources being underneath the
@@ -37101,9 +37224,58 @@ public final class MainActivity extends Activity {
             "the package carries its code"
         );
 
+        // What the project ships as it is, and what its libraries do. A
+        // library's native code is under `lib` in a package however it was
+        // named in the library, and a name the application also uses is the
+        // application's.
+        for (name, expected) in [
+            ("assets/notes.txt", "made here"),
+            ("assets/tokens.txt", "from the library"),
+            ("assets/shared.txt", "the application's own"),
+        ] {
+            let entry = held
+                .entry(name)
+                .unwrap_or_else(|| panic!("{name} is not in the package"));
+            let bytes =
+                super::builder::entry_bytes(&outcome.package, entry, name).expect("it reads");
+            assert_eq!(String::from_utf8_lossy(&bytes), expected, "{name}");
+        }
+        assert!(
+            held.entry("assets/fonts/a.ttf").is_some(),
+            "a folder inside the assets folder keeps its place"
+        );
+        assert!(
+            held.entry("lib/arm64-v8a/libgreeting.so").is_some(),
+            "the library's machine code is where a package keeps it"
+        );
+        assert!(
+            held.entry("jni/arm64-v8a/libgreeting.so").is_none(),
+            "and not where the library kept it"
+        );
+
+        // And two libraries declaring the same class is refused rather than
+        // decided by which folder was read first.
+        std::fs::copy(
+            libraries.join("greeting.jar"),
+            libraries.join("greeting-again.jar"),
+        )
+        .unwrap();
+        let refused = super::builder::from_project(root.to_str().unwrap())
+            .expect_err("two jars with one class in both must be refused");
+        assert_eq!(refused.code, "EB055", "{refused:?}");
+        assert!(
+            refused
+                .context
+                .iter()
+                .any(|held| held.contains("com.some.lib.Greeting")),
+            "the refusal names the class: {refused:?}"
+        );
+        std::fs::remove_file(libraries.join("greeting-again.jar")).unwrap();
+
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
-            "library packaging: {} classes, a library among them",
+            "library packaging: {} classes, a library among them, with its assets \
+             and its machine code",
             project.code.len()
         );
     }
