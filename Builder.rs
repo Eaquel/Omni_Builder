@@ -28018,15 +28018,15 @@ pub mod builder {
 
     pub fn from_project(root: &str) -> Result<Project, Diagnostic> {
         let manifest = crate::scaffold::read_manifest(root)?;
+        // And what the Android libraries brought with them, which sits
+        // underneath the project's own.
+        let brought = brought_by_libraries(root)?;
+        let manifest = merged_manifest(&manifest, &brought.manifests)?;
         let mut project = from_manifest(&manifest)?;
         project.icon = crate::scaffold::icon_bytes(root);
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
         project.resources = crate::scaffold::resource_files(root);
-
-        // And what the Android libraries brought with them, which sits
-        // underneath the project's own.
-        let brought = brought_by_libraries(root)?;
         project.library_values = brought.values;
         project.library_resources = brought.resources;
         project.library_packages = brought.packages;
@@ -28253,6 +28253,140 @@ public final class R {{
                 ));
         }
         Ok(out)
+    }
+
+    /// One element written back out as the XML it was read from.
+    ///
+    /// This is how a library's `<uses-permission>` or `<provider>` gets into
+    /// the application's manifest: it is read from the library, written out
+    /// again here, and put where it belongs. Only what a manifest holds is
+    /// written -- elements, attributes and elements inside them -- because
+    /// that is all a manifest is.
+    fn as_xml(element: &crate::xml::Element, indent: usize) -> String {
+        let pad = " ".repeat(indent);
+        let mut out = format!("{pad}<{}", element.name);
+        for attribute in &element.attributes {
+            out.push_str(&format!(
+                "\n{pad}    {}=\"{}\"",
+                attribute.name,
+                escaped(&attribute.value)
+            ));
+        }
+        if element.children.is_empty() {
+            out.push_str(" />\n");
+            return out;
+        }
+        out.push_str(">\n");
+        for child in &element.children {
+            out.push_str(&as_xml(child, indent + 4));
+        }
+        out.push_str(&format!("{pad}</{}>\n", element.name));
+        out
+    }
+
+    fn escaped(value: &str) -> String {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    }
+
+    /// What one element is known by, which is what makes two of them the same
+    /// one rather than two.
+    fn known_as(element: &crate::xml::Element) -> (String, String) {
+        (
+            element.name.clone(),
+            element
+                .attribute("android:name")
+                .unwrap_or_default()
+                .to_string(),
+        )
+    }
+
+    /// The application's manifest with what its libraries ask for in it.
+    ///
+    /// A library declares the permissions it needs, the features it needs and
+    /// the components it brings -- a provider that starts it, a receiver it
+    /// listens with -- and an application that does not carry them ships
+    /// something that does not work. Each is added where the application does
+    /// not already declare one by the same name, so an application that says
+    /// something about a library's component keeps what it said.
+    pub fn merged_manifest(application: &str, libraries: &[String]) -> Result<String, Diagnostic> {
+        if libraries.is_empty() {
+            return Ok(application.to_string());
+        }
+        let mut sink = Sink::new();
+        let Some(mut root) = crate::xml::parse(application, "AndroidManifest.xml", &mut sink)
+        else {
+            return Err(fail("EB051", "The manifest could not be read.")
+                .with_context("Merging what the libraries ask for needs it read first."));
+        };
+        let package = root.attribute("package").unwrap_or_default().to_string();
+
+        for (which, held) in libraries.iter().enumerate() {
+            let named = format!("AndroidManifest.xml in library {}", which + 1);
+            let mut theirs = Sink::new();
+            let Some(brought) = crate::xml::parse(held, &named, &mut theirs) else {
+                return Err(fail("EB052", "A library's manifest could not be read.")
+                    .with_context(format!("Library: {}", which + 1)));
+            };
+            for child in &brought.children {
+                if child.name == "application" {
+                    let Some(mine) = root
+                        .children
+                        .iter_mut()
+                        .find(|one| one.name == "application")
+                    else {
+                        continue;
+                    };
+                    for inside in &child.children {
+                        if mine
+                            .children
+                            .iter()
+                            .any(|one| known_as(one) == known_as(inside))
+                        {
+                            continue;
+                        }
+                        mine.children.push(instead(inside, &package));
+                    }
+                    continue;
+                }
+                // A library says nothing about which platform the application
+                // runs on; the application does.
+                if child.name == "uses-sdk" {
+                    continue;
+                }
+                if root
+                    .children
+                    .iter()
+                    .any(|one| known_as(one) == known_as(child))
+                {
+                    continue;
+                }
+                root.children.push(instead(child, &package));
+            }
+        }
+
+        let mut out = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+        out.push_str(&as_xml(&root, 0));
+        Ok(out)
+    }
+
+    /// The same element with `${applicationId}` in it replaced by the
+    /// application it is being put into, which is what a library writes when
+    /// it needs a name of the application's own.
+    fn instead(element: &crate::xml::Element, package: &str) -> crate::xml::Element {
+        let mut out = element.clone();
+        for attribute in &mut out.attributes {
+            attribute.value = attribute.value.replace("${applicationId}", package);
+        }
+        out.children = element
+            .children
+            .iter()
+            .map(|one| instead(one, package))
+            .collect();
+        out
     }
 
     /// What an Android library brings besides its code: the resources it
@@ -34971,9 +35105,18 @@ public final class Greeting {
         aar.add("classes.jar", inside.finish().unwrap()).unwrap();
         aar.add(
             "AndroidManifest.xml",
-            b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
-              <manifest package=\"com.some.lib\" />\n"
-                .to_vec(),
+            b"<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"
+    package=\"com.some.lib\">
+    <uses-permission android:name=\"android.permission.INTERNET\" />
+    <uses-feature android:name=\"android.hardware.camera\" android:required=\"false\" />
+    <application>
+        <meta-data android:name=\"com.some.lib.Which\" android:value=\"${applicationId}\" />
+        <service android:name=\"com.some.lib.Watcher\" android:exported=\"false\" />
+    </application>
+</manifest>
+"
+            .to_vec(),
         )
         .unwrap();
         aar.add("R.txt", Vec::new()).unwrap();
@@ -35108,6 +35251,26 @@ public final class MainActivity extends Activity {
             refused.is_empty(),
             "the runtime would refuse this:\n  {}",
             refused.join("\n  ")
+        );
+
+        // What the library asks the manifest for is in the manifest, with the
+        // application's own name where it asked for one.
+        for wanted in [
+            "android.permission.INTERNET",
+            "android.hardware.camera",
+            "com.some.lib.Watcher",
+            "com.some.lib.Which",
+        ] {
+            assert!(
+                project.manifest.contains(wanted),
+                "the manifest does not carry {wanted}:\n{}",
+                project.manifest
+            );
+        }
+        assert!(
+            project.manifest.contains("android:value=\"com.tr.yt\""),
+            "the library's placeholder was not filled in:\n{}",
+            project.manifest
         );
 
         let key = super::rsa::generate(2048).expect("a key");
