@@ -8360,11 +8360,13 @@ pub mod resources {
         Anim,
         Animator,
         Array,
+        Attr,
         Bool,
         Color,
         Dimension,
         Drawable,
         Font,
+        Fraction,
         Id,
         Integer,
         Interpolator,
@@ -8385,11 +8387,13 @@ pub mod resources {
                 Kind::Anim => "anim",
                 Kind::Animator => "animator",
                 Kind::Array => "array",
+                Kind::Attr => "attr",
                 Kind::Bool => "bool",
                 Kind::Color => "color",
                 Kind::Dimension => "dimen",
                 Kind::Drawable => "drawable",
                 Kind::Font => "font",
+                Kind::Fraction => "fraction",
                 Kind::Id => "id",
                 Kind::Integer => "integer",
                 Kind::Interpolator => "interpolator",
@@ -8409,11 +8413,13 @@ pub mod resources {
             Kind::Anim,
             Kind::Animator,
             Kind::Array,
+            Kind::Attr,
             Kind::Bool,
             Kind::Color,
             Kind::Dimension,
             Kind::Drawable,
             Kind::Font,
+            Kind::Fraction,
             Kind::Id,
             Kind::Integer,
             Kind::Interpolator,
@@ -8865,6 +8871,12 @@ pub mod resources {
 
         pub const VALUES_DIRECTORY: &'static str = "values";
 
+        /// Whether what a qualifier carries after its prefix is a number, so
+        /// that `mcc310` is a country code and `mccx` is not.
+        fn is_a_number(held: &str) -> bool {
+            !held.is_empty() && held.chars().all(|one| one.is_ascii_digit())
+        }
+
         pub fn parse_directory(name: &str) -> Result<(Kind, Config), String> {
             let mut parts = name.split('-');
             let Some(kind_name) = parts.next() else {
@@ -8888,13 +8900,94 @@ pub mod resources {
             Config::parse_qualifiers(name, parts)
         }
 
+        /// Where a qualifier sits in the order a folder name has to write
+        /// them in.
+        ///
+        /// The order is the platform's own, and it is not a nicety: `aapt2`
+        /// refuses `values-night-land` and accepts `values-land-night`, so a
+        /// build that took either would be a build whose folders stop working
+        /// the moment the project is opened anywhere else.
+        fn rank_of(qualifier: &str) -> Option<u8> {
+            const KEYWORDS: &[(&[&str], u8)] = &[
+                (&["ldrtl", "ldltr"], 4),
+                (&["small", "normal", "large", "xlarge"], 8),
+                (&["long", "notlong"], 9),
+                (&["round", "notround"], 10),
+                (&["widecg", "nowidecg"], 11),
+                (&["highdr", "lowdr"], 12),
+                (&["port", "land"], 13),
+                (
+                    &[
+                        "car",
+                        "desk",
+                        "television",
+                        "appliance",
+                        "watch",
+                        "vrheadset",
+                    ],
+                    14,
+                ),
+                (&["night", "notnight"], 15),
+                (&["notouch", "finger"], 17),
+                (&["keysexposed", "keyshidden", "keyssoft"], 18),
+                (&["nokeys", "qwerty", "12key"], 19),
+                (&["navexposed", "navhidden"], 20),
+                (&["nonav", "dpad", "trackball", "wheel"], 21),
+            ];
+
+            // In the order the reader below tries them, so that what a name
+            // is ranked as is what it is read as.
+            if Density::parse(qualifier).is_some() {
+                return Some(16);
+            }
+            for (names, rank) in KEYWORDS {
+                if names.contains(&qualifier) {
+                    return Some(*rank);
+                }
+            }
+            if qualifier.strip_prefix("mcc").is_some_and(Self::is_a_number) {
+                return Some(1);
+            }
+            if qualifier.strip_prefix("mnc").is_some_and(Self::is_a_number) {
+                return Some(2);
+            }
+            if qualifier.strip_prefix('v').is_some_and(Self::is_a_number) {
+                return Some(22);
+            }
+            for (prefix, rank) in [("sw", 5u8), ("w", 6), ("h", 7)] {
+                if qualifier
+                    .strip_prefix(prefix)
+                    .and_then(|held| held.strip_suffix("dp"))
+                    .is_some_and(Self::is_a_number)
+                {
+                    return Some(rank);
+                }
+            }
+            // A language, a region, or a whole locale said at once.
+            Some(3)
+        }
+
         fn parse_qualifiers<'a>(
             name: &str,
             qualifiers: impl Iterator<Item = &'a str>,
         ) -> Result<Config, String> {
             use said::*;
             let mut config = Config::DEFAULT;
+            let mut last: u8 = 0;
             for qualifier in qualifiers {
+                if let Some(rank) = Self::rank_of(qualifier) {
+                    // The locale is two qualifiers, a language and where it is
+                    // spoken, so that one may be said twice. Nothing else may.
+                    if rank < last || (rank == last && rank != 3) {
+                        return Err(format!(
+                            "'{name}' writes its qualifiers in an order the platform \
+                             does not read. '{qualifier}' comes earlier in the order \
+                             than something before it, and a folder is matched by the \
+                             order it writes them in."
+                        ));
+                    }
+                    last = rank;
+                }
                 if let Some(density) = Density::parse(qualifier) {
                     config.density = density;
                     continue;
@@ -9245,6 +9338,13 @@ pub mod resources {
             milli: i64,
             unit: Unit,
         },
+        /// `50%` of something, or `50%p` of whatever holds it: the same packed
+        /// number a dimension is, with the whole it is a part of in the low
+        /// bits rather than a unit.
+        Fraction {
+            milli: i64,
+            of_parent: bool,
+        },
         Bool(bool),
         Integer(i32),
         Reference(Reference),
@@ -9262,13 +9362,42 @@ pub mod resources {
             as_what: u8,
             data: u32,
         },
-        /// Several values under one name, each with the number the table calls
-        /// it by: an attribute's identifier in a style, a position in an array,
-        /// a quantity in a plural.
+        /// `?attr/colorPrimary`: not a value but a question, which the device
+        /// answers out of whatever theme is in force when it reads this.
+        Attribute(Reference),
+        /// Several values under one name, each with what the table calls it
+        /// by: an attribute's identifier in a style, a position in an array,
+        /// a quantity in a plural, what an attribute accepts and the names it
+        /// gives its own values.
         Bag {
             parent: Option<Reference>,
-            items: Vec<(u32, Value)>,
+            items: Vec<(BagKey, Value)>,
         },
+    }
+
+    /// What a bag calls one of the values it holds.
+    ///
+    /// Some of these numbers are known as the file is read: a position in an
+    /// array, a quantity in a plural, the identifier the framework long ago
+    /// gave an attribute a style sets. Others are the project's own, and the
+    /// project's own numbers are handed out when the table is compiled -- so
+    /// those are carried by name until then and resolved once, in the one
+    /// place that knows them.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    pub enum BagKey {
+        Number(u32),
+        Named(Kind, String),
+    }
+
+    impl BagKey {
+        /// The number, where this is one. A key still carrying a name has not
+        /// been through `compile`, and nothing that writes a table may guess.
+        pub fn number(&self) -> Option<u32> {
+            match self {
+                BagKey::Number(held) => Some(*held),
+                BagKey::Named(_, _) => None,
+            }
+        }
     }
 
     /// The numbers the table gives the parts of a bag.
@@ -9297,9 +9426,11 @@ pub mod resources {
                 Value::Text(_) => "text",
                 Value::Color(_) => "color",
                 Value::Dimension { .. } => "dimension",
+                Value::Fraction { .. } => "fraction",
                 Value::Bool(_) => "bool",
                 Value::Integer(_) => "integer",
                 Value::Reference(_) => "reference",
+                Value::Attribute(_) => "attribute",
                 Value::File(_) => "file",
                 Value::Empty => "empty",
                 Value::Typed { .. } => "typed",
@@ -9324,9 +9455,27 @@ pub mod resources {
                         )
                     }
                 }
+                Value::Fraction { milli, of_parent } => {
+                    let whole = milli * 100 / 1000;
+                    let fraction = (milli * 100 % 1000).abs();
+                    let tail = if *of_parent { "%p" } else { "%" };
+                    if fraction == 0 {
+                        format!("{whole}{tail}")
+                    } else {
+                        format!(
+                            "{whole}.{}{tail}",
+                            format!("{fraction:03}").trim_end_matches('0')
+                        )
+                    }
+                }
                 Value::Bool(flag) => flag.to_string(),
                 Value::Integer(number) => number.to_string(),
                 Value::Reference(reference) => reference.to_string(),
+                Value::Attribute(reference) => {
+                    let mut said = reference.to_string();
+                    said.replace_range(..1, "?");
+                    said
+                }
                 Value::File(path) => path.clone(),
                 Value::Empty => String::new(),
                 Value::Typed { source, .. } => source.clone(),
@@ -9384,10 +9533,56 @@ pub mod resources {
         }
     }
 
+    /// A group of attributes a view reads together.
+    ///
+    /// `obtainStyledAttributes` is handed an array of identifiers and gives
+    /// the values back in the same order, so what a styleable comes to, in the
+    /// end, is that array. None of it reaches the table -- `aapt2` writes no
+    /// entry for one -- and all of it reaches `R`.
+    #[derive(Clone, Debug)]
+    pub struct Styleable {
+        pub name: String,
+        pub attributes: Vec<StyleableAttribute>,
+        pub origin: String,
+        pub position: Position,
+    }
+
+    /// One attribute a styleable reads: the framework's, written
+    /// `android:textColor`, or this project's, written by its bare name.
+    #[derive(Clone, Debug)]
+    pub struct StyleableAttribute {
+        pub platform: bool,
+        pub name: String,
+    }
+
+    impl StyleableAttribute {
+        /// What `R.styleable` calls the offset of this one in the array.
+        ///
+        /// A field name cannot hold a colon or a dot, so `android:textColor`
+        /// becomes `android_textColor`, which is what `aapt2` writes too.
+        pub fn field(&self) -> String {
+            let held = if self.platform {
+                format!("android:{}", self.name)
+            } else {
+                self.name.clone()
+            };
+            held.replace([':', '.'], "_")
+        }
+    }
+
+    /// A styleable with its attributes settled: the array `R` writes, in the
+    /// order the device reads it.
+    #[derive(Clone, Debug)]
+    pub struct CompiledStyleable {
+        pub name: String,
+        pub attributes: Vec<(String, u32)>,
+    }
+
     #[derive(Clone, Debug)]
     pub struct Table {
         package_id: u8,
         entries: Vec<Entry>,
+        styleables: Vec<Styleable>,
     }
 
     impl Table {
@@ -9399,7 +9594,12 @@ pub mod resources {
             Table {
                 package_id,
                 entries: Vec::new(),
+                styleables: Vec::new(),
             }
+        }
+
+        pub fn styleables(&self) -> &[Styleable] {
+            &self.styleables
         }
 
         pub fn entries(&self) -> &[Entry] {
@@ -9496,6 +9696,19 @@ pub mod resources {
                     taken.push(held);
                 }
             }
+            // A library brings the groups of attributes its own views read, and
+            // a project that already declares a group of that name keeps its
+            // own -- the same rule the entries follow.
+            for styleable in other.styleables {
+                if self
+                    .styleables
+                    .iter()
+                    .any(|held| held.name == styleable.name)
+                {
+                    continue;
+                }
+                self.styleables.push(styleable);
+            }
             taken
         }
 
@@ -9544,14 +9757,44 @@ pub mod resources {
             config: Config,
             sink: &mut Sink,
         ) -> bool {
-            let Some(kind) = Kind::parse(&element.name) else {
+            // A styleable is the one thing here that is not a resource: it
+            // becomes an array in `R` and nothing in the table.
+            if element.name == "declare-styleable" {
+                return self.read_styleable(element, origin, config, sink);
+            }
+
+            // `<item type="id" name="save"/>` is how a values file declares a
+            // resource whose element it does not want to name: the type is
+            // written out rather than being the tag.
+            let named = if element.name == "item" {
+                match element.attribute("type") {
+                    Some(held) => held,
+                    None => {
+                        sink.emit(
+                            self.problem(
+                                "E9079",
+                                "<item> in a values file does not say what type it is.".to_string(),
+                                origin,
+                                element.position,
+                            )
+                            .with_suggestion(
+                                "It is written <item type=\"id\" name=\"save\"/>. An <item> \
+                                 without a type is only meaningful inside a style, an \
+                                 array or a plural.",
+                            ),
+                        );
+                        return false;
+                    }
+                }
+            } else {
+                element.name.as_str()
+            };
+
+            let Some(kind) = Kind::parse(named) else {
                 sink.emit(
                     self.problem(
                         "E9002",
-                        format!(
-                            "<{}> is not a resource this build understands.",
-                            element.name
-                        ),
+                        format!("<{named}> is not a resource this build understands."),
                         origin,
                         element.position,
                     )
@@ -9595,6 +9838,13 @@ pub mod resources {
                         ),
                 );
                 return false;
+            }
+
+            // An attribute is a bag too, but the only one that declares
+            // resources of its own: every name it gives one of its values is
+            // an `id` the table has to carry.
+            if kind == Kind::Attr {
+                return self.read_attr(name, element, origin, config, sink);
             }
 
             // A style, an array and a plural are written as several values
@@ -9728,6 +9978,212 @@ pub mod resources {
             )
         }
 
+        /// Declares a group of attributes a view reads together.
+        ///
+        /// An `<attr>` inside one that says what it accepts declares that
+        /// attribute as well; one that only names an attribute is naming an
+        /// attribute declared somewhere else, which is how the framework's own
+        /// are pulled into a group.
+        fn read_styleable(
+            &mut self,
+            element: &Element,
+            origin: &str,
+            config: Config,
+            sink: &mut Sink,
+        ) -> bool {
+            let Some(name) = element.attribute("name") else {
+                sink.emit(
+                    self.problem(
+                        "E9067",
+                        "<declare-styleable> has no name.".to_string(),
+                        origin,
+                        element.position,
+                    )
+                    .with_suggestion(
+                        "It is declared <declare-styleable name=\"MyView\">, and that \
+                         name is what R.styleable calls the array.",
+                    ),
+                );
+                return false;
+            };
+            if let Err(reason) = validate_name(name) {
+                sink.emit(
+                    self.problem("E9068", reason, origin, element.position)
+                        .with_context(format!("Name: {name}")),
+                );
+                return false;
+            }
+            if let Some(previous) = self.styleables.iter().find(|held| held.name == name) {
+                sink.emit(
+                    self.problem(
+                        "E9069",
+                        format!("Styleable '{name}' is declared twice."),
+                        origin,
+                        element.position,
+                    )
+                    .with_context(format!(
+                        "First declared in {} at line {}",
+                        previous.origin, previous.position.line
+                    ))
+                    .with_suggestion("Put every attribute the view reads in one group."),
+                );
+                return false;
+            }
+
+            let mut attributes: Vec<StyleableAttribute> = Vec::new();
+            for child in &element.children {
+                if child.name != "attr" {
+                    sink.emit(
+                        self.problem(
+                            "E9070",
+                            format!("<{}> is not something a styleable holds.", child.name),
+                            origin,
+                            child.position,
+                        )
+                        .with_suggestion(
+                            "A styleable holds the attributes the view reads, each \
+                             written <attr name=\"…\"/>.",
+                        ),
+                    );
+                    return false;
+                }
+                let Some(written) = child.attribute("name") else {
+                    sink.emit(
+                        self.problem(
+                            "E9071",
+                            "<attr> in a styleable has no name.".to_string(),
+                            origin,
+                            child.position,
+                        )
+                        .with_suggestion(
+                            "It names an attribute: android:textColor for the \
+                             framework's, or a bare name for one declared here.",
+                        ),
+                    );
+                    return false;
+                };
+                let written = written.trim();
+                let (platform, local) = match written.split_once(':') {
+                    Some(("android", rest)) => (true, rest),
+                    None => (false, written),
+                    Some((package, _)) => {
+                        sink.emit(
+                            self.problem(
+                                "E9072",
+                                format!("'{written}' names a package this build cannot reach."),
+                                origin,
+                                child.position,
+                            )
+                            .with_context(format!("Package: {package}"))
+                            .with_suggestion(
+                                "Only the framework's own attributes and this \
+                                 project's are reachable.",
+                            ),
+                        );
+                        return false;
+                    }
+                };
+                if let Err(reason) = validate_name(local) {
+                    sink.emit(
+                        self.problem("E9073", reason, origin, child.position)
+                            .with_context(format!("Name: {written}")),
+                    );
+                    return false;
+                }
+                if attributes
+                    .iter()
+                    .any(|held| held.platform == platform && held.name == local)
+                {
+                    sink.emit(
+                        self.problem(
+                            "E9074",
+                            format!("Styleable '{name}' reads '{written}' twice."),
+                            origin,
+                            child.position,
+                        )
+                        .with_suggestion(
+                            "The array a styleable comes to has one place per \
+                             attribute, so naming one twice has no second place to \
+                             put it.",
+                        ),
+                    );
+                    return false;
+                }
+
+                // An `<attr>` that says what it accepts is declaring the
+                // attribute, not just naming it.
+                let declares = child.attribute("format").is_some() || !child.children.is_empty();
+                if declares {
+                    if platform {
+                        sink.emit(
+                            self.problem(
+                                "E9075",
+                                format!("'{written}' is the framework's to declare."),
+                                origin,
+                                child.position,
+                            )
+                            .with_suggestion(
+                                "Name it without a format to read it; what it accepts \
+                                 is what the framework says it accepts.",
+                            ),
+                        );
+                        return false;
+                    }
+                    if !self.read_attr(local, child, origin, config, sink) {
+                        return false;
+                    }
+                }
+
+                attributes.push(StyleableAttribute {
+                    platform,
+                    name: local.to_string(),
+                });
+            }
+
+            self.styleables.push(Styleable {
+                name: name.to_string(),
+                attributes,
+                origin: origin.to_string(),
+                position: element.position,
+            });
+            true
+        }
+
+        /// Declares an attribute: what it accepts, and the names it gives its
+        /// own values.
+        ///
+        /// Each of those names is an `id` in its own right -- that is how the
+        /// table numbers them, and how `aapt2` writes them -- so declaring
+        /// `<enum name="left" value="0"/>` declares `R.id.left` as well.
+        fn read_attr(
+            &mut self,
+            name: &str,
+            element: &Element,
+            origin: &str,
+            config: Config,
+            sink: &mut Sink,
+        ) -> bool {
+            let Some((value, symbols)) = read_attr_value(name, element, origin, sink) else {
+                return false;
+            };
+            for symbol in &symbols {
+                if !self.declare_id(symbol, origin, sink) {
+                    return false;
+                }
+            }
+            self.push(
+                Entry {
+                    kind: Kind::Attr,
+                    name: name.to_string(),
+                    config,
+                    value,
+                    origin: origin.to_string(),
+                    position: element.position,
+                },
+                sink,
+            )
+        }
+
         fn push(&mut self, entry: Entry, sink: &mut Sink) -> bool {
             if self.entries.len() >= MAX_ENTRIES {
                 sink.emit(
@@ -9846,7 +10302,7 @@ pub mod resources {
                 }
             }
 
-            let mut ok = true;
+            let mut ok = self.settle_bag_keys(&assignments, sink);
             for entry in &self.entries {
                 if let Value::Reference(reference) = &entry.value {
                     ok &= self.check_reference(entry, reference, &assignments, sink);
@@ -9855,15 +10311,250 @@ pub mod resources {
 
             ok &= self.check_for_cycles(sink);
 
+            let styleables = self.settle_styleables(&assignments, sink);
+            ok &= styleables.is_some();
+
             if !ok {
                 return None;
             }
+            let styleables = styleables.unwrap_or_default();
 
             Some(Compiled {
                 package_id: self.package_id,
                 entries: self.entries,
                 assignments,
+                styleables,
             })
+        }
+
+        /// What each attribute this project declares accepts, and the names
+        /// it gives its own values.
+        ///
+        /// Read straight off the entries rather than off a compiled table,
+        /// because this is what a style needs while the table is still being
+        /// put together.
+        #[allow(clippy::type_complexity)]
+        fn declarations(&self) -> Vec<(String, String, Vec<(String, u32)>)> {
+            let mut out = Vec::new();
+            for entry in &self.entries {
+                if entry.kind != Kind::Attr {
+                    continue;
+                }
+                let Value::Bag { items, .. } = &entry.value else {
+                    continue;
+                };
+                let mut accepts = accepts::text(accepts::ANY);
+                let mut symbols: Vec<(String, u32)> = Vec::new();
+                for (key, value) in items {
+                    let Value::Typed { data, .. } = value else {
+                        continue;
+                    };
+                    match key {
+                        BagKey::Number(held) if *held == BAG_ATTR_TYPE => {
+                            accepts = accepts::text(*data);
+                        }
+                        BagKey::Named(Kind::Id, name) => symbols.push((name.clone(), *data)),
+                        _ => {}
+                    }
+                }
+                out.push((entry.name.clone(), accepts, symbols));
+            }
+            out
+        }
+
+        /// The numbers a bag's own names come to.
+        ///
+        /// A style may set an attribute this project declares, and an
+        /// attribute names its own values by identifiers of the project's own.
+        /// Neither number exists while the file is being read, because neither
+        /// has been handed out yet. Both have now, so this is where the names
+        /// become the numbers a device reads -- and where a name nothing
+        /// declares is refused rather than written as some number.
+        fn settle_bag_keys(
+            &mut self,
+            assignments: &[(Kind, String, ResourceId)],
+            sink: &mut Sink,
+        ) -> bool {
+            let mut settled: Vec<(usize, Vec<BagKey>)> = Vec::new();
+            let mut ok = true;
+
+            for (at, entry) in self.entries.iter().enumerate() {
+                let Value::Bag { items, .. } = &entry.value else {
+                    continue;
+                };
+                if items.iter().all(|(key, _)| key.number().is_some()) {
+                    continue;
+                }
+                let mut keys: Vec<BagKey> = Vec::with_capacity(items.len());
+                for (key, _) in items {
+                    let BagKey::Named(kind, name) = key else {
+                        keys.push(key.clone());
+                        continue;
+                    };
+                    match assignments
+                        .iter()
+                        .find(|(held, known, _)| held == kind && known == name)
+                    {
+                        Some((_, _, id)) => keys.push(BagKey::Number(id.raw())),
+                        None => {
+                            sink.emit(
+                                self.problem(
+                                    "E9058",
+                                    format!("This project declares no {kind} called '{name}'."),
+                                    &entry.origin,
+                                    entry.position,
+                                )
+                                .with_suggestion(
+                                    "An attribute is either the framework's, written \
+                                     android:name, or one this project declares with \
+                                     <attr name=\"…\">.",
+                                ),
+                            );
+                            ok = false;
+                        }
+                    }
+                }
+                if keys.len() == items.len() {
+                    settled.push((at, keys));
+                }
+            }
+
+            // What a style sets an attribute to is typed by what that
+            // attribute accepts, and for the project's own that was not known
+            // while the file was being read. It is now.
+            let declared = self.declarations();
+            let mut typed: Vec<(usize, Vec<Value>)> = Vec::new();
+            for (at, entry) in self.entries.iter().enumerate() {
+                let Value::Bag { items, .. } = &entry.value else {
+                    continue;
+                };
+                if entry.kind != Kind::Style {
+                    continue;
+                }
+                let mut held: Vec<Value> = Vec::with_capacity(items.len());
+                for (key, value) in items {
+                    let (BagKey::Named(Kind::Attr, name), Value::Text(raw)) = (key, value) else {
+                        held.push(value.clone());
+                        continue;
+                    };
+                    let found = declared.iter().find(|(known, _, _)| known == name);
+                    let settled = found.and_then(|(_, accepts, symbols)| {
+                        let symbols: Vec<(&str, u32)> = symbols
+                            .iter()
+                            .map(|(name, value)| (name.as_str(), *value))
+                            .collect();
+                        crate::axml::typed_by(accepts, &symbols, raw.trim())
+                    });
+                    held.push(match settled {
+                        Some((as_what, data)) => Value::Typed {
+                            source: raw.trim().to_string(),
+                            as_what,
+                            data,
+                        },
+                        None => Value::Text(decode_string(raw)),
+                    });
+                }
+                typed.push((at, held));
+            }
+            for (at, held) in typed {
+                if let Value::Bag { items, .. } = &mut self.entries[at].value {
+                    for (item, value) in items.iter_mut().zip(held) {
+                        item.1 = value;
+                    }
+                }
+            }
+
+            for (at, keys) in settled {
+                if let Value::Bag { items, .. } = &mut self.entries[at].value {
+                    for (item, key) in items.iter_mut().zip(keys) {
+                        item.0 = key;
+                    }
+                }
+            }
+
+            // A style and an attribute are written in order of what they call
+            // their parts, which is the order `aapt2` writes and the order the
+            // device reads. An array keeps the order it was written in and a
+            // plural the order the platform names its quantities, so neither
+            // is touched here.
+            for entry in &mut self.entries {
+                if !matches!(entry.kind, Kind::Style | Kind::Attr) {
+                    continue;
+                }
+                if let Value::Bag { items, .. } = &mut entry.value {
+                    items.sort_by_key(|(key, _)| key.number().unwrap_or(u32::MAX));
+                }
+            }
+
+            ok
+        }
+
+        /// The array each styleable comes to.
+        ///
+        /// A styleable is a list of attributes, and what the device is handed
+        /// is their identifiers in ascending order -- ascending because
+        /// `obtainStyledAttributes` sorts what it is given, and the offsets
+        /// `R` writes have to be the offsets into what it sorted.
+        fn settle_styleables(
+            &self,
+            assignments: &[(Kind, String, ResourceId)],
+            sink: &mut Sink,
+        ) -> Option<Vec<CompiledStyleable>> {
+            let mut out: Vec<CompiledStyleable> = Vec::with_capacity(self.styleables.len());
+            let mut ok = true;
+
+            for styleable in &self.styleables {
+                let mut attributes: Vec<(String, u32)> = Vec::new();
+                for attribute in &styleable.attributes {
+                    let found = if attribute.platform {
+                        crate::axml::attribute_id(&attribute.name)
+                    } else {
+                        assignments
+                            .iter()
+                            .find(|(kind, name, _)| *kind == Kind::Attr && name == &attribute.name)
+                            .map(|(_, _, id)| id.raw())
+                    };
+                    let Some(id) = found else {
+                        let (code, said) = if attribute.platform {
+                            (
+                                "E9076",
+                                format!(
+                                    "The framework has no attribute called '{}'.",
+                                    attribute.name
+                                ),
+                            )
+                        } else {
+                            (
+                                "E9077",
+                                format!(
+                                    "This project declares no attribute called '{}'.",
+                                    attribute.name
+                                ),
+                            )
+                        };
+                        sink.emit(
+                            self.problem(code, said, &styleable.origin, styleable.position)
+                                .with_context(format!("Styleable: {}", styleable.name))
+                                .with_suggestion(
+                                    "An attribute a styleable reads is declared with \
+                                     <attr name=\"…\" format=\"…\"/>, here or by the \
+                                     framework.",
+                                ),
+                        );
+                        ok = false;
+                        continue;
+                    };
+                    attributes.push((attribute.field(), id));
+                }
+                attributes.sort_by_key(|(_, id)| *id);
+                out.push(CompiledStyleable {
+                    name: styleable.name.clone(),
+                    attributes,
+                });
+            }
+
+            out.sort_by(|left, right| left.name.cmp(&right.name));
+            ok.then_some(out)
         }
 
         fn check_reference(
@@ -10003,6 +10694,7 @@ pub mod resources {
         package_id: u8,
         entries: Vec<Entry>,
         assignments: Vec<(Kind, String, ResourceId)>,
+        styleables: Vec<CompiledStyleable>,
     }
 
     impl Compiled {
@@ -10023,6 +10715,57 @@ pub mod resources {
 
         pub fn assignments(&self) -> &[(Kind, String, ResourceId)] {
             &self.assignments
+        }
+
+        pub fn styleables(&self) -> &[CompiledStyleable] {
+            &self.styleables
+        }
+
+        /// What this project calls its own attributes, in the form the binary
+        /// XML writer needs: the number each was given, what it accepts, and
+        /// the names it gives its values.
+        ///
+        /// A layout writing `app:corner="rounded"` has to come out as that
+        /// number holding the number behind `rounded`, and this is where both
+        /// of those come from.
+        pub fn declared_attributes(&self) -> Vec<crate::axml::Declared> {
+            let mut out = Vec::new();
+            for (kind, name, id) in &self.assignments {
+                if *kind != Kind::Attr {
+                    continue;
+                }
+                let mut declared = crate::axml::Declared {
+                    name: name.clone(),
+                    id: id.raw(),
+                    accepts: accepts::text(accepts::ANY),
+                    symbols: Vec::new(),
+                };
+                let held = self
+                    .entries
+                    .iter()
+                    .find(|entry| entry.kind == Kind::Attr && &entry.name == name);
+                if let Some(Value::Bag { items, .. }) = held.map(|entry| &entry.value) {
+                    for (key, value) in items {
+                        let (Some(number), Value::Typed { data, .. }) = (key.number(), value)
+                        else {
+                            continue;
+                        };
+                        if number == BAG_ATTR_TYPE {
+                            declared.accepts = accepts::text(*data);
+                            continue;
+                        }
+                        if let Some((_, named, _)) = self
+                            .assignments
+                            .iter()
+                            .find(|(kind, _, held)| *kind == Kind::Id && held.raw() == number)
+                        {
+                            declared.symbols.push((named.clone(), *data));
+                        }
+                    }
+                }
+                out.push(declared);
+            }
+            out
         }
 
         pub fn write_json(&self, w: &mut Writer, key: &str) {
@@ -10050,7 +10793,7 @@ pub mod resources {
         /// list of quantities. The table calls these complex entries and
         /// writes them a different shape.
         pub const fn is_a_bag(self) -> bool {
-            matches!(self, Kind::Style | Kind::Array | Kind::Plurals)
+            matches!(self, Kind::Style | Kind::Array | Kind::Plurals | Kind::Attr)
         }
     }
 
@@ -10127,6 +10870,16 @@ pub mod resources {
                     None
                 }
             },
+            Kind::Fraction => match parse_fraction(trimmed) {
+                Ok((milli, of_parent)) => Some(Value::Fraction { milli, of_parent }),
+                Err(reason) => {
+                    sink.emit(reject("E9078", reason, origin, position).with_suggestion(
+                        "A fraction is written 50% of the thing itself, or 50%p of \
+                         whatever holds it.",
+                    ));
+                    None
+                }
+            },
             Kind::Bool => match trimmed {
                 "true" => Some(Value::Bool(true)),
                 "false" => Some(Value::Bool(false)),
@@ -10161,7 +10914,7 @@ pub mod resources {
             Kind::Id => Some(Value::Empty),
             // A bag is put together by the reader that walks the elements
             // inside it, not from one run of text.
-            Kind::Array | Kind::Plurals | Kind::Style => {
+            Kind::Array | Kind::Plurals | Kind::Style | Kind::Attr => {
                 sink.emit(
                     reject(
                         "E9046",
@@ -10198,9 +10951,10 @@ pub mod resources {
         }
     }
 
-    /// The kind of value the table stores for a reference to a theme
-    /// attribute, which is what `?android:attr/colorAccent` is.
-    const TYPE_ATTRIBUTE: u8 = 0x02;
+    /// A whole number, as it was written: `2` and `0x2` are the same number
+    /// and the table keeps which one the file said.
+    const TYPE_INT_DEC: u8 = 0x10;
+    const TYPE_INT_HEX: u8 = 0x11;
 
     /// A style, an array or a plural: several values written inside one
     /// element.
@@ -10211,6 +10965,265 @@ pub mod resources {
     /// in: a style runs by identifier, an array in the order it was written,
     /// and a plural in the order the platform names the quantities. That is the
     /// order `aapt2` writes them, and a table is read back by what it holds.
+    /// What an attribute accepts, as the bits the table keeps.
+    ///
+    /// A device reads `android:orientation="vertical"` by looking the
+    /// attribute up, finding that it is an enumeration, and finding `vertical`
+    /// among the names it gives its values. None of that works unless what the
+    /// attribute accepts is written down, which is what these bits are.
+    pub mod accepts {
+        pub const REFERENCE: u32 = 1 << 0;
+        pub const STRING: u32 = 1 << 1;
+        pub const INTEGER: u32 = 1 << 2;
+        pub const BOOLEAN: u32 = 1 << 3;
+        pub const COLOR: u32 = 1 << 4;
+        pub const FLOAT: u32 = 1 << 5;
+        pub const DIMENSION: u32 = 1 << 6;
+        pub const FRACTION: u32 = 1 << 7;
+        /// Everything above at once, which is what an attribute that does not
+        /// say gets.
+        pub const ANY: u32 = 0x0000_ffff;
+        pub const ENUM: u32 = 1 << 16;
+        pub const FLAGS: u32 = 1 << 17;
+
+        pub const NAMED: &[(&str, u32)] = &[
+            ("reference", REFERENCE),
+            ("string", STRING),
+            ("integer", INTEGER),
+            ("boolean", BOOLEAN),
+            ("color", COLOR),
+            ("float", FLOAT),
+            ("dimension", DIMENSION),
+            ("fraction", FRACTION),
+            ("enum", ENUM),
+            ("flags", FLAGS),
+        ];
+
+        /// These bits written the way the framework's own table writes them,
+        /// so that one declared here and one declared by the platform are read
+        /// by the same code.
+        pub fn text(bits: u32) -> String {
+            let mut said: Vec<&str> = Vec::new();
+            if bits & ANY == ANY {
+                said.push("any");
+            } else {
+                for (name, bit) in NAMED {
+                    if *bit <= ANY && bits & bit != 0 {
+                        said.push(name);
+                    }
+                }
+            }
+            for (name, bit) in NAMED {
+                if *bit > ANY && bits & bit != 0 {
+                    said.push(name);
+                }
+            }
+            said.join("|")
+        }
+    }
+
+    /// The number an attribute's bag calls what it accepts.
+    ///
+    /// It is `attr/type` in the framework's own table, which is why it is a
+    /// number out of the platform's block rather than one of the project's.
+    pub const BAG_ATTR_TYPE: u32 = 0x0100_0000;
+
+    /// One `<attr>`: the bag it becomes, and the names it declares as ids.
+    fn read_attr_value(
+        name: &str,
+        element: &Element,
+        origin: &str,
+        sink: &mut Sink,
+    ) -> Option<(Value, Vec<String>)> {
+        if !element.text.trim().is_empty() {
+            sink.emit(
+                reject(
+                    "E9059",
+                    format!("<attr name=\"{name}\"> holds text."),
+                    origin,
+                    element.position,
+                )
+                .with_context(format!("Written: {}", element.text.trim()))
+                .with_suggestion(
+                    "An attribute declares what it accepts, not a value. What it \
+                     accepts is written format=\"…\".",
+                ),
+            );
+            return None;
+        }
+
+        let mut bits = 0u32;
+        if let Some(written) = element.attribute("format") {
+            for one in written.split('|') {
+                let one = one.trim();
+                let Some((_, bit)) = accepts::NAMED.iter().find(|(known, _)| *known == one) else {
+                    sink.emit(
+                        reject(
+                            "E9060",
+                            format!("'{one}' is not something an attribute can accept."),
+                            origin,
+                            element.position,
+                        )
+                        .with_context(format!(
+                            "Accepted: {}",
+                            accepts::NAMED
+                                .iter()
+                                .map(|(known, _)| *known)
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                    );
+                    return None;
+                };
+                bits |= bit;
+            }
+        }
+
+        let mut items: Vec<(BagKey, Value)> = Vec::new();
+        let mut symbols: Vec<String> = Vec::new();
+        for child in &element.children {
+            let bit = match child.name.as_str() {
+                "enum" => accepts::ENUM,
+                "flag" => accepts::FLAGS,
+                held => {
+                    sink.emit(
+                        reject(
+                            "E9061",
+                            format!("<{held}> is not something an attribute holds."),
+                            origin,
+                            child.position,
+                        )
+                        .with_suggestion(
+                            "An attribute names its values with <enum name=\"…\" \
+                             value=\"…\"/> or <flag …/>.",
+                        ),
+                    );
+                    return None;
+                }
+            };
+            // Naming a value is itself saying what the attribute accepts, so
+            // an attribute that names values and says nothing else still says
+            // it is an enumeration or a set of flags.
+            bits |= bit;
+
+            let Some(held) = child.attribute("name") else {
+                sink.emit(
+                    reject(
+                        "E9062",
+                        format!("<{}> has no name.", child.name),
+                        origin,
+                        child.position,
+                    )
+                    .with_suggestion("Each one is written <enum name=\"…\" value=\"…\"/>."),
+                );
+                return None;
+            };
+            if let Err(reason) = validate_name(held) {
+                sink.emit(
+                    reject("E9063", reason, origin, child.position)
+                        .with_context(format!("Name: {held}")),
+                );
+                return None;
+            }
+            let Some(raw) = child.attribute("value") else {
+                sink.emit(
+                    reject(
+                        "E9064",
+                        format!("<{} name=\"{held}\"> has no value.", child.name),
+                        origin,
+                        child.position,
+                    )
+                    .with_suggestion(
+                        "The value is the number the device carries when the name is \
+                         written in a layout.",
+                    ),
+                );
+                return None;
+            };
+            let Some((as_what, data)) = whole_number(raw.trim()) else {
+                sink.emit(
+                    reject(
+                        "E9065",
+                        format!("'{raw}' is not a whole number."),
+                        origin,
+                        child.position,
+                    )
+                    .with_context(format!("Named: {held}"))
+                    .with_suggestion("Write it as 3 or as 0x3, either of which fits in 32 bits."),
+                );
+                return None;
+            };
+            if symbols.iter().any(|known| known == held) {
+                sink.emit(
+                    reject(
+                        "E9066",
+                        format!("This attribute names '{held}' twice."),
+                        origin,
+                        child.position,
+                    )
+                    .with_suggestion(
+                        "Which of the two the device would read is not something to \
+                         leave to the order they were written in.",
+                    ),
+                );
+                return None;
+            }
+            symbols.push(held.to_string());
+            items.push((
+                BagKey::Named(Kind::Id, held.to_string()),
+                Value::Typed {
+                    source: raw.trim().to_string(),
+                    as_what,
+                    data,
+                },
+            ));
+        }
+
+        // Saying nothing is saying anything: an attribute with no format and
+        // no names accepts every kind of value there is.
+        if bits == 0 {
+            bits = accepts::ANY;
+        }
+        items.insert(
+            0,
+            (
+                BagKey::Number(BAG_ATTR_TYPE),
+                Value::Typed {
+                    source: String::new(),
+                    as_what: TYPE_INT_DEC,
+                    data: bits,
+                },
+            ),
+        );
+
+        Some((
+            Value::Bag {
+                parent: None,
+                items,
+            },
+            symbols,
+        ))
+    }
+
+    /// A number written for a device to carry, and how it was written.
+    ///
+    /// `0x2` and `2` are the same number and not the same text, and the table
+    /// keeps which one was written so that a dump reads back what the file
+    /// said.
+    fn whole_number(raw: &str) -> Option<(u8, u32)> {
+        if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+            return u32::from_str_radix(hex, 16)
+                .ok()
+                .map(|held| (TYPE_INT_HEX, held));
+        }
+        if let Ok(held) = raw.parse::<i64>() {
+            if held >= i64::from(i32::MIN) && held <= i64::from(u32::MAX) {
+                return Some((TYPE_INT_DEC, held as u32));
+            }
+        }
+        None
+    }
+
     fn read_bag(
         kind: Kind,
         name: &str,
@@ -10238,7 +11251,7 @@ pub mod resources {
             None
         };
 
-        let mut items: Vec<(u32, Value)> = Vec::new();
+        let mut items: Vec<(BagKey, Value)> = Vec::new();
         for (at, child) in element.children.iter().enumerate() {
             if child.name != "item" {
                 sink.emit(
@@ -10256,11 +11269,11 @@ pub mod resources {
             let held = match kind {
                 Kind::Style => style_item(child, origin, sink)?,
                 Kind::Plurals => (
-                    plural_quantity(child, origin, sink)?,
+                    BagKey::Number(plural_quantity(child, origin, sink)?),
                     parse_value(Kind::String, &child.text, origin, child.position, sink)?,
                 ),
                 _ => (
-                    BAG_ARRAY_FIRST + at as u32,
+                    BagKey::Number(BAG_ARRAY_FIRST + at as u32),
                     array_item(&element.name, child, origin, sink)?,
                 ),
             };
@@ -10283,15 +11296,18 @@ pub mod resources {
             items.push(held);
         }
 
-        match kind {
-            Kind::Style => items.sort_by_key(|(id, _)| *id),
-            Kind::Plurals => items.sort_by_key(|(id, _)| {
+        // A style is sorted by the identifier of the attribute it sets, but
+        // some of those identifiers are the project's own and are not handed
+        // out yet, so that sort happens in `compile` where they are known. A
+        // plural is written in the order the platform names its quantities,
+        // whatever order they were written in, and that is known here.
+        if kind == Kind::Plurals {
+            items.sort_by_key(|(key, _)| {
                 BAG_PLURAL
                     .iter()
-                    .position(|(_, known)| known == id)
+                    .position(|(_, known)| key.number() == Some(*known))
                     .unwrap_or(BAG_PLURAL.len())
-            }),
-            _ => {}
+            });
         }
 
         Some(Value::Bag { parent, items })
@@ -10359,7 +11375,7 @@ pub mod resources {
 
     /// One `<item name="android:…">` of a style: which attribute it sets, and
     /// the value typed the way that attribute says it should be.
-    fn style_item(child: &Element, origin: &str, sink: &mut Sink) -> Option<(u32, Value)> {
+    fn style_item(child: &Element, origin: &str, sink: &mut Sink) -> Option<(BagKey, Value)> {
         let Some(written) = child.attribute("name") else {
             sink.emit(
                 reject(
@@ -10376,7 +11392,41 @@ pub mod resources {
         let written = written.trim();
         let local = match written.split_once(':') {
             Some(("android", rest)) => rest,
-            _ => {
+            // One the project declares itself, whose number is handed out when
+            // the table is compiled. What it accepts is what it was declared to
+            // accept, so the value is read for what it is written as.
+            None => {
+                if validate_name(written).is_err() {
+                    sink.emit(
+                        reject(
+                            "E9052",
+                            format!("'{written}' is not an attribute this build can name."),
+                            origin,
+                            child.position,
+                        )
+                        .with_suggestion(
+                            "An attribute is named android:name for the framework's \
+                             own, or by its bare name for one this project declares \
+                             with <attr>.",
+                        ),
+                    );
+                    return None;
+                }
+                let raw = child.text.trim();
+                let value = if raw.starts_with('@') {
+                    parse_value(Kind::String, &child.text, origin, child.position, sink)?
+                } else if let Some(attribute) = theme_attribute(raw) {
+                    Value::Attribute(attribute)
+                } else {
+                    // What this is depends on what the attribute accepts, and
+                    // the attribute may not have been read yet. So the text is
+                    // kept as written and typed in `compile`, where the
+                    // declaration is in hand.
+                    Value::Text(child.text.clone())
+                };
+                return Some((BagKey::Named(Kind::Attr, written.to_string()), value));
+            }
+            Some((package, _)) => {
                 sink.emit(
                     reject(
                         "E9052",
@@ -10384,10 +11434,11 @@ pub mod resources {
                         origin,
                         child.position,
                     )
+                    .with_context(format!("Package: {package}"))
                     .with_suggestion(
-                        "A name without a package is one this application declares \
-                         itself, and declaring attributes is not modelled. The \
-                         framework's own are written android:name.",
+                        "Only the framework's own attributes and this project's are \
+                         reachable: android:name, or the bare name of one declared \
+                         here with <attr>.",
                     ),
                 );
                 return None;
@@ -10413,7 +11464,7 @@ pub mod resources {
         let raw = child.text.trim();
         if raw.starts_with('@') {
             let value = parse_value(Kind::String, &child.text, origin, child.position, sink)?;
-            return Some((id, value));
+            return Some((BagKey::Number(id), value));
         }
         if raw.starts_with('?') {
             let Some(attribute) = theme_attribute(raw) else {
@@ -10431,19 +11482,12 @@ pub mod resources {
                 );
                 return None;
             };
-            return Some((
-                id,
-                Value::Typed {
-                    source: raw.to_string(),
-                    as_what: TYPE_ATTRIBUTE,
-                    data: attribute,
-                },
-            ));
+            return Some((BagKey::Number(id), Value::Attribute(attribute)));
         }
 
         if let Some((as_what, data)) = crate::axml::typed_for(local, raw) {
             return Some((
-                id,
+                BagKey::Number(id),
                 Value::Typed {
                     source: raw.to_string(),
                     as_what,
@@ -10452,7 +11496,7 @@ pub mod resources {
             ));
         }
         if formats == "any" || formats.split('|').any(|held| held == "string") {
-            return Some((id, Value::Text(decode_string(&child.text))));
+            return Some((BagKey::Number(id), Value::Text(decode_string(&child.text))));
         }
 
         sink.emit(
@@ -10549,11 +11593,7 @@ pub mod resources {
             return parse_value(Kind::String, text, origin, position, sink);
         }
         if let Some(attribute) = theme_attribute(trimmed) {
-            return Some(Value::Typed {
-                source: trimmed.to_string(),
-                as_what: TYPE_ATTRIBUTE,
-                data: attribute,
-            });
+            return Some(Value::Attribute(attribute));
         }
         match trimmed {
             "true" => return Some(Value::Bool(true)),
@@ -10576,17 +11616,23 @@ pub mod resources {
 
     /// `?android:attr/colorAccent` and the shorter ways of writing it: a value
     /// the device looks up in the theme rather than in the table.
-    fn theme_attribute(raw: &str) -> Option<u32> {
+    fn theme_attribute(raw: &str) -> Option<Reference> {
         let body = raw.strip_prefix('?')?;
         let (package, rest) = match body.split_once(':') {
-            Some((package, rest)) => (package, rest),
-            None => return None,
+            Some((package, rest)) if !package.is_empty() => (Some(package.to_string()), rest),
+            Some(_) => return None,
+            None => (None, body),
         };
-        if package != "android" {
+        let name = rest.strip_prefix("attr/").unwrap_or(rest);
+        if name.is_empty() || validate_name(name).is_err() {
             return None;
         }
-        let local = rest.strip_prefix("attr/").unwrap_or(rest);
-        crate::axml::framework_id("attr", local)
+        Some(Reference {
+            package,
+            kind: Kind::Attr,
+            name: name.to_string(),
+            declares: false,
+        })
     }
 
     fn reject(
@@ -10692,6 +11738,34 @@ pub mod resources {
                 "'{text}' has {other} hex digits; a colour has 3, 4, 6 or 8."
             )),
         }
+    }
+
+    /// `50%` of something, or `50%p` of whatever holds it.
+    ///
+    /// What the table keeps is the proportion rather than the percentage --
+    /// half is 0.5, not 50 -- so the number written is divided by a hundred,
+    /// and one that does not divide exactly is refused rather than rounded.
+    fn parse_fraction(text: &str) -> Result<(i64, bool), String> {
+        let (number, of_parent) = match text.strip_suffix("%p") {
+            Some(number) => (number, true),
+            None => match text.strip_suffix('%') {
+                Some(number) => (number, false),
+                None => {
+                    return Err(format!(
+                        "'{text}' is not a fraction. One is written 50% or 50%p."
+                    ))
+                }
+            },
+        };
+        let (milli, _) = parse_dimension(&format!("{number}px"))
+            .map_err(|_| format!("'{text}' does not begin with a number."))?;
+        if milli % 100 != 0 {
+            return Err(format!(
+                "'{text}' is a fraction this build would have to round. Rounding \
+                 silently is how two machines stop producing the same artifact."
+            ));
+        }
+        Ok((milli / 100, of_parent))
     }
 
     fn parse_dimension(text: &str) -> Result<(i64, Unit), String> {
@@ -16109,6 +17183,8 @@ pub mod axml {
     const RES_XML_RESOURCE_MAP_TYPE: u16 = 0x0180;
 
     const TYPE_REFERENCE: u8 = 0x01;
+    /// What the device reads as a question for the theme rather than a value.
+    const TYPE_ATTRIBUTE: u8 = 0x02;
     const TYPE_STRING: u8 = 0x03;
     const TYPE_FLOAT: u8 = 0x04;
     const TYPE_DIMENSION: u8 = 0x05;
@@ -16221,6 +17297,22 @@ pub mod axml {
     /// it hands out, what it accepts, and the names it gives its own values.
     pub type Says = (u32, &'static str, &'static [(&'static str, u32)]);
 
+    /// The same, for an attribute the project declared itself.
+    ///
+    /// A layout names one of these in a namespace of its own -- `res-auto` --
+    /// and the number behind it was handed out when this project's table was
+    /// compiled, so it is carried here rather than looked up in the platform.
+    #[derive(Clone, Debug, Default)]
+    pub struct Declared {
+        pub name: String,
+        pub id: u32,
+        pub accepts: String,
+        pub symbols: Vec<(String, u32)>,
+    }
+
+    /// The namespace a layout writes the project's own attributes in.
+    pub const OWN_NAMESPACE: &str = "http://schemas.android.com/apk/res-auto";
+
     /// The whole of what the framework says about one of its attributes. A
     /// style setting `android:textSize` needs all three at once.
     pub fn framework_attribute(local: &str) -> Option<Says> {
@@ -16239,6 +17331,13 @@ pub mod axml {
     /// platform reads them in.
     pub fn typed_for(local: &str, raw: &str) -> Option<(u8, u32)> {
         let (formats, symbols) = what_it_accepts(local)?;
+        typed_by(formats, symbols, raw)
+    }
+
+    /// The same, for an attribute whose declaration is the project's own
+    /// rather than the framework's. What it accepts and the names it gives its
+    /// values are read the same way whoever declared it.
+    pub fn typed_by(formats: &str, symbols: &[(&str, u32)], raw: &str) -> Option<(u8, u32)> {
         // An attribute declared without a format takes whatever it is given,
         // and the framework writes that down as `any`.
         let accepts = |what: &str| formats == "any" || formats.split('|').any(|held| held == what);
@@ -16402,6 +17501,9 @@ pub mod axml {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Value {
         Reference(u32),
+        /// `?attr/colorPrimary`: not a value but a question, which the device
+        /// answers out of whatever theme is in force when it inflates.
+        Attribute(u32),
         Boolean(bool),
         Decimal(i32),
         Hex(u32),
@@ -16409,6 +17511,25 @@ pub mod axml {
     }
 
     pub fn classify(raw: &str) -> Result<Value, Diagnostic> {
+        if let Some(rest) = raw.strip_prefix('?') {
+            if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+                return u32::from_str_radix(hex, 16)
+                    .map(Value::Attribute)
+                    .map_err(|_| {
+                        fail("EA022", "A theme attribute is not a 32-bit value.")
+                            .with_context(format!("Value: {raw}"))
+                    });
+            }
+            return Err(fail(
+                "EA023",
+                "A theme attribute by name is resolved before it reaches this writer.",
+            )
+            .with_context(format!("Value: {raw}"))
+            .with_suggestion(
+                "The build engine turns ?attr/name into the attribute's identifier and \
+                 hands the numeric form here, for example ?0x01010435.",
+            ));
+        }
         if let Some(rest) = raw.strip_prefix('@') {
             if let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
                 return u32::from_str_radix(hex, 16)
@@ -16467,10 +17588,29 @@ pub mod axml {
 
     impl Pool {
         fn add_keyed(&mut self, name: &str, id: u32) {
-            if !self.keyed.iter().any(|held| held == name) {
+            // Two attributes may share a name and not an identifier -- the
+            // framework's `textColor` and a project's own -- and the pool
+            // carries a string per identifier, because the map beside it has
+            // one identifier per string.
+            if !self
+                .keyed
+                .iter()
+                .zip(&self.ids)
+                .any(|(held, known)| held == name && *known == id)
+            {
                 self.keyed.push(name.to_string());
                 self.ids.push(id);
             }
+        }
+
+        /// Where a name with this identifier sits, which is not always where
+        /// the same name with another identifier sits.
+        fn index_of_keyed(&self, text: &str, id: u32) -> Option<u32> {
+            self.keyed
+                .iter()
+                .zip(&self.ids)
+                .position(|(held, known)| held == text && *known == id)
+                .map(|at| at as u32)
         }
 
         fn add_other(&mut self, text: &str) {
@@ -16503,22 +17643,58 @@ pub mod axml {
         }
     }
 
-    fn collect(element: &Element, pool: &mut Pool) -> Result<(), Diagnostic> {
+    fn collect(
+        element: &Element,
+        bound: &[(String, String)],
+        own: &[Declared],
+        pool: &mut Pool,
+    ) -> Result<(), Diagnostic> {
         for attribute in &element.attributes {
             let (prefix, local) = split_name(&attribute.name);
             if prefix == Some("xmlns") {
                 continue;
             }
-            if prefix == Some(ANDROID_PREFIX) {
-                if let Some(id) = attribute_id(local) {
-                    pool.add_keyed(local, id);
+            match which_namespace(prefix, bound) {
+                Namespace::Platform => {
+                    if let Some(id) = attribute_id(local) {
+                        pool.add_keyed(local, id);
+                    }
                 }
+                Namespace::Own => {
+                    if let Some(held) = own.iter().find(|held| held.name == local) {
+                        pool.add_keyed(local, held.id);
+                    }
+                }
+                Namespace::None => {}
             }
         }
         for child in &element.children {
-            collect(child, pool)?;
+            collect(child, bound, own, pool)?;
         }
         Ok(())
+    }
+
+    /// Whose attribute a prefix names.
+    enum Namespace {
+        Platform,
+        Own,
+        None,
+    }
+
+    fn which_namespace(prefix: Option<&str>, bound: &[(String, String)]) -> Namespace {
+        let Some(prefix) = prefix else {
+            return Namespace::None;
+        };
+        let Some((_, uri)) = bound.iter().find(|(held, _)| held == prefix) else {
+            return Namespace::None;
+        };
+        if uri == ANDROID_NAMESPACE || prefix == ANDROID_PREFIX {
+            return Namespace::Platform;
+        }
+        if uri == OWN_NAMESPACE {
+            return Namespace::Own;
+        }
+        Namespace::None
     }
 
     fn collect_rest(element: &Element, pool: &mut Pool) -> Result<(), Diagnostic> {
@@ -16533,7 +17709,7 @@ pub mod axml {
             // is what `aapt2` writes and what a dump reads back. So anything
             // that is not a reference has its text in the pool, whether the
             // value written out beside it is the text or a number.
-            if !attribute.value.starts_with('@')
+            if !attribute.value.starts_with(['@', '?'])
                 || matches!(classify(&attribute.value)?, Value::Text)
             {
                 pool.add_other(&attribute.value);
@@ -16615,28 +17791,72 @@ pub mod axml {
         out.extend_from_slice(&NO_ENTRY.to_le_bytes());
     }
 
+    /// One attribute on its way out: what it is written in, what it is
+    /// called, what it says, the number the device reads it by where somebody
+    /// declared it, and what that declaration says it accepts.
+    type Writing<'a> = (&'a str, &'a str, &'a str, Option<u32>, Option<&'a Declared>);
+
     fn encode_element(
         element: &Element,
         pool: &Pool,
-        namespace_uri: &str,
+        bound: &[(String, String)],
+        own: &[Declared],
         out: &mut Vec<u8>,
     ) -> Result<(), Diagnostic> {
         let line = element.position.line;
         let name_index = pool.index_of(&element.name)?;
 
-        let mut attributes: Vec<(&str, &str, &str)> = Vec::new();
+        // Each attribute with what it is written in, what it is called, what
+        // it says, and -- where somebody declared it -- the number the device
+        // reads it by and what it accepts.
+        let mut attributes: Vec<Writing<'_>> = Vec::new();
         for attribute in &element.attributes {
             let (prefix, local) = split_name(&attribute.name);
             if prefix == Some("xmlns") {
                 continue;
             }
-            let uri = if prefix == Some(ANDROID_PREFIX) {
-                namespace_uri
-            } else {
-                ""
+            let (uri, id, declared) = match which_namespace(prefix, bound) {
+                Namespace::Platform => (bound[0].1.as_str(), attribute_id(local), None),
+                Namespace::Own => match own.iter().find(|held| held.name == local) {
+                    Some(held) => (
+                        bound
+                            .iter()
+                            .find(|(name, _)| Some(name.as_str()) == prefix)
+                            .map(|(_, uri)| uri.as_str())
+                            .unwrap_or(OWN_NAMESPACE),
+                        Some(held.id),
+                        Some(held),
+                    ),
+                    // A layout naming an attribute nothing declares is a
+                    // layout the inflater passes over in silence, which is
+                    // worse than being told.
+                    None => {
+                        return Err(
+                            fail("EA010", "A layout names an attribute nothing declares.")
+                                .with_context(format!("Attribute: {}", attribute.name))
+                                .with_suggestion(
+                                    "One the project reads itself is declared with <attr \
+                             name=\"…\" format=\"…\"/> in a values file.",
+                                ),
+                        );
+                    }
+                },
+                Namespace::None => ("", None, None),
             };
-            attributes.push((uri, local, &attribute.value));
+            attributes.push((uri, local, &attribute.value, id, declared));
         }
+
+        // In the order a device reads them: what has an identifier first, by
+        // identifier, and what has none after, by name. It is the order
+        // `aapt2` writes, and a file written in any other order is a file that
+        // does not match what the same folder built with the platform's own
+        // tools comes to.
+        attributes.sort_by(|left, right| match (left.3, right.3) {
+            (Some(one), Some(two)) => one.cmp(&two),
+            (Some(_), None) => core::cmp::Ordering::Less,
+            (None, Some(_)) => core::cmp::Ordering::Greater,
+            (None, None) => left.1.cmp(right.1),
+        });
 
         let size = 16 + 20 + attributes.len() * 20;
         node_header(out, RES_XML_START_ELEMENT_TYPE, size, line);
@@ -16649,35 +17869,54 @@ pub mod axml {
         out.extend_from_slice(&0u16.to_le_bytes());
         out.extend_from_slice(&0u16.to_le_bytes());
 
-        for (uri, local, raw) in &attributes {
+        for (uri, local, raw, id, declared) in &attributes {
             let namespace = if uri.is_empty() {
                 NO_ENTRY
             } else {
                 pool.index_of(uri)?
             };
             out.extend_from_slice(&namespace.to_le_bytes());
-            out.extend_from_slice(&pool.index_of(local)?.to_le_bytes());
+            let named = match id {
+                Some(id) => pool.index_of_keyed(local, *id).ok_or_else(|| {
+                    fail(
+                        "EA011",
+                        "An attribute was not collected before it was written.",
+                    )
+                    .with_context(format!("Attribute: {local}"))
+                })?,
+                None => pool.index_of(local)?,
+            };
+            out.extend_from_slice(&named.to_le_bytes());
 
             // A reference is settled before anything else: `@0x7f060000` is
             // an identifier whatever the attribute says it accepts. After
             // that, what the framework says this attribute takes decides how
             // the value is written -- and only for the framework's own, since
             // an attribute nobody declared has nothing saying what it holds.
-            let typed = if raw.starts_with('@') || uri.is_empty() {
+            let typed = if raw.starts_with('@') || raw.starts_with('?') || uri.is_empty() {
                 None
+            } else if let Some(held) = declared {
+                let symbols: Vec<(&str, u32)> = held
+                    .symbols
+                    .iter()
+                    .map(|(name, value)| (name.as_str(), *value))
+                    .collect();
+                typed_by(&held.accepts, &symbols, raw)
             } else {
                 typed_for(local, raw)
             };
             let (raw_index, kind, data) = match typed {
-                // The text is kept beside the typed value, which is what
-                // `aapt2` writes and what a person reading a dump sees.
-                Some((kind, data)) => (pool.index_of(raw)?, kind, data),
+                // A typed value carries no text beside it: the device reads
+                // the number, and `aapt2` keeps the text only where the value
+                // *is* the text.
+                Some((kind, data)) => (NO_ENTRY, kind, data),
                 None => match classify(raw)? {
                     Value::Text => {
                         let index = pool.index_of(raw)?;
                         (index, TYPE_STRING, index)
                     }
                     Value::Reference(id) => (NO_ENTRY, TYPE_REFERENCE, id),
+                    Value::Attribute(id) => (NO_ENTRY, TYPE_ATTRIBUTE, id),
                     Value::Boolean(true) => (NO_ENTRY, TYPE_INT_BOOLEAN, BOOLEAN_TRUE),
                     Value::Boolean(false) => (NO_ENTRY, TYPE_INT_BOOLEAN, 0),
                     Value::Decimal(number) => (NO_ENTRY, TYPE_INT_DEC, number as u32),
@@ -16692,7 +17931,7 @@ pub mod axml {
         }
 
         for child in &element.children {
-            encode_element(child, pool, namespace_uri, out)?;
+            encode_element(child, pool, bound, own, out)?;
         }
 
         node_header(out, RES_XML_END_ELEMENT_TYPE, 24, line);
@@ -16702,6 +17941,17 @@ pub mod axml {
     }
 
     pub fn encode(root: &Element) -> Result<Vec<u8>, Diagnostic> {
+        encode_knowing(root, &[])
+    }
+
+    /// The same, told what the project calls its own attributes.
+    ///
+    /// A layout that reads a view's own attributes writes them in the
+    /// `res-auto` namespace, and what a device reads there is a number, not a
+    /// name. Without this list such an attribute would go in as a bare name,
+    /// which the inflater passes over in silence -- so the view would be
+    /// built, and none of what the layout said about it would arrive.
+    pub fn encode_knowing(root: &Element, own: &[Declared]) -> Result<Vec<u8>, Diagnostic> {
         let namespace_uri = root
             .attributes
             .iter()
@@ -16709,10 +17959,27 @@ pub mod axml {
             .map(|attribute| attribute.value.clone())
             .unwrap_or_else(|| ANDROID_NAMESPACE.to_string());
 
+        // Every prefix the document binds, in the order it binds them, so an
+        // attribute's prefix says which namespace it is in. The framework's is
+        // always there, whether or not the document said so.
+        let mut bound: Vec<(String, String)> = vec![(ANDROID_PREFIX.to_string(), namespace_uri)];
+        for attribute in &root.attributes {
+            let Some(prefix) = attribute.name.strip_prefix("xmlns:") else {
+                continue;
+            };
+            if prefix == ANDROID_PREFIX || bound.iter().any(|(held, _)| held == prefix) {
+                continue;
+            }
+            bound.push((prefix.to_string(), attribute.value.clone()));
+        }
+        let namespace_uri = bound[0].1.clone();
+
         let mut pool = Pool::default();
-        collect(root, &mut pool)?;
-        pool.add_other(ANDROID_PREFIX);
-        pool.add_other(&namespace_uri);
+        collect(root, &bound, own, &mut pool)?;
+        for (prefix, uri) in &bound {
+            pool.add_other(prefix);
+            pool.add_other(uri);
+        }
         collect_rest(root, &mut pool)?;
 
         let string_pool = encode_string_pool(&pool)?;
@@ -16720,15 +17987,20 @@ pub mod axml {
 
         let mut nodes: Vec<u8> = Vec::new();
         let line = root.position.line;
-        node_header(&mut nodes, RES_XML_START_NAMESPACE_TYPE, 24, line);
-        nodes.extend_from_slice(&pool.index_of(ANDROID_PREFIX)?.to_le_bytes());
-        nodes.extend_from_slice(&pool.index_of(&namespace_uri)?.to_le_bytes());
+        for (prefix, uri) in &bound {
+            node_header(&mut nodes, RES_XML_START_NAMESPACE_TYPE, 24, line);
+            nodes.extend_from_slice(&pool.index_of(prefix)?.to_le_bytes());
+            nodes.extend_from_slice(&pool.index_of(uri)?.to_le_bytes());
+        }
 
-        encode_element(root, &pool, &namespace_uri, &mut nodes)?;
+        encode_element(root, &pool, &bound, own, &mut nodes)?;
 
-        node_header(&mut nodes, RES_XML_END_NAMESPACE_TYPE, 24, line);
-        nodes.extend_from_slice(&pool.index_of(ANDROID_PREFIX)?.to_le_bytes());
-        nodes.extend_from_slice(&pool.index_of(&namespace_uri)?.to_le_bytes());
+        for (prefix, uri) in bound.iter().rev() {
+            node_header(&mut nodes, RES_XML_END_NAMESPACE_TYPE, 24, line);
+            nodes.extend_from_slice(&pool.index_of(prefix)?.to_le_bytes());
+            nodes.extend_from_slice(&pool.index_of(uri)?.to_le_bytes());
+        }
+        let _ = &namespace_uri;
 
         let total = 8 + string_pool.len() + resource_map.len() + nodes.len();
         if total > MAX_DOCUMENT_BYTES {
@@ -25709,11 +26981,13 @@ pub mod bundle {
     const FILE_TYPE_PNG: u64 = 1;
     const PRIMITIVE_COLOUR_ARGB8: u32 = 9;
     const PRIMITIVE_DIMENSION: u32 = 13;
+    const PRIMITIVE_FRACTION: u32 = 14;
     const REFERENCE_TYPE: u32 = 1;
     const REFERENCE_TYPE_ATTRIBUTE: u64 = 1;
     /// The kind the table stores a reference to a theme attribute as.
     const TYPE_ATTRIBUTE: u8 = 0x02;
     const VALUE_COMPOUND: u32 = 5;
+    const COMPOUND_ATTR: u32 = 1;
     const COMPOUND_STYLE: u32 = 2;
     const COMPOUND_ARRAY: u32 = 4;
     const COMPOUND_PLURAL: u32 = 5;
@@ -25726,6 +27000,13 @@ pub mod bundle {
     const PLURAL_ENTRY: u32 = 1;
     const PLURAL_ARITY: u32 = 3;
     const PLURAL_ENTRY_ITEM: u32 = 4;
+    const ATTRIBUTE_ACCEPTS: u32 = 1;
+    const ATTRIBUTE_SMALLEST: u32 = 2;
+    const ATTRIBUTE_LARGEST: u32 = 3;
+    const ATTRIBUTE_SYMBOL: u32 = 4;
+    const SYMBOL_NAME: u32 = 3;
+    const SYMBOL_VALUE: u32 = 4;
+    const SYMBOL_TYPE: u32 = 5;
 
     /// The kinds of value the table stores, and the field each is written as
     /// here. A float is four bytes as they are; the rest are numbers.
@@ -25811,8 +27092,25 @@ pub mod bundle {
                 held.number(PRIMITIVE_DIMENSION, u64::from(packed));
                 item.message(ITEM_PRIMITIVE, &held);
             }
+            Value::Fraction { milli, of_parent } => {
+                let packed = crate::arsc::encode_fraction(*milli, *of_parent)?;
+                let mut held = Message::new();
+                held.number(PRIMITIVE_FRACTION, u64::from(packed));
+                item.message(ITEM_PRIMITIVE, &held);
+            }
             Value::Reference(reference) => {
                 let mut held = Message::new();
+                held.number(
+                    REFERENCE_ID,
+                    u64::from(reference_id(reference, compiled, named)?),
+                );
+                item.message(ITEM_REFERENCE, &held);
+            }
+            // The same, except that what the number names is a question for
+            // the theme rather than a resource to read.
+            Value::Attribute(reference) => {
+                let mut held = Message::new();
+                held.number(REFERENCE_TYPE, REFERENCE_TYPE_ATTRIBUTE);
                 held.number(
                     REFERENCE_ID,
                     u64::from(reference_id(reference, compiled, named)?),
@@ -25898,9 +27196,24 @@ pub mod bundle {
     }
 
     /// A style, an array or a plural, written as what it holds.
+    /// The number a bag key carries, where `compile` has handed one out.
+    ///
+    /// Every key is a number by the time a package is written. One that is
+    /// still a name is a table that was never compiled, which is a fault here
+    /// rather than something to guess a number for.
+    fn numbered_key(key: &crate::resources::BagKey, named: &str) -> Result<u32, Diagnostic> {
+        key.number().ok_or_else(|| {
+            fail(
+                "EN028",
+                "A bag still names what it holds rather than numbering it.",
+            )
+            .with_context(format!("In: {named}"))
+        })
+    }
+
     fn compound_for(
         parent: Option<&crate::resources::Reference>,
-        items: &[(u32, crate::resources::Value)],
+        items: &[(crate::resources::BagKey, crate::resources::Value)],
         kind: crate::resources::Kind,
         compiled: &crate::resources::Compiled,
         named: &str,
@@ -25908,6 +27221,47 @@ pub mod bundle {
         use crate::resources::Kind;
         let mut compound = Message::new();
         match kind {
+            // An attribute is written as what it accepts and the names it
+            // gives its own values, rather than as a list of parts: the first
+            // of its parts is the acceptance itself and the rest are the
+            // names, and the bundle keeps those two things apart.
+            Kind::Attr => {
+                let mut attribute = Message::new();
+                let mut accepts = 0u64;
+                let mut symbols: Vec<&(crate::resources::BagKey, crate::resources::Value)> =
+                    Vec::new();
+                for held in items {
+                    if numbered_key(&held.0, named)? == crate::resources::BAG_ATTR_TYPE {
+                        if let crate::resources::Value::Typed { data, .. } = &held.1 {
+                            accepts = u64::from(*data);
+                        }
+                        continue;
+                    }
+                    symbols.push(held);
+                }
+                attribute.number(ATTRIBUTE_ACCEPTS, accepts);
+                // The range a number may be in, which nothing here narrows,
+                // written out because that is what `aapt2` writes.
+                attribute.number(ATTRIBUTE_SMALLEST, i64::from(i32::MIN) as u64);
+                attribute.number(ATTRIBUTE_LARGEST, i64::from(i32::MAX) as u64);
+                for (key, value) in symbols {
+                    let crate::resources::Value::Typed { as_what, data, .. } = value else {
+                        return Err(fail(
+                            "EN029",
+                            "An attribute names a value that is not a number.",
+                        )
+                        .with_context(format!("In: {named}")));
+                    };
+                    let mut name = Message::new();
+                    name.number(REFERENCE_ID, u64::from(numbered_key(key, named)?));
+                    let mut symbol = Message::new();
+                    symbol.message(SYMBOL_NAME, &name);
+                    symbol.number(SYMBOL_VALUE, u64::from(*data));
+                    symbol.number(SYMBOL_TYPE, u64::from(*as_what));
+                    attribute.message(ATTRIBUTE_SYMBOL, &symbol);
+                }
+                compound.message(COMPOUND_ATTR, &attribute);
+            }
             Kind::Style => {
                 let mut style = Message::new();
                 if let Some(reference) = parent {
@@ -25920,7 +27274,7 @@ pub mod bundle {
                 }
                 for (attribute, value) in items {
                     let mut key = Message::new();
-                    key.number(REFERENCE_ID, u64::from(*attribute));
+                    key.number(REFERENCE_ID, u64::from(numbered_key(attribute, named)?));
                     let mut entry = Message::new();
                     entry.message(STYLE_ENTRY_KEY, &key);
                     entry.message(STYLE_ENTRY_ITEM, &item_for(value, compiled, named)?);
@@ -25931,7 +27285,8 @@ pub mod bundle {
             Kind::Plurals => {
                 let mut plural = Message::new();
                 for (quantity, value) in items {
-                    let Some((_, arity)) = ARITIES.iter().find(|(known, _)| known == quantity)
+                    let quantity = numbered_key(quantity, named)?;
+                    let Some((_, arity)) = ARITIES.iter().find(|(known, _)| *known == quantity)
                     else {
                         return Err(fail("EN024", "A plural is for a quantity with no name.")
                             .with_context(format!("Numbered: {quantity:#010x}"))
@@ -26157,6 +27512,10 @@ pub mod arsc {
     pub const MAX_STRINGS: usize = 65_535;
 
     const TYPE_REFERENCE: u8 = 0x01;
+    /// What the device reads as a question for the theme rather than a value.
+    const TYPE_ATTRIBUTE: u8 = 0x02;
+    /// A number of a whole, which is what `50%` is.
+    const TYPE_FRACTION: u8 = 0x06;
     const TYPE_STRING: u8 = 0x03;
     const TYPE_DIMENSION: u8 = 0x05;
     const TYPE_INT_DEC: u8 = 0x10;
@@ -26222,29 +27581,55 @@ pub mod arsc {
         }
     }
 
+    /// `50%` and `50%p`, packed the way a dimension is: the same fixed point,
+    /// with what the fraction is of in the low bits rather than a unit.
+    pub fn encode_fraction(milli: i64, of_parent: bool) -> Result<u32, Diagnostic> {
+        encode_fixed(milli, u32::from(of_parent), "of a whole")
+    }
+
     pub fn encode_dimension(milli: i64, unit: Unit) -> Result<u32, Diagnostic> {
-        let index = unit_index(unit);
-        for (radix, shift) in [(0u32, 0u32), (1, 7), (2, 15), (3, 23)] {
-            let widened = i128::from(milli) * (1i128 << shift);
-            if widened % 1000 != 0 {
-                continue;
-            }
-            let scaled = widened / 1000;
-            if (-0x0080_0000..=0x007f_ffff).contains(&scaled) {
-                let mantissa = (scaled as i32) & 0x00ff_ffff;
-                return Ok(((mantissa as u32) << 8) | (radix << 4) | index);
-            }
-        }
-        Err(fail(
-            "EZ001",
-            "A dimension cannot be written in the format's fixed point.",
-        )
-        .with_context(format!("Value: {}/1000 {}", milli, unit.as_str()))
-        .with_suggestion(
-            "The format carries a 24 bit mantissa with one of four radix points. \
-                 A value that fits none of them would be written as a different number \
-                 than the one written down, so it is refused instead.",
-        ))
+        encode_fixed(milli, unit_index(unit), unit.as_str())
+    }
+
+    /// The platform's own fixed point, and the platform's own choice of where
+    /// to put the point.
+    ///
+    /// The number is scaled by two to the twenty-third and the widest radix it
+    /// still fits is taken, in the order the runtime tries them -- which is
+    /// what decides the bytes, so it is done here the way it is done there
+    /// rather than in whatever order looks tidiest. A number too large for any
+    /// of them is refused; one too precise is rounded, because that is what a
+    /// twenty-four bit mantissa is and the runtime rounds it too.
+    fn encode_fixed(milli: i64, index: u32, said: &str) -> Result<u32, Diagnostic> {
+        let negative = milli < 0;
+        let held = i128::from(milli.abs());
+        let bits = ((held * (1i128 << 23)) + 500) / 1000;
+        let (radix, shift) = if bits & 0x7f_ffff == 0 && bits < (1i128 << 47) {
+            (0u32, 23u32)
+        } else if bits < (1i128 << 23) {
+            (3, 0)
+        } else if bits < (1i128 << 31) {
+            (2, 8)
+        } else if bits < (1i128 << 39) {
+            (1, 16)
+        } else {
+            return Err(fail(
+                "EZ001",
+                "A number cannot be written in the format's fixed point.",
+            )
+            .with_context(format!("Value: {milli}/1000 {said}"))
+            .with_suggestion(
+                "The format carries a 24 bit mantissa with one of four radix points, \
+                 and this is larger than the widest of them holds.",
+            ));
+        };
+        let mantissa = ((bits >> shift) & 0x00ff_ffff) as u32;
+        let mantissa = if negative {
+            mantissa.wrapping_neg() & 0x00ff_ffff
+        } else {
+            mantissa
+        };
+        Ok((mantissa << 8) | (radix << 4) | index)
     }
 
     #[derive(Default)]
@@ -26366,8 +27751,30 @@ pub mod arsc {
             Value::Dimension { milli, unit } => {
                 Ok((TYPE_DIMENSION, encode_dimension(*milli, *unit)?))
             }
+            Value::Fraction { milli, of_parent } => {
+                Ok((TYPE_FRACTION, encode_fraction(*milli, *of_parent)?))
+            }
             Value::Typed { as_what, data, .. } => Ok((*as_what, *data)),
+            // A question for the theme: the number of the attribute to ask
+            // about, typed so the device knows to ask rather than to read.
+            Value::Attribute(reference) => {
+                Ok((TYPE_ATTRIBUTE, identifier(reference, compiled, where_from)?))
+            }
             Value::Reference(reference) => {
+                Ok((TYPE_REFERENCE, identifier(reference, compiled, where_from)?))
+            }
+            Value::Empty => Ok((TYPE_INT_DEC, 0)),
+        }
+    }
+
+    /// The number behind a name, whoever handed it out.
+    fn identifier(
+        reference: &crate::resources::Reference,
+        compiled: &Compiled,
+        where_from: &str,
+    ) -> Result<u32, Diagnostic> {
+        {
+            {
                 // The framework hands out its own identifiers, and the build
                 // carries the list of them, so a reference to one is the number
                 // it was given.
@@ -26383,7 +27790,7 @@ pub mod arsc {
                              field of R it sits under, and the name the field itself.",
                             ));
                     };
-                    return Ok((TYPE_REFERENCE, id));
+                    return Ok(id);
                 }
                 let id = compiled
                     .id(reference.kind, &reference.name)
@@ -26395,9 +27802,8 @@ pub mod arsc {
                         .with_context(format!("Reference: {reference}"))
                         .with_context(format!("In: {where_from}"))
                     })?;
-                Ok((TYPE_REFERENCE, id.raw()))
+                Ok(id.raw())
             }
-            Value::Empty => Ok((TYPE_INT_DEC, 0)),
         }
     }
 
@@ -26574,6 +27980,14 @@ pub mod arsc {
                         written.extend_from_slice(&above.to_le_bytes());
                         written.extend_from_slice(&(items.len() as u32).to_le_bytes());
                         for (held, value) in items {
+                            let Some(held) = held.number() else {
+                                return Err(fail(
+                                    "EC030",
+                                    "A bag still names what it holds rather than \
+                                     numbering it.",
+                                )
+                                .with_context(format!("In: {where_from}")));
+                            };
                             let (data_type, data) =
                                 resolve(value, compiled, &mut values, &where_from)?;
                             written.extend_from_slice(&held.to_le_bytes());
@@ -27725,7 +29139,9 @@ pub mod builder {
 
         // And now the identifiers are settled, every XML resource is written
         // as the binary XML a device reads, with each `@string/x` in it
-        // replaced by the number it came to.
+        // replaced by the number it came to and each attribute the project
+        // declared itself by the number it was given.
+        let own = compiled.declared_attributes();
         for (entry, held) in compiling {
             let mut named = crate::diag::Sink::new();
             let text = String::from_utf8_lossy(&held.bytes).to_string();
@@ -27734,7 +29150,7 @@ pub mod builder {
                     .with_context(format!("File: {entry}")));
             };
             resolve_references(&mut parsed, Some(&compiled))?;
-            let bytes = crate::axml::encode(&parsed).map_err(|why| {
+            let bytes = crate::axml::encode_knowing(&parsed, &own).map_err(|why| {
                 why.with_context(format!("File: {entry}"))
                     .with_suggestion(
                         "Every attribute a resource carries is written with the identifier                          the platform gives it. One this build cannot name would be dropped                          by Android without a word, so it is refused instead.",
@@ -27751,6 +29167,40 @@ pub mod builder {
         compiled: Option<&crate::resources::Compiled>,
     ) -> Result<(), Diagnostic> {
         for attribute in &mut element.attributes {
+            // `?attr/colorPrimary` is a question for whatever theme is in
+            // force, and what the device carries is the attribute's number.
+            if let Some(rest) = attribute.value.strip_prefix('?') {
+                if rest.starts_with("0x") || rest.starts_with("0X") {
+                    continue;
+                }
+                let (package, name) = match rest.split_once(':') {
+                    Some((package, held)) => (Some(package), held),
+                    None => (None, rest),
+                };
+                let name = name.strip_prefix("attr/").unwrap_or(name);
+                let found = match package {
+                    Some("android") => crate::axml::attribute_id(name),
+                    Some(_) => None,
+                    None => compiled
+                        .and_then(|table| table.id(crate::resources::Kind::Attr, name))
+                        .map(|id| id.raw())
+                        .or_else(|| crate::axml::attribute_id(name)),
+                };
+                let Some(found) = found else {
+                    return Err(fail(
+                        "EB053",
+                        "That is not an attribute a theme could answer with.",
+                    )
+                    .with_context(format!("Attribute: {}", attribute.name))
+                    .with_context(format!("Value: {}", attribute.value))
+                    .with_suggestion(
+                        "One the framework declares is written ?android:attr/name; one \
+                         this project declares with <attr> is written ?attr/name.",
+                    ));
+                };
+                attribute.value = format!("?0x{found:08x}");
+                continue;
+            }
             let Some(rest) = attribute.value.strip_prefix('@') else {
                 continue;
             };
@@ -28123,6 +29573,41 @@ public final class R {{
 ",
             );
         }
+
+        // A styleable is not a resource and has no identifier of its own. What
+        // it is, is the array `obtainStyledAttributes` is handed and the offset
+        // of each attribute in it, so that is what is written.
+        if !compiled.styleables().is_empty() {
+            out.push_str(
+                "    public static final class styleable {
+",
+            );
+            for styleable in compiled.styleables() {
+                let numbers: Vec<String> = styleable
+                    .attributes
+                    .iter()
+                    .map(|(_, id)| format!("{}", *id as i32))
+                    .collect();
+                out.push_str(&format!(
+                    "        public static final int[] {} = {{ {} }};
+",
+                    styleable.name,
+                    numbers.join(", ")
+                ));
+                for (at, (field, _)) in styleable.attributes.iter().enumerate() {
+                    out.push_str(&format!(
+                        "        public static final int {}_{} = {};
+",
+                        styleable.name, field, at
+                    ));
+                }
+            }
+            out.push_str(
+                "    }
+",
+            );
+        }
+
         out.push_str(
             "}
 ",
@@ -28245,7 +29730,7 @@ public final class R {{
             out.push(entry_bytes(bytes, entry, &where_from)?);
         }
         if out.is_empty() {
-            return Err(fail("EB049", "An Android library holds no code.")
+            return Err(fail("EB054", "An Android library holds no code.")
                 .with_context(format!("Path: {where_from}"))
                 .with_suggestion(
                     "An aar carries its classes in `classes.jar`, and any more under \
@@ -32808,18 +34293,10 @@ mod tests {
                 apk.display(),
                 String::from_utf8_lossy(&out.stderr)
             );
-            let text = String::from_utf8_lossy(&out.stdout).to_string();
-            // The raw text beside a typed value is not what the device reads,
-            // and the order attributes come out in is the writer's own.
-            let mut lines: Vec<String> = text
+            String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .map(|one| match one.find(" (Raw:") {
-                    Some(at) => one[..at].trim().to_string(),
-                    None => one.trim().to_string(),
-                })
-                .collect();
-            lines.sort();
-            lines
+                .map(|one| one.trim().to_string())
+                .collect()
         };
         for file in [
             "res/layout/screen.xml",
@@ -32876,6 +34353,10 @@ mod tests {
         <item quantity="one">an apple</item>
         <item quantity="few">a few apples</item>
     </plurals>
+    <fraction name="half">50%</fraction>
+    <fraction name="third">33.3%p</fraction>
+    <item type="id" name="save" />
+    <item type="dimen" name="pad">8dp</item>
 </resources>
 "####;
 
@@ -33101,10 +34582,42 @@ mod tests {
             dump(&theirs),
             "a qualifier does not mean here what it means to aapt2"
         );
+        // And the orders this build refuses are the orders `aapt2` refuses.
+        // A rule kept here and nowhere else would be a rule that only makes
+        // this build harder to use.
+        const WRONG: &[&str] = &[
+            "values-night-land",
+            "values-v31-xxhdpi",
+            "values-land-sw600dp",
+            "values-navhidden-nokeys",
+        ];
+        for one in WRONG {
+            let alone = directory.join(one);
+            std::fs::create_dir_all(alone.join(one)).unwrap();
+            std::fs::write(
+                alone.join(one).join("strings.xml"),
+                "<resources><string name=\"app_name\">x</string></resources>\n",
+            )
+            .unwrap();
+            let refused = std::process::Command::new(&aapt2)
+                .args(["compile", "--dir"])
+                .arg(alone.to_str().unwrap())
+                .arg("-o")
+                .arg(directory.join("refused.zip").to_str().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                !refused.status.success(),
+                "aapt2 took {one}, so refusing it here would be this build's own rule"
+            );
+        }
+
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
-            "qualifier conformance: {} folders agree with aapt2",
-            QUALIFIERS.len()
+            "qualifier conformance: {} folders agree with aapt2, and {} orders are \
+             refused by both",
+            QUALIFIERS.len(),
+            WRONG.len()
         );
     }
 
@@ -33212,10 +34725,15 @@ mod tests {
         // comparison, so what the table has to hold is named here.
         for held in [
             "resource 0x7f010000 array/counts",
-            "resource 0x7f030000 plurals/apples",
-            "resource 0x7f050000 style/Plain",
+            "resource 0x7f060000 plurals/apples",
+            "resource 0x7f080000 style/Plain",
+            "resource 0x7f040000 fraction/half",
+            "resource 0x7f050000 id/save",
+            "() 0.500000%",
+            "() 0.333000%p",
+            "() 8.000000dp",
             "(style) size=5 parent=0x01030237",
-            "(style) size=1 parent=style/Theme (0x7f050001)",
+            "(style) size=1 parent=style/Theme (0x7f080001)",
             "(array) size=5",
             "(plurals) size=3",
             "0x01010031=?0x01010435",
@@ -33280,6 +34798,280 @@ mod tests {
         std::fs::remove_dir_all(&directory).ok();
         eprintln!("bag conformance: styles, arrays and plurals agree with aapt2 value for value");
     }
+
+    /// An attribute a project declares, and a group of them a view reads, mean
+    /// to `aapt2` what they mean here.
+    ///
+    /// This is what a custom view is: `<attr>` says what it accepts,
+    /// `<declare-styleable>` groups the ones it reads, `R.styleable` is the
+    /// array handed to `obtainStyledAttributes`, and a layout writes them in a
+    /// namespace of its own. Every one of those has to line up with what the
+    /// device expects, and the way to know it does is to put the same folder
+    /// through `aapt2` and compare.
+    #[test]
+    fn attributes_and_styleables_are_what_aapt2_makes_of_them() {
+        let directory = temp_directory("omni-attrs");
+        let res = directory.join("Res");
+        std::fs::create_dir_all(res.join("values")).unwrap();
+        std::fs::create_dir_all(res.join("layout")).unwrap();
+        std::fs::write(res.join("values/attrs.xml"), THE_ATTRIBUTES.trim_start()).unwrap();
+        std::fs::write(res.join("layout/view.xml"), A_CUSTOM_LAYOUT.trim_start()).unwrap();
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            A_BARE_MANIFEST.trim_start(),
+        )
+        .unwrap();
+        let root = directory.to_str().unwrap().to_string();
+
+        let mut project =
+            super::builder::from_manifest(A_BARE_MANIFEST).expect("the manifest reads");
+        project.values = super::scaffold::values_files(&root);
+        project.resources = super::scaffold::resource_files(&root);
+
+        let mut sink = crate::diag::Sink::new();
+        let icons = super::builder::compile_resources_for_test(&project, &mut sink)
+            .expect("the resources compile");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+        let icons = icons.expect("there are resources");
+
+        // What the project's own code indexes into. Nothing else in `R` is an
+        // array, and an offset that is not the offset the table sorted to is a
+        // view reading the wrong attribute.
+        let generated = super::builder::r_source("com.my.app", &icons.compiled);
+        for held in [
+            "public static final class styleable {",
+            "public static final int[] Empty = {  };",
+            "public static final int MyView_android_textColor = 0;",
+        ] {
+            assert!(
+                generated.contains(held),
+                "R.java is missing {held:?}:\n{generated}"
+            );
+        }
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let mut made = crate::diag::Sink::new();
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut made)
+            .expect("the package is written");
+        assert!(!made.has_blocking(), "{:?}", made.entries());
+
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("attribute conformance: aapt2 is not available here");
+            return;
+        };
+        let Some(platform) = crate::builder::platform_jar() else {
+            std::fs::remove_dir_all(&directory).ok();
+            eprintln!("attribute conformance: no android.jar to link against");
+            return;
+        };
+        let ours = directory.join("ours.apk");
+        std::fs::write(&ours, &outcome.package).unwrap();
+
+        let compiled = directory.join("compiled.zip");
+        let done = std::process::Command::new(&aapt2)
+            .args(["compile", "--dir"])
+            .arg(res.to_str().unwrap())
+            .arg("-o")
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            done.status.success(),
+            "aapt2 could not compile the folder: {}",
+            String::from_utf8_lossy(&done.stderr)
+        );
+        let theirs = directory.join("theirs.apk");
+        let java = directory.join("Java");
+        std::fs::create_dir_all(&java).unwrap();
+        let linked = std::process::Command::new(&aapt2)
+            .arg("link")
+            .arg("-o")
+            .arg(theirs.to_str().unwrap())
+            .arg("-I")
+            .arg(&platform)
+            .arg("--manifest")
+            .arg(directory.join("AndroidManifest.xml").to_str().unwrap())
+            .arg("--java")
+            .arg(java.to_str().unwrap())
+            .arg(compiled.to_str().unwrap())
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "aapt2 could not link the folder: {}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+
+        let dump = |apk: &std::path::Path, what: &[&str]| -> Vec<String> {
+            let out = std::process::Command::new(&aapt2)
+                .arg("dump")
+                .args(what)
+                .arg(apk.to_str().unwrap())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "aapt2 refused {}: {}",
+                apk.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|one| one.trim().to_string())
+                .filter(|one| !one.is_empty())
+                .collect()
+        };
+
+        let mine = dump(&ours, &["resources"]);
+        // A comparison that passes because neither side holds anything is no
+        // comparison, so what the table has to hold is named here.
+        for held in [
+            "resource 0x7f010005 attr/withEnum",
+            "(attr) type=enum size=3",
+            "(attr) type=flags size=3",
+            "(attr) type=any",
+            "(attr) type=integer|enum size=1",
+            "(attr) type=reference|color|dimension",
+            "second(0x7f030006)=0x00000001",
+            "negative(0x7f030003)=0xffffffff",
+            "resource 0x7f030002 id/left",
+            // A style setting one of the project's own attributes, with the
+            // name of a value it declared read as the number behind it.
+            "withEnum(0x7f010005)=1",
+            // And one answering out of the theme rather than out of the table,
+            // for an attribute the framework declares and one this project
+            // declares itself.
+            "0x01010098=?0x01010435",
+            "0x01010031=?attr/manyFormats",
+        ] {
+            assert!(
+                mine.iter().any(|one| one == held || one.ends_with(held)),
+                "{held} is missing from the table: {mine:?}"
+            );
+        }
+        assert_eq!(
+            mine,
+            dump(&theirs, &["resources"]),
+            "the table is not what aapt2 makes of the same file"
+        );
+
+        // And the layout: an attribute in the project's own namespace carries
+        // the number the project gave it, and a name it declared for one of
+        // its values carries the number behind that name.
+        let layout = ["xmltree", "--file", "res/layout/view.xml"];
+        let seen = dump(&ours, &layout);
+        for held in [
+            "N: app=http://schemas.android.com/apk/res-auto (line=2)",
+            "A: http://schemas.android.com/apk/res-auto:withEnum(0x7f010005)=1",
+            "A: http://schemas.android.com/apk/res-auto:withFlags(0x7f010006)=0x00000003",
+            "A: http://schemas.android.com/apk/res/android:background(0x010100d4)=?0x7f010002",
+            "A: http://schemas.android.com/apk/res/android:textColor(0x01010098)=?0x01010435",
+        ] {
+            assert!(
+                seen.iter().any(|one| one == held),
+                "{held} is missing from the layout: {seen:?}"
+            );
+        }
+        assert_eq!(
+            seen,
+            dump(&theirs, &layout),
+            "the layout is not what aapt2 makes of the same file"
+        );
+
+        // And the array `R` writes is the array `aapt2` writes, number for
+        // number and offset for offset.
+        let written = std::fs::read_to_string(java.join("com/my/app/R.java"))
+            .expect("aapt2 writes an R of its own");
+        for name in ["MyView", "Empty"] {
+            let theirs = styleable_array(&written, name);
+            let ours = styleable_array(&generated, name);
+            assert_eq!(
+                ours, theirs,
+                "R.styleable.{name} is not the array aapt2 writes"
+            );
+        }
+        assert_eq!(styleable_array(&written, "MyView").len(), 4);
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "attribute conformance: attributes, styleables and a layout that reads \
+             them agree with aapt2"
+        );
+    }
+
+    /// The numbers one `R.styleable` array holds, whoever wrote the `R`.
+    fn styleable_array(source: &str, name: &str) -> Vec<i64> {
+        let at = source
+            .find(&format!("int[] {name}="))
+            .or_else(|| source.find(&format!("int[] {name} =")))
+            .unwrap_or_else(|| panic!("no styleable called {name} in\n{source}"));
+        let open = source[at..].find('{').expect("an array opens") + at;
+        let close = source[open..].find('}').expect("an array closes") + open;
+        source[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|one| !one.is_empty())
+            .map(|one| {
+                let one = one.trim_end_matches('L');
+                match one.strip_prefix("0x") {
+                    Some(hex) => i64::from(u32::from_str_radix(hex, 16).expect("a number") as i32),
+                    None => one.parse::<i64>().expect("a number"),
+                }
+            })
+            .collect()
+    }
+
+    const THE_ATTRIBUTES: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <attr name="plainRef" format="reference" />
+    <attr name="manyFormats" format="reference|color|dimension" />
+    <attr name="noFormat" />
+    <attr name="withEnum" format="enum">
+        <enum name="first" value="0" />
+        <enum name="second" value="1" />
+        <enum name="negative" value="-1" />
+    </attr>
+    <attr name="withFlags" format="flags">
+        <flag name="none" value="0" />
+        <flag name="left" value="0x01" />
+        <flag name="right" value="0x02" />
+    </attr>
+    <attr name="intAndEnum" format="integer|enum">
+        <enum name="auto" value="0" />
+    </attr>
+    <declare-styleable name="MyView">
+        <attr name="plainRef" />
+        <attr name="localOnly" format="string" />
+        <attr name="android:textColor" />
+        <attr name="withEnum" />
+    </declare-styleable>
+    <declare-styleable name="Empty" />
+    <color name="ink">#ff102030</color>
+    <string name="app_name">Omni</string>
+    <style name="Custom">
+        <item name="withEnum">second</item>
+        <item name="localOnly">hi</item>
+        <item name="android:textSize">16sp</item>
+        <item name="android:colorBackground">?attr/manyFormats</item>
+        <item name="android:textColor">?android:attr/colorAccent</item>
+    </style>
+</resources>
+"####;
+
+    const A_CUSTOM_LAYOUT: &str = r####"
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:background="?attr/manyFormats"
+    android:textColor="?android:attr/colorAccent"
+    app:withEnum="second"
+    app:withFlags="left|right"
+    app:localOnly="hello"
+    app:plainRef="@color/ink" />
+"####;
 
     /// What a register holds, as far as the runtime's own check is concerned.
     ///
@@ -35514,8 +37306,12 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn an_unmodelled_element_is_reported_not_skipped() {
-        let (_, sink) = values("<resources><declare-styleable name=\"p\"/></resources>");
+        let (_, sink) = values("<resources><public name=\"p\" type=\"string\"/></resources>");
         assert!(sink.entries().iter().any(|d| d.code == "E9002"));
+
+        // And one that is modelled is read rather than reported.
+        let (_, sink) = values("<resources><declare-styleable name=\"p\"/></resources>");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
 
         // A style is several values, and one written as though it were one is
         // refused rather than read as the text it holds.
@@ -35590,6 +37386,44 @@ public final class MainActivity extends Activity {
             "{:?}",
             sink.entries()
         );
+
+        // And an order the platform does not read is refused, because a
+        // folder aapt2 will not take is a project that stops building the
+        // moment it is opened anywhere else.
+        for wrong in [
+            "drawable-night-land",
+            "drawable-v31-xxhdpi",
+            "drawable-land-sw600dp",
+            "drawable-navhidden-nokeys",
+            "drawable-land-port",
+        ] {
+            let mut sink = Sink::new();
+            assert!(
+                !table.read_file(wrong, "c.png", &format!("res/{wrong}/c.png"), &mut sink),
+                "{wrong} is an order the platform does not read"
+            );
+            let error = sink.entries().iter().find(|d| d.code == "E9010").unwrap();
+            assert!(
+                error.message.contains("order the platform does not read"),
+                "{}",
+                error.message
+            );
+        }
+        // The same qualifiers, written in the order the platform reads.
+        for right in [
+            "drawable-land-night",
+            "drawable-xxhdpi-v31",
+            "drawable-sw600dp-land",
+            "drawable-nokeys-navhidden",
+            "drawable-en-rGB-w600dp",
+        ] {
+            let mut sink = Sink::new();
+            assert!(
+                table.read_file(right, "d.png", &format!("res/{right}/d.png"), &mut sink),
+                "{right}: {:?}",
+                sink.entries()
+            );
+        }
 
         let mut sink = Sink::new();
         assert!(!table.read_file("nonsense", "a.png", "res/nonsense/a.png", &mut sink));
@@ -41126,6 +42960,7 @@ public final class MainActivity extends Activity {
     fn dimensions_are_written_in_the_fixed_point_the_format_defines() {
         use super::arsc::encode_dimension;
         use super::resources::Unit;
+        use crate::arsc::encode_fraction;
 
         assert_eq!(encode_dimension(1_000, Unit::Dp).unwrap(), 0x0000_0101);
         assert_eq!(encode_dimension(4_000, Unit::Dp).unwrap(), 0x0000_0401);
@@ -41135,10 +42970,18 @@ public final class MainActivity extends Activity {
         assert_eq!(encode_dimension(16_000, Unit::Sp).unwrap(), 0x0000_1002);
         assert_eq!(encode_dimension(0, Unit::Px).unwrap(), 0x0000_0000);
 
-        let half = encode_dimension(1_500, Unit::Dp).unwrap();
-        assert_eq!(half & 0xf0, 0x10, "1.5dp needs the 16p7 radix");
-        assert_eq!(half & 0x0f, 0x01);
-        assert_eq!(half >> 8, 192, "1.5 at 16p7 is 192");
+        // The radix the platform's own reader picks, which is the one aapt2
+        // writes: not the narrowest that would hold the number, but the first
+        // in the order the runtime tries them.
+        assert_eq!(encode_dimension(1_500, Unit::Dp).unwrap(), 0x00c0_0021);
+        assert_eq!(encode_dimension(-2_250, Unit::Dp).unwrap(), 0xfee0_0021);
+        assert_eq!(encode_dimension(1_234_500, Unit::Sp).unwrap(), 0x0269_4012);
+        // And a number the mantissa cannot hold exactly is rounded, because
+        // twenty-four bits is what the format has and the device rounds it too.
+        assert_eq!(encode_dimension(100, Unit::Dp).unwrap(), 0x0ccc_cd31);
+        assert_eq!(encode_fraction(500, false).unwrap(), 0x4000_0030);
+        assert_eq!(encode_fraction(333, true).unwrap(), 0x2a9f_be31);
+        assert_eq!(encode_fraction(1_000, false).unwrap(), 0x0000_0100);
 
         assert_eq!(
             encode_dimension(40_000_000_000, Unit::Dp)
