@@ -28071,6 +28071,79 @@ public final class R {{
         Ok(out)
     }
 
+    /// One entry of an archive, as the bytes it holds.
+    fn entry_bytes(
+        bytes: &[u8],
+        entry: &crate::archive::Entry,
+        where_from: &str,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let from = entry.data_offset as usize;
+        let to = from.saturating_add(entry.compressed_size as usize);
+        let raw = bytes.get(from..to).ok_or_else(|| {
+            fail(
+                "EB048",
+                "A dependency stops before one of its entries ends.",
+            )
+            .with_context(format!("In: {where_from}"))
+            .with_context(format!("Entry: {}", entry.name))
+        })?;
+        match entry.compression {
+            crate::archive::Compression::Stored => Ok(raw.to_vec()),
+            crate::archive::Compression::Deflate => crate::inflate::raw(raw).map_err(|error| {
+                error
+                    .with_context(format!("In: {where_from}"))
+                    .with_context(format!("Entry: {}", entry.name))
+            }),
+            crate::archive::Compression::Other(how) => Err(fail(
+                "EB047",
+                "A dependency holds something squeezed in a way this does not read.",
+            )
+            .with_context(format!("In: {where_from}"))
+            .with_context(format!("Entry: {}, method {how}", entry.name))),
+        }
+    }
+
+    /// The jars one dependency amounts to.
+    ///
+    /// A jar is one. An `aar` -- which is how an Android library is published
+    /// -- is an archive with the jar inside it, and any more it brings under
+    /// `libs`. Everything else it holds is resources, a manifest and notes,
+    /// which are read elsewhere.
+    pub fn jars_within(path: &std::path::Path, bytes: &[u8]) -> Result<Vec<Vec<u8>>, Diagnostic> {
+        let where_from = path.display().to_string();
+        if path.extension().is_none_or(|held| held != "aar") {
+            return Ok(vec![bytes.to_vec()]);
+        }
+        let mut sink = Sink::new();
+        let Some(archive) = crate::archive::read(bytes, &mut sink) else {
+            return Err(fail("EB046", "A dependency is not an archive this reads.")
+                .with_context(format!("Path: {where_from}")));
+        };
+        let mut wanted: Vec<&crate::archive::Entry> = archive
+            .entries()
+            .iter()
+            .filter(|entry| {
+                !entry.is_directory()
+                    && (entry.name == "classes.jar"
+                        || (entry.name.starts_with("libs/") && entry.name.ends_with(".jar")))
+            })
+            .collect();
+        wanted.sort_by(|left, right| left.name.cmp(&right.name));
+        let mut out = Vec::with_capacity(wanted.len());
+        for entry in wanted {
+            out.push(entry_bytes(bytes, entry, &where_from)?);
+        }
+        if out.is_empty() {
+            return Err(fail("EB049", "An Android library holds no code.")
+                .with_context(format!("Path: {where_from}"))
+                .with_suggestion(
+                    "An aar carries its classes in `classes.jar`, and any more under \
+                     `libs`. One with neither is not a library.",
+                ));
+        }
+        Ok(out)
+    }
+
     /// The jars a project brings with it that have to go into the package.
     ///
     /// The platform's own jar is what the device already has: compiling
@@ -28087,7 +28160,7 @@ public final class R {{
             .map(|entry| entry.path())
             .filter(|path| {
                 path.extension()
-                    .is_some_and(|held| held == "jar" || held == "zip")
+                    .is_some_and(|held| held == "jar" || held == "zip" || held == "aar")
                     && path.file_name().is_some_and(|held| held != "android.jar")
             })
             .collect();
@@ -28115,67 +28188,47 @@ public final class R {{
                     .with_context(format!("Path: {}", path.display()))
                     .with_context(format!("Reason: {why}"))
             })?;
-            let mut sink = crate::diag::Sink::new();
-            let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
-                return Err(fail("EB046", "A dependency is not an archive this reads.")
-                    .with_context(format!("Path: {}", path.display()))
-                    .with_suggestion("A dependency is a jar, which is a zip of class files."));
-            };
+            for bytes in jars_within(&path, &bytes)? {
+                let mut sink = crate::diag::Sink::new();
+                let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+                    return Err(fail("EB046", "A dependency is not an archive this reads.")
+                        .with_context(format!("Path: {}", path.display()))
+                        .with_suggestion("A dependency is a jar, which is a zip of class files."));
+                };
 
-            let mut names: Vec<&crate::archive::Entry> = archive
-                .entries()
-                .iter()
-                .filter(|entry| {
-                    !entry.is_directory()
+                let mut names: Vec<&crate::archive::Entry> = archive
+                    .entries()
+                    .iter()
+                    .filter(|entry| {
+                        !entry.is_directory()
                         && entry.name.ends_with(".class")
                         // What is under META-INF describes the jar rather than
                         // being part of it, and the copies kept there for
                         // newer releases would collide with the originals.
                         && !entry.name.starts_with("META-INF/")
                         && !entry.name.ends_with("module-info.class")
-                })
-                .collect();
-            names.sort_by(|left, right| left.name.cmp(&right.name));
+                    })
+                    .collect();
+                names.sort_by(|left, right| left.name.cmp(&right.name));
 
-            for entry in names {
-                let from = entry.data_offset as usize;
-                let to = from.saturating_add(entry.compressed_size as usize);
-                let Some(raw) = bytes.get(from..to) else {
-                    continue;
-                };
-                let content = match entry.compression {
-                    crate::archive::Compression::Stored => raw.to_vec(),
-                    crate::archive::Compression::Deflate => {
-                        crate::inflate::raw(raw).map_err(|error| {
-                            error
-                                .with_context(format!("In: {}", path.display()))
-                                .with_context(format!("Entry: {}", entry.name))
-                        })?
+                for entry in names {
+                    let content = entry_bytes(&bytes, entry, &path.display().to_string())?;
+                    let class = crate::jvm::read(&content).map_err(|error| {
+                        error
+                            .with_context(format!("In: {}", path.display()))
+                            .with_context(format!("Entry: {}", entry.name))
+                    })?;
+                    let descriptor = format!("L{};", class.name.replace('.', "/"));
+                    if held.contains(&descriptor) {
+                        continue;
                     }
-                    crate::archive::Compression::Other(how) => {
-                        return Err(fail(
-                            "EB047",
-                            "A dependency holds a class squeezed in a way this does not read.",
-                        )
-                        .with_context(format!("In: {}", path.display()))
-                        .with_context(format!("Entry: {}, method {how}", entry.name)))
-                    }
-                };
-                let class = crate::jvm::read(&content).map_err(|error| {
-                    error
-                        .with_context(format!("In: {}", path.display()))
-                        .with_context(format!("Entry: {}", entry.name))
-                })?;
-                let descriptor = format!("L{};", class.name.replace('.', "/"));
-                if held.contains(&descriptor) {
-                    continue;
+                    held.push(descriptor);
+                    out.extend(crate::dalvik::translate_class(&class).map_err(|error| {
+                        error
+                            .with_context(format!("In: {}", path.display()))
+                            .with_context(format!("Class: {}", class.name))
+                    })?);
                 }
-                held.push(descriptor);
-                out.extend(crate::dalvik::translate_class(&class).map_err(|error| {
-                    error
-                        .with_context(format!("In: {}", path.display()))
-                        .with_context(format!("Class: {}", class.name))
-                })?);
             }
         }
         Ok(out)
@@ -28205,7 +28258,7 @@ public final class R {{
                 .map(|entry| entry.path())
                 .filter(|path| {
                     path.extension()
-                        .is_some_and(|held| held == "jar" || held == "zip")
+                        .is_some_and(|held| held == "jar" || held == "zip" || held == "aar")
                 })
                 .collect();
             // In a settled order, so that two jars declaring the same class
@@ -28230,9 +28283,11 @@ public final class R {{
                     .with_context(format!("Path: {}", path.display()))
                     .with_context(format!("Reason: {why}"))
             })?;
-            classpath
-                .learn_jar(&bytes)
-                .map_err(|error| error.with_context(format!("Path: {}", path.display())))?;
+            for held in jars_within(&path, &bytes)? {
+                classpath
+                    .learn_jar(&held)
+                    .map_err(|error| error.with_context(format!("Path: {}", path.display())))?;
+            }
         }
         Ok(classpath)
     }
@@ -34604,6 +34659,20 @@ public class Written {
         let made = directory.join("made");
         std::fs::create_dir_all(&made).unwrap();
         std::fs::write(
+            made.join("Farewell.java"),
+            r#"
+package com.some.lib;
+
+public final class Farewell {
+    public String said() {
+        return "goodbye";
+    }
+}
+"#
+            .trim_start(),
+        )
+        .unwrap();
+        std::fs::write(
             made.join("Greeting.java"),
             r#"
 package com.some.lib;
@@ -34642,6 +34711,7 @@ public final class Greeting {
             .args(["--release", "17", "-d"])
             .arg(made.to_str().unwrap())
             .arg(made.join("Greeting.java").to_str().unwrap())
+            .arg(made.join("Farewell.java").to_str().unwrap())
             .output();
         let Ok(done) = done else {
             std::fs::remove_dir_all(&directory).ok();
@@ -34672,18 +34742,41 @@ public final class Greeting {
         gather_class_files(&made, &mut classes);
         classes.sort();
         assert!(!classes.is_empty(), "the library compiled to something");
+        // The greeting goes in a jar and the farewell in an aar, so that
+        // neither could have come from the other.
         let mut jar = crate::archive::Builder::new();
+        let mut inside = crate::archive::Builder::new();
         for path in &classes {
             let name = path
                 .strip_prefix(&made)
                 .unwrap()
                 .to_string_lossy()
                 .replace('\\', "/");
-            jar.add(name, std::fs::read(path).unwrap()).unwrap();
+            let bytes = std::fs::read(path).unwrap();
+            if name.contains("Farewell") {
+                inside.add(name, bytes).unwrap();
+            } else {
+                jar.add(name, bytes).unwrap();
+            }
         }
         let libraries = root.join(super::scaffold::LIBRARY_FOLDER);
         std::fs::create_dir_all(&libraries).unwrap();
         std::fs::write(libraries.join("greeting.jar"), jar.finish().unwrap()).unwrap();
+
+        // And the same jar again inside an `aar`, which is how an Android
+        // library is actually published: the classes in `classes.jar`, and
+        // the rest of what a library brings around it.
+        let mut aar = crate::archive::Builder::new();
+        aar.add("classes.jar", inside.finish().unwrap()).unwrap();
+        aar.add(
+            "AndroidManifest.xml",
+            b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+              <manifest package=\"com.some.lib\" />\n"
+                .to_vec(),
+        )
+        .unwrap();
+        aar.add("R.txt", Vec::new()).unwrap();
+        std::fs::write(libraries.join("greeting.aar"), aar.finish().unwrap()).unwrap();
 
         std::fs::write(
             root.join(super::scaffold::JAVA_FOLDER)
@@ -34702,7 +34795,10 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         Greeting greeting = new Greeting("world");
         TextView view = new TextView(this);
-        view.setText(greeting.said() + greeting.twice().size() + greeting.later().get());
+        view.setText(greeting.said()
+                + greeting.twice().size()
+                + greeting.later().get()
+                + new com.some.lib.Farewell().said());
         setContentView(view);
     }
 }
@@ -34722,6 +34818,7 @@ public final class MainActivity extends Activity {
             "Lcom/tr/yt/MainActivity;",
             "Lcom/some/lib/Greeting;",
             "Lcom/some/lib/Greeting$$Lambda$0;",
+            "Lcom/some/lib/Farewell;",
         ] {
             assert!(
                 named.contains(&wanted),
