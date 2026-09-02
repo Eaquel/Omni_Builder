@@ -27463,6 +27463,7 @@ pub mod bundle {
     }
 
     pub fn write(project: &crate::builder::Project) -> Result<Outcome, Diagnostic> {
+        crate::progress::enter("bundle");
         let mut sink = crate::diag::Sink::new();
         let prepared = crate::builder::prepare(project, &mut sink).map_err(|error| {
             if error.code == "EB010" {
@@ -29035,6 +29036,7 @@ pub mod builder {
     }
 
     fn compile_resources(project: &Project, sink: &mut Sink) -> Result<Option<Icons>, Diagnostic> {
+        crate::progress::enter("resources");
         let set = launcher_icons(project)?;
         if set.is_empty() && project.values.is_empty() && project.resources.is_empty() {
             return Ok(None);
@@ -29514,6 +29516,7 @@ pub mod builder {
     }
 
     pub fn from_project(root: &str) -> Result<Project, Diagnostic> {
+        crate::progress::enter("project");
         let manifest = crate::scaffold::read_manifest(root)?;
         // And what the Android libraries brought with them, which sits
         // underneath the project's own.
@@ -29688,6 +29691,7 @@ public final class R {{
         root: &str,
         generated: Vec<(String, String)>,
     ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
+        crate::progress::enter("java");
         let folder = std::path::Path::new(root).join(crate::scaffold::JAVA_FOLDER);
         let mut sources = Vec::new();
         gather_java(&folder, &mut sources);
@@ -30405,8 +30409,10 @@ public final class R {{
             guard: report,
         } = prepare(project, sink)?;
 
+        crate::progress::enter("manifest");
         let manifest = crate::axml::encode(&root)?;
 
+        crate::progress::enter("package");
         let mut archive = ArchiveBuilder::for_android();
         archive.add("AndroidManifest.xml", manifest)?;
         if let Some(made) = &icons {
@@ -30419,6 +30425,7 @@ public final class R {{
             // More than one where one will not hold it. The platform reads
             // them in order, and has since long before the oldest this builds
             // for.
+            crate::progress::enter("dex");
             for (which, held) in crate::dexwrite::write_all(&project.code, &project.references)?
                 .into_iter()
                 .enumerate()
@@ -30426,6 +30433,7 @@ public final class R {{
                 archive.add(crate::dexwrite::dex_named(which), held)?;
             }
         }
+        crate::progress::enter("package");
         for (name, bytes) in &project.files {
             if name == "AndroidManifest.xml" {
                 return Err(fail(
@@ -30449,6 +30457,7 @@ public final class R {{
             .and_then(|element| element.attribute("android:minSdkVersion"))
             .and_then(|text| text.parse::<u32>().ok())
             .unwrap_or(guard::MINIMUM_SDK as u32);
+        crate::progress::enter("signing");
         let package = crate::signing::sign(
             &unsigned,
             key,
@@ -30457,6 +30466,7 @@ public final class R {{
             Some((minimum_sdk, NEWEST_PLATFORM)),
         )?;
 
+        crate::progress::enter("verify");
         let parsed = crate::x509::Certificate::parse(certificate_der)?;
 
         Ok(Outcome {
@@ -31700,6 +31710,325 @@ pub fn state_report(observed_environment: &str) -> String {
     w.finish()
 }
 
+/// What a build is doing, while it is doing it.
+///
+/// A build on a phone takes long enough that a spinner is not an answer. A
+/// person watching one wants to know what it is working on and roughly how
+/// much is left, and both of those have to be true or they are worse than
+/// nothing.
+///
+/// So neither is invented here. The stage is written down by the code that
+/// actually enters it -- `enter` is called from inside the resource compiler,
+/// the Java compiler, the dex writer, the signer -- and the estimate is this
+/// build's own timings from the last time it ran on this device, handed back
+/// after every build and handed in before the next one. A device that has
+/// never built anything says so; every one after that says what it learned.
+pub mod progress {
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Instant;
+
+    /// The stages a build goes through, in the order it goes through them.
+    ///
+    /// These are not a description of a build written beside one: each name is
+    /// entered by the code that does that work, so a stage that stopped
+    /// happening would stop being reported rather than quietly stay on the
+    /// list.
+    pub const STAGES: &[&str] = &[
+        "project",
+        "resources",
+        "java",
+        "manifest",
+        "dex",
+        "package",
+        "signing",
+        "bundle",
+        "verify",
+    ];
+
+    /// What to expect of each stage before this device has built anything, in
+    /// microseconds.
+    ///
+    /// Measured on one machine building the project the scaffold writes, which
+    /// makes it a starting point and not a promise -- the first build on a
+    /// device says its estimate is a guess, and the second one does not,
+    /// because by then the timings are that device's own.
+    ///
+    /// Microseconds rather than milliseconds because several of these stages
+    /// finish inside one millisecond on a desktop, and a measurement that
+    /// rounds them all to zero teaches the next build nothing.
+    const FIRST_GUESS: &[u64] = &[
+        120_000, 340_000, 1_450_000, 90_000, 620_000, 260_000, 210_000, 180_000, 40_000,
+    ];
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Channel {
+        /// What each stage took last time, in microseconds. Empty until a
+        /// build finishes or timings are handed in.
+        learned: Vec<u64>,
+        /// The same for this build, one per finished stage.
+        measured: Vec<u64>,
+        began: Option<Instant>,
+        entered: Option<Instant>,
+        at: usize,
+        running: bool,
+        outcome: Outcome,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub enum Outcome {
+        #[default]
+        Waiting,
+        Building,
+        Built,
+        Refused,
+    }
+
+    impl Outcome {
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Outcome::Waiting => "waiting",
+                Outcome::Building => "building",
+                Outcome::Built => "built",
+                Outcome::Refused => "refused",
+            }
+        }
+    }
+
+    impl Channel {
+        pub fn new() -> Channel {
+            Channel::default()
+        }
+
+        /// What this build expects each stage to take: what was learned where
+        /// anything was, and the first guess where nothing was.
+        fn expected(&self) -> Vec<u64> {
+            // All of it or none of it. A stage that really takes no time --
+            // `dex` on a project with no code -- measured zero and is expected
+            // to be zero, and mixing that with a guess for the others would
+            // put the guess back in the middle of a measurement.
+            if self.knows_this_device() {
+                return self.learned.clone();
+            }
+            FIRST_GUESS.to_vec()
+        }
+
+        pub fn knows_this_device(&self) -> bool {
+            self.learned.len() == STAGES.len()
+        }
+
+        /// Takes the timings of an earlier build, as `timings` wrote them.
+        ///
+        /// Anything that is not a list of the right length is ignored rather
+        /// than refused: a stored estimate from an older version of this build
+        /// is not worth failing over, and the first guess is right there.
+        pub fn learn(&mut self, held: &str) {
+            let mut found = Vec::with_capacity(STAGES.len());
+            for piece in held.split(',') {
+                match piece.trim().parse::<u64>() {
+                    Ok(millis) => found.push(millis),
+                    Err(_) => return,
+                }
+            }
+            if found.len() == STAGES.len() {
+                self.learned = found;
+            }
+        }
+
+        /// What this build took, in the form `learn` reads.
+        pub fn timings(&self) -> String {
+            self.measured
+                .iter()
+                .map(|held| held.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        }
+
+        pub fn begin(&mut self) {
+            let now = Instant::now();
+            self.measured.clear();
+            self.began = Some(now);
+            self.entered = Some(now);
+            self.at = 0;
+            self.running = true;
+            self.outcome = Outcome::Building;
+        }
+
+        /// Marks the build as having reached a stage.
+        ///
+        /// A stage that is not on the list, or one already passed, is ignored:
+        /// this is called from inside the build, and a build that is not
+        /// running -- a test compiling one file, say -- has nothing to report.
+        pub fn enter(&mut self, stage: &str) {
+            if !self.running {
+                return;
+            }
+            let Some(next) = STAGES.iter().position(|held| *held == stage) else {
+                return;
+            };
+            if next < self.at {
+                return;
+            }
+            let now = Instant::now();
+            let taken = self.entered.map(|held| elapsed(held, now)).unwrap_or(0);
+            // Every stage between the one that was running and the one being
+            // entered is finished too: a build that skips a stage -- a project
+            // with no Java, say -- passed through it in no time at all.
+            while self.measured.len() < next {
+                self.measured.push(if self.measured.len() == self.at {
+                    taken
+                } else {
+                    0
+                });
+            }
+            self.at = next;
+            self.entered = Some(now);
+        }
+
+        pub fn finish(&mut self, built: bool) {
+            if !self.running {
+                return;
+            }
+            let now = Instant::now();
+            let taken = self.entered.map(|held| elapsed(held, now)).unwrap_or(0);
+            while self.measured.len() < STAGES.len() {
+                self.measured.push(if self.measured.len() == self.at {
+                    taken
+                } else {
+                    0
+                });
+            }
+            self.running = false;
+            self.outcome = if built {
+                Outcome::Built
+            } else {
+                Outcome::Refused
+            };
+            if built {
+                self.learned = self.measured.clone();
+            }
+        }
+
+        /// Where the build has got to, as JSON.
+        ///
+        /// The percentage is what has elapsed against what the whole is now
+        /// expected to take, and what it is expected to take is stretched by
+        /// how far ahead or behind this build already is -- so a device slower
+        /// than the one that produced the estimate does not sit at 90% for
+        /// half the build.
+        pub fn report(&self) -> String {
+            let expected = self.expected();
+            let now = Instant::now();
+            let elapsed = self.began.map(|held| elapsed(held, now)).unwrap_or(0);
+
+            let behind: u64 = expected.iter().take(self.at).sum();
+            let so_far: u64 = self.measured.iter().take(self.at).sum();
+            // How this device is doing against what was expected of it, taken
+            // from the stages already finished. Nothing finished yet means
+            // nothing to say, which is a factor of one.
+            let pace = if behind > 0 && so_far > 0 {
+                so_far as f64 / behind as f64
+            } else {
+                1.0
+            };
+            let ahead: u64 = expected.iter().skip(self.at).sum();
+            let total = (so_far as f64 + pace * ahead as f64).max(1.0);
+
+            let (percent, left) = match self.outcome {
+                Outcome::Built | Outcome::Refused => (100.0, 0.0),
+                Outcome::Waiting => (0.0, total),
+                Outcome::Building => (
+                    ((elapsed as f64 / total) * 100.0).clamp(0.0, 99.0),
+                    (total - elapsed as f64).max(0.0),
+                ),
+            };
+
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_str("state", self.outcome.as_str());
+            w.field_str("stage", STAGES.get(self.at).copied().unwrap_or(""));
+            w.field_u64("step", self.at as u64 + 1);
+            w.field_u64("steps", STAGES.len() as u64);
+            w.field_u64("percent", percent.round() as u64);
+            w.field_u64("elapsedMillis", as_millis(elapsed as f64));
+            w.field_u64("leftMillis", as_millis(left));
+            w.field_u64("wholeMillis", as_millis(total));
+            w.field_bool("estimated", self.knows_this_device());
+            w.field_str("timings", &self.timings());
+            w.begin_array(Some("stages"));
+            for (at, name) in STAGES.iter().enumerate() {
+                w.begin_object(None);
+                w.field_str("name", name);
+                w.field_str(
+                    "state",
+                    match () {
+                        _ if self.outcome == Outcome::Refused && at == self.at => "refused",
+                        _ if at < self.at || self.outcome == Outcome::Built => "done",
+                        _ if at == self.at && self.outcome == Outcome::Building => "running",
+                        _ => "waiting",
+                    },
+                );
+                let took = self.measured.get(at).copied().unwrap_or(0);
+                w.field_u64("millis", as_millis(took as f64));
+                w.field_u64("micros", took);
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+            w.finish()
+        }
+    }
+
+    fn elapsed(from: Instant, to: Instant) -> u64 {
+        to.saturating_duration_since(from).as_micros() as u64
+    }
+
+    fn as_millis(micros: f64) -> u64 {
+        (micros / 1000.0).round() as u64
+    }
+
+    fn held() -> &'static Mutex<Channel> {
+        static HELD: OnceLock<Mutex<Channel>> = OnceLock::new();
+        HELD.get_or_init(|| Mutex::new(Channel::new()))
+    }
+
+    /// The one channel a build writes into, for the one build a device runs at
+    /// a time. A lock nobody can hold for long: every one of these is a few
+    /// arithmetic operations on a handful of numbers.
+    fn with<T>(what: impl FnOnce(&mut Channel) -> T) -> T {
+        match held().lock() {
+            Ok(mut channel) => what(&mut channel),
+            // A panic while the lock was held leaves it poisoned. What is
+            // behind it is a progress report, so carrying on with it is
+            // better than taking a build down over it.
+            Err(poisoned) => what(&mut poisoned.into_inner()),
+        }
+    }
+
+    pub fn begin() {
+        with(|channel| channel.begin());
+    }
+
+    pub fn enter(stage: &str) {
+        with(|channel| channel.enter(stage));
+    }
+
+    pub fn finish(built: bool) {
+        with(|channel| channel.finish(built));
+    }
+
+    pub fn learn(timings: &str) {
+        with(|channel| channel.learn(timings));
+    }
+
+    pub fn report() -> String {
+        with(|channel| channel.report())
+    }
+
+    pub fn timings() -> String {
+        with(|channel| channel.timings())
+    }
+}
+
 pub mod ffi {
     use std::ffi::{c_char, CStr, CString};
     use std::panic::catch_unwind;
@@ -31762,6 +32091,37 @@ pub mod ffi {
         }
     }
 
+    /// Where the build running right now has got to.
+    ///
+    /// Safe to call at any time and from any thread: a build that is not
+    /// running answers `waiting`, and one that is answers with the stage it is
+    /// in, what fraction of the way through it is, and how long is left. This
+    /// is polled while a build runs, so it does no work beyond reading a
+    /// handful of numbers.
+    #[no_mangle]
+    pub extern "C" fn omni_build_progress() -> *mut c_char {
+        let result = catch_unwind(|| match CString::new(crate::progress::report()) {
+            Ok(report) => report.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Hands the timings of an earlier build back to the estimator.
+    ///
+    /// Every build hands its own timings out in `timings`; handing them back
+    /// before the next one is what turns "we guessed" into "this is what your
+    /// device did last time". Anything that is not a list of the right shape
+    /// is ignored, because a stored estimate is not worth failing a build for.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_build_expect(timings: *const c_char) {
+        let _ = catch_unwind(|| {
+            if let Some(held) = text_from(timings) {
+                crate::progress::learn(&held);
+            }
+        });
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn omni_create_project(
         root: *const c_char,
@@ -31819,6 +32179,9 @@ pub mod ffi {
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
 
+            // From here to the end of this call, every stage the build enters
+            // is written where `omni_build_progress` can read it.
+            crate::progress::begin();
             let mut sink = crate::diag::Sink::new();
             let now = now_seconds();
 
@@ -31838,9 +32201,11 @@ pub mod ffi {
                 }
             });
 
+            let mut built = false;
             match outcome {
                 Ok(outcome) => match std::fs::write(&output_path, &outcome.package) {
                     Ok(()) => {
+                        built = true;
                         w.field_bool("built", true);
                         w.field_str("path", &output_path);
                         outcome.write_json(&mut w, "package");
@@ -31853,6 +32218,10 @@ pub mod ffi {
                 Err(error) => write_failure(&mut w, "built", &error),
             }
 
+            // What this build took, stage by stage, so the next one on this
+            // device has something better than a first guess to say.
+            crate::progress::finish(built);
+            w.field_str("timings", &crate::progress::timings());
             sink.write_json(&mut w, "diagnostics");
             w.end_object();
             hand_back(w)
@@ -32030,6 +32399,9 @@ pub mod ffi {
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
 
+            // From here to the end of this call, every stage the build enters
+            // is written where `omni_build_progress` can read it.
+            crate::progress::begin();
             let mut sink = crate::diag::Sink::new();
             let now = now_seconds();
 
@@ -32052,12 +32424,15 @@ pub mod ffi {
                 Ok((package, bundle))
             });
 
+            #[allow(unused_assignments)]
+            let mut built = false;
             match outcome {
                 Ok((package, bundle)) => {
                     match std::fs::write(&package_path, &package.package)
                         .and_then(|()| std::fs::write(&bundle_path, &bundle.bundle))
                     {
                         Ok(()) => {
+                            built = true;
                             w.field_bool("built", true);
                             w.field_str("path", &package_path);
                             w.field_str("bundlePath", &bundle_path);
@@ -32076,6 +32451,10 @@ pub mod ffi {
                 Err(error) => write_failure(&mut w, "built", &error),
             }
 
+            // What this build took, stage by stage, so the next one on this
+            // device has something better than a first guess to say.
+            crate::progress::finish(built);
+            w.field_str("timings", &crate::progress::timings());
             sink.write_json(&mut w, "diagnostics");
             w.end_object();
             hand_back(w)
@@ -35180,6 +35559,200 @@ mod tests {
     app:localOnly="hello"
     app:plainRef="@color/ink" />
 "####;
+
+    /// A build that says where it is, and says it honestly.
+    ///
+    /// The stage is whatever the build last entered, the percentage never
+    /// arrives before the build does, and the estimate is this device's own
+    /// timings once it has any. Driven on a channel of its own rather than the
+    /// one a build writes into, so that a build running beside this test in
+    /// another thread cannot make it pass or fail.
+    #[test]
+    fn a_build_says_where_it_is_and_how_long_is_left() {
+        use super::progress::{Channel, STAGES};
+
+        let read = |held: &str, key: &str| -> String {
+            let at = held.find(&format!("\"{key}\"")).unwrap_or_else(|| {
+                panic!("no {key} in {held}");
+            });
+            let rest = &held[at + key.len() + 3..];
+            let rest = rest.trim_start_matches(':').trim_start();
+            match rest.strip_prefix('"') {
+                Some(text) => text[..text.find('"').unwrap()].to_string(),
+                None => rest[..rest.find([',', '}']).unwrap()].trim().to_string(),
+            }
+        };
+
+        // Nothing has been asked of it, so it says so rather than saying zero
+        // per cent of something.
+        let mut channel = Channel::new();
+        assert_eq!(read(&channel.report(), "state"), "waiting");
+        assert_eq!(read(&channel.report(), "percent"), "0");
+        assert!(!channel.knows_this_device());
+
+        channel.begin();
+        assert_eq!(read(&channel.report(), "state"), "building");
+        assert_eq!(read(&channel.report(), "stage"), "project");
+        assert_eq!(read(&channel.report(), "step"), "1");
+        assert_eq!(read(&channel.report(), "steps"), STAGES.len().to_string());
+        assert_eq!(read(&channel.report(), "estimated"), "false");
+
+        // A stage nobody declared, and one already passed, say nothing: this
+        // is called from inside the build, and the build is not a place to
+        // find out that a name was misspelled.
+        channel.enter("polishing");
+        assert_eq!(read(&channel.report(), "stage"), "project");
+        channel.enter("dex");
+        assert_eq!(read(&channel.report(), "stage"), "dex");
+        channel.enter("resources");
+        assert_eq!(read(&channel.report(), "stage"), "dex");
+
+        // While it runs it never claims to be finished, whatever the estimate
+        // says: the only thing that says a build is done is a build being done.
+        let held = channel.report();
+        assert!(read(&held, "percent").parse::<u64>().unwrap() < 100);
+        assert!(held.contains("\"state\":\"running\""), "{held}");
+
+        channel.finish(true);
+        let done = channel.report();
+        assert_eq!(read(&done, "state"), "built");
+        assert_eq!(read(&done, "percent"), "100");
+        assert_eq!(read(&done, "leftMillis"), "0");
+        assert!(!done.contains("\"state\":\"waiting\""), "{done}");
+
+        // And what it took is now what it expects, one number per stage.
+        assert!(channel.knows_this_device());
+        assert_eq!(channel.timings().split(',').count(), STAGES.len());
+        assert_eq!(read(&channel.report(), "estimated"), "true");
+
+        // A build that is refused stops where it was refused, and says so
+        // there rather than marking everything done.
+        let mut refused = Channel::new();
+        refused.begin();
+        refused.enter("java");
+        refused.finish(false);
+        let said = refused.report();
+        assert_eq!(read(&said, "state"), "refused");
+        assert!(
+            said.contains("\"name\":\"java\",\"state\":\"refused\""),
+            "{said}"
+        );
+        assert!(
+            !refused.knows_this_device(),
+            "a refused build teaches nothing"
+        );
+
+        // Timings handed back are the timings used, and anything else is
+        // ignored rather than refused.
+        let mut learned = Channel::new();
+        learned.learn("1,2,3");
+        assert!(!learned.knows_this_device());
+        learned.learn("not a number");
+        assert!(!learned.knows_this_device());
+        learned.learn(&vec!["50"; STAGES.len()].join(","));
+        assert!(learned.knows_this_device());
+        assert_eq!(read(&learned.report(), "estimated"), "true");
+    }
+
+    /// The stages the channel names are the stages the build enters.
+    ///
+    /// A list of stages written beside a build rather than by it would drift
+    /// the first time one of them moved. This puts a real project through a
+    /// real build and reads back which stages it was seen in.
+    #[test]
+    fn every_stage_a_build_reports_is_one_it_really_went_through() {
+        let directory = temp_directory("omni-progress");
+        let root = directory.join("Watched");
+        super::scaffold::create(
+            root.to_str().unwrap(),
+            &super::scaffold::Spec::parse(
+                "package=com.tr.yt;label=Watched;abis=arm64-v8a;languages=java",
+            )
+            .unwrap(),
+        )
+        .expect("the project is created");
+
+        let key = super::rsa::generate(2048).expect("a key");
+
+        // The channel a build writes into is one per process, so this watches
+        // it from the thread that is not building -- which is what the app
+        // does too. It begins before the project is read, because reading the
+        // project is the first stage.
+        super::progress::begin();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let watching = std::sync::Arc::clone(&seen);
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let until = std::sync::Arc::clone(&stop);
+        let watcher = std::thread::spawn(move || {
+            while !until.load(std::sync::atomic::Ordering::Relaxed) {
+                let held = super::progress::report();
+                if let Some(at) = held.find("\"stage\":\"") {
+                    let rest = &held[at + 9..];
+                    let name = rest[..rest.find('"').unwrap()].to_string();
+                    let mut held = watching.lock().unwrap();
+                    if held.last() != Some(&name) {
+                        held.push(name);
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+
+        let mut sink = crate::diag::Sink::new();
+        let project =
+            super::builder::from_project(root.to_str().unwrap()).expect("the project reads");
+        let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut sink);
+        super::bundle::write(&project).expect("the bundle is written");
+        super::progress::finish(outcome.is_ok());
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().ok();
+        assert!(outcome.is_ok(), "{:?}", sink.entries());
+
+        let held = seen.lock().unwrap().clone();
+        // Sampling cannot promise to catch every stage -- some of them are
+        // over in under a millisecond -- but what it caught has to be stages
+        // that exist, in the order they are declared, and it has to have
+        // caught the slow ones.
+        for name in &held {
+            assert!(
+                super::progress::STAGES.contains(&name.as_str()),
+                "{name} is not a stage this build declares"
+            );
+        }
+        let numbered: Vec<usize> = held
+            .iter()
+            .map(|name| {
+                super::progress::STAGES
+                    .iter()
+                    .position(|held| held == name)
+                    .unwrap()
+            })
+            .collect();
+        assert!(
+            numbered.windows(2).all(|pair| pair[0] <= pair[1]),
+            "the stages came out of order: {held:?}"
+        );
+        assert!(
+            held.iter()
+                .any(|name| name == "java" || name == "resources"),
+            "the slowest stages were never seen: {held:?}"
+        );
+
+        let done = super::progress::report();
+        assert!(done.contains("\"state\":\"built\""), "{done}");
+        assert!(done.contains("\"percent\":100"), "{done}");
+        assert_eq!(
+            super::progress::timings().split(',').count(),
+            super::progress::STAGES.len(),
+            "every stage is timed"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+        eprintln!(
+            "progress: {} stages seen from outside the build",
+            held.len()
+        );
+    }
 
     /// What a register holds, as far as the runtime's own check is concerned.
     ///

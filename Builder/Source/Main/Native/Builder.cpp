@@ -570,6 +570,24 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSetIcon(
   return HandBack(env, omni_set_icon(root_text.c_str(), source_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildProgress(
+    JNIEnv *env, jobject ) {
+  return HandBack(env, omni_build_progress());
+}
+
+JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildExpect(
+    JNIEnv *env, jobject , jstring timings) {
+  if (timings == nullptr) {
+    omni_build_expect(nullptr);
+    return;
+  }
+  std::string held;
+  if (!JavaStringToUtf8(env, timings, &held)) {
+    return;
+  }
+  omni_build_expect(held.c_str());
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(
     JNIEnv *env, jobject , jstring observed_environment) {
   if (observed_environment == nullptr) {

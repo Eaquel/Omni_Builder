@@ -125,4 +125,21 @@
     <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
     <string name="omni_about_how">Un projet, c\'est un manifeste, des dossiers pour les langages choisis et un dossier de ressources. Appuyer sur construire compile la table des ressources, écrit le manifeste binaire, assemble l\'archive, la signe, et écrit un paquet à installer et un bundle à téléverser. Tout se passe sur cet appareil : aucun serveur ne voit ton projet, et rien d\'autre que les outils Android que tu as déjà n\'est utilisé.</string>
     <string name="omni_about_watch">La signature de cette application est vérifiée à chaque démarrage et à chaque retour à cet écran, et encore en arrière-plan tant qu\'Android l\'autorise.</string>
+    <string name="omni_forge_title">FORGE DE LA CLÉ</string>
+    <string name="omni_forge_bits">%1$d bits, créée sur cet appareil</string>
+    <string name="omni_forge_sealed">CLÉ SCELLÉE</string>
+    <string name="omni_forge_refused">LA CLÉ N\'A PAS ÉTÉ CRÉÉE</string>
+    <string name="omni_stage_title">CONSTRUCTION</string>
+    <string name="omni_stage_project">Projet</string>
+    <string name="omni_stage_resources">Ressources</string>
+    <string name="omni_stage_java">Code</string>
+    <string name="omni_stage_manifest">Manifeste</string>
+    <string name="omni_stage_dex">Dex</string>
+    <string name="omni_stage_package">Paquet</string>
+    <string name="omni_stage_signing">Signature</string>
+    <string name="omni_stage_bundle">Bundle</string>
+    <string name="omni_stage_verify">Vérification</string>
+    <string name="omni_stage_measuring">Première construction ici, ceci est donc une estimation.</string>
+    <string name="omni_stage_learned">Calculé d\'après les constructions de cet appareil.</string>
+    <string name="omni_stage_built">PAQUET ÉCRIT</string>
 </resources>

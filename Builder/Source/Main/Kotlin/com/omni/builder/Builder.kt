@@ -514,6 +514,22 @@ object Builder {
         keyPassword: CharArray?,
     ): String
 
+    /**
+     * Where the build running right now has got to.
+     *
+     * Answers at any time and from any thread. A build that is not running
+     * says so; one that is says which stage it is in, how far through it is,
+     * and how long is left. Polled while a build runs, so it does nothing but
+     * read a handful of numbers.
+     */
+    external fun nativeBuildProgress(): String
+
+    /**
+     * Hands the timings of the last build back before the next one starts,
+     * which is what turns a guess into this device's own measurement.
+     */
+    external fun nativeBuildExpect(timings: String?)
+
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
     external fun nativeCreateKey(directory: String, spec: String, keyPassword: CharArray): String
@@ -818,6 +834,13 @@ data class BuildOutcome(
     val bundlePath: String?,
     val bundleBytes: Long,
     val locales: Long,
+    /**
+     * How long each stage took, in microseconds, comma separated.
+     *
+     * Only a build that finished has a full set of these, so only a build
+     * that finished is worth keeping them from.
+     */
+    val timings: String?,
 ) {
     companion object {
         fun parse(document: String): BuildOutcome {
@@ -854,6 +877,7 @@ data class BuildOutcome(
                 bundlePath = root.optString("bundlePath").ifEmpty { null },
                 bundleBytes = root.optJSONObject("bundle")?.optLong("bytes") ?: 0L,
                 locales = root.optLong("locales"),
+                timings = root.optString("timings").ifEmpty { null },
             )
         }
     }
@@ -975,9 +999,38 @@ data class Palette(
             glowThird = 0xFFD6C9F0.toInt(),
         )
 
-        val ALL: List<Palette> = listOf(MIDNIGHT, SLATE, DAYLIGHT)
+        /**
+         * The one this application was drawn for, and the one it opens in.
+         *
+         * It is not a dark grey with a blue accent. The ground is the near
+         * black of a screen with nothing lit on it, the surfaces above it are
+         * separated by four points of brightness rather than by borders, and
+         * the accent is the cyan a cathode tube throws rather than the blue
+         * every framework ships. The three glows are what the aurora behind
+         * the content is painted from: a deep sea blue, a green that only
+         * shows where it overlaps, and a violet that never quite arrives.
+         */
+        val FORGE = Palette(
+            key = "forge",
+            label = "Forge",
+            background = 0xFF04070C.toInt(),
+            surface = 0xFF0A0F17.toInt(),
+            raised = 0xFF101724.toInt(),
+            foreground = 0xFFDCE9F5.toInt(),
+            muted = 0xFF6F7F94.toInt(),
+            accent = 0xFF35B7FF.toInt(),
+            ok = 0xFF2FE0B0.toInt(),
+            warning = 0xFFF2B441.toInt(),
+            error = 0xFFFF5C6C.toInt(),
+            divider = 0xFF16202E.toInt(),
+            glowFirst = 0xFF0B3F6E.toInt(),
+            glowSecond = 0xFF0A5646.toInt(),
+            glowThird = 0xFF2A1B4E.toInt(),
+        )
 
-        fun of(key: String): Palette = ALL.firstOrNull { it.key == key } ?: MIDNIGHT
+        val ALL: List<Palette> = listOf(FORGE, MIDNIGHT, SLATE, DAYLIGHT)
+
+        fun of(key: String): Palette = ALL.firstOrNull { it.key == key } ?: FORGE
     }
 }
 
@@ -987,6 +1040,7 @@ object Preferences {
     private const val LANGUAGE = "language"
     private const val THEME = "theme"
     private const val SIGNING_KEY = "signing_key"
+    private const val TIMINGS = "build_timings"
 
     val LANGUAGES: List<Pair<String, String>> = listOf(
         "en" to "English",
@@ -1011,7 +1065,7 @@ object Preferences {
     }
 
     fun palette(context: Context): Palette =
-        Palette.of(store(context).getString(THEME, Palette.MIDNIGHT.key).orEmpty())
+        Palette.of(store(context).getString(THEME, Palette.FORGE.key).orEmpty())
 
     fun setPalette(context: Context, key: String) {
         store(context).edit().putString(THEME, key).apply()
@@ -1021,6 +1075,22 @@ object Preferences {
 
     fun setSigningKey(context: Context, path: String) {
         store(context).edit().putString(SIGNING_KEY, path).apply()
+    }
+
+    /**
+     * How long each stage of the last successful build took on this device.
+     *
+     * The Core hands this back at the end of every build it finished, and it
+     * is given straight back to the Core at the start of the next one, which
+     * is what turns the estimate on the build screen from a guess made on
+     * some other machine into a measurement made on this one. It is a
+     * measurement of this phone and nothing else, so it is kept here rather
+     * than anywhere a project could carry it somewhere new.
+     */
+    fun timings(context: Context): String = store(context).getString(TIMINGS, "").orEmpty()
+
+    fun setTimings(context: Context, measured: String) {
+        store(context).edit().putString(TIMINGS, measured).apply()
     }
 
 }
@@ -1217,6 +1287,27 @@ class BuilderActivity : Activity() {
         const val IMAGE_REQUEST = 2
         const val ENTER_MILLIS = 260L
         const val LEAVE_MILLIS = 140L
+        /** How long a refusal is left on a ceremony before it comes down. */
+        const val REFUSAL_MILLIS = 1_400L
+        /** How often a ceremony is asked whether it is finished. */
+        const val LOOK_MILLIS = 60L
+        /** How often the Core is asked where the build has got to. */
+        const val WATCH_MILLIS = 40L
+        /** How long the finished figure is left on screen before it comes down. */
+        const val SETTLE_MILLIS = 620L
+
+        /** The Core's build stages, in its order, in this application's words. */
+        val STAGE_NAMES = listOf(
+            R.string.omni_stage_project,
+            R.string.omni_stage_resources,
+            R.string.omni_stage_java,
+            R.string.omni_stage_manifest,
+            R.string.omni_stage_dex,
+            R.string.omni_stage_package,
+            R.string.omni_stage_signing,
+            R.string.omni_stage_bundle,
+            R.string.omni_stage_verify,
+        )
         const val RISE_DP = 18
 
         const val DEFAULT_PACKAGE = "com.my.app"
@@ -1266,6 +1357,8 @@ class BuilderActivity : Activity() {
 
     private lateinit var palette: Palette
     private lateinit var aurora: AuroraView
+    private lateinit var veil: BinaryVeil
+    private lateinit var ceremony: FrameLayout
     private lateinit var bar: LinearLayout
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
@@ -1349,10 +1442,22 @@ class BuilderActivity : Activity() {
             addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
 
+        // A ceremony covers the application while it runs, and the veil
+        // covers the ceremony too: both sit above the shell rather than
+        // inside it, so no screen has to know either of them exists.
+        ceremony = FrameLayout(this).apply {
+            visibility = View.GONE
+            isClickable = true
+            setBackgroundColor(palette.background)
+        }
+        veil = BinaryVeil(this).apply { visibility = View.GONE }
+
         val stack = FrameLayout(this).apply {
             setBackgroundColor(palette.background)
             addView(aurora, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
             addView(shell, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(ceremony, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+            addView(veil, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
         setContentView(stack)
         fitAroundTheSystemBars(stack, roof)
@@ -1486,6 +1591,15 @@ class BuilderActivity : Activity() {
     private fun examine(): String =
         if (Sentry.refused(this)) "TAMPERED" else Sentry.check(this)
 
+    /**
+     * Goes to another screen, through the field of bits.
+     *
+     * The screen being left fades down while a wipe of 0s and 1s crosses the
+     * display; the swap happens under the brightest part of that wipe, and the
+     * screen being arrived at rises into place behind it. Nothing waits on
+     * anything: the whole thing is over in under half a second, and a second
+     * press during it lands on the screen that is arriving.
+     */
     private fun go(next: Screen) {
         if (next == screen) {
             return
@@ -1496,12 +1610,42 @@ class BuilderActivity : Activity() {
             .translationY(-gap(RISE_DP / 6).toFloat())
             .setDuration(LEAVE_MILLIS)
             .setInterpolator(AccelerateInterpolator())
+            .start()
+        veil.sweep(palette.accent) {
+            render(true)
+            scroller.scrollTo(0, 0)
+        }
+    }
+
+    /**
+     * Puts a ceremony over the whole application until it is finished.
+     *
+     * What was on screen underneath is left exactly as it was. A ceremony is
+     * something happening on top of the application rather than a screen of
+     * its own, so when it ends the person is looking at what they were looking
+     * at before it started.
+     */
+    private fun showCeremony(view: View) {
+        ceremony.removeAllViews()
+        ceremony.addView(view, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        ceremony.alpha = 0f
+        ceremony.visibility = View.VISIBLE
+        ceremony.animate().alpha(1f).setDuration(ENTER_MILLIS).start()
+    }
+
+    private fun hideCeremony(then: () -> Unit) {
+        ceremony.animate()
+            .alpha(0f)
+            .setDuration(LEAVE_MILLIS)
             .withEndAction {
-                render(true)
-                scroller.scrollTo(0, 0)
+                ceremony.removeAllViews()
+                ceremony.visibility = View.GONE
+                then()
             }
             .start()
     }
+
+    private fun ceremonyIsUp(): Boolean = ceremony.visibility == View.VISIBLE
 
     private fun render(animated: Boolean) {
         content.removeAllViews()
@@ -2696,20 +2840,82 @@ class BuilderActivity : Activity() {
         )
         val folder = keysFolder().absolutePath
 
-        working({ Builder.nativeCreateKey(folder, request.encode(), first) }) finished@{ answer ->
-            first.fill(' ')
-            keyPasswordView?.text?.clear()
-            keyPasswordAgainView?.text?.clear()
-            val root = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
-            if (!root.optBoolean("created", false)) {
-                showRefusal(Refusal.parse(root), results)
-                return@finished
-            }
-            val made = SigningKey.parse(root.getJSONObject("key"))
-            OmniLog.event(LogLevel.INFO, "keystore", "Key ${made.alias} created, ${made.fingerprint}")
-            Preferences.setSigningKey(this, made.path)
-            go(Screen.Keys)
+        // The ceremony runs for exactly as long as the key takes to make.
+        // Nothing here is on a timer: the particles keep circling until the
+        // Core hands back a fingerprint, and the seal at the end is played
+        // because a key exists and not because time has passed.
+        val forge = KeyForgeView(this, palette).apply {
+            caption = getString(R.string.omni_forge_title)
+            detail = getString(R.string.omni_forge_bits, request.bits)
         }
+        showCeremony(forge)
+        forge.begin()
+
+        Thread {
+            val answer = runCatching {
+                Builder.nativeCreateKey(folder, request.encode(), first)
+            }
+            runOnUiThread {
+                first.fill(' ')
+                keyPasswordView?.text?.clear()
+                keyPasswordAgainView?.text?.clear()
+                answer.fold({ document -> keyForged(forge, document) }) { error ->
+                    OmniLog.recordCrash(Thread.currentThread(), error)
+                    keyRefused(forge, error.message ?: error.javaClass.simpleName, null)
+                }
+            }
+        }.start()
+    }
+
+    /** What the Core said about the key, played out on the ceremony. */
+    private fun keyForged(forge: KeyForgeView, answer: String) {
+        val root = runCatching { JSONObject(answer) }.getOrNull()
+        if (root == null || !root.optBoolean("created", false)) {
+            keyRefused(forge, getString(R.string.omni_forge_refused), root)
+            return
+        }
+        val made = SigningKey.parse(root.getJSONObject("key"))
+        OmniLog.event(LogLevel.INFO, "keystore", "Key ${made.alias} created, ${made.fingerprint}")
+        Preferences.setSigningKey(this, made.path)
+        forge.caption = getString(R.string.omni_forge_sealed)
+        forge.seal(made.fingerprint)
+        // The seal is an animation with an end, and the screen underneath is
+        // only changed once it has reached it.
+        waitFor(forge::sealedThrough) {
+            hideCeremony { go(Screen.Keys) }
+        }
+    }
+
+    private fun keyRefused(forge: KeyForgeView, said: String, root: JSONObject?) {
+        forge.caption = said
+        forge.detail = ""
+        forge.refuse()
+        ceremony.postDelayed({
+            hideCeremony {
+                results.removeAllViews()
+                if (root != null) {
+                    showRefusal(Refusal.parse(root), results)
+                } else {
+                    results.addView(notice(said, palette.error))
+                }
+            }
+        }, REFUSAL_MILLIS)
+    }
+
+    /**
+     * Runs `then` once `ready` is true, looking again every frame or so.
+     *
+     * A ceremony finishes when its own animation says it has, not when a
+     * duration this code guessed has elapsed, so what is waited on here is the
+     * view's own answer.
+     */
+    private fun waitFor(ready: () -> Boolean, then: () -> Unit) {
+        val look = object : Runnable {
+            override fun run() {
+                if (ready()) then() else ceremony.postDelayed(this, LOOK_MILLIS)
+            }
+        }
+        ceremony.postDelayed(look, LOOK_MILLIS)
     }
 
     private fun buildProject(root: String) {
@@ -2732,17 +2938,103 @@ class BuilderActivity : Activity() {
         val password = readSecret(buildPasswordView)
         val started = System.nanoTime()
 
-        working({
-            Builder.nativeBuildAll(
-                root,
-                apk.absolutePath,
-                aab.absolutePath,
-                keyPath,
-                if (password.isEmpty()) null else password,
+        // What the Core measured on this device last time is handed back
+        // before the build starts, which is what makes the estimate on screen
+        // this phone's own rather than the one this project shipped with.
+        val learned = Preferences.timings(this)
+        Builder.nativeBuildExpect(learned.ifEmpty { null })
+
+        val stage = BuildStageView(this, palette).apply {
+            title = getString(R.string.omni_stage_title)
+            stages = STAGE_NAMES.map { getString(it) }
+            note = getString(
+                if (learned.isEmpty()) R.string.omni_stage_measuring
+                else R.string.omni_stage_learned
             )
-        }) finished@{ answer ->
-            password.fill(' ')
-            buildPasswordView?.text?.clear()
+        }
+        showCeremony(stage)
+        stage.begin()
+        watchTheBuild(stage)
+
+        Thread {
+            val answer = runCatching {
+                Builder.nativeBuildAll(
+                    root,
+                    apk.absolutePath,
+                    aab.absolutePath,
+                    keyPath,
+                    if (password.isEmpty()) null else password,
+                )
+            }
+            runOnUiThread {
+                password.fill(' ')
+                buildPasswordView?.text?.clear()
+                answer.fold({ document ->
+                    settle(stage) { buildEnded(document, apk, aab, started) }
+                }) { error ->
+                    OmniLog.recordCrash(Thread.currentThread(), error)
+                    settle(stage) {
+                        results.addView(
+                            notice(error.message ?: error.javaClass.simpleName, palette.error)
+                        )
+                    }
+                }
+            }
+        }.start()
+    }
+
+    /**
+     * Reads where the build is, every frame, for as long as it is running.
+     *
+     * The percentage, the stage and the time left are all the Core's: this
+     * asks it what they are and hands them to the view, which is why the
+     * figure on screen cannot say something the build is not doing.
+     */
+    private fun watchTheBuild(view: BuildStageView) {
+        val look = object : Runnable {
+            override fun run() {
+                if (!ceremonyIsUp()) return
+                val report = runCatching { JSONObject(Builder.nativeBuildProgress()) }.getOrNull()
+                if (report != null) {
+                    val state = report.optString("state")
+                    view.observe(
+                        percent = report.optInt("percent"),
+                        stage = report.optInt("step", 1) - 1,
+                        count = report.optInt("steps", 1),
+                        finished = state == "built",
+                        refused = state == "refused",
+                    )
+                    view.remaining = when {
+                        state == "built" -> getString(R.string.omni_stage_built)
+                        state == "refused" -> getString(R.string.omni_refused)
+                        else -> left(report.optLong("leftMillis") / 1000L)
+                    }
+                }
+                view.postDelayed(this, WATCH_MILLIS)
+            }
+        }
+        view.post(look)
+    }
+
+    /**
+     * Lets the arc finish arriving at what it is showing, then hands over.
+     *
+     * A build that took two seconds should not have its ring snap from 60% to
+     * gone: the ceremony is given long enough to run the number up to where
+     * the Core left it, and only then does the screen underneath come back.
+     */
+    private fun settle(view: BuildStageView, then: () -> Unit) {
+        view.postDelayed({
+            view.rest()
+            hideCeremony {
+                results.removeAllViews()
+                then()
+            }
+        }, SETTLE_MILLIS)
+    }
+
+    private fun buildEnded(answer: String, apk: File, aab: File, started: Long) {
+        run finished@{
             val elapsed = (System.nanoTime() - started) / 1_000_000
             val outcome = runCatching { BuildOutcome.parse(answer) }.getOrElse {
                 results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
@@ -2755,6 +3047,10 @@ class BuilderActivity : Activity() {
                 outcome.findings.forEach { results.addView(quiet(it)) }
                 return@finished
             }
+
+            // Only a build that got all the way through measured every stage,
+            // so only that one teaches the next build anything.
+            outcome.timings?.let { Preferences.setTimings(this, it) }
 
             OmniLog.event(
                 LogLevel.INFO,

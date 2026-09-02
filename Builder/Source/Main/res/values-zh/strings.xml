@@ -125,4 +125,21 @@
     <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
     <string name="omni_about_how">一个项目由清单文件、你所选语言的文件夹和一个资源文件夹组成。按下构建会编译资源表、写出二进制清单、打包归档、签名，并写出可安装的安装包和可上传的应用包。这一切都在这台设备上完成：没有任何服务器看到你的项目，除了你本来就有的 Android 工具之外什么也不用。</string>
     <string name="omni_about_watch">这个应用的签名在每次启动、每次回到这个界面时都会检查，只要 Android 允许，后台也会继续检查。</string>
+    <string name="omni_forge_title">正在锻造密钥</string>
+    <string name="omni_forge_bits">%1$d 位，在本设备上生成</string>
+    <string name="omni_forge_sealed">密钥已封存</string>
+    <string name="omni_forge_refused">密钥未能生成</string>
+    <string name="omni_stage_title">正在构建</string>
+    <string name="omni_stage_project">项目</string>
+    <string name="omni_stage_resources">资源</string>
+    <string name="omni_stage_java">代码</string>
+    <string name="omni_stage_manifest">清单</string>
+    <string name="omni_stage_dex">Dex</string>
+    <string name="omni_stage_package">安装包</string>
+    <string name="omni_stage_signing">签名</string>
+    <string name="omni_stage_bundle">应用包</string>
+    <string name="omni_stage_verify">校验</string>
+    <string name="omni_stage_measuring">这是此处的首次构建，因此只是估计。</string>
+    <string name="omni_stage_learned">根据本设备自己的构建记录估算。</string>
+    <string name="omni_stage_built">安装包已写入</string>
 </resources>

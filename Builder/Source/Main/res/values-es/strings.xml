@@ -125,4 +125,21 @@
     <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
     <string name="omni_about_how">Un proyecto es un manifiesto, carpetas para los lenguajes que elegiste y una carpeta de recursos. Pulsar construir compila la tabla de recursos, escribe el manifiesto binario, empaqueta el archivo, lo firma y escribe un paquete para instalar y un bundle para subir. Todo ocurre en este dispositivo: ningún servidor ve tu proyecto, y no se usa nada más que las herramientas de Android que ya tienes.</string>
     <string name="omni_about_watch">La firma de esta aplicación se comprueba en cada inicio y en cada regreso a esta pantalla, y también en segundo plano mientras Android lo permita.</string>
+    <string name="omni_forge_title">FORJANDO LA CLAVE</string>
+    <string name="omni_forge_bits">%1$d bits, creada en este dispositivo</string>
+    <string name="omni_forge_sealed">CLAVE SELLADA</string>
+    <string name="omni_forge_refused">LA CLAVE NO SE CREÓ</string>
+    <string name="omni_stage_title">CONSTRUYENDO</string>
+    <string name="omni_stage_project">Proyecto</string>
+    <string name="omni_stage_resources">Recursos</string>
+    <string name="omni_stage_java">Código</string>
+    <string name="omni_stage_manifest">Manifiesto</string>
+    <string name="omni_stage_dex">Dex</string>
+    <string name="omni_stage_package">Paquete</string>
+    <string name="omni_stage_signing">Firma</string>
+    <string name="omni_stage_bundle">Bundle</string>
+    <string name="omni_stage_verify">Comprobación</string>
+    <string name="omni_stage_measuring">Primera construcción aquí, así que esto es una estimación.</string>
+    <string name="omni_stage_learned">Calculado con las propias construcciones de este dispositivo.</string>
+    <string name="omni_stage_built">PAQUETE ESCRITO</string>
 </resources>

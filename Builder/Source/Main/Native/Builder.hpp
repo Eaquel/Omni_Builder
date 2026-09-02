@@ -19,6 +19,10 @@ char *omni_build_all(const char *root, const char *package_path,
                      const char *bundle_path, const char *key_path,
                      const char *key_password);
 
+char *omni_build_progress(void);
+
+void omni_build_expect(const char *timings);
+
 char *omni_verify_self(const char *package_path,
                        const char *expected_certificate);
 

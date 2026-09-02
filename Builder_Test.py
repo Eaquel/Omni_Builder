@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parent
 WORK = ROOT / "Tests"
 CORE = ROOT / "Builder.rs"
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt"
+KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
 COMPILERS = ROOT / "Compilers"
 
@@ -40,6 +41,19 @@ CONFORMANCE = {
     "OMNI_REQUIRE_IMAGE_CONFORMANCE": "1",
     "OMNI_REQUIRE_INFLATE_CONFORMANCE": "1",
 }
+
+
+def interface() -> str:
+    """Every line of Kotlin in this application, as one text.
+
+    The interface is more than one file -- the ceremonies are their own -- so a
+    check that reads only the file the activity lives in would let a string
+    nothing declares, or a native method nothing exports, through in any of the
+    others.
+    """
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(KOTLIN_ROOT.rglob("*.kt"))
+    )
 
 
 class Skip(Exception):
@@ -250,8 +264,7 @@ def check_strings() -> str:
 
     # android.R.string.* are the framework's own; only this project's are ours.
     used = set(
-        re.findall(r"(?<!android\.)\bR\.string\.([a-z_0-9]+)",
-                   KOTLIN.read_text(encoding="utf-8"))
+        re.findall(r"(?<!android\.)\bR\.string\.([a-z_0-9]+)", interface())
     )
     generated = {"omni_expected_certificate"}
     fromXml = {"omni_app_name"}
@@ -298,8 +311,7 @@ def check_bridge() -> str:
 
     declared = sorted(
         f"Java_com_omni_builder_Builder_{name}"
-        for name in re.findall(r"external fun (native[A-Za-z]*)",
-                               KOTLIN.read_text(encoding="utf-8"))
+        for name in re.findall(r"external fun (native[A-Za-z]*)", interface())
     ) + ["JNI_OnLoad"]
     declared = sorted(declared)
 

@@ -125,4 +125,21 @@
     <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
     <string name="omni_about_how">Проект — это манифест, папки для выбранных языков и папка ресурсов. Нажатие «Собрать» компилирует таблицу ресурсов, пишет двоичный манифест, упаковывает архив, подписывает его и пишет пакет для установки и bundle для загрузки. Всё происходит на этом устройстве: ваш проект не видит ни один сервер, и не используется ничего, кроме инструментов Android, которые у вас уже есть.</string>
     <string name="omni_about_watch">Подпись этого приложения проверяется при каждом запуске и каждом возврате на этот экран, а также в фоне, пока Android это позволяет.</string>
+    <string name="omni_forge_title">КЛЮЧ СОЗДАЁТСЯ</string>
+    <string name="omni_forge_bits">%1$d бит, создан на этом устройстве</string>
+    <string name="omni_forge_sealed">КЛЮЧ ЗАПЕЧАТАН</string>
+    <string name="omni_forge_refused">КЛЮЧ НЕ СОЗДАН</string>
+    <string name="omni_stage_title">СБОРКА</string>
+    <string name="omni_stage_project">Проект</string>
+    <string name="omni_stage_resources">Ресурсы</string>
+    <string name="omni_stage_java">Код</string>
+    <string name="omni_stage_manifest">Манифест</string>
+    <string name="omni_stage_dex">Dex</string>
+    <string name="omni_stage_package">Пакет</string>
+    <string name="omni_stage_signing">Подпись</string>
+    <string name="omni_stage_bundle">Bundle</string>
+    <string name="omni_stage_verify">Проверка</string>
+    <string name="omni_stage_measuring">Первая сборка здесь, поэтому это лишь оценка.</string>
+    <string name="omni_stage_learned">Рассчитано по собственным сборкам этого устройства.</string>
+    <string name="omni_stage_built">ПАКЕТ ЗАПИСАН</string>
 </resources>

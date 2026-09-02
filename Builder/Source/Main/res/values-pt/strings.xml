@@ -125,4 +125,21 @@
     <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
     <string name="omni_about_how">Um projeto é um manifesto, pastas para as linguagens que escolheste e uma pasta de recursos. Carregar em construir compila a tabela de recursos, escreve o manifesto binário, empacota o arquivo, assina-o e escreve um pacote para instalar e um bundle para enviar. Tudo acontece neste aparelho: nenhum servidor vê o teu projeto, e não se usa nada além das ferramentas Android que já tens.</string>
     <string name="omni_about_watch">A assinatura desta aplicação é verificada a cada arranque e a cada regresso a este ecrã, e ainda em segundo plano enquanto o Android permitir.</string>
+    <string name="omni_forge_title">FORJANDO A CHAVE</string>
+    <string name="omni_forge_bits">%1$d bits, criada neste dispositivo</string>
+    <string name="omni_forge_sealed">CHAVE SELADA</string>
+    <string name="omni_forge_refused">A CHAVE NÃO FOI CRIADA</string>
+    <string name="omni_stage_title">CONSTRUINDO</string>
+    <string name="omni_stage_project">Projeto</string>
+    <string name="omni_stage_resources">Recursos</string>
+    <string name="omni_stage_java">Código</string>
+    <string name="omni_stage_manifest">Manifesto</string>
+    <string name="omni_stage_dex">Dex</string>
+    <string name="omni_stage_package">Pacote</string>
+    <string name="omni_stage_signing">Assinatura</string>
+    <string name="omni_stage_bundle">Bundle</string>
+    <string name="omni_stage_verify">Verificação</string>
+    <string name="omni_stage_measuring">Primeira construção aqui, portanto isto é uma estimativa.</string>
+    <string name="omni_stage_learned">Calculado a partir das construções deste dispositivo.</string>
+    <string name="omni_stage_built">PACOTE ESCRITO</string>
 </resources>

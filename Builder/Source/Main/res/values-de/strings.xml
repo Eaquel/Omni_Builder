@@ -125,4 +125,21 @@
     <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
     <string name="omni_about_how">Ein Projekt besteht aus einem Manifest, Ordnern für die gewählten Sprachen und einem Ressourcenordner. Ein Druck auf Bauen übersetzt die Ressourcentabelle, schreibt das binäre Manifest, packt das Archiv, signiert es und schreibt ein Paket zum Installieren und ein Bundle zum Hochladen. Alles geschieht auf diesem Gerät: kein Server sieht dein Projekt, und nichts außer den Android-Werkzeugen, die du ohnehin hast, wird benutzt.</string>
     <string name="omni_about_watch">Die Signatur dieser Anwendung wird bei jedem Start und bei jeder Rückkehr zu diesem Bildschirm geprüft, und weiter im Hintergrund, solange Android es zulässt.</string>
+    <string name="omni_forge_title">SCHLÜSSEL WIRD GESCHMIEDET</string>
+    <string name="omni_forge_bits">%1$d Bit, auf diesem Gerät erzeugt</string>
+    <string name="omni_forge_sealed">SCHLÜSSEL VERSIEGELT</string>
+    <string name="omni_forge_refused">DER SCHLÜSSEL WURDE NICHT ERZEUGT</string>
+    <string name="omni_stage_title">WIRD GEBAUT</string>
+    <string name="omni_stage_project">Projekt</string>
+    <string name="omni_stage_resources">Ressourcen</string>
+    <string name="omni_stage_java">Code</string>
+    <string name="omni_stage_manifest">Manifest</string>
+    <string name="omni_stage_dex">Dex</string>
+    <string name="omni_stage_package">Paket</string>
+    <string name="omni_stage_signing">Signatur</string>
+    <string name="omni_stage_bundle">Bundle</string>
+    <string name="omni_stage_verify">Prüfung</string>
+    <string name="omni_stage_measuring">Erster Build hier, das ist also eine Schätzung.</string>
+    <string name="omni_stage_learned">Aus den eigenen Builds dieses Geräts berechnet.</string>
+    <string name="omni_stage_built">PAKET GESCHRIEBEN</string>
 </resources>

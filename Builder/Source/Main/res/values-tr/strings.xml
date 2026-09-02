@@ -125,4 +125,21 @@
     <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
     <string name="omni_about_how">Bir proje; bir manifest, seçtiğin diller için klasörler ve bir kaynak klasöründen oluşur. Derle\'ye bastığında kaynak tablosu derlenir, ikili manifest yazılır, arşiv paketlenir, imzalanır ve kurulacak bir paket ile yüklenecek bir demet yazılır. Her şey bu cihazda olur: projeni hiçbir sunucu görmez ve zaten sende olan Android araçlarından başkası kullanılmaz.</string>
     <string name="omni_about_watch">Bu uygulamanın imzası her başlangıçta ve bu ekrana her dönüşte, ayrıca Android izin verdiği sürece arka planda denetlenir.</string>
+    <string name="omni_forge_title">ANAHTAR DÖVÜLÜYOR</string>
+    <string name="omni_forge_bits">%1$d bit, bu cihazda üretildi</string>
+    <string name="omni_forge_sealed">ANAHTAR MÜHÜRLENDİ</string>
+    <string name="omni_forge_refused">ANAHTAR ÜRETİLMEDİ</string>
+    <string name="omni_stage_title">DERLENİYOR</string>
+    <string name="omni_stage_project">Proje</string>
+    <string name="omni_stage_resources">Kaynaklar</string>
+    <string name="omni_stage_java">Kod</string>
+    <string name="omni_stage_manifest">Manifest</string>
+    <string name="omni_stage_dex">Dex</string>
+    <string name="omni_stage_package">Paket</string>
+    <string name="omni_stage_signing">İmza</string>
+    <string name="omni_stage_bundle">Demet</string>
+    <string name="omni_stage_verify">Denetim</string>
+    <string name="omni_stage_measuring">Buradaki ilk derleme, bu yüzden bu bir tahmin.</string>
+    <string name="omni_stage_learned">Bu cihazın kendi derlemelerinden hesaplandı.</string>
+    <string name="omni_stage_built">PAKET YAZILDI</string>
 </resources>
