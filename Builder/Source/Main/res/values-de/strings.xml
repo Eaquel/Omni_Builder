@@ -201,4 +201,7 @@
     <string name="omni_depends_clashes">Doppelt deklariert</string>
     <string name="omni_depends_clash_note">Zwei Dateien deklarieren dieselbe Klasse. Welche ein Build nimmt, ist nichts, was dem Zufall überlassen wird, also lehnt er ab. Entfernen Sie eine davon.</string>
     <string name="omni_depends_note">Eine Abhängigkeit ist eine Datei im Ordner %1$s des Projekts. Es gibt keinen Resolver und kein Netz: was im Ordner liegt, ist das, wovon das Projekt abhängt.</string>
+    <string name="omni_editor_shape">AUSRICHTEN</string>
+    <string name="omni_editor_shaped">Ausgerichtet. Nur die Leerzeichen um die Zeilen haben sich geändert.</string>
+    <string name="omni_editor_shaped_none">Es war bereits ausgerichtet.</string>
 </resources>

@@ -201,4 +201,7 @@
     <string name="omni_depends_clashes">Dichiarato due volte</string>
     <string name="omni_depends_clash_note">Due file dichiarano la stessa classe. Quale usi una costruzione non si lascia al caso, quindi rifiuta. Togline uno.</string>
     <string name="omni_depends_note">Una dipendenza è un file nella cartella %1$s del progetto. Nessun resolver e nessuna rete: ciò che è nella cartella è ciò da cui il progetto dipende.</string>
+    <string name="omni_editor_shape">ALLINEA</string>
+    <string name="omni_editor_shaped">Allineato. È cambiato solo lo spazio attorno alle righe.</string>
+    <string name="omni_editor_shaped_none">Era già allineato.</string>
 </resources>

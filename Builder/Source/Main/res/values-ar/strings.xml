@@ -201,4 +201,7 @@
     <string name="omni_depends_clashes">مُعلَن مرتين</string>
     <string name="omni_depends_clash_note">ملفان يُعلنان الصنف نفسه. أيّهما يأخذه البناء ليس أمرًا يُترك للصدفة، لذا يرفض. احذف أحدهما.</string>
     <string name="omni_depends_note">الاعتمادية ملف في مجلد %1$s الخاص بالمشروع. لا مُحلِّل ولا شبكة: ما في المجلد هو ما يعتمد عليه المشروع.</string>
+    <string name="omni_editor_shape">تنسيق</string>
+    <string name="omni_editor_shaped">نُسِّق. لم يتغير سوى الفراغ حول الأسطر.</string>
+    <string name="omni_editor_shaped_none">كان منسّقًا أصلًا.</string>
 </resources>

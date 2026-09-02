@@ -422,6 +422,18 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeLayOut(
+    JNIEnv *env, jobject , jstring name, jstring text) {
+  std::string name_text;
+  std::string body_text;
+  if (name == nullptr || !JavaStringToUtf8(env, name, &name_text) ||
+      text == nullptr || !JavaStringToUtf8(env, text, &body_text)) {
+    ThrowJava(env, kIllegalState, "Laying out needs a name and the text.");
+    return nullptr;
+  }
+  return HandBack(env, omni_lay_out(name_text.c_str(), body_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDependencies(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;

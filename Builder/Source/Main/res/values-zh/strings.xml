@@ -201,4 +201,7 @@
     <string name="omni_depends_clashes">被声明了两次</string>
     <string name="omni_depends_clash_note">有两个文件声明了同一个类。构建用哪一个不是可以碰运气的事，所以它拒绝。删掉其中一个。</string>
     <string name="omni_depends_note">依赖是项目 %1$s 文件夹里的一个文件。没有解析器，也没有网络：文件夹里有什么，项目就依赖什么。</string>
+    <string name="omni_editor_shape">整理</string>
+    <string name="omni_editor_shaped">已整理。除了每行前后的空白之外没有改变任何东西。</string>
+    <string name="omni_editor_shaped_none">本来就是整齐的。</string>
 </resources>

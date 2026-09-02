@@ -552,6 +552,16 @@ object Builder {
     external fun nativeProjectTree(root: String): String
 
     /**
+     * Lays out a file, changing nothing but the whitespace around lines.
+     *
+     * Every character that is not whitespace comes back in the order it went
+     * in, so a file that compiled before compiles after, to the same bytes.
+     * The text goes over and comes back: nothing is read from disk and
+     * nothing is written to it.
+     */
+    external fun nativeLayOut(name: String, text: String): String
+
+    /**
      * What a project depends on, read out of the files themselves.
      *
      * There is no resolver and no network. What is in the project's library
@@ -3290,6 +3300,10 @@ class BuilderActivity : Activity() {
         tools.addView(tool(getString(R.string.omni_editor_uses), palette.accent) {
             findUses(root, editor)
         })
+        tools.addView(tool(getString(R.string.omni_editor_shape), palette.accent) {
+            layOut(path.substringAfterLast('/'), editor)
+            mark()
+        })
         content.addView(tools)
 
         val sheet = card()
@@ -3394,6 +3408,33 @@ class BuilderActivity : Activity() {
 
     private fun isNamePart(c: Char): Boolean =
         c.isLetterOrDigit() || c == '_' || c == '$'
+
+    /**
+     * Lays the open file out, in place, as one edit.
+     *
+     * One edit rather than many, so undo takes it back in one press: a
+     * formatter somebody has to undo forty times is a formatter they stop
+     * pressing.
+     */
+    private fun layOut(name: String, editor: CodeEditor) {
+        results.removeAllViews()
+        val held = editor.text ?: return
+        val answer = runCatching {
+            JSONObject(Builder.nativeLayOut(name, held.toString()))
+        }.getOrNull()
+        if (answer == null || !answer.optBoolean("laid", false)) {
+            answer?.let { showRefusal(Refusal.parse(it), results) }
+            return
+        }
+        if (!answer.optBoolean("changed", false)) {
+            results.addView(notice(getString(R.string.omni_editor_shaped_none), palette.muted))
+            return
+        }
+        val caret = editor.selectionStart
+        held.replace(0, held.length, answer.optString("text"))
+        editor.setSelection(caret.coerceIn(0, editor.text?.length ?: 0))
+        results.addView(notice(getString(R.string.omni_editor_shaped), palette.ok))
+    }
 
     /** The word the caret is in, or an empty string when it is not in one. */
     private fun wordAt(editor: CodeEditor): String {

@@ -201,4 +201,7 @@
     <string name="omni_depends_clashes">Объявлено дважды</string>
     <string name="omni_depends_clash_note">Два файла объявляют один и тот же класс. Какой возьмёт сборка — не то, что оставляют на случай, поэтому она отклоняется. Уберите один.</string>
     <string name="omni_depends_note">Зависимость — это файл в папке %1$s проекта. Ни резолвера, ни сети: что лежит в папке, от того проект и зависит.</string>
+    <string name="omni_editor_shape">ВЫРОВНЯТЬ</string>
+    <string name="omni_editor_shaped">Выровнено. Изменились только пробелы вокруг строк.</string>
+    <string name="omni_editor_shaped_none">Оно уже было выровнено.</string>
 </resources>

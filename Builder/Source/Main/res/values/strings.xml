@@ -201,4 +201,7 @@
     <string name="omni_depends_clashes">Declared twice</string>
     <string name="omni_depends_clash_note">Two files declare the same class. Which one a build uses is not something to leave to chance, so it refuses. Remove one of them.</string>
     <string name="omni_depends_note">A dependency is a file in the project\'s %1$s folder. There is no resolver and no network: what is in the folder is what the project depends on.</string>
+    <string name="omni_editor_shape">LAY OUT</string>
+    <string name="omni_editor_shaped">Laid out. Nothing but the whitespace around lines changed.</string>
+    <string name="omni_editor_shaped_none">It was already laid out.</string>
 </resources>

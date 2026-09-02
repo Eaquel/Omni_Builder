@@ -201,4 +201,7 @@
     <string name="omni_depends_clashes">İki kez tanımlanan</string>
     <string name="omni_depends_clash_note">İki dosya aynı sınıfı tanımlıyor. Derlemenin hangisini kullanacağı şansa bırakılacak bir şey değil, o yüzden reddediyor. Birini kaldır.</string>
     <string name="omni_depends_note">Bağımlılık, projenin %1$s klasöründeki bir dosyadır. Çözümleyici ve ağ yok: klasörde ne varsa proje ona bağlıdır.</string>
+    <string name="omni_editor_shape">DÜZENLE</string>
+    <string name="omni_editor_shaped">Düzenlendi. Satır başı ve sonundaki boşluktan başka bir şey değişmedi.</string>
+    <string name="omni_editor_shaped_none">Zaten düzenliydi.</string>
 </resources>

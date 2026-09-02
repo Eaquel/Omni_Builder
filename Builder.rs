@@ -34370,6 +34370,197 @@ pub mod depends {
     }
 }
 
+/// Laying out a file, without changing what is in it.
+///
+/// A formatter that rewrites code is a formatter nobody trusts on a phone,
+/// where the file is the only copy. This one makes exactly one promise and
+/// keeps it: the only thing that changes is the whitespace at the start and
+/// the end of a line. Every character that is not whitespace, in the order it
+/// was in, comes out the same -- so a file that compiled before compiles
+/// after, to the same bytes, and the suite says so by compiling both.
+///
+/// What that buys is the thing worth having on a phone: indentation that
+/// follows the braces without anybody counting spaces with a thumb.
+pub mod shape {
+
+    /// One level of indentation, in spaces. Four, as Java has always been.
+    pub const STEP: usize = 4;
+
+    /// The most a line is indented, past which something is wrong and making
+    /// it worse by another eighty spaces helps nobody.
+    pub const DEEPEST: usize = 24;
+
+    /// What the scanner is in the middle of, at the start of a line.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    struct Standing {
+        braces: usize,
+        brackets: usize,
+        /// Inside a `/* */`, which runs across lines.
+        comment: bool,
+        /// Inside a `"""` text block, where every character is the string's.
+        text_block: bool,
+    }
+
+    /// Reads one line and says what the next one starts inside.
+    ///
+    /// Strings, characters and comments are stepped over rather than counted,
+    /// so a brace in a string is a brace in a string.
+    fn after(line: &str, mut held: Standing) -> Standing {
+        let bytes = line.as_bytes();
+        let mut at = 0usize;
+        while at < bytes.len() {
+            let byte = bytes[at];
+
+            if held.comment {
+                if byte == b'*' && bytes.get(at + 1) == Some(&b'/') {
+                    held.comment = false;
+                    at += 2;
+                    continue;
+                }
+                at += 1;
+                continue;
+            }
+
+            if held.text_block {
+                if line[at..].starts_with("\"\"\"") {
+                    held.text_block = false;
+                    at += 3;
+                    continue;
+                }
+                at += 1;
+                continue;
+            }
+
+            match byte {
+                b'/' if bytes.get(at + 1) == Some(&b'/') => return held,
+                b'/' if bytes.get(at + 1) == Some(&b'*') => {
+                    held.comment = true;
+                    at += 2;
+                }
+                b'"' if line[at..].starts_with("\"\"\"") => {
+                    held.text_block = true;
+                    at += 3;
+                }
+                b'"' | b'\'' => {
+                    let quote = byte;
+                    at += 1;
+                    while at < bytes.len() {
+                        if bytes[at] == b'\\' {
+                            at += 2;
+                            continue;
+                        }
+                        if bytes[at] == quote {
+                            at += 1;
+                            break;
+                        }
+                        at += 1;
+                    }
+                }
+                b'{' => {
+                    held.braces += 1;
+                    at += 1;
+                }
+                b'}' => {
+                    held.braces = held.braces.saturating_sub(1);
+                    at += 1;
+                }
+                b'(' | b'[' => {
+                    held.brackets += 1;
+                    at += 1;
+                }
+                b')' | b']' => {
+                    held.brackets = held.brackets.saturating_sub(1);
+                    at += 1;
+                }
+                _ => at += 1,
+            }
+        }
+        held
+    }
+
+    /// How far in this line belongs, given what it starts inside.
+    fn indent_for(trimmed: &str, held: Standing) -> usize {
+        let mut depth = held.braces;
+        // A line that begins by closing what the last one opened belongs a
+        // level out, with the thing it closes.
+        if trimmed.starts_with('}') || trimmed.starts_with(')') || trimmed.starts_with(']') {
+            depth = depth.saturating_sub(1);
+        }
+        // A label, and the arms of a switch, sit a level in from the switch
+        // itself, which the braces do not say.
+        if held.brackets > 0 {
+            depth += 1;
+        }
+        depth.min(DEEPEST)
+    }
+
+    /// Lays out Java, changing nothing but the whitespace around each line.
+    pub fn java(source: &str) -> String {
+        let mut out = String::with_capacity(source.len() + source.len() / 8);
+        let mut held = Standing::default();
+
+        for line in source.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.is_empty() {
+                // A blank line is blank rather than a line of spaces.
+                out.push('\n');
+                held = after(line, held);
+                continue;
+            }
+
+            if held.text_block {
+                // Every character inside one belongs to the string.
+                out.push_str(line);
+                out.push('\n');
+                held = after(line, held);
+                continue;
+            }
+
+            if held.comment {
+                // The middle of a block comment: a `*` line is lined up under
+                // the one that opened it, and anything else is left alone,
+                // because somebody drawing a diagram in a comment meant it.
+                if trimmed.starts_with('*') {
+                    out.push_str(&" ".repeat(indent_for(trimmed, held) * STEP + 1));
+                    out.push_str(trimmed);
+                } else {
+                    out.push_str(line.trim_end());
+                }
+                out.push('\n');
+                held = after(line, held);
+                continue;
+            }
+
+            out.push_str(&" ".repeat(indent_for(trimmed, held) * STEP));
+            out.push_str(trimmed);
+            out.push('\n');
+            held = after(line, held);
+        }
+
+        // One newline at the end, and one only. A file that ended without one
+        // gets one; a file that ended with six gets one.
+        while out.ends_with("\n\n") {
+            out.pop();
+        }
+        if out.is_empty() {
+            return String::new();
+        }
+        out
+    }
+
+    /// Everything on a line that is not whitespace, in the order it is in.
+    ///
+    /// This is what laying a file out is not allowed to change, and it is what
+    /// the suite compares before and after.
+    pub fn ink(source: &str) -> String {
+        source
+            .chars()
+            .filter(|held| !held.is_whitespace())
+            .collect()
+    }
+}
+
 pub mod progress {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
@@ -35231,6 +35422,43 @@ pub mod ffi {
     /// the only two: the first says whether case counts, the second whether
     /// `at` may match inside `that`.
     /// What the manifest says, as the things a person changes.
+    /// Lays out a file, changing nothing but the whitespace around lines.
+    ///
+    /// The text goes over and comes back; nothing is read from disk and
+    /// nothing is written to it, so what an editor is showing is what is laid
+    /// out rather than whatever was last saved.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_lay_out(name: *const c_char, text: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(name), Some(text)) = (text_from(name), text_from(text)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            if name.to_ascii_lowercase().ends_with(".java") {
+                let laid = crate::shape::java(&text);
+                w.field_bool("laid", true);
+                w.field_bool("changed", laid != text);
+                w.field_str("text", &laid);
+            } else {
+                // Only Java, and said so rather than handing back something
+                // laid out by rules that are not that language's.
+                w.field_bool("laid", false);
+                w.field_str("code", "EF001");
+                w.field_str(
+                    "error",
+                    "Laying out is for Java here, and this file is not Java.",
+                );
+                w.begin_array(Some("context"));
+                w.element_str(&format!("File: {name}"));
+                w.end_array();
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     /// What a project depends on, read out of the files themselves.
     #[no_mangle]
     pub unsafe extern "C" fn omni_dependencies(root: *const c_char) -> *mut c_char {
@@ -50168,6 +50396,141 @@ class Screen
         assert!(!super::guard::fired(&policy, "EG002"));
 
         std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Laying a file out changes the whitespace around lines and nothing else.
+    ///
+    /// The promise is exact, so the test is exact: every character that is not
+    /// whitespace, in the order it was in, is the same afterwards. That is
+    /// what makes a formatter safe on a phone where the file is the only copy.
+    #[test]
+    fn laying_out_java_moves_nothing_but_the_whitespace_around_lines() {
+        let badly = "package com.tr.yt;\n\
+             import android.app.Activity;\n\
+             public final class Main extends Activity {\n\
+             int held = 0;\n\
+             void one() {\n\
+             if (held > 0) {\n\
+             held -= 1;\n\
+             }\n\
+             }\n\
+             void two(int a,\n\
+             int b) {\n\
+             held = a + b;\n\
+             }\n\
+             }\n";
+
+        let laid = super::shape::java(badly);
+        assert_eq!(
+            super::shape::ink(&laid),
+            super::shape::ink(badly),
+            "something other than whitespace moved"
+        );
+
+        // And it is laid out: braces step in, closers step back out.
+        let lines: Vec<&str> = laid.lines().collect();
+        let indent = |text: &str| text.len() - text.trim_start().len();
+        assert_eq!(indent(lines[0]), 0, "{:?}", lines[0]);
+        assert_eq!(indent(lines[3]), 4, "{:?}", lines[3]);
+        assert_eq!(indent(lines[5]), 8, "{:?}", lines[5]);
+        assert_eq!(indent(lines[6]), 12, "{:?}", lines[6]);
+        assert_eq!(indent(lines[7]), 8, "{:?}", lines[7]);
+        assert_eq!(indent(lines[8]), 4, "{:?}", lines[8]);
+        // A line inside open brackets is a continuation of the one above it.
+        assert_eq!(indent(lines[10]), 8, "{:?}", lines[10]);
+
+        // Doing it again does nothing, which is what makes it safe to run on
+        // save.
+        assert_eq!(super::shape::java(&laid), laid, "it is not settled");
+
+        // Trailing whitespace goes, and a file ends with exactly one newline.
+        assert!(!laid.lines().any(|line| line.ends_with(' ')));
+        assert!(laid.ends_with("}\n"));
+        assert_eq!(super::shape::java("class A {}\n\n\n\n"), "class A {}\n");
+        assert_eq!(super::shape::java("class A {}"), "class A {}\n");
+        assert_eq!(super::shape::java(""), "");
+    }
+
+    /// A brace inside a string is a brace inside a string.
+    #[test]
+    fn laying_out_java_does_not_count_what_is_inside_a_string() {
+        let source = "class A {\n\
+             String a = \"{{{\";\n\
+             char b = '}';\n\
+             // } a comment with a brace\n\
+             /* } and a block one */\n\
+             int c = 1;\n\
+             }\n";
+        let laid = super::shape::java(source);
+        assert_eq!(super::shape::ink(&laid), super::shape::ink(source));
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        for line in laid.lines().skip(1).take(5) {
+            assert_eq!(indent(line), 4, "{line:?}");
+        }
+        assert_eq!(indent(laid.lines().last().unwrap()), 0);
+    }
+
+    /// Every character inside a text block belongs to the string, so none of
+    /// them move.
+    #[test]
+    fn laying_out_java_leaves_a_text_block_exactly_as_it_is() {
+        let source = "class A {\n\
+             String held = \"\"\"\n\
+             \x20     one\n\
+             \x20         two\n\
+             \x20     three\n\
+             \x20     \"\"\";\n\
+             }\n";
+        let laid = super::shape::java(source);
+        assert!(
+            laid.contains("      one\n          two\n      three\n"),
+            "a text block was re-indented, which changes the string it is\n{laid}"
+        );
+        assert_eq!(super::shape::ink(&laid), super::shape::ink(source));
+    }
+
+    /// The strongest thing that can be said about a formatter: what it lays
+    /// out compiles to the same bytes as what it was given.
+    #[test]
+    fn what_is_laid_out_compiles_to_exactly_what_it_did_before() {
+        let sources = [
+            "package com.tr.yt;\npublic class Counted {\nprivate int held;\n\
+             public int next() {\nheld += 1;\nreturn held;\n}\n\
+             public String toString() {\nreturn \"held=\" + held;\n}\n}\n",
+            "package com.tr.yt;\nimport java.util.ArrayList;\nimport java.util.List;\n\
+             public class Kept {\n  private final List<String> all = new ArrayList<>();\n\
+             public void add(String one) { if (one != null) { all.add(one); } }\n\
+             public int size() { return all.size(); }\n}\n",
+            "package com.tr.yt;\npublic class Shapes {\n\
+             public static int of(Object held) {\n\
+             if (held instanceof String text) { return text.length(); }\n\
+             for (int index = 0; index < 3; index += 1) { if (index == 2) { return index; } }\n\
+             return 0;\n}\n}\n",
+        ];
+
+        for source in sources {
+            let laid = super::shape::java(source);
+            assert_ne!(laid, source, "this source was already laid out");
+            assert_eq!(super::shape::ink(&laid), super::shape::ink(source));
+
+            let classpath = crate::compilers::java::Classpath::new();
+            let before = crate::compilers::java::compile(source, &classpath)
+                .expect("the source must compile to begin with");
+            let after = crate::compilers::java::compile(&laid, &classpath)
+                .expect("and what was laid out must compile too");
+            assert_eq!(
+                before.len(),
+                after.len(),
+                "a different number of classes came out"
+            );
+            for ((one, first), (two, second)) in before.iter().zip(after.iter()) {
+                assert_eq!(one, two, "a class changed its name");
+                assert_eq!(
+                    first, second,
+                    "{one} came out as different bytes after being laid out"
+                );
+            }
+        }
     }
 
     /// What a project depends on is read out of the files, clashes included.
