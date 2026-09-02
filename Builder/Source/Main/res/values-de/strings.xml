@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">AUSRICHTEN</string>
     <string name="omni_editor_shaped">Ausgerichtet. Nur die Leerzeichen um die Zeilen haben sich geändert.</string>
     <string name="omni_editor_shaped_none">Es war bereits ausgerichtet.</string>
+    <string name="omni_build_said">%1$d Dinge, die der Build anzumerken hatte</string>
+    <string name="omni_health_title">Projektzustand</string>
+    <string name="omni_health_well">Hier ist nichts zu tun.</string>
+    <string name="omni_health_not">Einiges davon gehört erledigt, bevor es ausgeliefert wird.</string>
+    <string name="omni_health_code">Code</string>
+    <string name="omni_health_resources">Ressourcen</string>
+    <string name="omni_health_assets">Assets</string>
+    <string name="omni_health_libraries">Bibliotheken</string>
+    <string name="omni_health_whole">Das ganze Projekt</string>
+    <string name="omni_health_files">%1$d Dateien</string>
+    <string name="omni_health_no_icon">Kein Bild gesetzt, es installiert sich mit dem schlichten.</string>
+    <string name="omni_health_uncompiled">%1$d Dateien sind in einer Sprache, die dieser Build nicht kompiliert.</string>
+    <string name="omni_health_languages">Sprachen</string>
+    <string name="omni_health_short">%1$d fehlen</string>
+    <string name="omni_health_spare">%1$d fragt niemand ab</string>
+    <string name="omni_health_short_and_spare">%1$d fehlen, %2$d fragt niemand ab</string>
+    <string name="omni_health_language_note">Ein String, den die erste Sprache deklariert und eine Übersetzung nicht, ist ein Bildschirm in der falschen Sprache auf jemandes Telefon. Das Bauen der Anwendung hätte das nie gesagt.</string>
 </resources>

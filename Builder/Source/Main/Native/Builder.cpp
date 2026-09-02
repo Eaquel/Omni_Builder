@@ -422,6 +422,16 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectHealth(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Reading a project's health needs the project.");
+    return nullptr;
+  }
+  return HandBack(env, omni_project_health(root_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeLayOut(
     JNIEnv *env, jobject , jstring name, jstring text) {
   std::string name_text;

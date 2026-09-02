@@ -34561,6 +34561,250 @@ pub mod shape {
     }
 }
 
+/// What is right and wrong about a project, said before a build finds out.
+///
+/// Not a second compiler and not a linter: everything here is a fact about
+/// the files, counted or compared. What it is for is the class of mistake a
+/// build cannot see -- a language file that lost a string when somebody
+/// translated it, an icon nobody set, a folder of code in a language nothing
+/// compiles -- which turn into an application that installs and is wrong
+/// rather than a build that refuses.
+pub mod health {
+    use crate::diag::Diagnostic;
+    use crate::json::Writer;
+
+    /// One language file, against the one every other is compared to.
+    #[derive(Clone, Debug)]
+    pub struct Language {
+        /// The folder it is in: `values`, `values-tr`, and so on.
+        pub folder: String,
+        pub strings: usize,
+        /// What the base language declares and this one does not.
+        pub missing: Vec<String>,
+        /// What this one declares and the base language does not, which is a
+        /// string nothing can ever ask for.
+        pub extra: Vec<String>,
+    }
+
+    /// How many names are listed for one language before the rest are counted.
+    pub const MOST_NAMED: usize = 12;
+
+    /// The folder every other language is compared against: the one with no
+    /// qualifier on it, which is what a device falls back to.
+    pub const BASE_VALUES: &str = "values";
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Report {
+        pub files: usize,
+        pub bytes: u64,
+        pub code_files: usize,
+        pub code_bytes: u64,
+        pub resource_files: usize,
+        pub resource_bytes: u64,
+        pub asset_files: usize,
+        pub asset_bytes: u64,
+        pub library_files: usize,
+        pub library_bytes: u64,
+        pub has_icon: bool,
+        /// The folder every other language is compared against.
+        pub base: String,
+        pub languages: Vec<Language>,
+        /// Source in a language this build does not compile.
+        pub uncompiled: Vec<(String, String)>,
+    }
+
+    impl Report {
+        /// Whether anything here needs doing.
+        pub fn settled(&self) -> bool {
+            self.uncompiled.is_empty()
+                && self.has_icon
+                && self
+                    .languages
+                    .iter()
+                    .all(|held| held.missing.is_empty() && held.extra.is_empty())
+        }
+
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_bool("settled", self.settled());
+            w.field_u64("files", self.files as u64);
+            w.field_u64("bytes", self.bytes);
+            w.field_u64("codeFiles", self.code_files as u64);
+            w.field_u64("codeBytes", self.code_bytes);
+            w.field_u64("resourceFiles", self.resource_files as u64);
+            w.field_u64("resourceBytes", self.resource_bytes);
+            w.field_u64("assetFiles", self.asset_files as u64);
+            w.field_u64("assetBytes", self.asset_bytes);
+            w.field_u64("libraryFiles", self.library_files as u64);
+            w.field_u64("libraryBytes", self.library_bytes);
+            w.field_bool("hasIcon", self.has_icon);
+            w.field_str("base", &self.base);
+            w.begin_array(Some("languages"));
+            for one in &self.languages {
+                w.begin_object(None);
+                w.field_str("folder", &one.folder);
+                w.field_u64("strings", one.strings as u64);
+                w.begin_array(Some("missing"));
+                for name in one.missing.iter().take(MOST_NAMED) {
+                    w.element_str(name);
+                }
+                w.end_array();
+                w.field_u64("missingCount", one.missing.len() as u64);
+                w.begin_array(Some("extra"));
+                for name in one.extra.iter().take(MOST_NAMED) {
+                    w.element_str(name);
+                }
+                w.end_array();
+                w.field_u64("extraCount", one.extra.len() as u64);
+                w.end_object();
+            }
+            w.end_array();
+            w.begin_array(Some("uncompiled"));
+            for (language, path) in &self.uncompiled {
+                w.begin_object(None);
+                w.field_str("language", language);
+                w.field_str("path", path);
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// Every string a values file declares, by name.
+    ///
+    /// Read with the project's own XML reader rather than by looking for
+    /// quotes, so a name inside a comment is not a string and a file that does
+    /// not parse says so by declaring nothing.
+    fn names(text: &str, where_from: &str) -> Vec<String> {
+        let mut sink = crate::diag::Sink::new();
+        let Some(root) = crate::xml::parse(text, where_from, &mut sink) else {
+            return Vec::new();
+        };
+        let mut out: Vec<String> = root
+            .children
+            .iter()
+            .filter(|held| held.name == "string" || held.name == "string-array")
+            .filter_map(|held| {
+                held.attributes
+                    .iter()
+                    .find(|one| one.name == "name")
+                    .map(|one| one.value.clone())
+            })
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    pub fn of(root: &str) -> Result<Report, Diagnostic> {
+        let entries = crate::workspace::tree(root)?;
+        let mut out = Report {
+            base: "values".to_string(),
+            uncompiled: crate::builder::uncompiled_source(root)
+                .into_iter()
+                .map(|(language, path)| (language.to_string(), path))
+                .collect(),
+            ..Report::default()
+        };
+
+        let code_folders: Vec<&str> = crate::scaffold::LANGUAGES
+            .iter()
+            .map(|(_, folder, _, _)| *folder)
+            .collect();
+
+        for entry in &entries {
+            if entry.folder {
+                continue;
+            }
+            out.files += 1;
+            out.bytes += entry.bytes;
+            let first = entry.path.split('/').next().unwrap_or("");
+            if code_folders.contains(&first) {
+                out.code_files += 1;
+                out.code_bytes += entry.bytes;
+            } else if first == crate::scaffold::RES_FOLDER {
+                out.resource_files += 1;
+                out.resource_bytes += entry.bytes;
+            } else if first == crate::scaffold::ASSETS_FOLDER {
+                out.asset_files += 1;
+                out.asset_bytes += entry.bytes;
+            } else if first == crate::scaffold::LIBRARY_FOLDER {
+                out.library_files += 1;
+                out.library_bytes += entry.bytes;
+            }
+        }
+
+        out.has_icon = std::path::Path::new(&crate::scaffold::icon_path(root)).is_file();
+
+        // Every language against the base one. A string the base declares and
+        // a language does not is a screen in English on a phone set to
+        // something else; one a language declares and the base does not is a
+        // string nothing can ever ask for.
+        let strings_file = crate::scaffold::STRINGS_FILE;
+        let base_path = format!(
+            "{}/{}/{strings_file}",
+            crate::scaffold::RES_FOLDER,
+            BASE_VALUES
+        );
+        let base = crate::workspace::read_text(root, &base_path)
+            .map(|text| names(&text, &base_path))
+            .unwrap_or_default();
+
+        let mut folders: Vec<String> = entries
+            .iter()
+            .filter(|entry| !entry.folder && entry.path.ends_with(strings_file))
+            .filter_map(|entry| {
+                entry
+                    .path
+                    .rsplit_once('/')
+                    .and_then(|(held, _)| held.rsplit_once('/'))
+                    .map(|(_, folder)| folder.to_string())
+            })
+            .collect();
+        folders.sort();
+        folders.dedup();
+
+        for folder in folders {
+            if folder == BASE_VALUES {
+                continue;
+            }
+            let path = format!("{}/{folder}/{strings_file}", crate::scaffold::RES_FOLDER);
+            let held = crate::workspace::read_text(root, &path)
+                .map(|text| names(&text, &path))
+                .unwrap_or_default();
+            out.languages.push(Language {
+                folder,
+                strings: held.len(),
+                missing: base
+                    .iter()
+                    .filter(|one| !held.contains(one))
+                    .cloned()
+                    .collect(),
+                extra: held
+                    .iter()
+                    .filter(|one| !base.contains(one))
+                    .cloned()
+                    .collect(),
+            });
+        }
+
+        // The base itself, so the count of what everything is compared to is
+        // on the same list as everything else.
+        out.languages.insert(
+            0,
+            Language {
+                folder: "values".to_string(),
+                strings: base.len(),
+                missing: Vec::new(),
+                extra: Vec::new(),
+            },
+        );
+
+        Ok(out)
+    }
+}
+
 pub mod progress {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
@@ -35422,6 +35666,28 @@ pub mod ffi {
     /// the only two: the first says whether case counts, the second whether
     /// `at` may match inside `that`.
     /// What the manifest says, as the things a person changes.
+    /// What is right and wrong about a project, counted off its own files.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_project_health(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::health::of(&root) {
+                Ok(found) => {
+                    w.field_bool("read", true);
+                    found.write_json(&mut w, "health");
+                }
+                Err(error) => write_failure(&mut w, "read", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     /// Lays out a file, changing nothing but the whitespace around lines.
     ///
     /// The text goes over and comes back; nothing is read from disk and
@@ -50394,6 +50660,115 @@ class Screen
         assert_eq!(policy.verdict(), super::guard::Verdict::Refused);
         assert!(super::guard::fired(&policy, "EG001"));
         assert!(!super::guard::fired(&policy, "EG002"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// What is right and wrong about a project is counted rather than guessed.
+    #[test]
+    fn a_projects_health_is_counted_off_its_own_files() {
+        let directory = temp_directory("omni-health");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Whole".to_string(),
+                languages: vec!["java".to_string()],
+                locales: vec!["en".to_string(), "tr".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let whole = super::health::of(&root).expect("it must read");
+        assert!(whole.files > 0);
+        assert!(whole.bytes > 0);
+        assert!(whole.code_files > 0, "the scaffold writes an activity");
+        assert!(whole.resource_files > 0, "and a resource folder");
+        assert_eq!(whole.asset_files, 0);
+        assert_eq!(whole.library_files, 0);
+        // A new project has no picture of its own yet, which is a thing to
+        // say rather than a thing to hide.
+        assert!(!whole.has_icon);
+        assert!(whole.uncompiled.is_empty());
+
+        // Every language, with the base one first and every other compared
+        // against it.
+        assert_eq!(whole.languages[0].folder, super::health::BASE_VALUES);
+        assert!(whole.languages[0].strings > 0);
+        assert!(whole
+            .languages
+            .iter()
+            .any(|held| held.folder == "values-tr"));
+        for held in &whole.languages {
+            assert!(
+                held.missing.is_empty(),
+                "{}: {:?}",
+                held.folder,
+                held.missing
+            );
+            assert!(held.extra.is_empty(), "{}: {:?}", held.folder, held.extra);
+        }
+        assert!(!whole.settled(), "a project with no picture is not settled");
+
+        // One set, and it is.
+        let square = super::image::Raster::new(48, 48);
+        std::fs::write(
+            super::scaffold::icon_path(&root),
+            super::image::encode(&square).unwrap(),
+        )
+        .unwrap();
+        assert!(super::health::of(&root).unwrap().has_icon);
+        assert!(super::health::of(&root).unwrap().settled());
+
+        // A string taken out of one language is a screen in the wrong one.
+        let turkish = "Res/values-tr/strings.xml";
+        let text = super::workspace::read_text(&root, turkish).unwrap();
+        let short = text
+            .lines()
+            .filter(|line| !line.contains("app_name"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_ne!(short, text, "the base language must declare app_name");
+        super::workspace::write_text(&root, turkish, &short).unwrap();
+
+        let missing = super::health::of(&root).unwrap();
+        let held = missing
+            .languages
+            .iter()
+            .find(|one| one.folder == "values-tr")
+            .expect("the language is still there");
+        assert_eq!(held.missing, vec!["app_name"]);
+        assert!(held.extra.is_empty());
+        assert!(!missing.settled());
+
+        // And one nothing can ever ask for is the other way round.
+        super::workspace::write_text(
+            &root,
+            turkish,
+            &short.replace(
+                "</resources>",
+                "    <string name=\"never_asked_for\">Boş</string>\n</resources>",
+            ),
+        )
+        .unwrap();
+        let extra = super::health::of(&root).unwrap();
+        let held = extra
+            .languages
+            .iter()
+            .find(|one| one.folder == "values-tr")
+            .unwrap();
+        assert_eq!(held.extra, vec!["never_asked_for"]);
+        assert_eq!(held.missing, vec!["app_name"]);
+
+        // Source nothing compiles is on the list here as well as refused by
+        // the build, because this is where somebody looks first.
+        super::workspace::write_text(&root, "Kotlin/Screen.kt", "class Screen\n").unwrap();
+        let mixed = super::health::of(&root).unwrap();
+        assert_eq!(mixed.uncompiled.len(), 1);
+        assert_eq!(mixed.uncompiled[0].0, "kotlin");
+        assert!(mixed.code_files > whole.code_files, "it counts as code");
 
         std::fs::remove_dir_all(&directory).ok();
     }

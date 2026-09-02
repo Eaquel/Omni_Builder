@@ -552,6 +552,16 @@ object Builder {
     external fun nativeProjectTree(root: String): String
 
     /**
+     * What is right and wrong about a project, counted off its own files.
+     *
+     * Not a second compiler: the class of mistake this finds is the one a
+     * build cannot see -- a language file that lost a string, a picture
+     * nobody set -- which turns into an application that installs and is
+     * wrong rather than a build that refuses.
+     */
+    external fun nativeProjectHealth(root: String): String
+
+    /**
      * Lays out a file, changing nothing but the whitespace around lines.
      *
      * Every character that is not whitespace comes back in the order it went
@@ -1410,6 +1420,10 @@ private sealed interface Screen {
         override val tab = Tab.FILES
     }
 
+    data class Health(val root: String) : Screen {
+        override val tab = Tab.FILES
+    }
+
     data class Picture(val root: String, val path: String) : Screen {
         override val tab = Tab.FILES
     }
@@ -1897,6 +1911,7 @@ class BuilderActivity : Activity() {
             is Screen.Search -> renderSearch(here.root)
             is Screen.Manifest -> renderManifest(here.root)
             is Screen.Depends -> renderDepends(here.root)
+            is Screen.Health -> renderHealth(here.root)
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
@@ -1938,6 +1953,7 @@ class BuilderActivity : Activity() {
             is Screen.Search -> go(Screen.Files(here.root, ""))
             is Screen.Manifest -> go(Screen.Files(here.root, ""))
             is Screen.Depends -> go(Screen.Files(here.root, ""))
+            is Screen.Health -> go(Screen.Files(here.root, ""))
             is Screen.Build -> go(Screen.Files(here.root, ""))
             is Screen.Keys -> go(Screen.Settings)
             is Screen.NewKey -> go(Screen.Keys)
@@ -2309,6 +2325,9 @@ class BuilderActivity : Activity() {
         content.addView(subtle(getString(R.string.omni_depends_title), palette.accent) {
             go(Screen.Depends(root))
         })
+        content.addView(subtle(getString(R.string.omni_health_title), palette.accent) {
+            go(Screen.Health(root))
+        })
         content.addView(subtle(getString(R.string.omni_check_title), palette.accent) {
             checkProject(root)
         })
@@ -2317,6 +2336,131 @@ class BuilderActivity : Activity() {
         })
         content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
         content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    /**
+     * What is right and wrong about the project.
+     *
+     * Everything here is a fact about the files rather than an opinion about
+     * them. The one worth the screen is the languages: a string the base
+     * language declares and a translation does not is a screen in the wrong
+     * language on somebody's phone, and nothing about building the
+     * application would ever have said so.
+     */
+    private fun renderHealth(root: String) {
+        content.addView(heading(getString(R.string.omni_health_title)))
+
+        val answer = runCatching { JSONObject(Builder.nativeProjectHealth(root)) }.getOrNull()
+        val health = answer?.optJSONObject("health")
+        if (answer == null || !answer.optBoolean("read", false) || health == null) {
+            answer?.let { showRefusal(Refusal.parse(it), content) }
+            content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+                go(Screen.Files(root, ""))
+            })
+            return
+        }
+
+        val settled = health.optBoolean("settled", false)
+        content.addView(
+            notice(
+                getString(if (settled) R.string.omni_health_well else R.string.omni_health_not),
+                if (settled) palette.ok else palette.warning,
+            )
+        )
+
+        val sizes = card()
+        listOf(
+            Triple(R.string.omni_health_code, "codeFiles", "codeBytes"),
+            Triple(R.string.omni_health_resources, "resourceFiles", "resourceBytes"),
+            Triple(R.string.omni_health_assets, "assetFiles", "assetBytes"),
+            Triple(R.string.omni_health_libraries, "libraryFiles", "libraryBytes"),
+        ).forEach { (label, files, bytes) ->
+            sizes.addView(
+                keyValue(
+                    getString(label),
+                    getString(R.string.omni_health_files, health.optInt(files)),
+                    size(health.optLong(bytes)),
+                    palette.muted,
+                )
+            )
+        }
+        sizes.addView(rule(), MATCH_PARENT, 1)
+        sizes.addView(
+            keyValue(
+                getString(R.string.omni_health_whole),
+                getString(R.string.omni_health_files, health.optInt("files")),
+                size(health.optLong("bytes")),
+                palette.foreground,
+            )
+        )
+        content.addView(sizes)
+
+        if (!health.optBoolean("hasIcon", false)) {
+            content.addView(
+                row(
+                    getString(R.string.omni_health_no_icon),
+                    "",
+                    getString(R.string.omni_action_change),
+                    palette.warning,
+                ) { chooseImage(root) }
+            )
+        }
+
+        val uncompiled = health.optJSONArray("uncompiled")
+        if (uncompiled != null && uncompiled.length() > 0) {
+            content.addView(
+                notice(getString(R.string.omni_health_uncompiled, uncompiled.length()), palette.error)
+            )
+            val listed = card()
+            for (index in 0 until minOf(uncompiled.length(), 20)) {
+                val one = uncompiled.optJSONObject(index) ?: continue
+                listed.addView(
+                    keyValue(one.optString("path"), "", one.optString("language"), palette.error)
+                )
+            }
+            content.addView(listed)
+        }
+
+        val languages = health.optJSONArray("languages")
+        if (languages != null && languages.length() > 0) {
+            content.addView(heading(getString(R.string.omni_health_languages)))
+            val listed = card()
+            for (index in 0 until languages.length()) {
+                val one = languages.optJSONObject(index) ?: continue
+                val short = one.optInt("missingCount")
+                val spare = one.optInt("extraCount")
+                if (index > 0) {
+                    listed.addView(rule(), MATCH_PARENT, 1)
+                }
+                listed.addView(
+                    keyValue(
+                        one.optString("folder"),
+                        when {
+                            short > 0 && spare > 0 ->
+                                getString(R.string.omni_health_short_and_spare, short, spare)
+                            short > 0 -> getString(R.string.omni_health_short, short)
+                            spare > 0 -> getString(R.string.omni_health_spare, spare)
+                            else -> ""
+                        },
+                        one.optInt("strings").toString(),
+                        if (short > 0 || spare > 0) palette.warning else palette.ok,
+                    )
+                )
+                for (key in listOf("missing", "extra")) {
+                    val named = one.optJSONArray(key) ?: continue
+                    if (named.length() == 0) continue
+                    listed.addView(
+                        quiet((0 until named.length()).joinToString(", ") { named.getString(it) })
+                    )
+                }
+            }
+            content.addView(listed)
+            content.addView(quiet(getString(R.string.omni_health_language_note)))
+        }
+
+        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+            go(Screen.Files(root, ""))
+        })
     }
 
     /**
@@ -4434,6 +4578,25 @@ class BuilderActivity : Activity() {
                 )
             )
             results.addView(facts)
+
+            // What the build said on its way through. A package that was
+            // written with something worth saying about it says it here
+            // rather than nowhere: a warning only shown when a build fails is
+            // a warning nobody ever reads.
+            if (outcome.findings.isNotEmpty()) {
+                results.addView(
+                    heading(getString(R.string.omni_build_said, outcome.findings.size))
+                )
+                val said = card()
+                outcome.findings.forEachIndexed { index, one ->
+                    if (index > 0) {
+                        said.addView(rule(), MATCH_PARENT, 1)
+                    }
+                    said.addView(body(one))
+                }
+                results.addView(said)
+            }
+
             outcome.path?.let { actionsFor(File(it), results) }
         }
     }

@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">LAY OUT</string>
     <string name="omni_editor_shaped">Laid out. Nothing but the whitespace around lines changed.</string>
     <string name="omni_editor_shaped_none">It was already laid out.</string>
+    <string name="omni_build_said">%1$d things the build had to say</string>
+    <string name="omni_health_title">Project health</string>
+    <string name="omni_health_well">Nothing here needs doing.</string>
+    <string name="omni_health_not">Some of this needs doing before it ships.</string>
+    <string name="omni_health_code">Code</string>
+    <string name="omni_health_resources">Resources</string>
+    <string name="omni_health_assets">Assets</string>
+    <string name="omni_health_libraries">Libraries</string>
+    <string name="omni_health_whole">The whole project</string>
+    <string name="omni_health_files">%1$d files</string>
+    <string name="omni_health_no_icon">No picture is set, so it installs with the plain one.</string>
+    <string name="omni_health_uncompiled">%1$d files are in a language this build does not compile.</string>
+    <string name="omni_health_languages">Languages</string>
+    <string name="omni_health_short">%1$d missing</string>
+    <string name="omni_health_spare">%1$d nothing asks for</string>
+    <string name="omni_health_short_and_spare">%1$d missing, %2$d nothing asks for</string>
+    <string name="omni_health_language_note">A string the first language declares and a translation does not is a screen in the wrong language on somebody\'s phone. Nothing about building the application would have said so.</string>
 </resources>

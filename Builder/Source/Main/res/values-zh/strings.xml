@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">整理</string>
     <string name="omni_editor_shaped">已整理。除了每行前后的空白之外没有改变任何东西。</string>
     <string name="omni_editor_shaped_none">本来就是整齐的。</string>
+    <string name="omni_build_said">构建有 %1$d 处要说的</string>
+    <string name="omni_health_title">项目健康</string>
+    <string name="omni_health_well">这里没有需要处理的事。</string>
+    <string name="omni_health_not">其中有些要在发布前处理。</string>
+    <string name="omni_health_code">代码</string>
+    <string name="omni_health_resources">资源</string>
+    <string name="omni_health_assets">Assets</string>
+    <string name="omni_health_libraries">库</string>
+    <string name="omni_health_whole">整个项目</string>
+    <string name="omni_health_files">%1$d 个文件</string>
+    <string name="omni_health_no_icon">没有设置图片，安装时会用朴素的那个。</string>
+    <string name="omni_health_uncompiled">有 %1$d 个文件使用了本构建不编译的语言。</string>
+    <string name="omni_health_languages">语言</string>
+    <string name="omni_health_short">缺 %1$d 条</string>
+    <string name="omni_health_spare">%1$d 条没人用</string>
+    <string name="omni_health_short_and_spare">缺 %1$d 条，%2$d 条没人用</string>
+    <string name="omni_health_language_note">第一种语言声明了而某个翻译没有声明的字符串，就是别人手机上一块语言不对的界面。构建应用永远不会告诉你这件事。</string>
 </resources>

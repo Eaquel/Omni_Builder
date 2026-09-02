@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">ВЫРОВНЯТЬ</string>
     <string name="omni_editor_shaped">Выровнено. Изменились только пробелы вокруг строк.</string>
     <string name="omni_editor_shaped_none">Оно уже было выровнено.</string>
+    <string name="omni_build_said">%1$d замечаний от сборки</string>
+    <string name="omni_health_title">Состояние проекта</string>
+    <string name="omni_health_well">Здесь делать нечего.</string>
+    <string name="omni_health_not">Кое-что из этого стоит сделать до выпуска.</string>
+    <string name="omni_health_code">Код</string>
+    <string name="omni_health_resources">Ресурсы</string>
+    <string name="omni_health_assets">Assets</string>
+    <string name="omni_health_libraries">Библиотеки</string>
+    <string name="omni_health_whole">Весь проект</string>
+    <string name="omni_health_files">%1$d файлов</string>
+    <string name="omni_health_no_icon">Картинка не задана, поэтому ставится простая.</string>
+    <string name="omni_health_uncompiled">%1$d файлов на языке, который эта сборка не компилирует.</string>
+    <string name="omni_health_languages">Языки</string>
+    <string name="omni_health_short">не хватает %1$d</string>
+    <string name="omni_health_spare">%1$d никто не спрашивает</string>
+    <string name="omni_health_short_and_spare">не хватает %1$d, %2$d никто не спрашивает</string>
+    <string name="omni_health_language_note">Строка, которую объявляет первый язык, а перевод — нет, это экран не на том языке на чьём-то телефоне. Сборка приложения никогда бы об этом не сказала.</string>
 </resources>

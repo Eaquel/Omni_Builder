@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">تنسيق</string>
     <string name="omni_editor_shaped">نُسِّق. لم يتغير سوى الفراغ حول الأسطر.</string>
     <string name="omni_editor_shaped_none">كان منسّقًا أصلًا.</string>
+    <string name="omni_build_said">‏%1$d أمور كان للبناء أن يقولها</string>
+    <string name="omni_health_title">حال المشروع</string>
+    <string name="omni_health_well">لا شيء هنا يحتاج عملًا.</string>
+    <string name="omni_health_not">بعض هذا يحتاج عملًا قبل النشر.</string>
+    <string name="omni_health_code">الشيفرة</string>
+    <string name="omni_health_resources">الموارد</string>
+    <string name="omni_health_assets">الأصول</string>
+    <string name="omni_health_libraries">المكتبات</string>
+    <string name="omni_health_whole">المشروع كله</string>
+    <string name="omni_health_files">%1$d ملفات</string>
+    <string name="omni_health_no_icon">لا صورة محدَّدة، فيُثبَّت بالأيقونة البسيطة.</string>
+    <string name="omni_health_uncompiled">‏%1$d ملفات بلغة لا يترجمها هذا البناء.</string>
+    <string name="omni_health_languages">اللغات</string>
+    <string name="omni_health_short">ينقص %1$d</string>
+    <string name="omni_health_spare">‏%1$d لا يطلبها أحد</string>
+    <string name="omni_health_short_and_spare">ينقص %1$d، و%2$d لا يطلبها أحد</string>
+    <string name="omni_health_language_note">نص تُعلنه اللغة الأولى ولا تُعلنه ترجمة يعني شاشة بلغة خاطئة على هاتف أحدهم. بناء التطبيق ما كان ليقول ذلك أبدًا.</string>
 </resources>

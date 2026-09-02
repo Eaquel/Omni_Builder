@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">ALINEAR</string>
     <string name="omni_editor_shaped">Alineado. Solo cambió el espacio en blanco alrededor de las líneas.</string>
     <string name="omni_editor_shaped_none">Ya estaba alineado.</string>
+    <string name="omni_build_said">%1$d cosas que la construcción tuvo que decir</string>
+    <string name="omni_health_title">Salud del proyecto</string>
+    <string name="omni_health_well">Aquí no hay nada que hacer.</string>
+    <string name="omni_health_not">Algo de esto hay que hacerlo antes de publicarlo.</string>
+    <string name="omni_health_code">Código</string>
+    <string name="omni_health_resources">Recursos</string>
+    <string name="omni_health_assets">Assets</string>
+    <string name="omni_health_libraries">Bibliotecas</string>
+    <string name="omni_health_whole">Todo el proyecto</string>
+    <string name="omni_health_files">%1$d archivos</string>
+    <string name="omni_health_no_icon">No hay imagen puesta, así que se instala con la simple.</string>
+    <string name="omni_health_uncompiled">%1$d archivos están en un lenguaje que esta construcción no compila.</string>
+    <string name="omni_health_languages">Idiomas</string>
+    <string name="omni_health_short">faltan %1$d</string>
+    <string name="omni_health_spare">%1$d que nadie pide</string>
+    <string name="omni_health_short_and_spare">faltan %1$d, %2$d que nadie pide</string>
+    <string name="omni_health_language_note">Una cadena que el primer idioma declara y una traducción no es una pantalla en el idioma equivocado en el teléfono de alguien. Construir la aplicación nunca lo habría dicho.</string>
 </resources>

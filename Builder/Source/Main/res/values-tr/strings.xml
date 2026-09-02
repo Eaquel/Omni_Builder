@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">DÜZENLE</string>
     <string name="omni_editor_shaped">Düzenlendi. Satır başı ve sonundaki boşluktan başka bir şey değişmedi.</string>
     <string name="omni_editor_shaped_none">Zaten düzenliydi.</string>
+    <string name="omni_build_said">Derlemenin söyleyecek %1$d şeyi vardı</string>
+    <string name="omni_health_title">Proje sağlığı</string>
+    <string name="omni_health_well">Burada yapılacak bir şey yok.</string>
+    <string name="omni_health_not">Yayınlanmadan önce yapılacak birkaç şey var.</string>
+    <string name="omni_health_code">Kod</string>
+    <string name="omni_health_resources">Kaynaklar</string>
+    <string name="omni_health_assets">Varlıklar</string>
+    <string name="omni_health_libraries">Kütüphaneler</string>
+    <string name="omni_health_whole">Projenin tamamı</string>
+    <string name="omni_health_files">%1$d dosya</string>
+    <string name="omni_health_no_icon">Resim ayarlanmamış, düz simgeyle kurulur.</string>
+    <string name="omni_health_uncompiled">%1$d dosya, bu derlemenin derlemediği bir dilde.</string>
+    <string name="omni_health_languages">Diller</string>
+    <string name="omni_health_short">%1$d eksik</string>
+    <string name="omni_health_spare">%1$d tanesini kimse istemiyor</string>
+    <string name="omni_health_short_and_spare">%1$d eksik, %2$d tanesini kimse istemiyor</string>
+    <string name="omni_health_language_note">İlk dilin tanımladığı ama bir çevirinin tanımlamadığı dize, birinin telefonunda yanlış dilde bir ekran demektir. Uygulamayı derlemek bunu asla söylemezdi.</string>
 </resources>

@@ -204,4 +204,21 @@
     <string name="omni_editor_shape">ALIGNER</string>
     <string name="omni_editor_shaped">Aligné. Seuls les blancs autour des lignes ont changé.</string>
     <string name="omni_editor_shaped_none">C\'était déjà aligné.</string>
+    <string name="omni_build_said">%1$d choses que la construction avait à dire</string>
+    <string name="omni_health_title">Santé du projet</string>
+    <string name="omni_health_well">Rien à faire ici.</string>
+    <string name="omni_health_not">Une partie de ceci est à faire avant publication.</string>
+    <string name="omni_health_code">Code</string>
+    <string name="omni_health_resources">Ressources</string>
+    <string name="omni_health_assets">Assets</string>
+    <string name="omni_health_libraries">Bibliothèques</string>
+    <string name="omni_health_whole">Tout le projet</string>
+    <string name="omni_health_files">%1$d fichiers</string>
+    <string name="omni_health_no_icon">Aucune image définie, il s\'installe avec l\'icône simple.</string>
+    <string name="omni_health_uncompiled">%1$d fichiers sont dans un langage que cette construction ne compile pas.</string>
+    <string name="omni_health_languages">Langues</string>
+    <string name="omni_health_short">%1$d manquantes</string>
+    <string name="omni_health_spare">%1$d que personne ne demande</string>
+    <string name="omni_health_short_and_spare">%1$d manquantes, %2$d que personne ne demande</string>
+    <string name="omni_health_language_note">Une chaîne que la première langue déclare et qu\'une traduction ne déclare pas, c\'est un écran dans la mauvaise langue sur le téléphone de quelqu\'un. Construire l\'application ne l\'aurait jamais dit.</string>
 </resources>

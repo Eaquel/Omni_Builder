@@ -42,6 +42,8 @@ char *omni_list_projects(const char *directory);
 
 char *omni_project_tree(const char *root);
 
+char *omni_project_health(const char *root);
+
 char *omni_lay_out(const char *name, const char *text);
 
 char *omni_dependencies(const char *root);
