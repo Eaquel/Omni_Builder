@@ -5945,6 +5945,21 @@ impl Classpath {
         Classpath::default()
     }
 
+    /// Everything a compilation starts out knowing, borrowed.
+    ///
+    /// `new` hands back a copy, because a compilation adds the project's own
+    /// types to what it was given. Anything that only wants to look -- an
+    /// editor asking what types exist -- wants the one that is already there
+    /// rather than four thousand classes copied to answer one question.
+    pub fn everything() -> &'static Classpath {
+        Classpath::the_library()
+    }
+
+    /// Every type this classpath knows, by the name a class file calls it.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.known.keys().map(|held| held.as_str())
+    }
+
     /// The standard library, read once and kept.
     fn the_library() -> &'static Classpath {
         static HELD: std::sync::OnceLock<Classpath> = std::sync::OnceLock::new();

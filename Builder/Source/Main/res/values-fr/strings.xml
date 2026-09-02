@@ -176,4 +176,9 @@
     <string name="omni_policy_title">Ce contre quoi il est vérifié</string>
     <string name="omni_policy_all">Les %1$d règles tiennent.</string>
     <string name="omni_policy_some">%1$d des %2$d règles ne tiennent pas. Une construction serait refusée.</string>
+    <string name="omni_editor_name">NOM</string>
+    <string name="omni_editor_name_none">Placez d\'abord le curseur dans un nom.</string>
+    <string name="omni_editor_name_nothing">Aucun type ne répond à %1$s.</string>
+    <string name="omni_editor_name_found">Types qui pourraient être %1$s</string>
+    <string name="omni_editor_name_yours">le vôtre</string>
 </resources>

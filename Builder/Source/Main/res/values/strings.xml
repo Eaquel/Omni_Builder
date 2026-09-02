@@ -176,4 +176,9 @@
     <string name="omni_policy_title">What it is checked against</string>
     <string name="omni_policy_all">All %1$d rules hold.</string>
     <string name="omni_policy_some">%1$d of %2$d rules do not hold. A build would be refused.</string>
+    <string name="omni_editor_name">NAME</string>
+    <string name="omni_editor_name_none">Put the caret in a name first.</string>
+    <string name="omni_editor_name_nothing">No type answers to %1$s.</string>
+    <string name="omni_editor_name_found">Types that could be %1$s</string>
+    <string name="omni_editor_name_yours">yours</string>
 </resources>

@@ -176,4 +176,9 @@
     <string name="omni_policy_title">بأي قواعد يُفحص</string>
     <string name="omni_policy_all">القواعد الـ%1$d كلها متحققة.</string>
     <string name="omni_policy_some">%1$d من %2$d قواعد غير متحققة. سيُرفض البناء.</string>
+    <string name="omni_editor_name">الاسم</string>
+    <string name="omni_editor_name_none">ضع المؤشر داخل اسم أولًا.</string>
+    <string name="omni_editor_name_nothing">لا يوجد نوع باسم %1$s.</string>
+    <string name="omni_editor_name_found">أنواع قد تكون %1$s</string>
+    <string name="omni_editor_name_yours">لك</string>
 </resources>

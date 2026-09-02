@@ -176,4 +176,9 @@
     <string name="omni_policy_title">Neye karşı denetleniyor</string>
     <string name="omni_policy_all">%1$d kuralın hepsi sağlanıyor.</string>
     <string name="omni_policy_some">%2$d kuraldan %1$d tanesi sağlanmıyor. Derleme reddedilirdi.</string>
+    <string name="omni_editor_name">AD</string>
+    <string name="omni_editor_name_none">Önce imleci bir adın içine koy.</string>
+    <string name="omni_editor_name_nothing">%1$s adına karşılık gelen tür yok.</string>
+    <string name="omni_editor_name_found">%1$s olabilecek türler</string>
+    <string name="omni_editor_name_yours">senin</string>
 </resources>

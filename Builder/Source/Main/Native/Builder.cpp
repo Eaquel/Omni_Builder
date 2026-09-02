@@ -422,6 +422,30 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSymbols(
+    JNIEnv *env, jobject , jstring root, jstring needle) {
+  std::string root_text;
+  std::string needle_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text) ||
+      needle == nullptr || !JavaStringToUtf8(env, needle, &needle_text)) {
+    ThrowJava(env, kIllegalState, "Looking for a name needs a project and a name.");
+    return nullptr;
+  }
+  return HandBack(env, omni_symbols(root_text.c_str(), needle_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeWhereWritten(
+    JNIEnv *env, jobject , jstring root, jstring qualified) {
+  std::string root_text;
+  std::string qualified_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text) ||
+      qualified == nullptr || !JavaStringToUtf8(env, qualified, &qualified_text)) {
+    ThrowJava(env, kIllegalState, "Finding where a type is written needs a project and a type.");
+    return nullptr;
+  }
+  return HandBack(env, omni_where_written(root_text.c_str(), qualified_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeInspectPackage(
     JNIEnv *env, jobject , jstring path) {
   std::string path_text;

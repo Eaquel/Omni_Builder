@@ -33341,6 +33341,251 @@ pub mod inspect {
     }
 }
 
+/// The types a person can name, and where each of them is.
+///
+/// This is what stands behind completing a name, importing it without being
+/// asked, and going to where it was written. It is not a separate index kept
+/// beside the compiler and hoped to agree with it: the platform's types come
+/// out of the same classpath the compiler is handed, and the project's come
+/// out of parsing the project's own files with the same parser. A type this
+/// answers with is a type that compiles.
+pub mod symbols {
+    use crate::diag::Diagnostic;
+    use crate::json::Writer;
+
+    /// The most names handed back for one question.
+    pub const MOST: usize = 60;
+
+    /// Where a type was found.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum From {
+        /// The Android platform and the standard library, which this build
+        /// carries rather than reads off a jar.
+        Platform,
+        /// Written in this project.
+        Project,
+    }
+
+    impl From {
+        pub fn as_str(self) -> &'static str {
+            match self {
+                From::Platform => "platform",
+                From::Project => "project",
+            }
+        }
+    }
+
+    /// One type, as somebody looking for it would want it.
+    #[derive(Clone, Debug)]
+    pub struct Named {
+        /// `android.widget.TextView`, which is what an import says.
+        pub qualified: String,
+        /// `TextView`.
+        pub simple: String,
+        /// `android.widget`, empty for the default package.
+        pub package: String,
+        pub from: From,
+        /// The file it is written in, for one written in this project.
+        pub path: String,
+        /// How well it answered, largest first. Kept so the interface can show
+        /// what it thinks the best answer is without deciding again.
+        pub rank: u32,
+    }
+
+    impl Named {
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("qualified", &self.qualified);
+            w.field_str("simple", &self.simple);
+            w.field_str("package", &self.package);
+            w.field_str("from", self.from.as_str());
+            if !self.path.is_empty() {
+                w.field_str("path", &self.path);
+            }
+            w.end_object();
+        }
+    }
+
+    /// How well a name answers what was typed.
+    ///
+    /// Four ways, and they are ordered the way somebody typing means them.
+    /// The whole name is what they meant. A name starting with what they typed
+    /// is nearly what they meant. Initials -- `TV` for `TextView`, the way
+    /// every editor worth using reads them -- is what they meant when they
+    /// could not be bothered. And the letters appearing somewhere inside is a
+    /// last resort, offered because it costs nothing and sometimes helps.
+    fn how_well(simple: &str, needle: &str) -> Option<u32> {
+        if needle.is_empty() {
+            return Some(1);
+        }
+        if simple.eq_ignore_ascii_case(needle) {
+            return Some(1000);
+        }
+        let lower_simple = simple.to_ascii_lowercase();
+        let lower_needle = needle.to_ascii_lowercase();
+        if lower_simple.starts_with(&lower_needle) {
+            // A shorter name matching the same prefix is the better answer:
+            // `View` before `ViewAnimationUtils` for `Vie`.
+            return Some(800 - (simple.len().min(200) as u32));
+        }
+        if initials(simple).starts_with(&needle.to_ascii_uppercase()) {
+            return Some(600 - (simple.len().min(200) as u32));
+        }
+        if lower_simple.contains(&lower_needle) {
+            return Some(300 - (simple.len().min(200) as u32));
+        }
+        None
+    }
+
+    /// `TextView` is `TV`, `ArrayList` is `AL`, `URLConnection` is `URLC`.
+    fn initials(simple: &str) -> String {
+        simple
+            .chars()
+            .filter(|held| held.is_ascii_uppercase())
+            .collect()
+    }
+
+    /// A class file's name for a type, as a person writes it.
+    fn as_written(internal: &str) -> String {
+        internal.replace(['/', '$'], ".")
+    }
+
+    /// Every type in the project and on the platform that answers to this.
+    ///
+    /// The project's own come first where they rank the same, because a person
+    /// typing a name in their own project usually means their own type.
+    pub fn matching(root: &str, needle: &str) -> Result<Vec<Named>, Diagnostic> {
+        let mut found: Vec<Named> = Vec::new();
+
+        for (internal, path) in declared_in(root) {
+            let simple = internal.rsplit(['/', '$']).next().unwrap_or(&internal);
+            if let Some(rank) = how_well(simple, needle) {
+                found.push(Named {
+                    qualified: as_written(&internal),
+                    simple: simple.to_string(),
+                    package: as_written(&internal)
+                        .rsplit_once('.')
+                        .map(|(held, _)| held.to_string())
+                        .unwrap_or_default(),
+                    from: From::Project,
+                    path,
+                    // A project's own types answer first at the same rank.
+                    rank: rank + 1,
+                });
+            }
+        }
+
+        for internal in crate::compilers::java::Classpath::everything().names() {
+            let simple = internal.rsplit(['/', '$']).next().unwrap_or(internal);
+            // A type with no name is one written without one, which nothing
+            // can be typed to reach.
+            if simple.is_empty() || simple.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                continue;
+            }
+            if let Some(rank) = how_well(simple, needle) {
+                let qualified = as_written(internal);
+                found.push(Named {
+                    package: qualified
+                        .rsplit_once('.')
+                        .map(|(held, _)| held.to_string())
+                        .unwrap_or_default(),
+                    qualified,
+                    simple: simple.to_string(),
+                    from: From::Platform,
+                    path: String::new(),
+                    rank,
+                });
+            }
+        }
+
+        // Best first, and alike ones in a settled order so the same question
+        // gives the same answer twice.
+        found.sort_by(|left, right| {
+            right
+                .rank
+                .cmp(&left.rank)
+                .then_with(|| left.qualified.cmp(&right.qualified))
+        });
+        found.truncate(MOST);
+        Ok(found)
+    }
+
+    /// Every type this project declares, with the file it is written in.
+    ///
+    /// Parsed with the compiler's own parser rather than read off the file
+    /// names: a file may declare more than one type, and the type a person is
+    /// looking for is as likely to be the second one.
+    fn declared_in(root: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let Ok(entries) = crate::workspace::tree(root) else {
+            return out;
+        };
+        for entry in entries {
+            if entry.folder || !entry.path.ends_with(".java") {
+                continue;
+            }
+            let Ok(text) = crate::workspace::read_text(root, &entry.path) else {
+                continue;
+            };
+            let Ok(units) = crate::compilers::java::parse(&text) else {
+                continue;
+            };
+            for unit in &units {
+                out.push((unit.internal_name(), entry.path.clone()));
+            }
+        }
+        out
+    }
+
+    /// Where a type is written, for one this project declares.
+    ///
+    /// A type on the platform has no file to go to: it is not written
+    /// anywhere on this device, and saying so is better than pointing at a
+    /// file that would turn out to be a description of it.
+    pub fn where_written(root: &str, qualified: &str) -> Option<(String, u32)> {
+        let internal = qualified.replace('.', "/");
+        let Ok(entries) = crate::workspace::tree(root) else {
+            return None;
+        };
+        for entry in entries {
+            if entry.folder || !entry.path.ends_with(".java") {
+                continue;
+            }
+            let Ok(text) = crate::workspace::read_text(root, &entry.path) else {
+                continue;
+            };
+            let Ok(units) = crate::compilers::java::parse(&text) else {
+                continue;
+            };
+            for unit in &units {
+                if unit.internal_name() != internal {
+                    continue;
+                }
+                // The line it is declared on, found in the text rather than
+                // carried out of the parse, so it is the line a person sees.
+                let simple = internal.rsplit('/').next().unwrap_or(&internal);
+                let line = text
+                    .lines()
+                    .position(|line| {
+                        let held = line.trim_start();
+                        (held.starts_with("public ")
+                            || held.starts_with("class ")
+                            || held.starts_with("interface ")
+                            || held.starts_with("enum ")
+                            || held.starts_with("abstract ")
+                            || held.starts_with("final ")
+                            || held.starts_with("record "))
+                            && held.contains(simple)
+                    })
+                    .map(|held| held as u32 + 1)
+                    .unwrap_or(1);
+                return Some((entry.path.clone(), line));
+            }
+        }
+        None
+    }
+}
+
 pub mod progress {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
@@ -34201,6 +34446,74 @@ pub mod ffi {
     /// `sensitive` and `whole_word` are the two switches a search needs and
     /// the only two: the first says whether case counts, the second whether
     /// `at` may match inside `that`.
+    /// Every type in this project and on the platform that answers to this.
+    ///
+    /// The platform's types come out of the same classpath the compiler is
+    /// handed and the project's out of parsing its files with the same parser,
+    /// so a name this answers with is a name that compiles.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_symbols(
+        root: *const c_char,
+        needle: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(needle)) = (text_from(root), text_from(needle)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::symbols::matching(&root, &needle) {
+                Ok(found) => {
+                    w.field_bool("found", true);
+                    w.field_str("needle", &needle);
+                    w.field_u64("count", found.len() as u64);
+                    w.field_bool("capped", found.len() >= crate::symbols::MOST);
+                    w.begin_array(Some("named"));
+                    for one in &found {
+                        one.write_json(&mut w);
+                    }
+                    w.end_array();
+                }
+                Err(error) => write_failure(&mut w, "found", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Where a type this project declares is written.
+    ///
+    /// A type on the platform has no file on this device to go to, and saying
+    /// so is better than pointing at the description of one.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_where_written(
+        root: *const c_char,
+        qualified: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(qualified)) = (text_from(root), text_from(qualified)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::symbols::where_written(&root, &qualified) {
+                Some((path, line)) => {
+                    w.field_bool("written", true);
+                    w.field_str("path", &path);
+                    w.field_u64("line", u64::from(line));
+                }
+                None => {
+                    w.field_bool("written", false);
+                    w.field_str("qualified", &qualified);
+                }
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     /// Opens a finished package and says what is in it.
     ///
     /// Everything reported comes out of the file: the manifest is decoded from
@@ -48500,6 +48813,212 @@ public final class MainActivity extends Activity {
         let error = super::rsa::seal_pkcs8(&key, "short").unwrap_err();
         assert_eq!(error.code, "ER040");
         assert!(error.suggestion.unwrap().contains("only thing between"));
+    }
+
+    /// Looking for a name finds the platform's types and the project's own,
+    /// and the one that answers best comes first.
+    #[test]
+    fn a_name_being_typed_finds_the_types_it_could_be() {
+        let directory = temp_directory("omni-symbols");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Named".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+        super::workspace::write_text(
+            &root,
+            "Java/com/tr/yt/Cabinet.java",
+            "package com.tr.yt;\npublic class Cabinet {\n}\nclass CabinetDrawer {\n}\n",
+        )
+        .unwrap();
+
+        // A type the platform has, found by its whole name.
+        let exact = super::symbols::matching(&root, "TextView").unwrap();
+        assert_eq!(
+            exact.first().map(|held| held.qualified.as_str()),
+            Some("android.widget.TextView"),
+            "got {:?}",
+            exact
+                .iter()
+                .take(4)
+                .map(|h| &h.qualified)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(exact[0].from, super::symbols::From::Platform);
+        assert_eq!(exact[0].package, "android.widget");
+
+        // By its beginning, with the shortest name answering first.
+        let starting = super::symbols::matching(&root, "Bitmap").unwrap();
+        assert_eq!(
+            starting.first().map(|held| held.simple.as_str()),
+            Some("Bitmap"),
+            "got {:?}",
+            starting
+                .iter()
+                .take(4)
+                .map(|h| &h.simple)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            starting
+                .iter()
+                .any(|held| held.qualified == "android.graphics.BitmapFactory"),
+            "a name starting with it must be offered too"
+        );
+
+        // By its initials, which is how a person who cannot be bothered types.
+        let initials = super::symbols::matching(&root, "TV").unwrap();
+        assert!(
+            initials
+                .iter()
+                .any(|held| held.qualified == "android.widget.TextView"),
+            "TV must reach TextView: {:?}",
+            initials
+                .iter()
+                .take(6)
+                .map(|h| &h.simple)
+                .collect::<Vec<_>>()
+        );
+
+        // The project's own types, with the file each is written in, and both
+        // types in a file that declares two.
+        let mine = super::symbols::matching(&root, "Cabinet").unwrap();
+        let first = mine.first().expect("the project's own type");
+        assert_eq!(first.qualified, "com.tr.yt.Cabinet");
+        assert_eq!(first.from, super::symbols::From::Project);
+        assert_eq!(first.path, "Java/com/tr/yt/Cabinet.java");
+        assert!(
+            mine.iter()
+                .any(|held| held.qualified == "com.tr.yt.CabinetDrawer"),
+            "the second type in a file counts as much as the first"
+        );
+
+        // Where a type is written, which is what going to it needs.
+        let (path, line) =
+            super::symbols::where_written(&root, "com.tr.yt.Cabinet").expect("it is written here");
+        assert_eq!(path, "Java/com/tr/yt/Cabinet.java");
+        assert_eq!(line, 2);
+        // And nothing for a type that is not written on this device.
+        assert!(super::symbols::where_written(&root, "android.widget.TextView").is_none());
+
+        // Nothing typed is everything, capped rather than the whole platform.
+        let everything = super::symbols::matching(&root, "").unwrap();
+        assert_eq!(everything.len(), super::symbols::MOST);
+
+        // A name nothing answers to answers with nothing rather than with
+        // whatever was nearest.
+        assert!(super::symbols::matching(&root, "Qzzxwv")
+            .unwrap()
+            .is_empty());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// And a name this offers is a name that compiles.
+    ///
+    /// The point of the offer is that importing it works. So one is taken from
+    /// the list, written into a file as an import and a field, and compiled.
+    #[test]
+    fn a_type_this_offers_is_one_an_import_of_it_compiles() {
+        let directory = temp_directory("omni-symbols-compile");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Named".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        for typed in ["ArrayList", "TextView", "Bundle", "Intent"] {
+            let offered = super::symbols::matching(&root, typed).unwrap();
+            let best = offered
+                .iter()
+                .find(|held| held.simple == typed)
+                .unwrap_or_else(|| panic!("{typed} was not offered"));
+
+            let source = format!(
+                "package com.tr.yt;\nimport {};\npublic class Holds{typed} {{\n    {typed} held;\n}}\n",
+                best.qualified
+            );
+            let produced =
+                crate::compilers::java::compile(&source, &crate::compilers::java::Classpath::new());
+            assert!(
+                produced.is_ok(),
+                "importing {} did not compile: {:?}",
+                best.qualified,
+                produced.err()
+            );
+        }
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// What comes back over the bridge is what was found.
+    #[test]
+    fn the_bridge_offers_names_and_says_where_one_is_written() {
+        let directory = temp_directory("omni-symbols-bridge");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Named".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+        super::workspace::write_text(
+            &root,
+            "Java/com/tr/yt/Ledger.java",
+            "package com.tr.yt;\n\npublic class Ledger {\n}\n",
+        )
+        .unwrap();
+
+        let read = |ptr: *mut std::os::raw::c_char| {
+            assert!(!ptr.is_null());
+            let held = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { super::ffi::omni_string_free(ptr) };
+            held
+        };
+        let root_c = std::ffi::CString::new(root.clone()).unwrap();
+
+        let needle = std::ffi::CString::new("Ledger").unwrap();
+        let answer = read(unsafe { super::ffi::omni_symbols(root_c.as_ptr(), needle.as_ptr()) });
+        assert!(is_structurally_valid(&answer), "{answer}");
+        assert!(answer.contains("\"found\":true"), "{answer}");
+        assert!(
+            answer.contains("\"qualified\":\"com.tr.yt.Ledger\""),
+            "{answer}"
+        );
+        assert!(answer.contains("\"from\":\"project\""), "{answer}");
+        assert!(answer.contains("Java/com/tr/yt/Ledger.java"), "{answer}");
+
+        let named = std::ffi::CString::new("com.tr.yt.Ledger").unwrap();
+        let where_it_is =
+            read(unsafe { super::ffi::omni_where_written(root_c.as_ptr(), named.as_ptr()) });
+        assert!(is_structurally_valid(&where_it_is), "{where_it_is}");
+        assert!(where_it_is.contains("\"written\":true"), "{where_it_is}");
+        assert!(where_it_is.contains("\"line\":3"), "{where_it_is}");
+
+        let platform = std::ffi::CString::new("android.widget.TextView").unwrap();
+        let nowhere =
+            read(unsafe { super::ffi::omni_where_written(root_c.as_ptr(), platform.as_ptr()) });
+        assert!(nowhere.contains("\"written\":false"), "{nowhere}");
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     /// The list of rules is the rules, and stays the rules.

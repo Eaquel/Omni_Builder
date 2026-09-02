@@ -176,4 +176,9 @@
     <string name="omni_policy_title">Wogegen es geprüft wird</string>
     <string name="omni_policy_all">Alle %1$d Regeln halten.</string>
     <string name="omni_policy_some">%1$d von %2$d Regeln halten nicht. Ein Build würde abgelehnt.</string>
+    <string name="omni_editor_name">NAME</string>
+    <string name="omni_editor_name_none">Setzen Sie den Cursor zuerst in einen Namen.</string>
+    <string name="omni_editor_name_nothing">Kein Typ heißt %1$s.</string>
+    <string name="omni_editor_name_found">Typen, die %1$s sein könnten</string>
+    <string name="omni_editor_name_yours">Ihrer</string>
 </resources>

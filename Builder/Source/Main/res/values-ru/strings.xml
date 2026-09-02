@@ -176,4 +176,9 @@
     <string name="omni_policy_title">По каким правилам проверяется</string>
     <string name="omni_policy_all">Все %1$d правил соблюдены.</string>
     <string name="omni_policy_some">%1$d из %2$d правил не соблюдены. Сборка была бы отклонена.</string>
+    <string name="omni_editor_name">ИМЯ</string>
+    <string name="omni_editor_name_none">Сначала поставьте курсор внутрь имени.</string>
+    <string name="omni_editor_name_nothing">Ни один тип не отзывается на %1$s.</string>
+    <string name="omni_editor_name_found">Типы, которыми мог бы быть %1$s</string>
+    <string name="omni_editor_name_yours">ваш</string>
 </resources>

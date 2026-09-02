@@ -552,6 +552,18 @@ object Builder {
     external fun nativeProjectTree(root: String): String
 
     /**
+     * Every type in this project and on the platform that answers to this.
+     *
+     * The platform's types come out of the same classpath the compiler is
+     * handed, and the project's out of parsing its files with the same
+     * parser, so a name this offers is a name that compiles.
+     */
+    external fun nativeSymbols(root: String, needle: String): String
+
+    /** Where a type this project declares is written. */
+    external fun nativeWhereWritten(root: String, qualified: String): String
+
+    /**
      * Opens a finished package and says what is in it.
      *
      * Everything it reports comes out of the file itself: the manifest is
@@ -2859,6 +2871,9 @@ class BuilderActivity : Activity() {
             pasteInto(editor)
             mark()
         })
+        tools.addView(tool(getString(R.string.omni_editor_name), palette.accent) {
+            offerNames(root, editor)
+        })
         content.addView(tools)
 
         val sheet = card()
@@ -2904,6 +2919,120 @@ class BuilderActivity : Activity() {
         content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
             go(Screen.Files(root, path.substringBeforeLast('/', "")))
         })
+    }
+
+    /**
+     * The types the word under the caret could be, offered as a list.
+     *
+     * Picking one puts the name in place of what was typed and, where the file
+     * does not already import it and the type is not in the same package,
+     * writes the import after the last one there is. Both edits are the
+     * editor's own, so undo takes them like anything else typed.
+     */
+    private fun offerNames(root: String, editor: CodeEditor) {
+        val held = editor.text ?: return
+        val caret = editor.selectionEnd.coerceIn(0, held.length)
+        var from = caret
+        while (from > 0 && isNamePart(held[from - 1])) from -= 1
+        var to = caret
+        while (to < held.length && isNamePart(held[to])) to += 1
+        val word = held.subSequence(from, to).toString()
+        if (word.isEmpty()) {
+            results.removeAllViews()
+            results.addView(notice(getString(R.string.omni_editor_name_none), palette.muted))
+            return
+        }
+
+        working({ Builder.nativeSymbols(root, word) }) finished@{ answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+            val named = document.optJSONArray("named")
+            if (named == null || named.length() == 0) {
+                results.addView(
+                    notice(getString(R.string.omni_editor_name_nothing, word), palette.muted)
+                )
+                return@finished
+            }
+            results.addView(heading(getString(R.string.omni_editor_name_found, word)))
+            val listed = card()
+            for (index in 0 until minOf(named.length(), 30)) {
+                val one = named.optJSONObject(index) ?: continue
+                if (index > 0) {
+                    listed.addView(rule(), MATCH_PARENT, 1)
+                }
+                val project = one.optString("from") == "project"
+                listed.addView(
+                    row(
+                        one.optString("simple"),
+                        one.optString("package"),
+                        if (project) getString(R.string.omni_editor_name_yours) else "",
+                        if (project) palette.ok else palette.muted,
+                    ) {
+                        putName(editor, from, to, one)
+                        results.removeAllViews()
+                    }
+                )
+            }
+            results.addView(listed)
+        }
+    }
+
+    private fun isNamePart(c: Char): Boolean =
+        c.isLetterOrDigit() || c == '_' || c == '$'
+
+    /**
+     * Puts the chosen name where the word was, and imports it if it needs to be.
+     *
+     * The import goes after the last one in the file, or after the package
+     * line where there are none. A file that already imports it, and a type in
+     * the same package as the file, both need nothing.
+     */
+    private fun putName(editor: CodeEditor, from: Int, to: Int, chosen: JSONObject) {
+        val held = editor.text ?: return
+        val simple = chosen.optString("simple")
+        val qualified = chosen.optString("qualified")
+        val whole = held.toString()
+
+        val already = whole.contains("import ${'$'}qualified;")
+        val mine = whole.lineSequence()
+            .firstOrNull { it.trimStart().startsWith("package ") }
+            ?.trim()
+            ?.removePrefix("package ")
+            ?.removeSuffix(";")
+            ?.trim()
+            .orEmpty()
+        val needsImport = !already &&
+            qualified.contains('.') &&
+            chosen.optString("package") != mine
+
+        held.replace(from, to, simple)
+        if (!needsImport) {
+            editor.setSelection((from + simple.length).coerceIn(0, editor.text?.length ?: 0))
+            return
+        }
+
+        // Where the import belongs, worked out on the text as it is now.
+        val text = editor.text?.toString().orEmpty()
+        var at = -1
+        var line = 0
+        var offset = 0
+        for (one in text.lineSequence()) {
+            val trimmed = one.trimStart()
+            if (trimmed.startsWith("import ") || trimmed.startsWith("package ")) {
+                at = offset + one.length + 1
+            }
+            offset += one.length + 1
+            line += 1
+            if (line > 200) break
+        }
+        val statement = "import ${'$'}qualified;\n"
+        val put = at.coerceIn(0, editor.text?.length ?: 0)
+        editor.text?.insert(put, statement)
+        // The caret follows the word rather than the import, since that is
+        // where the person was.
+        val moved = if (put <= from) statement.length else 0
+        editor.setSelection(
+            (from + simple.length + moved).coerceIn(0, editor.text?.length ?: 0)
+        )
     }
 
     /** What is selected, or the whole file when nothing is. */

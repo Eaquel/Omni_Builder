@@ -176,4 +176,9 @@
     <string name="omni_policy_title">依据哪些规则检查</string>
     <string name="omni_policy_all">%1$d 条规则全部满足。</string>
     <string name="omni_policy_some">%2$d 条规则中有 %1$d 条不满足。构建会被拒绝。</string>
+    <string name="omni_editor_name">名称</string>
+    <string name="omni_editor_name_none">请先把光标放进一个名称里。</string>
+    <string name="omni_editor_name_nothing">没有名为 %1$s 的类型。</string>
+    <string name="omni_editor_name_found">可能是 %1$s 的类型</string>
+    <string name="omni_editor_name_yours">你的</string>
 </resources>

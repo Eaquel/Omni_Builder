@@ -42,6 +42,10 @@ char *omni_list_projects(const char *directory);
 
 char *omni_project_tree(const char *root);
 
+char *omni_symbols(const char *root, const char *needle);
+
+char *omni_where_written(const char *root, const char *qualified);
+
 char *omni_inspect_package(const char *path);
 
 char *omni_check_project(const char *root);
