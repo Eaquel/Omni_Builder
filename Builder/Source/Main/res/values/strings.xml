@@ -142,4 +142,7 @@
     <string name="omni_stage_measuring">First build here, so this is a guess.</string>
     <string name="omni_stage_learned">Estimated from this device\'s own builds.</string>
     <string name="omni_stage_built">PACKAGE WRITTEN</string>
+    <string name="omni_result_verified">Checked back</string>
+    <string name="omni_result_verified_yes">The package verifies against its own key</string>
+    <string name="omni_result_verified_no">The package does not verify</string>
 </resources>

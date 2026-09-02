@@ -841,6 +841,16 @@ data class BuildOutcome(
      * that finished is worth keeping them from.
      */
     val timings: String?,
+    /**
+     * What re-reading the finished package said about its own signature.
+     *
+     * The Core opens what it wrote and checks it the way an installer would,
+     * so these are measurements of the file on disk rather than a note that
+     * the signing code returned without complaining.
+     */
+    val signatureSchemes: List<String>,
+    val signaturesVerified: Long,
+    val signatureKeyMatches: Boolean,
 ) {
     companion object {
         fun parse(document: String): BuildOutcome {
@@ -878,6 +888,14 @@ data class BuildOutcome(
                 bundleBytes = root.optJSONObject("bundle")?.optLong("bytes") ?: 0L,
                 locales = root.optLong("locales"),
                 timings = root.optString("timings").ifEmpty { null },
+                signatureSchemes = packaged?.optJSONObject("verified")
+                    ?.optJSONArray("schemes")
+                    ?.let { array -> (0 until array.length()).map { array.getString(it) } }
+                    .orEmpty(),
+                signaturesVerified =
+                    packaged?.optJSONObject("verified")?.optLong("signaturesVerified") ?: 0L,
+                signatureKeyMatches = packaged?.optJSONObject("verified")
+                    ?.optBoolean("keyMatchesCertificate", false) ?: false,
             )
         }
     }
@@ -3093,12 +3111,30 @@ class BuilderActivity : Activity() {
                     palette.muted,
                 )
             )
+            // What the schemes are is read off the package, not written here:
+            // a row saying "v2 + v3" whatever the file holds is a row that
+            // would keep saying it once it stopped being true.
+            val schemes = outcome.signatureSchemes.joinToString(" + ")
+            val soundly = outcome.signed &&
+                outcome.signatureKeyMatches &&
+                outcome.signaturesVerified > 0
             facts.addView(
                 keyValue(
                     getString(R.string.omni_result_signature),
                     outcome.signedBy.orEmpty(),
-                    "v2 + v3",
-                    if (outcome.signed) palette.ok else palette.error,
+                    schemes.ifEmpty { "?" },
+                    if (soundly) palette.ok else palette.error,
+                )
+            )
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_result_verified),
+                    getString(
+                        if (soundly) R.string.omni_result_verified_yes
+                        else R.string.omni_result_verified_no
+                    ),
+                    outcome.signaturesVerified.toString(),
+                    if (soundly) palette.ok else palette.error,
                 )
             )
             facts.addView(

@@ -13429,11 +13429,30 @@ pub mod signing {
         VerityMerkle,
     }
 
+    /// What the signature over a signer's signed data is made with.
+    ///
+    /// This is a separate thing from the digest over the package's contents,
+    /// and the names run them together: `RSASSA-PKCS1-v1_5 with SHA-256` says
+    /// both that the contents were chunk-digested with SHA-256 and that the
+    /// signed data was signed with PKCS#1 v1.5 padding over its SHA-256. Only
+    /// the second of those is what checking a signature needs.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Padding {
+        RsaPkcs1Sha256,
+        RsaPkcs1Sha512,
+        /// Read and named, but not something this build can check. RSASSA-PSS,
+        /// ECDSA and DSA are all here: naming them and saying nothing about
+        /// them is the honest answer, and claiming otherwise would be worse
+        /// than not looking.
+        NotImplemented,
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct SignatureAlgorithm {
         pub id: u32,
         pub name: &'static str,
         pub digest: DigestKind,
+        pub padding: Padding,
     }
 
     const ALGORITHMS: &[SignatureAlgorithm] = &[
@@ -13441,51 +13460,61 @@ pub mod signing {
             id: 0x0101,
             name: "RSASSA-PSS with SHA-256",
             digest: DigestKind::Chunked256,
+            padding: Padding::NotImplemented,
         },
         SignatureAlgorithm {
             id: 0x0102,
             name: "RSASSA-PSS with SHA-512",
             digest: DigestKind::Chunked512,
+            padding: Padding::NotImplemented,
         },
         SignatureAlgorithm {
             id: 0x0103,
             name: "RSASSA-PKCS1-v1_5 with SHA-256",
             digest: DigestKind::Chunked256,
+            padding: Padding::RsaPkcs1Sha256,
         },
         SignatureAlgorithm {
             id: 0x0104,
             name: "RSASSA-PKCS1-v1_5 with SHA-512",
             digest: DigestKind::Chunked512,
+            padding: Padding::RsaPkcs1Sha512,
         },
         SignatureAlgorithm {
             id: 0x0201,
             name: "ECDSA with SHA-256",
             digest: DigestKind::Chunked256,
+            padding: Padding::NotImplemented,
         },
         SignatureAlgorithm {
             id: 0x0202,
             name: "ECDSA with SHA-512",
             digest: DigestKind::Chunked512,
+            padding: Padding::NotImplemented,
         },
         SignatureAlgorithm {
             id: 0x0301,
             name: "DSA with SHA-256",
             digest: DigestKind::Chunked256,
+            padding: Padding::NotImplemented,
         },
         SignatureAlgorithm {
             id: 0x0421,
             name: "RSASSA-PKCS1-v1_5 with SHA-256 over a verity tree",
             digest: DigestKind::VerityMerkle,
+            padding: Padding::RsaPkcs1Sha256,
         },
         SignatureAlgorithm {
             id: 0x0423,
             name: "ECDSA with SHA-256 over a verity tree",
             digest: DigestKind::VerityMerkle,
+            padding: Padding::NotImplemented,
         },
         SignatureAlgorithm {
             id: 0x0425,
             name: "DSA with SHA-256 over a verity tree",
             digest: DigestKind::VerityMerkle,
+            padding: Padding::NotImplemented,
         },
     ];
 
@@ -13651,12 +13680,56 @@ pub mod signing {
         }))
     }
 
+    /// Which block a signer came out of, which is what says how it is laid out.
+    ///
+    /// A v3 signer repeats the platform range it applies to outside its signed
+    /// data, between that and its signatures. Reading a v3 signer as a v2 one
+    /// lands eight bytes short of where the signatures begin and reads noise
+    /// from there on.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Scheme {
+        V2,
+        V3,
+    }
+
     #[derive(Clone, Debug)]
     pub struct Signer {
         pub digests: Vec<(SignatureAlgorithm, Vec<u8>)>,
         pub signature_algorithms: Vec<SignatureAlgorithm>,
         pub certificates: Vec<Certificate>,
         pub unknown_algorithms: Vec<u32>,
+        /// The exact bytes the signatures are over.
+        ///
+        /// Kept as they were read rather than rebuilt from what was parsed out
+        /// of them: a signature is over bytes, and a check against a
+        /// re-encoding of those bytes is a check of the encoder.
+        pub signed_data: Vec<u8>,
+        /// Each signature, with the algorithm that made it.
+        pub signatures: Vec<(SignatureAlgorithm, Vec<u8>)>,
+        /// The signer's public key, as a SubjectPublicKeyInfo.
+        pub public_key: Vec<u8>,
+        /// The first certificate, as it was in the block.
+        pub first_certificate: Vec<u8>,
+    }
+
+    /// What checking one signature came to.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub enum Checked {
+        /// The key in the block made this signature over these bytes.
+        Verified,
+        /// It did not. The package is not what its signer signed.
+        Failed,
+        /// The signature is of a kind this build does not implement, so
+        /// nothing is claimed about it either way.
+        NotImplemented,
+    }
+
+    /// What checking one signer came to, all of it.
+    #[derive(Clone, Debug)]
+    pub struct SignerCheck {
+        /// Whether the key in the block is the key in the certificate.
+        pub key_matches_certificate: bool,
+        pub signatures: Vec<(SignatureAlgorithm, Checked)>,
     }
 
     fn read_length_prefixed<'a>(
@@ -13670,7 +13743,7 @@ pub mod signing {
         reader.bytes(length)
     }
 
-    pub fn parse_signers(value: &[u8]) -> Result<Vec<Signer>, Diagnostic> {
+    pub fn parse_signers(value: &[u8], scheme: Scheme) -> Result<Vec<Signer>, Diagnostic> {
         let mut outer = Reader::new(value, Endian::Little, "signers");
         let signers_bytes = read_length_prefixed(&mut outer, "signers")?;
 
@@ -13703,24 +13776,42 @@ pub mod signing {
             let mut certificates_reader =
                 Reader::new(certificates_bytes, Endian::Little, "certificates");
             let mut certificates = Vec::new();
+            let mut first_certificate: &[u8] = &[];
             while certificates_reader.remaining() > 0 {
                 let der = read_length_prefixed(&mut certificates_reader, "certificate")?;
+                if certificates.is_empty() {
+                    first_certificate = der;
+                }
                 certificates.push(Certificate::parse(der)?);
+            }
+
+            // A v3 signer says again, outside what it signed, which
+            // platforms it is for. Skipping it is what puts the reader on the
+            // start of the signatures rather than in the middle of them.
+            if scheme == Scheme::V3 {
+                let _minimum = signer.u32()?;
+                let _maximum = signer.u32()?;
             }
 
             let signatures_bytes = read_length_prefixed(&mut signer, "signatures")?;
             let mut signatures_reader = Reader::new(signatures_bytes, Endian::Little, "signatures");
             let mut signature_algorithms = Vec::new();
+            let mut signatures = Vec::new();
             while signatures_reader.remaining() > 0 {
                 let entry = read_length_prefixed(&mut signatures_reader, "signature")?;
                 let mut fields = Reader::new(entry, Endian::Little, "signature");
                 let id = fields.u32()?;
-                let _bytes = read_length_prefixed(&mut fields, "signature value")?;
+                let bytes = read_length_prefixed(&mut fields, "signature value")?;
                 match algorithm(id) {
-                    Some(known) => signature_algorithms.push(known),
+                    Some(known) => {
+                        signature_algorithms.push(known);
+                        signatures.push((known, bytes.to_vec()));
+                    }
                     None => unknown.push(id),
                 }
             }
+
+            let public_key = read_length_prefixed(&mut signer, "public key")?;
 
             if certificates.is_empty() {
                 return Err(fail("ES010", "A signer carries no certificate.")
@@ -13732,6 +13823,10 @@ pub mod signing {
                 signature_algorithms,
                 certificates,
                 unknown_algorithms: unknown,
+                signed_data: signed_data.to_vec(),
+                signatures,
+                public_key: public_key.to_vec(),
+                first_certificate: first_certificate.to_vec(),
             });
         }
 
@@ -13864,11 +13959,30 @@ pub mod signing {
         pub digests_unverifiable: u64,
         pub digests_failed: u64,
         pub signatures_checked: bool,
+        pub signatures_verified: u64,
+        pub signatures_unimplemented: u64,
+        pub signatures_failed: u64,
+        /// Whether every signer's public key is the one in its own first
+        /// certificate. A block that fails this names a key nobody vouched for.
+        pub key_matches_certificate: bool,
     }
 
     impl Report {
+        /// Whether everything this build can check about the package passed.
+        ///
+        /// Three separate things, and all of them are needed. The contents
+        /// have to match the digest that was recorded, or the package has been
+        /// changed since. A signature over that digest has to verify, or
+        /// anybody could have recorded it. And the key that made the signature
+        /// has to be the one in the certificate, or the name on the package is
+        /// not the name of whoever signed it.
         pub fn everything_checkable_passed(&self) -> bool {
-            self.has_block && self.digests_failed == 0 && self.digests_verified > 0
+            self.has_block
+                && self.digests_failed == 0
+                && self.digests_verified > 0
+                && self.signatures_failed == 0
+                && self.signatures_verified > 0
+                && self.key_matches_certificate
         }
 
         pub fn write_json(&self, w: &mut Writer, key: &str) {
@@ -13884,11 +13998,18 @@ pub mod signing {
             w.field_u64("digestsUnverifiable", self.digests_unverifiable);
             w.field_u64("digestsFailed", self.digests_failed);
             w.field_bool("signaturesChecked", self.signatures_checked);
+            w.field_u64("signaturesVerified", self.signatures_verified);
+            w.field_u64("signaturesUnimplemented", self.signatures_unimplemented);
+            w.field_u64("signaturesFailed", self.signatures_failed);
+            w.field_bool("keyMatchesCertificate", self.key_matches_certificate);
             w.field_str(
                 "note",
                 "A verified digest proves the package has not changed since the \
-                 block was written. It does not prove who wrote it: that needs a \
-                 signature check, which this build does not perform.",
+                 block was written. A verified signature proves the key in the \
+                 block wrote it, and a key matching the certificate proves that \
+                 key is the one the certificate names. RSASSA-PSS, ECDSA and DSA \
+                 signatures are named here but not checked; a package carrying \
+                 only those reports none verified rather than reporting a pass.",
             );
             w.begin_array(Some("signerDetail"));
             for signer in &self.signers {
@@ -14075,6 +14196,116 @@ pub mod signing {
         Ok(out)
     }
 
+    /// Checks one signer's signatures against the key it carries.
+    ///
+    /// Two things are established here and they are different. That the key in
+    /// the block signed these exact bytes -- which is what a signature is --
+    /// and that the key in the block is the one in the certificate the block
+    /// presents, which is what stops a package being signed by one key and
+    /// attributed to another. Neither says the certificate is one anybody
+    /// should trust: that is the caller's question, answered by comparing the
+    /// fingerprint against what was expected.
+    pub fn verify_signer(signer: &Signer, sink: &mut Sink) -> SignerCheck {
+        let mut out = SignerCheck {
+            key_matches_certificate: false,
+            signatures: Vec::new(),
+        };
+
+        let expected = match crate::x509::Certificate::public_key_info(&signer.first_certificate) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                sink.emit(error);
+                return out;
+            }
+        };
+        if expected != signer.public_key {
+            sink.emit(
+                Diagnostic::new(
+                    "ES034",
+                    Severity::Fatal,
+                    FailureClass::SecurityFailure,
+                    "core.signing",
+                    "The key in the signing block is not the key in the certificate.",
+                )
+                .with_suggestion(
+                    "A signature made by one key and presented beside another key's \
+                     certificate says nothing about who made the package. Do not \
+                     install it.",
+                ),
+            );
+            return out;
+        }
+        out.key_matches_certificate = true;
+
+        let (modulus, exponent) = match crate::rsa::parse_public_key(&signer.public_key) {
+            Ok(pair) => pair,
+            Err(error) => {
+                sink.emit(error);
+                return out;
+            }
+        };
+
+        for (algorithm, signature) in &signer.signatures {
+            let hashed = match algorithm.padding {
+                Padding::RsaPkcs1Sha256 => (
+                    crate::rsa::DigestAlgorithm::Sha256,
+                    crate::hash::sha256(&signer.signed_data).as_bytes().to_vec(),
+                ),
+                Padding::RsaPkcs1Sha512 => (
+                    crate::rsa::DigestAlgorithm::Sha512,
+                    crate::hash::sha512(&signer.signed_data).as_bytes().to_vec(),
+                ),
+                Padding::NotImplemented => {
+                    out.signatures.push((*algorithm, Checked::NotImplemented));
+                    sink.emit(
+                        Diagnostic::new(
+                            "ES035",
+                            Severity::Warning,
+                            FailureClass::SecurityFailure,
+                            "core.signing",
+                            format!(
+                                "A signature uses {}, which this build cannot check.",
+                                algorithm.name
+                            ),
+                        )
+                        .with_suggestion(
+                            "It is neither confirmed nor disputed; it is not checked \
+                             against anything.",
+                        ),
+                    );
+                    continue;
+                }
+            };
+
+            let (digest_algorithm, digest) = hashed;
+            match crate::rsa::verify(&modulus, &exponent, digest_algorithm, &digest, signature) {
+                Ok(true) => out.signatures.push((*algorithm, Checked::Verified)),
+                Ok(false) => {
+                    out.signatures.push((*algorithm, Checked::Failed));
+                    sink.emit(
+                        Diagnostic::new(
+                            "ES036",
+                            Severity::Fatal,
+                            FailureClass::SecurityFailure,
+                            "core.signing",
+                            "A signature does not check out against the key that presents it.",
+                        )
+                        .with_context(format!("Algorithm: {}", algorithm.name))
+                        .with_suggestion(
+                            "Whatever produced this package did not have the private \
+                             key it claims. Do not install it.",
+                        ),
+                    );
+                }
+                Err(error) => {
+                    sink.emit(error);
+                }
+            }
+        }
+
+        out
+    }
+
     pub fn examine(
         data: &[u8],
         central_directory_offset: u64,
@@ -14089,6 +14320,10 @@ pub mod signing {
             digests_unverifiable: 0,
             digests_failed: 0,
             signatures_checked: false,
+            signatures_verified: 0,
+            signatures_unimplemented: 0,
+            signatures_failed: 0,
+            key_matches_certificate: false,
         };
 
         let block = match find_block(data, central_directory_offset) {
@@ -14127,10 +14362,30 @@ pub mod signing {
             }
         }
 
-        let Some(value) = block
-            .value(V2_BLOCK_ID)
-            .or_else(|| block.value(V3_BLOCK_ID))
-        else {
+        // Every scheme in the block, not the first one found. Android reads
+        // v3 where it can and falls back to v2, so a package where only one of
+        // them holds up is a package half of the platforms will refuse, and
+        // saying so needs both to be read.
+        let mut anything = false;
+        for (id, scheme) in [
+            (V2_BLOCK_ID, Scheme::V2),
+            (V3_BLOCK_ID, Scheme::V3),
+            (V31_BLOCK_ID, Scheme::V3),
+        ] {
+            let Some(value) = block.value(id) else {
+                continue;
+            };
+            anything = true;
+            match parse_signers(value, scheme) {
+                Ok(signers) => report.signers.extend(signers),
+                Err(error) => {
+                    sink.emit(error);
+                    return report;
+                }
+            }
+        }
+
+        if !anything {
             sink.emit(
                 Diagnostic::new(
                     "ES031",
@@ -14150,14 +14405,6 @@ pub mod signing {
                 )),
             );
             return report;
-        };
-
-        match parse_signers(value) {
-            Ok(signers) => report.signers = signers,
-            Err(error) => {
-                sink.emit(error);
-                return report;
-            }
         }
 
         let wanted = |kind: DigestKind| {
@@ -14257,6 +14504,25 @@ pub mod signing {
                              install it.",
                         ),
                     );
+                }
+            }
+        }
+
+        // Who made it, which is a separate question from whether it has
+        // changed, and the one a digest on its own cannot answer.
+        report.key_matches_certificate = !report.signers.is_empty();
+        let signers = report.signers.clone();
+        for signer in &signers {
+            let checked = verify_signer(signer, sink);
+            if !checked.key_matches_certificate {
+                report.key_matches_certificate = false;
+            }
+            for (_, outcome) in checked.signatures {
+                report.signatures_checked = true;
+                match outcome {
+                    Checked::Verified => report.signatures_verified += 1,
+                    Checked::Failed => report.signatures_failed += 1,
+                    Checked::NotImplemented => report.signatures_unimplemented += 1,
                 }
             }
         }
@@ -16047,6 +16313,59 @@ pub mod rsa {
         })?;
         let bytes = der::read_integer_bytes(&element)?;
         Ok(Natural::from_bytes_be(bytes))
+    }
+
+    /// The modulus and public exponent inside a SubjectPublicKeyInfo.
+    ///
+    /// This is the shape a public key travels in on its own: an algorithm
+    /// identifier, then a bit string holding the RSA key. A signing block
+    /// carries one of these beside the certificate, and a signature is checked
+    /// against this key rather than against the certificate's, which is why
+    /// the two being the same has to be checked separately.
+    pub fn parse_public_key(spki: &[u8]) -> Result<(Natural, Natural), Diagnostic> {
+        let mut outer = der::Reader::new(spki, 0);
+        let sequence = outer.expect(der::tag::SEQUENCE).map_err(|error| {
+            fail("ER020", "A public key is not a SubjectPublicKeyInfo.").with_context(error.message)
+        })?;
+        let mut fields = sequence.reader();
+
+        let identifier = fields.expect(der::tag::SEQUENCE)?;
+        let mut named = identifier.reader();
+        let oid = der::read_oid(&named.expect(der::tag::OID)?)?;
+        if oid != RSA_OID {
+            return Err(fail("ER021", "A public key is not an RSA key.")
+                .with_context(format!("Algorithm: {oid}")));
+        }
+
+        let key = fields.expect(der::tag::BIT_STRING)?;
+        // The first byte of a bit string counts the bits unused in the last
+        // one. A key is whole bytes, so it is zero, and what follows it is the
+        // key itself.
+        let Some((unused, body)) = key.contents.split_first() else {
+            return Err(fail("ER022", "A public key's bit string is empty."));
+        };
+        if *unused != 0 {
+            return Err(fail(
+                "ER023",
+                "A public key's bit string does not end on a byte.",
+            ));
+        }
+
+        let mut inner = der::Reader::new(body, 0);
+        let numbers = inner.expect(der::tag::SEQUENCE)?;
+        let mut pair = numbers.reader();
+        let modulus = integer(&mut pair, "modulus")?;
+        let exponent = integer(&mut pair, "public exponent")?;
+
+        let bits = modulus.bit_len();
+        if !(MIN_MODULUS_BITS..=MAX_MODULUS_BITS).contains(&bits) {
+            return Err(fail(
+                "ER024",
+                "A public key's modulus is outside the accepted range.",
+            )
+            .with_context(format!("Bits: {bits}")));
+        }
+        Ok((modulus, exponent))
     }
 
     pub fn parse_pkcs1(bytes: &[u8]) -> Result<PrivateKey, Diagnostic> {
@@ -22995,6 +23314,11 @@ pub mod integrity {
         pub has_block: bool,
         pub digest_verified: bool,
         pub digest_failed: bool,
+        /// Whether the signature over the digest was checked against the key
+        /// in the block, and whether it held. A digest says the package has
+        /// not changed; only this says who recorded that digest.
+        pub signature_verified: bool,
+        pub signature_failed: bool,
         pub certificate: Option<String>,
         pub expected: Option<String>,
         pub standing: Standing,
@@ -23011,6 +23335,10 @@ pub mod integrity {
                 "contentsUnchanged",
                 self.digest_verified && !self.digest_failed,
             );
+            w.field_bool(
+                "signatureVerified",
+                self.signature_verified && !self.signature_failed,
+            );
             if let Some(certificate) = &self.certificate {
                 w.field_str("certificate", certificate);
             }
@@ -23019,7 +23347,7 @@ pub mod integrity {
             }
             w.field_str(
                 "note",
-                "This is the package checking itself. It detects a package that was repacked or re-signed by anything that did not also change this check. It cannot detect an attacker who patched the check out, and it is not a claim that the running process is untampered.",
+                "This is the package checking itself: that its contents match the digest recorded when it was signed, that the signature over that digest was made by the key in the block, that the key is the one in the certificate, and that the certificate is the expected one. It detects a package that was repacked or re-signed by anything that did not also change this check. It cannot detect an attacker who patched the check out, and it is not a claim that the running process is untampered.",
             );
             w.end_object();
         }
@@ -23043,6 +23371,8 @@ pub mod integrity {
                     has_block: false,
                     digest_verified: false,
                     digest_failed: false,
+                    signature_verified: false,
+                    signature_failed: false,
                     certificate: None,
                     expected: expected_clean,
                     standing: Standing::Unverified,
@@ -23057,6 +23387,8 @@ pub mod integrity {
                 has_block: false,
                 digest_verified: false,
                 digest_failed: false,
+                signature_verified: false,
+                signature_failed: false,
                 certificate: None,
                 expected: expected_clean,
                 standing: Standing::Tampered,
@@ -23079,6 +23411,8 @@ pub mod integrity {
 
         let digest_failed = report.digests_failed > 0;
         let digest_verified = report.digests_verified > 0;
+        let signature_failed = report.signatures_failed > 0 || !report.key_matches_certificate;
+        let signature_verified = report.signatures_verified > 0;
 
         let (standing, reason) = if !report.has_block {
             (
@@ -23090,10 +23424,27 @@ pub mod integrity {
                 Standing::Tampered,
                 "The package does not match the digest recorded when it was signed.".to_string(),
             )
+        } else if !report.key_matches_certificate {
+            (
+                Standing::Tampered,
+                "The key that signed this package is not the key in the certificate it presents."
+                    .to_string(),
+            )
+        } else if report.signatures_failed > 0 {
+            (
+                Standing::Tampered,
+                "The signature on this package does not check out against the key that presents it."
+                    .to_string(),
+            )
         } else if !digest_verified {
             (
                 Standing::Unverified,
                 "The signature uses a digest this build cannot recompute.".to_string(),
+            )
+        } else if !signature_verified {
+            (
+                Standing::Unverified,
+                "The contents are unchanged, but the signature over them is of a kind this build cannot check.".to_string(),
             )
         } else {
             match (&certificate, &expected_clean) {
@@ -23121,6 +23472,8 @@ pub mod integrity {
             has_block: report.has_block,
             digest_verified,
             digest_failed,
+            signature_verified,
+            signature_failed,
             certificate,
             expected: expected_clean,
             standing,
@@ -29401,6 +29754,12 @@ pub mod builder {
         pub signed: bool,
         pub carries_code: bool,
         pub certificate_fingerprint: String,
+        /// What re-reading the finished package said about its own signature.
+        ///
+        /// The package handed back is read again from its own bytes, as
+        /// anything installing it would read it, rather than being declared
+        /// signed because the code that signed it returned without an error.
+        pub verified: crate::signing::Report,
     }
 
     impl Outcome {
@@ -29412,6 +29771,7 @@ pub mod builder {
             w.field_bool("carriesCode", self.carries_code);
             w.field_str("certificate", &self.certificate_fingerprint);
             self.guard.write_json(w, "guard");
+            self.verified.write_json(w, "verified");
             w.end_object();
         }
     }
@@ -30469,6 +30829,58 @@ public final class R {{
         crate::progress::enter("verify");
         let parsed = crate::x509::Certificate::parse(certificate_der)?;
 
+        // What was just written, read back the way an installer reads it.
+        //
+        // Signing returning without an error says the signing code ran. It
+        // does not say the bytes it produced carry a signature that verifies
+        // against the key that made it, and the only way to know that is to
+        // read those bytes as a stranger would. A package that fails this is
+        // never handed back: it would be one this build called signed and
+        // Android would refuse.
+        let mut checking = Sink::new();
+        let verified = match crate::archive::read(&package, &mut checking) {
+            Some(archive) => crate::signing::examine(
+                &package,
+                archive.central_directory_offset(),
+                archive.end_record_offset(),
+                &mut checking,
+            ),
+            None => {
+                return Err(fail(
+                    "EB056",
+                    "The package this build wrote does not read back as an archive.",
+                )
+                .with_suggestion(
+                    "Nothing was handed back. This is a fault in this build, not in \
+                     the project.",
+                ))
+            }
+        };
+        if !verified.everything_checkable_passed() {
+            let mut refusal = fail(
+                "EB057",
+                "The package this build signed does not verify against its own key.",
+            )
+            .with_context(format!(
+                "Digests verified: {}, failed: {}",
+                verified.digests_verified, verified.digests_failed
+            ))
+            .with_context(format!(
+                "Signatures verified: {}, failed: {}",
+                verified.signatures_verified, verified.signatures_failed
+            ))
+            .with_suggestion(
+                "Nothing was handed back. A package that does not verify here \
+                 would be refused at install time.",
+            );
+            for entry in checking.entries() {
+                if entry.severity.is_blocking() {
+                    refusal = refusal.with_context(entry.message.clone());
+                }
+            }
+            return Err(refusal);
+        }
+
         Ok(Outcome {
             package,
             guard: report,
@@ -30476,6 +30888,7 @@ public final class R {{
             signed: true,
             carries_code: !project.code.is_empty(),
             certificate_fingerprint: parsed.fingerprint_display(),
+            verified,
         })
     }
 }
@@ -39144,11 +39557,21 @@ public final class MainActivity extends Activity {
         assert_eq!(certificate.subject, "C=TR, O=Omni, CN=Omni Test");
         assert_eq!(certificate.public_key_bits, Some(2048));
 
-        assert!(!report.signatures_checked);
+        assert!(
+            report.signatures_checked,
+            "apksigner's own signature was not checked"
+        );
+        assert_eq!(report.signatures_failed, 0, "{:?}", sink.entries());
+        assert!(
+            report.signatures_verified > 0,
+            "no signature verified: {:?}",
+            sink.entries()
+        );
+        assert!(report.key_matches_certificate);
 
         eprintln!(
-            "signing conformance: {} digest(s) recomputed and matched apksigner",
-            report.digests_verified
+            "signing conformance: {} digest(s) and {} signature(s) of apksigner's agreed",
+            report.digests_verified, report.signatures_verified
         );
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -39273,11 +39696,14 @@ public final class MainActivity extends Activity {
             report.signers[0].certificates[0].public_key_bits,
             Some(4096)
         );
-        assert!(!report.signatures_checked);
+        assert!(report.signatures_checked);
+        assert_eq!(report.signatures_failed, 0, "{:?}", sink.entries());
+        assert!(report.signatures_verified > 0, "{:?}", sink.entries());
+        assert!(report.everything_checkable_passed());
 
         eprintln!(
-            "signing conformance: SHA-512, {} digest(s) recomputed and matched apksigner",
-            report.digests_verified
+            "signing conformance: SHA-512, {} digest(s) and {} signature(s) agreed",
+            report.digests_verified, report.signatures_verified
         );
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -39343,8 +39769,11 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    /// The report says what was checked, and says it in the same words the
+    /// check would answer in. Every count it carries is one this build
+    /// produced, and the note names what it still does not do.
     #[test]
-    fn a_signing_report_says_what_it_did_not_check() {
+    fn a_signing_report_says_what_it_checked_and_what_it_did_not() {
         let Some((bytes, directory)) = sign_with_apksigner("v2-report") else {
             return;
         };
@@ -39364,8 +39793,126 @@ public final class MainActivity extends Activity {
         let document = w.finish();
 
         assert!(is_structurally_valid(&document), "{document}");
-        assert!(document.contains("\"signaturesChecked\":false"));
-        assert!(document.contains("does not prove who wrote it"));
+        assert!(document.contains("\"signaturesChecked\":true"));
+        assert!(document.contains("\"signaturesVerified\":1"));
+        assert!(document.contains("\"signaturesFailed\":0"));
+        assert!(document.contains("\"keyMatchesCertificate\":true"));
+        // What it still does not do is said in the same place as what it does.
+        assert!(document.contains("ECDSA and DSA"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A signature made by one key, presented beside another key's
+    /// certificate, is refused rather than counted.
+    ///
+    /// This is the attack a digest check alone cannot see: the package is
+    /// exactly what the block says it is, and the block says it was signed by
+    /// somebody who did not sign it.
+    #[test]
+    fn a_key_that_is_not_the_certificate_s_key_is_refused() {
+        let Some((bytes, directory)) = sign_with_apksigner("v2-swap") else {
+            return;
+        };
+
+        let archive = archive::read(&bytes, &mut Sink::new()).unwrap();
+        let mut sink = Sink::new();
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+        let signer = report.signers[0].clone();
+
+        // Somebody else's key, in the place of the one that signed.
+        let other = crate::rsa::generate(2048).expect("a key");
+        let substituted = signing::Signer {
+            public_key: crate::certificate::public_key_info(&other).expect("a public key"),
+            ..signer.clone()
+        };
+
+        let mut complaints = Sink::new();
+        let checked = signing::verify_signer(&substituted, &mut complaints);
+        assert!(!checked.key_matches_certificate);
+        assert!(checked.signatures.is_empty(), "nothing may be counted");
+        let refusal = complaints
+            .entries()
+            .iter()
+            .find(|entry| entry.code == "ES034")
+            .expect("the swap must be named");
+        assert_eq!(refusal.severity, Severity::Fatal);
+        assert_eq!(refusal.class, FailureClass::SecurityFailure);
+
+        // And the untouched one still passes, so the refusal is about the
+        // swap and not about the check being unable to pass anything.
+        let mut quiet = Sink::new();
+        assert!(signing::verify_signer(&signer, &mut quiet).key_matches_certificate);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A signature changed after the fact stops verifying.
+    #[test]
+    fn a_signature_that_was_tampered_with_stops_verifying() {
+        let Some((bytes, directory)) = sign_with_apksigner("v2-bent") else {
+            return;
+        };
+
+        let archive = archive::read(&bytes, &mut Sink::new()).unwrap();
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut Sink::new(),
+        );
+        let mut signer = report.signers[0].clone();
+        assert!(!signer.signatures.is_empty());
+
+        // One bit, in the middle of the signature.
+        let middle = signer.signatures[0].1.len() / 2;
+        signer.signatures[0].1[middle] ^= 0x01;
+
+        let mut sink = Sink::new();
+        let checked = signing::verify_signer(&signer, &mut sink);
+        assert!(checked.key_matches_certificate, "the key is untouched");
+        assert_eq!(checked.signatures.len(), 1);
+        assert_eq!(checked.signatures[0].1, signing::Checked::Failed);
+        let refusal = sink
+            .entries()
+            .iter()
+            .find(|entry| entry.code == "ES036")
+            .expect("a bent signature must be named");
+        assert_eq!(refusal.severity, Severity::Fatal);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// And a package whose contents were changed fails the signature too, not
+    /// only the digest: the digests are inside what the signature covers.
+    #[test]
+    fn what_the_signature_covers_includes_the_digests() {
+        let Some((bytes, directory)) = sign_with_apksigner("v2-covered") else {
+            return;
+        };
+
+        let archive = archive::read(&bytes, &mut Sink::new()).unwrap();
+        let report = signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut Sink::new(),
+        );
+        let mut signer = report.signers[0].clone();
+
+        // A digest changed inside the signed data, as somebody swapping the
+        // package's contents would have to do.
+        let at = signer.signed_data.len() / 2;
+        signer.signed_data[at] ^= 0xff;
+
+        let mut sink = Sink::new();
+        let checked = signing::verify_signer(&signer, &mut sink);
+        assert_eq!(checked.signatures[0].1, signing::Checked::Failed);
 
         std::fs::remove_dir_all(&directory).ok();
     }
@@ -39393,7 +39940,15 @@ public final class MainActivity extends Activity {
                     archive.end_record_offset(),
                     &mut sink,
                 );
-                assert!(!report.signatures_checked);
+                // Whatever the damage was, nothing is ever counted as
+                // verified that was not: a report may say it checked
+                // signatures and found them wanting, and may say it checked
+                // none, but a failure never arrives as a pass.
+                assert!(
+                    report.signatures_verified == 0
+                        || (report.signatures_failed == 0 && report.key_matches_certificate),
+                    "a damaged package reported a clean signature"
+                );
             }
         }
 
@@ -41145,6 +41700,15 @@ public final class MainActivity extends Activity {
             super::builder::assemble(&project, &opened.key, &opened.certificate, &mut sink)
                 .expect("the developer's key must sign the package");
         assert_eq!(outcome.certificate_fingerprint, made.fingerprint);
+
+        // The build read back what it wrote before handing it over, and what
+        // it found is carried out with it rather than assumed.
+        assert!(outcome.verified.everything_checkable_passed());
+        assert!(outcome.verified.signatures_checked);
+        assert_eq!(outcome.verified.signatures_failed, 0);
+        assert!(outcome.verified.signatures_verified >= 2, "v2 and v3 both");
+        assert!(outcome.verified.key_matches_certificate);
+        assert_eq!(outcome.verified.digests_failed, 0);
 
         let path = directory.join("developer-signed.apk");
         std::fs::write(&path, &outcome.package).unwrap();

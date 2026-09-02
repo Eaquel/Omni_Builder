@@ -142,4 +142,7 @@
     <string name="omni_stage_measuring">Buradaki ilk derleme, bu yüzden bu bir tahmin.</string>
     <string name="omni_stage_learned">Bu cihazın kendi derlemelerinden hesaplandı.</string>
     <string name="omni_stage_built">PAKET YAZILDI</string>
+    <string name="omni_result_verified">Geri denetim</string>
+    <string name="omni_result_verified_yes">Paket kendi anahtarıyla doğrulanıyor</string>
+    <string name="omni_result_verified_no">Paket doğrulanmıyor</string>
 </resources>

@@ -142,4 +142,7 @@
     <string name="omni_stage_measuring">Primera construcción aquí, así que esto es una estimación.</string>
     <string name="omni_stage_learned">Calculado con las propias construcciones de este dispositivo.</string>
     <string name="omni_stage_built">PAQUETE ESCRITO</string>
+    <string name="omni_result_verified">Comprobado</string>
+    <string name="omni_result_verified_yes">El paquete se verifica con su propia clave</string>
+    <string name="omni_result_verified_no">El paquete no se verifica</string>
 </resources>
