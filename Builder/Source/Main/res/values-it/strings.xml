@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">Permessi richiesti</string>
     <string name="omni_open_activities">Schermate dichiarate</string>
     <string name="omni_open_largest">Cosa occupa lo spazio</string>
+    <string name="omni_policy_title">Rispetto a cosa viene controllato</string>
+    <string name="omni_policy_all">Tutte le %1$d regole reggono.</string>
+    <string name="omni_policy_some">%1$d regole su %2$d non reggono. Una costruzione verrebbe rifiutata.</string>
 </resources>

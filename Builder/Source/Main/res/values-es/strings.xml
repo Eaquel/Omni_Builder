@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">Permisos que pide</string>
     <string name="omni_open_activities">Pantallas que declara</string>
     <string name="omni_open_largest">Lo que ocupa el sitio</string>
+    <string name="omni_policy_title">Contra qué se comprueba</string>
+    <string name="omni_policy_all">Las %1$d reglas se cumplen.</string>
+    <string name="omni_policy_some">%1$d de %2$d reglas no se cumplen. Una construcción sería rechazada.</string>
 </resources>

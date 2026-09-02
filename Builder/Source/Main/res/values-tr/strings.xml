@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">İstediği izinler</string>
     <string name="omni_open_activities">Tanımladığı ekranlar</string>
     <string name="omni_open_largest">Yeri kaplayanlar</string>
+    <string name="omni_policy_title">Neye karşı denetleniyor</string>
+    <string name="omni_policy_all">%1$d kuralın hepsi sağlanıyor.</string>
+    <string name="omni_policy_some">%2$d kuraldan %1$d tanesi sağlanmıyor. Derleme reddedilirdi.</string>
 </resources>

@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">Permissions it asks for</string>
     <string name="omni_open_activities">Screens it declares</string>
     <string name="omni_open_largest">What is taking the room</string>
+    <string name="omni_policy_title">What it is checked against</string>
+    <string name="omni_policy_all">All %1$d rules hold.</string>
+    <string name="omni_policy_some">%1$d of %2$d rules do not hold. A build would be refused.</string>
 </resources>

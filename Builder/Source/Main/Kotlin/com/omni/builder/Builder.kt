@@ -2318,6 +2318,7 @@ class BuilderActivity : Activity() {
                         palette.ok,
                     )
                 )
+                showPolicy(answer)
                 return@finished
             }
             checked.refusal?.let { showRefusal(it, results) }
@@ -2339,6 +2340,71 @@ class BuilderActivity : Activity() {
                     }
                 )
             }
+            showPolicy(answer)
+        }
+    }
+
+    /**
+     * Every rule the security policy applies, and what it made of this one.
+     *
+     * The rules are the Core's own list rather than a copy of them written
+     * here: a rule that stopped being applied would stop being shown, instead
+     * of quietly staying on a page that says it is checked. A project that
+     * fails one is refused at build time, so this is the page that says why
+     * before the wait.
+     */
+    private fun showPolicy(answer: String) {
+        val rules = runCatching {
+            JSONObject(answer).optJSONObject("code")?.optJSONArray("rules")
+        }.getOrNull() ?: return
+        if (rules.length() == 0) {
+            return
+        }
+        var broken = 0
+        for (index in 0 until rules.length()) {
+            if (rules.optJSONObject(index)?.optBoolean("held", true) == false) broken += 1
+        }
+        results.addView(heading(getString(R.string.omni_policy_title)))
+        results.addView(
+            notice(
+                if (broken == 0) {
+                    getString(R.string.omni_policy_all, rules.length())
+                } else {
+                    getString(R.string.omni_policy_some, broken, rules.length())
+                },
+                if (broken == 0) palette.ok else palette.error,
+            )
+        )
+        val listed = card()
+        for (index in 0 until rules.length()) {
+            val one = rules.optJSONObject(index) ?: continue
+            val held = one.optBoolean("held", true)
+            if (index > 0) {
+                listed.addView(rule(), MATCH_PARENT, 1)
+            }
+            listed.addView(
+                keyValue(
+                    one.optString("says"),
+                    one.optString("rule"),
+                    if (held) "OK" else one.optString("code"),
+                    if (held) palette.ok else palette.error,
+                )
+            )
+        }
+        results.addView(listed)
+
+        // And what each broken one is, in the Core's own words.
+        val findings = runCatching {
+            JSONObject(answer).optJSONObject("code")
+                ?.optJSONObject("policy")?.optJSONArray("findings")
+        }.getOrNull() ?: return
+        for (index in 0 until findings.length()) {
+            val one = findings.optJSONObject(index) ?: continue
+            val said = card()
+            said.addView(notice(one.optString("what"), palette.error))
+            said.addView(body(one.optString("why")))
+            said.addView(quiet(one.optString("remedy")))
+            results.addView(said)
         }
     }
 

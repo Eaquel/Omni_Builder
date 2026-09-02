@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">Запрашиваемые разрешения</string>
     <string name="omni_open_activities">Объявленные экраны</string>
     <string name="omni_open_largest">Что занимает место</string>
+    <string name="omni_policy_title">По каким правилам проверяется</string>
+    <string name="omni_policy_all">Все %1$d правил соблюдены.</string>
+    <string name="omni_policy_some">%1$d из %2$d правил не соблюдены. Сборка была бы отклонена.</string>
 </resources>

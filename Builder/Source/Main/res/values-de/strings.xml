@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">Angeforderte Berechtigungen</string>
     <string name="omni_open_activities">Deklarierte Bildschirme</string>
     <string name="omni_open_largest">Was den Platz belegt</string>
+    <string name="omni_policy_title">Wogegen es geprüft wird</string>
+    <string name="omni_policy_all">Alle %1$d Regeln halten.</string>
+    <string name="omni_policy_some">%1$d von %2$d Regeln halten nicht. Ein Build würde abgelehnt.</string>
 </resources>

@@ -17243,6 +17243,78 @@ pub mod guard {
         }
     }
 
+    /// Every rule this policy applies, in the order it applies them.
+    ///
+    /// This is a list of the rules rather than a second implementation of
+    /// them: each entry names one, and the suite checks that every rule the
+    /// inspection can produce a finding for is on it and that nothing on it is
+    /// a rule the inspection does not have. A screen showing a person what
+    /// their project is checked against reads this, and a rule that stopped
+    /// being applied would stop being listed rather than quietly staying on a
+    /// page that says it is.
+    pub const RULES: &[(&str, &str, &str)] = &[
+        (
+            "EG001",
+            "no-debuggable",
+            "Nothing on the device may attach a debugger to it.",
+        ),
+        (
+            "EG002",
+            "no-cleartext",
+            "Its traffic is not carried in the open.",
+        ),
+        (
+            "EG003",
+            "no-backup",
+            "Its data is not copied off the device by the backup service.",
+        ),
+        (
+            "EG004",
+            "guard-exported",
+            "What other applications may start is said, and what they must hold to start it.",
+        ),
+        (
+            "EG005",
+            "provider-uri-grants",
+            "A content provider does not hand out access to everything it holds.",
+        ),
+        (
+            "EG006",
+            "minimum-platform",
+            "It runs on platforms that still receive fixes.",
+        ),
+        (
+            "EG007",
+            "high-risk-permission",
+            "It does not ask for a permission that reads everything a person does.",
+        ),
+        (
+            "EG008",
+            "no-shared-user",
+            "It does not share a user with another application.",
+        ),
+        (
+            "EG009",
+            "no-legacy-storage",
+            "It does not opt out of the storage rules the platform put there.",
+        ),
+        (
+            "EG010",
+            "no-package-census",
+            "It does not ask to see every application installed.",
+        ),
+        (
+            "EG011",
+            "no-task-hijacking",
+            "Another application cannot place its own screen inside this one's task.",
+        ),
+    ];
+
+    /// Whether a rule found something in this project.
+    pub fn fired(report: &Report, code: &str) -> bool {
+        report.findings.iter().any(|held| held.code == code)
+    }
+
     pub fn inspect_manifest(root: &Element) -> Report {
         let mut report = Report::default();
         let mut elements = Vec::new();
@@ -30650,6 +30722,12 @@ pub mod builder {
         pub package: String,
         /// The one thing that stopped it, if anything did.
         pub refusal: Option<Diagnostic>,
+        /// What the security policy makes of the manifest, rule by rule.
+        ///
+        /// The policy runs before anything is written, so a project that
+        /// compiles and would be refused on policy is a project worth knowing
+        /// about before pressing build rather than after waiting for one.
+        pub policy: Option<guard::Report>,
     }
 
     impl Checked {
@@ -30660,6 +30738,19 @@ pub mod builder {
             w.field_u64("resources", self.resources as u64);
             w.field_u64("locales", self.locales as u64);
             w.field_str("package", &self.package);
+            if let Some(policy) = &self.policy {
+                policy.write_json(w, "policy");
+                w.begin_array(Some("rules"));
+                for (code, rule, says) in guard::RULES {
+                    w.begin_object(None);
+                    w.field_str("code", code);
+                    w.field_str("rule", rule);
+                    w.field_str("says", says);
+                    w.field_bool("held", !guard::fired(policy, code));
+                    w.end_object();
+                }
+                w.end_array();
+            }
             if let Some(refusal) = &self.refusal {
                 // The whole refusal, location included: a mark on a line needs
                 // a line, and a sentence saying which one is not one.
@@ -30712,12 +30803,20 @@ pub mod builder {
                         .as_ref()
                         .map(package_name)
                         .unwrap_or_default();
+                let policy = crate::xml::parse(
+                    &project.manifest,
+                    "AndroidManifest.xml",
+                    &mut crate::diag::Sink::new(),
+                )
+                .as_ref()
+                .map(guard::inspect_manifest);
                 Checked {
                     classes: project.code.len(),
                     resources,
                     locales: project.values.len(),
                     package,
                     refusal: table.err(),
+                    policy,
                 }
             }
             Err(refusal) => Checked {
@@ -30726,6 +30825,7 @@ pub mod builder {
                 locales: 0,
                 package: String::new(),
                 refusal: Some(refusal),
+                policy: None,
             },
         }
     }
@@ -48400,6 +48500,121 @@ public final class MainActivity extends Activity {
         let error = super::rsa::seal_pkcs8(&key, "short").unwrap_err();
         assert_eq!(error.code, "ER040");
         assert!(error.suggestion.unwrap().contains("only thing between"));
+    }
+
+    /// The list of rules is the rules, and stays the rules.
+    ///
+    /// A security page that names eleven checks while the build applies ten is
+    /// a page that lies, and it lies quietly, because nothing about a rule
+    /// being deleted makes a list of rules shorter. So the list is checked
+    /// against the code that applies them: every code the inspection can
+    /// produce is on the list, nothing on the list is a code the inspection
+    /// does not have, and the count matches what a report says it applied.
+    #[test]
+    fn every_rule_the_policy_applies_is_one_it_lists() {
+        let source = std::fs::read_to_string("Builder.rs").expect("this file must be here");
+        let at = source
+            .find("pub fn inspect_manifest(root: &Element) -> Report {")
+            .expect("the inspection is here");
+        let end = source[at..]
+            .find("\n    pub fn emit(")
+            .expect("and it ends")
+            + at;
+        let body = &source[at..end];
+
+        let mut applied: Vec<String> = Vec::new();
+        let mut rest = body;
+        while let Some(found) = rest.find("code: \"") {
+            // Past `code: "`, which leaves the code itself.
+            let after = &rest[found + 7..];
+            let close = after.find('"').expect("a code is quoted");
+            applied.push(after[..close].to_string());
+            rest = &after[close..];
+        }
+        applied.sort();
+        applied.dedup();
+
+        let listed: Vec<String> = super::guard::RULES
+            .iter()
+            .map(|(code, _, _)| (*code).to_string())
+            .collect();
+        let mut sorted = listed.clone();
+        sorted.sort();
+        sorted.dedup();
+
+        assert_eq!(
+            sorted, applied,
+            "the listed rules and the applied rules have drifted apart"
+        );
+        assert_eq!(
+            listed.len(),
+            super::guard::RULES.len(),
+            "a rule is listed twice"
+        );
+
+        // What a report says it applied is how many there are.
+        let mut sink = Sink::new();
+        let manifest = super::xml::parse(
+            "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             package=\"com.tr.yt\"><uses-sdk android:minSdkVersion=\"30\"/>\
+             <application/></manifest>",
+            "AndroidManifest.xml",
+            &mut sink,
+        )
+        .expect("it must parse");
+        let report = super::guard::inspect_manifest(&manifest);
+        assert_eq!(
+            report.rules_applied,
+            super::guard::RULES.len(),
+            "the policy applied {} rules and lists {}",
+            report.rules_applied,
+            super::guard::RULES.len()
+        );
+
+        // And every rule says something a person can act on.
+        for (code, rule, says) in super::guard::RULES {
+            assert!(code.starts_with("EG"), "{code}");
+            assert!(rule.contains('-'), "{rule}");
+            assert!(says.len() > 30, "{code} says too little: {says}");
+            assert!(says.ends_with('.'), "{code} does not finish its sentence");
+        }
+    }
+
+    /// The check says what the policy makes of the project, before a build.
+    #[test]
+    fn a_check_says_what_the_policy_would_refuse() {
+        let directory = temp_directory("omni-check-policy");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Guarded".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let clear = super::builder::check(&root);
+        let policy = clear.policy.expect("a project that reads has a verdict");
+        assert_eq!(policy.verdict(), super::guard::Verdict::Passed);
+        assert_eq!(policy.rules_applied, super::guard::RULES.len());
+
+        // A manifest asking to be debuggable is one the build refuses, and
+        // the check says so without writing a package to find out.
+        let manifest = super::workspace::read_text(&root, "AndroidManifest.xml").unwrap();
+        let opened = manifest.replace("<application", "<application android:debuggable=\"true\"");
+        assert_ne!(opened, manifest, "the manifest must have an application");
+        super::workspace::write_text(&root, "AndroidManifest.xml", &opened).unwrap();
+
+        let refused = super::builder::check(&root);
+        let policy = refused.policy.expect("a verdict");
+        assert_eq!(policy.verdict(), super::guard::Verdict::Refused);
+        assert!(super::guard::fired(&policy, "EG001"));
+        assert!(!super::guard::fired(&policy, "EG002"));
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     /// A package this build wrote, opened again with nothing but this build.

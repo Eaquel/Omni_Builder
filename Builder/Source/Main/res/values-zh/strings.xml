@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">申请的权限</string>
     <string name="omni_open_activities">声明的界面</string>
     <string name="omni_open_largest">占用空间的内容</string>
+    <string name="omni_policy_title">依据哪些规则检查</string>
+    <string name="omni_policy_all">%1$d 条规则全部满足。</string>
+    <string name="omni_policy_some">%2$d 条规则中有 %1$d 条不满足。构建会被拒绝。</string>
 </resources>

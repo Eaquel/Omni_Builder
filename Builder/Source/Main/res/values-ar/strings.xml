@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">الأذونات المطلوبة</string>
     <string name="omni_open_activities">الشاشات المعلنة</string>
     <string name="omni_open_largest">ما يشغل المساحة</string>
+    <string name="omni_policy_title">بأي قواعد يُفحص</string>
+    <string name="omni_policy_all">القواعد الـ%1$d كلها متحققة.</string>
+    <string name="omni_policy_some">%1$d من %2$d قواعد غير متحققة. سيُرفض البناء.</string>
 </resources>

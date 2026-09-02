@@ -173,4 +173,7 @@
     <string name="omni_open_permissions">Permissions demandées</string>
     <string name="omni_open_activities">Écrans déclarés</string>
     <string name="omni_open_largest">Ce qui prend la place</string>
+    <string name="omni_policy_title">Ce contre quoi il est vérifié</string>
+    <string name="omni_policy_all">Les %1$d règles tiennent.</string>
+    <string name="omni_policy_some">%1$d des %2$d règles ne tiennent pas. Une construction serait refusée.</string>
 </resources>
