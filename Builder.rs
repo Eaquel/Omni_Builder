@@ -30152,6 +30152,95 @@ pub mod builder {
         Ok(project)
     }
 
+    /// What checking a project's code came to.
+    #[derive(Clone, Debug)]
+    pub struct Checked {
+        pub classes: usize,
+        pub resources: usize,
+        pub locales: usize,
+        pub package: String,
+        /// The one thing that stopped it, if anything did.
+        pub refusal: Option<Diagnostic>,
+    }
+
+    impl Checked {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_bool("clear", self.refusal.is_none());
+            w.field_u64("classes", self.classes as u64);
+            w.field_u64("resources", self.resources as u64);
+            w.field_u64("locales", self.locales as u64);
+            w.field_str("package", &self.package);
+            if let Some(refusal) = &self.refusal {
+                // The whole refusal, location included: a mark on a line needs
+                // a line, and a sentence saying which one is not one.
+                w.field_str("code", &refusal.code);
+                w.field_str("error", &refusal.message);
+                if let Some(suggestion) = &refusal.suggestion {
+                    w.field_str("suggestion", suggestion);
+                }
+                if let Some(place) = &refusal.location {
+                    w.begin_object(Some("location"));
+                    w.field_str("file", &place.file);
+                    w.field_u64("line", u64::from(place.line));
+                    w.field_u64("column", u64::from(place.column));
+                    w.end_object();
+                }
+                w.begin_array(Some("context"));
+                for line in &refusal.context {
+                    w.element_str(line);
+                }
+                w.end_array();
+            }
+            w.end_object();
+        }
+    }
+
+    /// Reads a project the way a build reads it, and stops before packaging.
+    ///
+    /// This is not a second opinion about the project: it is the front half of
+    /// the build itself -- the manifest, the resources, the identifiers, the
+    /// Java -- run and then dropped. So an answer of clear means the same
+    /// files compiled, with the same classpath, in the same order, and a
+    /// refusal is the refusal the build would give, at the line it would give
+    /// it at.
+    ///
+    /// Nothing is written anywhere. It is the check to run while typing.
+    pub fn check(root: &str) -> Checked {
+        match from_project(root) {
+            Ok(project) => {
+                let mut sink = crate::diag::Sink::new();
+                let table = compile_resources(&project, &mut sink);
+                let resources = table
+                    .as_ref()
+                    .ok()
+                    .and_then(|held| held.as_ref())
+                    .map(|held| held.files.len())
+                    .unwrap_or(0);
+                let mut named = crate::diag::Sink::new();
+                let package =
+                    crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut named)
+                        .as_ref()
+                        .map(package_name)
+                        .unwrap_or_default();
+                Checked {
+                    classes: project.code.len(),
+                    resources,
+                    locales: project.values.len(),
+                    package,
+                    refusal: table.err(),
+                }
+            }
+            Err(refusal) => Checked {
+                classes: 0,
+                resources: 0,
+                locales: 0,
+                package: String::new(),
+                refusal: Some(refusal),
+            },
+        }
+    }
+
     /// The `R` class, as Java, from the identifiers the resource table gave
     /// out.
     ///
@@ -30282,7 +30371,16 @@ public final class R {{
                     .with_context(format!("Path: {}", path.display()))
                     .with_context(format!("Reason: {why}"))
             })?;
-            read.push((path.display().to_string(), text));
+            // Named the way the project names it, so a refusal points at a
+            // file somebody can open rather than at wherever this device
+            // happens to keep its projects.
+            let named = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .display()
+                .to_string()
+                .replace('\\', "/");
+            read.push((named, text));
         }
         read.extend(generated);
 
@@ -33204,6 +33302,29 @@ pub mod ffi {
     /// `sensitive` and `whole_word` are the two switches a search needs and
     /// the only two: the first says whether case counts, the second whether
     /// `at` may match inside `that`.
+    /// Reads a project the way a build reads it, and stops before packaging.
+    ///
+    /// This is the front half of the build itself rather than a second opinion
+    /// about it, so a refusal is the refusal a build would give, at the line it
+    /// would give it at, and nothing is written anywhere.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_check_project(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let checked = crate::builder::check(&root);
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_bool("checked", true);
+            w.field_str("root", &root);
+            checked.write_json(&mut w, "code");
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     #[no_mangle]
     pub unsafe extern "C" fn omni_search_project(
         root: *const c_char,
@@ -40205,6 +40326,137 @@ public final class MainActivity extends Activity {
     /// word the compiler reserves. It may hold more -- `record`, `sealed`
     /// and `yield` are names to the compiler and read as keywords to a person
     /// -- but never fewer.
+    /// Checking a project says what a build would say, at the line it would
+    /// say it at, and writes nothing.
+    #[test]
+    fn a_check_refuses_where_a_build_would_and_says_which_line() {
+        let directory = temp_directory("omni-check");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Checked".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        // As written, it is a project that builds.
+        let clear = super::builder::check(&root);
+        assert!(
+            clear.refusal.is_none(),
+            "a project as written must check clear: {:?}",
+            clear.refusal
+        );
+        assert!(clear.classes > 0, "the activity is a class");
+        assert_eq!(clear.package, "com.tr.yt");
+
+        // Nothing is written by checking: the folder holds what it held.
+        let before = super::workspace::tree(&root).unwrap();
+        super::builder::check(&root);
+        let after = super::workspace::tree(&root).unwrap();
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "a check left something behind in the project"
+        );
+
+        // A mistake on a line this test chose, found on that line.
+        let source = super::workspace::tree(&root)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path.ends_with(".java"))
+            .expect("the scaffold writes Java");
+        let text = super::workspace::read_text(&root, &source.path).unwrap();
+        let mut lines: Vec<String> = text.lines().map(|line| line.to_string()).collect();
+        let broken = lines.len() / 2;
+        lines.insert(broken, "    int and now this is not Java @@@;".to_string());
+        super::workspace::write_text(&root, &source.path, &lines.join("\n")).unwrap();
+
+        let refused = super::builder::check(&root);
+        let refusal = refused.refusal.expect("a project that is not Java refuses");
+        let place = refusal
+            .location
+            .as_ref()
+            .expect("a refusal about a line carries that line");
+        assert_eq!(
+            place.line as usize,
+            broken + 1,
+            "the refusal points at {} rather than at the line that is wrong: {refusal:?}",
+            place.line
+        );
+        assert_eq!(
+            place.file, source.path,
+            "the refusal names the file by the path the project knows it by"
+        );
+
+        // And a build of the same project refuses in the same place, which is
+        // what makes the check worth running.
+        let error = super::builder::from_project(&root).expect_err("the build refuses too");
+        assert_eq!(error.code, refusal.code);
+        assert_eq!(
+            error.location.as_ref().map(|held| held.line),
+            Some(place.line)
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// And the bridge hands the same thing across.
+    #[test]
+    fn the_bridge_checks_a_project_without_building_it() {
+        let directory = temp_directory("omni-check-bridge");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Checked".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let root_c = std::ffi::CString::new(root.clone()).unwrap();
+        let read = |ptr: *mut std::os::raw::c_char| {
+            assert!(!ptr.is_null());
+            let held = unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_string_lossy()
+                .into_owned();
+            unsafe { super::ffi::omni_string_free(ptr) };
+            held
+        };
+
+        let clear = read(unsafe { super::ffi::omni_check_project(root_c.as_ptr()) });
+        assert!(is_structurally_valid(&clear), "{clear}");
+        assert!(clear.contains("\"clear\":true"), "{clear}");
+        assert!(clear.contains("\"package\":\"com.tr.yt\""), "{clear}");
+
+        let source = super::workspace::tree(&root)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.path.ends_with(".java"))
+            .expect("the scaffold writes Java");
+        super::workspace::write_text(&root, &source.path, "this is not Java at all\n").unwrap();
+
+        let refused = read(unsafe { super::ffi::omni_check_project(root_c.as_ptr()) });
+        assert!(is_structurally_valid(&refused), "{refused}");
+        assert!(refused.contains("\"clear\":false"), "{refused}");
+        assert!(refused.contains("\"location\""), "{refused}");
+        assert!(refused.contains("\"line\":1"), "{refused}");
+
+        // No package was written by any of it.
+        assert!(
+            !directory.join("Built").exists(),
+            "a check produced a package"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     /// Looking through a project finds what is in it, where it is, and says
     /// what it did not look at.
     #[test]

@@ -160,4 +160,7 @@
     <string name="omni_search_capped">Los primeros %1$d de más, en %2$d archivos</string>
     <string name="omni_search_too_large">%1$d archivos eran demasiado grandes para recorrerlos.</string>
     <string name="omni_search_not_text">%1$d archivos no son texto, así que se dejaron aparte.</string>
+    <string name="omni_check_title">COMPROBAR EL CÓDIGO</string>
+    <string name="omni_check_clear">%1$d clases, %2$d archivos de recursos, %3$d idiomas. Nada rechazado.</string>
+    <string name="omni_check_open">Abrirlo aquí</string>
 </resources>

@@ -168,8 +168,17 @@ fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
     )
 }
 
+/// A refusal about one place in one file.
+///
+/// The line and the column go into the diagnostic's own location as well as
+/// into the words a person reads, because an editor that means to put a mark
+/// on that line cannot get one out of a sentence. The file is not known here
+/// -- the lexer and the parser see text, not paths -- so it is left empty and
+/// filled in by whoever handed the text over.
 fn at(code: &str, line: u32, column: u32, message: impl Into<String>) -> Diagnostic {
-    fail(code, message).with_context(format!("Line {line}, column {column}"))
+    fail(code, message)
+        .with_context(format!("Line {line}, column {column}"))
+        .with_location(crate::diag::Location::at("", line, column))
 }
 
 fn at_line(code: &str, line: u32, message: impl Into<String>) -> Diagnostic {
@@ -22050,9 +22059,15 @@ pub fn compile_together(
 }
 
 /// Says which file a refusal is about, where there is more than one.
-fn named_file(error: Diagnostic, label: &str) -> Diagnostic {
+/// Says which file a refusal came out of, in its words and in its location.
+fn named_file(mut error: Diagnostic, label: &str) -> Diagnostic {
     if label.is_empty() {
         return error;
+    }
+    match error.location.as_mut() {
+        Some(place) if place.file.is_empty() => place.file = label.to_string(),
+        Some(_) => {}
+        None => error.location = Some(crate::diag::Location::file(label)),
     }
     error.with_context(format!("File: {label}"))
 }

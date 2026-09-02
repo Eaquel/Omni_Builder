@@ -552,6 +552,15 @@ object Builder {
     external fun nativeProjectTree(root: String): String
 
     /**
+     * Reads a project the way a build reads it, and stops before packaging.
+     *
+     * A refusal is the refusal a build would give, at the line it would give
+     * it at, and nothing is written anywhere. This is the one to run while
+     * typing.
+     */
+    external fun nativeCheckProject(root: String): String
+
+    /**
      * Looks through every text file in a project for a piece of text.
      *
      * The search is over the project as it is on disk, so what it finds is
@@ -722,6 +731,44 @@ data class Refusal(
                 message = root.optString("error").ifEmpty { null },
                 suggestion = root.optString("suggestion").ifEmpty { null },
                 context = context,
+            )
+        }
+    }
+}
+
+/**
+ * What checking a project came to.
+ *
+ * A refusal carries where it is, which is what lets the screen offer to open
+ * that file at that line rather than only saying which one it is.
+ */
+data class CodeCheck(
+    val clear: Boolean,
+    val classes: Int,
+    val resources: Int,
+    val locales: Int,
+    val packageName: String,
+    val refusal: Refusal?,
+    val file: String,
+    val line: Int,
+    val column: Int,
+) {
+    companion object {
+        fun parse(document: String): CodeCheck {
+            val root = JSONObject(document)
+            val code = root.optJSONObject("code") ?: JSONObject()
+            val clear = code.optBoolean("clear", false)
+            val place = code.optJSONObject("location")
+            return CodeCheck(
+                clear = clear,
+                classes = code.optInt("classes"),
+                resources = code.optInt("resources"),
+                locales = code.optInt("locales"),
+                packageName = code.optString("package"),
+                refusal = if (clear) null else Refusal.parse(code),
+                file = place?.optString("file").orEmpty(),
+                line = place?.optInt("line") ?: 0,
+                column = place?.optInt("column") ?: 0,
             )
         }
     }
@@ -1438,6 +1485,8 @@ class BuilderActivity : Activity() {
     private var editorAt: Pair<String, String>? = null
     /** What the open file held when it was read, so a draft knows it differs. */
     private var editorOnDisk = ""
+    /** The line to land on when the editor next opens, from a refusal. */
+    private var editorLine = 0
 
     override fun attachBaseContext(base: Context) {
         // Nothing chosen means the language the phone is set to, which is what
@@ -2096,11 +2145,63 @@ class BuilderActivity : Activity() {
             })
         }
 
+        content.addView(subtle(getString(R.string.omni_check_title), palette.accent) {
+            checkProject(root)
+        })
         content.addView(subtle(getString(R.string.omni_search_title), palette.accent) {
             go(Screen.Search(root))
         })
         content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
         content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    /**
+     * Reads the project the way a build reads it, and stops before packaging.
+     *
+     * The point is the wait: this is the front half of a build, so it takes
+     * what that takes and finds what that finds, and a person who runs it
+     * before pressing build knows whether pressing build is worth it.
+     */
+    private fun checkProject(root: String) {
+        working({ Builder.nativeCheckProject(root) }) finished@{ answer ->
+            val checked = runCatching { CodeCheck.parse(answer) }.getOrElse {
+                results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
+                return@finished
+            }
+            if (checked.clear) {
+                results.addView(
+                    notice(
+                        getString(
+                            R.string.omni_check_clear,
+                            checked.classes,
+                            checked.resources,
+                            checked.locales,
+                        ),
+                        palette.ok,
+                    )
+                )
+                return@finished
+            }
+            checked.refusal?.let { showRefusal(it, results) }
+            // Where it is, as a way to get there.
+            if (checked.file.isNotEmpty()) {
+                results.addView(
+                    row(
+                        checked.file,
+                        getString(R.string.omni_check_open),
+                        if (checked.line > 0) {
+                            checked.line.toString() + ":" + checked.column
+                        } else {
+                            ""
+                        },
+                        palette.error,
+                    ) {
+                        editorLine = checked.line
+                        go(Screen.Editor(root, checked.file))
+                    }
+                )
+            }
+        }
     }
 
     /**
@@ -2502,6 +2603,10 @@ class BuilderActivity : Activity() {
         }
         this.editor = editor
         this.editorAt = root to path
+        if (editorLine > 0) {
+            editor.showLine(editorLine)
+            editorLine = 0
+        }
         if (draft != null) {
             content.addView(notice(getString(R.string.omni_editor_restored), palette.warning))
         }

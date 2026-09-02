@@ -505,6 +505,33 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         invalidate()
     }
 
+    /**
+     * Puts the caret on a line and scrolls to it, counting from one.
+     *
+     * This is how a refusal becomes somewhere to look: the build says line
+     * ninety, and the file opens with the caret sitting on line ninety rather
+     * than at the top with a number beside it. It is posted rather than done
+     * now, because a view that has not been laid out has no lines to land on.
+     */
+    fun showLine(line: Int) {
+        post {
+            val held = text ?: return@post
+            var at = 0
+            var seen = 1
+            while (seen < line && at < held.length) {
+                if (held[at] == '\n') seen += 1
+                at += 1
+            }
+            setSelection(at.coerceIn(0, held.length))
+            val layout = layout ?: return@post
+            val row = layout.getLineForOffset(at)
+            // A third of the way down rather than at the very top, so what is
+            // above the line is visible too.
+            scrollTo(0, (layout.getLineTop(row) - height / 3).coerceAtLeast(0))
+            invalidate()
+        }
+    }
+
     fun undo() = move { history.undo(it) }
 
     fun redo() = move { history.redo(it) }

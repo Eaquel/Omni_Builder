@@ -160,4 +160,7 @@
     <string name="omni_search_capped">%2$d dosyada, daha fazlasının ilk %1$d tanesi</string>
     <string name="omni_search_too_large">%1$d dosya taranamayacak kadar büyüktü.</string>
     <string name="omni_search_not_text">%1$d dosya metin değil, o yüzden dokunulmadı.</string>
+    <string name="omni_check_title">KODU DENETLE</string>
+    <string name="omni_check_clear">%1$d sınıf, %2$d kaynak dosyası, %3$d dil. Hiçbir şey reddedilmedi.</string>
+    <string name="omni_check_open">Buradan aç</string>
 </resources>

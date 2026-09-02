@@ -160,4 +160,7 @@
     <string name="omni_search_capped">أول %1$d من أكثر، في %2$d ملفات</string>
     <string name="omni_search_too_large">%1$d ملفات كانت أكبر من أن تُقرأ.</string>
     <string name="omni_search_not_text">%1$d ملفات ليست نصًا، فتُركت.</string>
+    <string name="omni_check_title">افحص الشيفرة</string>
+    <string name="omni_check_clear">%1$d أصناف، %2$d ملفات موارد، %3$d لغات. لم يُرفض شيء.</string>
+    <string name="omni_check_open">افتحه هنا</string>
 </resources>

@@ -42,6 +42,8 @@ char *omni_list_projects(const char *directory);
 
 char *omni_project_tree(const char *root);
 
+char *omni_check_project(const char *root);
+
 char *omni_search_project(const char *root, const char *needle, bool sensitive,
                           bool whole_word);
 

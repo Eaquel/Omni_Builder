@@ -422,6 +422,16 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCheckProject(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Checking a project needs its folder.");
+    return nullptr;
+  }
+  return HandBack(env, omni_check_project(root_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSearchProject(
     JNIEnv *env, jobject , jstring root, jstring needle, jboolean sensitive,
     jboolean whole_word) {
