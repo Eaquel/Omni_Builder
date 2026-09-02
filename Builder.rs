@@ -39955,6 +39955,111 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    /// One list of words, in two places, saying the same thing.
+    ///
+    /// The editor colours a word because it is a Java keyword, and the
+    /// compiler refuses a name because it is a Java keyword. Those are two
+    /// separate lists in two separate languages, and a word in one and not
+    /// the other is a word the editor shows as an ordinary name right up
+    /// until the build refuses it. So the editor's list has to hold every
+    /// word the compiler reserves. It may hold more -- `record`, `sealed`
+    /// and `yield` are names to the compiler and read as keywords to a person
+    /// -- but never fewer.
+    #[test]
+    fn the_editor_colours_every_word_the_compiler_reserves() {
+        let editor =
+            std::fs::read_to_string("Builder/Source/Main/Kotlin/com/omni/builder/Editor.kt")
+                .expect("the editor's source must be here");
+
+        let listed = |name: &str| -> Vec<String> {
+            let opens = format!("private val {name} = setOf(");
+            let at = editor
+                .find(&opens)
+                .unwrap_or_else(|| panic!("the editor declares no {name} words"))
+                + opens.len();
+            let mut depth = 1usize;
+            let mut end = at;
+            for (index, character) in editor[at..].char_indices() {
+                match character {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = at + index;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body = &editor[at..end];
+            let mut words = Vec::new();
+            let mut rest = body;
+            while let Some(open) = rest.find('"') {
+                let after = &rest[open + 1..];
+                let Some(close) = after.find('"') else { break };
+                words.push(after[..close].to_string());
+                rest = &after[close + 1..];
+            }
+            assert!(!words.is_empty(), "{name} came out empty");
+            words
+        };
+
+        let java = listed("JAVA");
+        let source = std::fs::read_to_string("Compilers/Java.rs").expect("the compiler's source");
+        let at = source
+            .find("const KEYWORDS: &[&str] = &[")
+            .expect("the compiler declares its keywords");
+        let end = source[at..].find("];").expect("and closes the list") + at;
+        let mut reserved: Vec<&str> = Vec::new();
+        let mut rest = &source[at..end];
+        while let Some(open) = rest.find('"') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('"') else { break };
+            reserved.push(&after[..close]);
+            rest = &after[close + 1..];
+        }
+        assert!(reserved.len() >= 50, "{} keywords found", reserved.len());
+
+        let missing: Vec<&&str> = reserved
+            .iter()
+            .filter(|word| !java.iter().any(|held| held == *word))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "the editor does not colour these Java keywords: {missing:?}"
+        );
+
+        // And the other lists are real lists rather than a handful of words
+        // somebody typed: a language whose keywords are half there colours
+        // half a file.
+        for (name, least) in [("KOTLIN", 60), ("RUST", 35), ("CPP", 80)] {
+            let held = listed(name);
+            assert!(
+                held.len() >= least,
+                "{name} holds {} words, expected at least {least}",
+                held.len()
+            );
+        }
+
+        // Every file this application writes into a project opens in an
+        // editor that knows what it is looking at.
+        for name in [
+            "MainActivity.java",
+            "MainActivity.kt",
+            "Main.cpp",
+            "Lib.rs",
+            "AndroidManifest.xml",
+            "strings.xml",
+        ] {
+            let suffix = name.rsplit('.').next().unwrap();
+            assert!(
+                editor.contains(&format!(".{suffix}\"")),
+                "the editor knows no grammar for {name}"
+            );
+        }
+    }
+
     #[test]
     fn no_text_the_interface_shows_carries_a_stray_run_of_spaces() {
         let check = |what: &str, text: &str| {

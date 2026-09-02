@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Ricontrollato</string>
     <string name="omni_result_verified_yes">Il pacchetto si verifica con la propria chiave</string>
     <string name="omni_result_verified_no">Il pacchetto non si verifica</string>
+    <string name="omni_editor_undo">ANNULLA</string>
+    <string name="omni_editor_redo">RIPRISTINA</string>
+    <string name="omni_editor_paste">INCOLLA</string>
+    <string name="omni_editor_unsaved">Modifiche non salvate</string>
+    <string name="omni_editor_restored">Quello che avevi scritto qui è stato conservato e rimesso. Salvalo, oppure modificalo via.</string>
 </resources>

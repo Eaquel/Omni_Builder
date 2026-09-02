@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Revérifié</string>
     <string name="omni_result_verified_yes">Le paquet se vérifie avec sa propre clé</string>
     <string name="omni_result_verified_no">Le paquet ne se vérifie pas</string>
+    <string name="omni_editor_undo">ANNULER</string>
+    <string name="omni_editor_redo">RÉTABLIR</string>
+    <string name="omni_editor_paste">COLLER</string>
+    <string name="omni_editor_unsaved">Modifications non enregistrées</string>
+    <string name="omni_editor_restored">Ce que vous aviez tapé ici a été conservé et remis. Enregistrez-le, ou modifiez-le pour l\'effacer.</string>
 </resources>

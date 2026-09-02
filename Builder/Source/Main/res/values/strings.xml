@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Checked back</string>
     <string name="omni_result_verified_yes">The package verifies against its own key</string>
     <string name="omni_result_verified_no">The package does not verify</string>
+    <string name="omni_editor_undo">UNDO</string>
+    <string name="omni_editor_redo">REDO</string>
+    <string name="omni_editor_paste">PASTE</string>
+    <string name="omni_editor_unsaved">Unsaved changes</string>
+    <string name="omni_editor_restored">What you typed here last time was kept and put back. Save it, or edit it away.</string>
 </resources>

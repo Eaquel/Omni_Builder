@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Geri denetim</string>
     <string name="omni_result_verified_yes">Paket kendi anahtarıyla doğrulanıyor</string>
     <string name="omni_result_verified_no">Paket doğrulanmıyor</string>
+    <string name="omni_editor_undo">GERİ AL</string>
+    <string name="omni_editor_redo">İLERİ AL</string>
+    <string name="omni_editor_paste">YAPIŞTIR</string>
+    <string name="omni_editor_unsaved">Kaydedilmemiş değişiklikler</string>
+    <string name="omni_editor_restored">Buraya en son yazdıkların saklanıp geri kondu. Kaydet ya da düzenleyip çıkar.</string>
 </resources>

@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Перепроверка</string>
     <string name="omni_result_verified_yes">Пакет проверяется собственным ключом</string>
     <string name="omni_result_verified_no">Пакет не проходит проверку</string>
+    <string name="omni_editor_undo">ОТМЕНИТЬ</string>
+    <string name="omni_editor_redo">ВЕРНУТЬ</string>
+    <string name="omni_editor_paste">ВСТАВИТЬ</string>
+    <string name="omni_editor_unsaved">Несохранённые изменения</string>
+    <string name="omni_editor_restored">То, что вы набрали здесь в прошлый раз, сохранено и возвращено. Сохраните это или удалите правкой.</string>
 </resources>

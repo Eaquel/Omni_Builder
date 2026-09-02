@@ -145,4 +145,9 @@
     <string name="omni_result_verified">إعادة التحقق</string>
     <string name="omni_result_verified_yes">تتحقق الحزمة بمفتاحها الخاص</string>
     <string name="omni_result_verified_no">لا تتحقق الحزمة</string>
+    <string name="omni_editor_undo">تراجع</string>
+    <string name="omni_editor_redo">إعادة</string>
+    <string name="omni_editor_paste">لصق</string>
+    <string name="omni_editor_unsaved">تغييرات غير محفوظة</string>
+    <string name="omni_editor_restored">ما كتبته هنا آخر مرة حُفظ وأُعيد. احفظه، أو حرّره حتى يزول.</string>
 </resources>

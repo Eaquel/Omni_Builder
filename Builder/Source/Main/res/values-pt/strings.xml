@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Reconferido</string>
     <string name="omni_result_verified_yes">O pacote verifica com a sua própria chave</string>
     <string name="omni_result_verified_no">O pacote não verifica</string>
+    <string name="omni_editor_undo">DESFAZER</string>
+    <string name="omni_editor_redo">REFAZER</string>
+    <string name="omni_editor_paste">COLAR</string>
+    <string name="omni_editor_unsaved">Alterações por guardar</string>
+    <string name="omni_editor_restored">O que escreveu aqui da última vez foi guardado e reposto. Guarde-o, ou edite-o até desaparecer.</string>
 </resources>

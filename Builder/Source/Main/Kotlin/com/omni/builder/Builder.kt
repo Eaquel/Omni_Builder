@@ -68,6 +68,8 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.cos
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.sin
 import org.json.JSONObject
 
@@ -1409,6 +1411,11 @@ class BuilderActivity : Activity() {
     private var buildPasswordView: EditText? = null
 
     private var editorText = ""
+    private var editor: CodeEditor? = null
+    /** The project and the file the open editor is showing, if one is open. */
+    private var editorAt: Pair<String, String>? = null
+    /** What the open file held when it was read, so a draft knows it differs. */
+    private var editorOnDisk = ""
 
     override fun attachBaseContext(base: Context) {
         // Nothing chosen means the language the phone is set to, which is what
@@ -1595,13 +1602,32 @@ class BuilderActivity : Activity() {
         }.start()
     }
 
+    /**
+     * Puts whatever is in the open editor into its draft, now.
+     *
+     * The editor writes a draft after a pause in typing, which covers a person
+     * who stops to think. It does not cover a person who is closed by Android
+     * a keystroke later, so leaving the screen and leaving the application
+     * both come through here first.
+     */
+    private fun keepTheDraft() {
+        val open = editor ?: return
+        val (root, path) = editorAt ?: return
+        val held = open.text?.toString().orEmpty()
+        if (held != editorOnDisk) {
+            Drafts.write(this, root, path, held)
+        }
+    }
+
     override fun onPause() {
+        keepTheDraft()
         aurora.pauseDrawing()
         super.onPause()
         OmniLog.flushSession()
     }
 
     override fun onDestroy() {
+        keepTheDraft()
         OmniLog.flushSession()
         super.onDestroy()
     }
@@ -1666,6 +1692,9 @@ class BuilderActivity : Activity() {
     private fun ceremonyIsUp(): Boolean = ceremony.visibility == View.VISIBLE
 
     private fun render(animated: Boolean) {
+        keepTheDraft()
+        editor = null
+        editorAt = null
         content.removeAllViews()
         results.removeAllViews()
 
@@ -2294,7 +2323,13 @@ class BuilderActivity : Activity() {
 
     private fun renderEditor(root: String, path: String) {
         content.addView(heading(path.substringAfterLast('/')))
-        content.addView(quiet(path))
+        val where = TextView(this).apply {
+            text = path
+            setTextColor(palette.muted)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setPadding(0, 0, 0, gap(1))
+        }
+        content.addView(where)
 
         val answer = runCatching { JSONObject(Builder.nativeReadFile(root, path)) }.getOrNull()
         if (answer == null || !answer.optBoolean("read", false)) {
@@ -2304,36 +2339,89 @@ class BuilderActivity : Activity() {
             })
             return
         }
-        editorText = answer.optString("text")
+        val onDisk = answer.optString("text")
+        editorOnDisk = onDisk
+        // Whatever was typed here last time and never saved, offered back.
+        val draft = Drafts.read(this, root, path)?.takeIf { it != onDisk }
+        editorText = draft ?: onDisk
+
+        val editor = CodeEditor(this, palette).apply {
+            setPadding(gap(9), gap(2), gap(3), gap(2))
+            open(path.substringAfterLast('/'), editorText)
+        }
+        this.editor = editor
+        this.editorAt = root to path
+        if (draft != null) {
+            content.addView(notice(getString(R.string.omni_editor_restored), palette.warning))
+        }
+
+        // What is on screen and what is on disk, said in one place. The row
+        // under the name is the path when they agree and the count of what is
+        // unsaved when they do not.
+        var dirty = draft != null
+        if (dirty) {
+            where.text = getString(R.string.omni_editor_unsaved)
+            where.setTextColor(palette.warning)
+        }
+        // Written after a pause rather than after every keystroke: a draft is
+        // insurance, and insurance that runs on the typing thread is a cost.
+        val keep = Runnable { Drafts.write(this, root, path, editorText) }
+        fun mark() {
+            editorText = editor.text?.toString().orEmpty()
+            val changed = editorText != onDisk
+            if (changed != dirty) {
+                dirty = changed
+                where.text = if (changed) getString(R.string.omni_editor_unsaved) else path
+                where.setTextColor(if (changed) palette.warning else palette.muted)
+            }
+            editor.removeCallbacks(keep)
+            if (changed) {
+                editor.postDelayed(keep, Drafts.REST_MILLIS)
+            } else {
+                Drafts.forget(this, root, path)
+            }
+        }
+        editor.onChanged = ::mark
+
+        val tools = FlowLayout(this, gap(2), gap(2)).apply { setPadding(0, gap(1), 0, gap(1)) }
+        tools.addView(tool(getString(R.string.omni_editor_undo), palette.accent) {
+            editor.undo()
+            mark()
+        })
+        tools.addView(tool(getString(R.string.omni_editor_redo), palette.accent) {
+            editor.redo()
+            mark()
+        })
+        tools.addView(tool(getString(R.string.omni_action_copy), palette.foreground) {
+            copyOut(selectionOf(editor), path.substringAfterLast('/'))
+        })
+        tools.addView(tool(getString(R.string.omni_editor_paste), palette.foreground) {
+            pasteInto(editor)
+            mark()
+        })
+        content.addView(tools)
 
         val sheet = card()
         sheet.addView(
-            EditText(this).apply {
-                setText(editorText)
-                setTextColor(palette.foreground)
-                setBackgroundColor(Color.TRANSPARENT)
-                setTypeface(Typeface.MONOSPACE)
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-                gravity = Gravity.TOP or Gravity.START
-                setHorizontallyScrolling(false)
-                minLines = 14
-                setPadding(gap(2))
-                addTextChangedListener(object : TextWatcher {
-                    override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                    override fun onTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) = Unit
-                    override fun afterTextChanged(s: Editable?) {
-                        editorText = s?.toString().orEmpty()
-                    }
-                })
-            }
+            editor,
+            LinearLayout.LayoutParams(
+                MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.52f).toInt(),
+            ),
         )
         content.addView(sheet)
 
         content.addView(primary(getString(R.string.omni_action_save)) {
             results.removeAllViews()
+            editorText = editor.text?.toString().orEmpty()
             val saved = runCatching { JSONObject(Builder.nativeWriteFile(root, path, editorText)) }
                 .getOrNull()
             if (saved != null && saved.optBoolean("saved", false)) {
+                dirty = false
+                where.text = path
+                where.setTextColor(palette.muted)
+                editor.removeCallbacks(keep)
+                Drafts.forget(this, root, path)
                 results.addView(notice(getString(R.string.omni_editor_saved, path), palette.ok))
             } else {
                 saved?.let { showRefusal(Refusal.parse(it), results) }
@@ -2345,6 +2433,8 @@ class BuilderActivity : Activity() {
                 JSONObject(Builder.nativeRemovePath(root, path, trashFolder()))
             }.getOrNull()
             if (thrown != null && thrown.optBoolean("removed", false)) {
+                editor.removeCallbacks(keep)
+                Drafts.forget(this, root, path)
                 go(Screen.Files(root, path.substringBeforeLast('/', "")))
             } else {
                 thrown?.let { showRefusal(Refusal.parse(it), results) }
@@ -2354,6 +2444,57 @@ class BuilderActivity : Activity() {
         content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
             go(Screen.Files(root, path.substringBeforeLast('/', "")))
         })
+    }
+
+    /** What is selected, or the whole file when nothing is. */
+    private fun selectionOf(editor: CodeEditor): String {
+        val held = editor.text?.toString().orEmpty()
+        val from = editor.selectionStart
+        val to = editor.selectionEnd
+        if (from < 0 || to < 0 || from == to) return held
+        return held.substring(min(from, to), max(from, to))
+    }
+
+    private fun copyOut(text: String, label: String) {
+        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
+        clipboard.setPrimaryClip(ClipData.newPlainText(label, text))
+        results.removeAllViews()
+        results.addView(notice(getString(R.string.omni_settings_logs_copied), palette.ok))
+    }
+
+    /** Puts the clipboard where the caret is, replacing what is selected. */
+    private fun pasteInto(editor: CodeEditor) {
+        val clipboard = getSystemService(ClipboardManager::class.java) ?: return
+        val held = clipboard.primaryClip?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)
+            ?.coerceToText(this)
+            ?.toString()
+            .orEmpty()
+        if (held.isEmpty()) return
+        val editable = editor.text ?: return
+        val from = min(editor.selectionStart, editor.selectionEnd).coerceIn(0, editable.length)
+        val to = max(editor.selectionStart, editor.selectionEnd).coerceIn(0, editable.length)
+        editable.replace(from, to, held)
+        editor.setSelection((from + held.length).coerceIn(0, editor.text?.length ?: 0))
+    }
+
+    /** A small button for a row of them, as against one across the screen. */
+    private fun tool(text: String, colour: Int, onPress: () -> Unit) = TextView(this).apply {
+        this.text = text
+        setTextColor(colour)
+        setTypeface(Typeface.DEFAULT_BOLD)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        gravity = Gravity.CENTER
+        maxLines = 1
+        setPadding(gap(4), gap(2), gap(4), gap(2))
+        background = touchable(pill(palette.raised, gap(4).toFloat()), colour)
+        isClickable = true
+        setOnClickListener {
+            onPress()
+            animate().scaleX(0.94f).scaleY(0.94f).setDuration(70L).withEndAction {
+                animate().scaleX(1f).scaleY(1f).setDuration(110L).start()
+            }.start()
+        }
     }
 
     private fun renderBuild(root: String) {

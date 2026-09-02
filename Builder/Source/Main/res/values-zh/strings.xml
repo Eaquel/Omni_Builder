@@ -145,4 +145,9 @@
     <string name="omni_result_verified">回读校验</string>
     <string name="omni_result_verified_yes">安装包通过自身密钥校验</string>
     <string name="omni_result_verified_no">安装包未通过校验</string>
+    <string name="omni_editor_undo">撤销</string>
+    <string name="omni_editor_redo">重做</string>
+    <string name="omni_editor_paste">粘贴</string>
+    <string name="omni_editor_unsaved">有未保存的改动</string>
+    <string name="omni_editor_restored">你上次在这里输入的内容已保留并放回。保存它，或改掉它。</string>
 </resources>

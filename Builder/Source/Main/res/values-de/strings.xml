@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Nachgeprüft</string>
     <string name="omni_result_verified_yes">Das Paket verifiziert gegen seinen eigenen Schlüssel</string>
     <string name="omni_result_verified_no">Das Paket verifiziert nicht</string>
+    <string name="omni_editor_undo">ZURÜCK</string>
+    <string name="omni_editor_redo">VOR</string>
+    <string name="omni_editor_paste">EINFÜGEN</string>
+    <string name="omni_editor_unsaved">Nicht gespeicherte Änderungen</string>
+    <string name="omni_editor_restored">Was Sie hier zuletzt getippt haben, wurde aufbewahrt und zurückgelegt. Speichern Sie es oder bearbeiten Sie es weg.</string>
 </resources>

@@ -145,4 +145,9 @@
     <string name="omni_result_verified">Comprobado</string>
     <string name="omni_result_verified_yes">El paquete se verifica con su propia clave</string>
     <string name="omni_result_verified_no">El paquete no se verifica</string>
+    <string name="omni_editor_undo">DESHACER</string>
+    <string name="omni_editor_redo">REHACER</string>
+    <string name="omni_editor_paste">PEGAR</string>
+    <string name="omni_editor_unsaved">Cambios sin guardar</string>
+    <string name="omni_editor_restored">Lo que escribiste aquí la última vez se guardó y se ha devuelto. Guárdalo o edítalo hasta quitarlo.</string>
 </resources>
