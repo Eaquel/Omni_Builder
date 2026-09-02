@@ -46,6 +46,7 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.util.Log
 import android.util.TypedValue
+import android.view.inputmethod.EditorInfo
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -549,6 +550,19 @@ object Builder {
     external fun nativeListProjects(directory: String): String
 
     external fun nativeProjectTree(root: String): String
+
+    /**
+     * Looks through every text file in a project for a piece of text.
+     *
+     * The search is over the project as it is on disk, so what it finds is
+     * what a build would compile rather than what an editor is showing.
+     */
+    external fun nativeSearchProject(
+        root: String,
+        needle: String,
+        sensitive: Boolean,
+        wholeWord: Boolean,
+    ): String
 
     external fun nativeReadFile(root: String, relative: String): String
 
@@ -1277,6 +1291,10 @@ private sealed interface Screen {
         override val tab = Tab.FILES
     }
 
+    data class Search(val root: String) : Screen {
+        override val tab = Tab.FILES
+    }
+
     data class Picture(val root: String, val path: String) : Screen {
         override val tab = Tab.FILES
     }
@@ -1409,6 +1427,10 @@ class BuilderActivity : Activity() {
     private var keyPasswordView: EditText? = null
     private var keyPasswordAgainView: EditText? = null
     private var buildPasswordView: EditText? = null
+
+    private var searchFor = ""
+    private var searchCase = false
+    private var searchWord = false
 
     private var editorText = ""
     private var editor: CodeEditor? = null
@@ -1726,6 +1748,7 @@ class BuilderActivity : Activity() {
             is Screen.Projects -> renderProjects()
             is Screen.NewProject -> renderNewProject()
             is Screen.Files -> renderFiles(here.root, here.folder)
+            is Screen.Search -> renderSearch(here.root)
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
@@ -1764,6 +1787,7 @@ class BuilderActivity : Activity() {
                 } else {
                     go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
                 }
+            is Screen.Search -> go(Screen.Files(here.root, ""))
             is Screen.Build -> go(Screen.Files(here.root, ""))
             is Screen.Keys -> go(Screen.Settings)
             is Screen.NewKey -> go(Screen.Keys)
@@ -2072,8 +2096,135 @@ class BuilderActivity : Activity() {
             })
         }
 
+        content.addView(subtle(getString(R.string.omni_search_title), palette.accent) {
+            go(Screen.Search(root))
+        })
         content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
         content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    /**
+     * Every place in a project a piece of text appears.
+     *
+     * The searching is the Core's: it reads the files off disk, which is what
+     * a build reads, so what turns up here is what is really in the project
+     * rather than what some index last saw. What it did not look at -- files
+     * too large, files that are not text -- is said rather than left out.
+     */
+    private fun renderSearch(root: String) {
+        content.addView(heading(getString(R.string.omni_search_title)))
+
+        val field = EditText(this).apply {
+            setText(searchFor)
+            hint = getString(R.string.omni_search_hint)
+            setHintTextColor(palette.muted)
+            setTextColor(palette.foreground)
+            setTypeface(Typeface.MONOSPACE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setSingleLine()
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            background = sheet(palette.raised, palette.divider)
+            setPadding(gap(3), gap(3), gap(3), gap(3))
+        }
+        content.addView(field)
+
+        content.addView(
+            chips(
+                listOf(
+                    getString(R.string.omni_search_case),
+                    getString(R.string.omni_search_word),
+                ),
+                { index -> if (index == 0) searchCase else searchWord },
+            ) { index ->
+                if (index == 0) searchCase = !searchCase else searchWord = !searchWord
+            }
+        )
+
+        fun look() {
+            searchFor = field.text.toString()
+            results.removeAllViews()
+            if (searchFor.isEmpty()) {
+                return
+            }
+            working({
+                Builder.nativeSearchProject(root, searchFor, searchCase, searchWord)
+            }) finished@{ answer ->
+                val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+                if (!document.optBoolean("searched", false)) {
+                    showRefusal(Refusal.parse(document), results)
+                    return@finished
+                }
+                showFound(root, document.optJSONObject("result"))
+            }
+        }
+
+        field.setOnEditorActionListener { _, _, _ ->
+            look()
+            true
+        }
+        content.addView(primary(getString(R.string.omni_search_go)) { look() })
+        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+            go(Screen.Files(root, ""))
+        })
+    }
+
+    private fun showFound(root: String, result: JSONObject?) {
+        if (result == null) {
+            return
+        }
+        val found = result.optJSONArray("found")
+        val count = found?.length() ?: 0
+        if (count == 0) {
+            results.addView(notice(getString(R.string.omni_search_none), palette.muted))
+        } else {
+            results.addView(
+                notice(
+                    getString(
+                        if (result.optBoolean("stoppedEarly", false)) {
+                            R.string.omni_search_capped
+                        } else {
+                            R.string.omni_search_found
+                        },
+                        count,
+                        result.optInt("filesSearched"),
+                    ),
+                    palette.ok,
+                )
+            )
+        }
+
+        // One card per file, so twelve hits in one file read as one place to
+        // look rather than as twelve.
+        var lastPath = ""
+        var card: LinearLayout? = null
+        for (index in 0 until count) {
+            val one = found?.optJSONObject(index) ?: continue
+            val path = one.optString("path")
+            if (path != lastPath) {
+                lastPath = path
+                card = card()
+                card.addView(quiet(path))
+                results.addView(card)
+            }
+            card?.addView(
+                row(
+                    one.optString("text").trim().take(120),
+                    "",
+                    one.optInt("line").toString() + ":" + one.optInt("column"),
+                    palette.accent,
+                ) {
+                    go(Screen.Editor(root, path))
+                }
+            )
+        }
+
+        val quiet = listOfNotNull(
+            result.optInt("filesTooLarge").takeIf { it > 0 }
+                ?.let { getString(R.string.omni_search_too_large, it) },
+            result.optInt("filesNotText").takeIf { it > 0 }
+                ?.let { getString(R.string.omni_search_not_text, it) },
+        )
+        quiet.forEach { results.addView(quiet(it)) }
     }
 
     private fun joined(folder: String, name: String): String =

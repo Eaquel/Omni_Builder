@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">COLLER</string>
     <string name="omni_editor_unsaved">Modifications non enregistrées</string>
     <string name="omni_editor_restored">Ce que vous aviez tapé ici a été conservé et remis. Enregistrez-le, ou modifiez-le pour l\'effacer.</string>
+    <string name="omni_search_title">Chercher dans le projet</string>
+    <string name="omni_search_hint">Texte à chercher</string>
+    <string name="omni_search_go">CHERCHER</string>
+    <string name="omni_search_case">Respecter la casse</string>
+    <string name="omni_search_word">Mot entier</string>
+    <string name="omni_search_none">Rien dans ce projet ne contient cela.</string>
+    <string name="omni_search_found">%1$d dans %2$d fichiers</string>
+    <string name="omni_search_capped">Les %1$d premiers sur davantage, dans %2$d fichiers</string>
+    <string name="omni_search_too_large">%1$d fichiers étaient trop grands pour être parcourus.</string>
+    <string name="omni_search_not_text">%1$d fichiers ne sont pas du texte, ils ont été laissés.</string>
 </resources>

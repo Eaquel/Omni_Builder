@@ -26911,6 +26911,214 @@ pub mod workspace {
         Ok(entries)
     }
 
+    /// The largest file searched through. Past this it is skipped and said so.
+    pub const MAX_SEARCHED_BYTES: u64 = 2 * 1024 * 1024;
+
+    /// The most matches carried back from one search.
+    pub const MAX_MATCHES: usize = 500;
+
+    /// How much of a line is carried back with a match.
+    pub const MATCH_LINE_BYTES: usize = 400;
+
+    /// One place a search found what it was looking for.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Match {
+        pub path: String,
+        /// Counted from one, as an editor counts them.
+        pub line: u32,
+        /// Where in the line it starts, in characters rather than in bytes,
+        /// so a line with an emoji in it does not point somewhere else.
+        pub column: u32,
+        pub text: String,
+    }
+
+    impl Match {
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("path", &self.path);
+            w.field_u64("line", u64::from(self.line));
+            w.field_u64("column", u64::from(self.column));
+            w.field_str("text", &self.text);
+            w.end_object();
+        }
+    }
+
+    /// What a search came to, including what it did not look at.
+    ///
+    /// A search that quietly skipped half a project and reported nothing is
+    /// worse than one that reports nothing, so what was skipped and why is
+    /// carried out with the matches rather than dropped.
+    #[derive(Clone, Debug, Default)]
+    pub struct Found {
+        pub matches: Vec<Match>,
+        pub files_searched: usize,
+        pub files_too_large: usize,
+        pub files_not_text: usize,
+        /// Whether the limit was reached, which means there are more.
+        pub stopped_early: bool,
+    }
+
+    impl Found {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_u64("matches", self.matches.len() as u64);
+            w.field_u64("filesSearched", self.files_searched as u64);
+            w.field_u64("filesTooLarge", self.files_too_large as u64);
+            w.field_u64("filesNotText", self.files_not_text as u64);
+            w.field_bool("stoppedEarly", self.stopped_early);
+            w.begin_array(Some("found"));
+            for one in &self.matches {
+                one.write_json(w);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// Whether a byte can be part of a word, for a whole-word search.
+    fn wordish(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
+    }
+
+    /// Every place `needle` appears in one line.
+    ///
+    /// Byte offsets, found on bytes: the needle and the line are both UTF-8,
+    /// and a byte sequence that is a whole character can only match at a
+    /// character boundary, so matching on bytes finds exactly what matching on
+    /// characters would and does no decoding to do it.
+    fn places(
+        line: &[u8],
+        needle: &[u8],
+        sensitive: bool,
+        whole_word: bool,
+        into: &mut Vec<usize>,
+    ) {
+        into.clear();
+        if needle.is_empty() || needle.len() > line.len() {
+            return;
+        }
+        let same = |left: u8, right: u8| {
+            if sensitive {
+                left == right
+            } else {
+                left.eq_ignore_ascii_case(&right)
+            }
+        };
+        for at in 0..=(line.len() - needle.len()) {
+            if !needle
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| same(line[at + index], *byte))
+            {
+                continue;
+            }
+            if whole_word {
+                let before = at.checked_sub(1).map(|before| line[before]);
+                let after = line.get(at + needle.len()).copied();
+                if before.is_some_and(wordish) || after.is_some_and(wordish) {
+                    continue;
+                }
+            }
+            into.push(at);
+        }
+    }
+
+    /// Whether these bytes are text, decided the way every such tool decides.
+    ///
+    /// A file with a zero byte near its start is not text. Nothing else is
+    /// checked: a search that insisted on valid UTF-8 would skip a file with
+    /// one bad byte in it, and that file is exactly the one somebody is
+    /// looking through a project to find.
+    fn looks_like_text(bytes: &[u8]) -> bool {
+        !bytes.iter().take(8192).any(|byte| *byte == 0)
+    }
+
+    /// Looks through every text file in a project for a piece of text.
+    ///
+    /// The search is over the project as it is on disk, so it finds what a
+    /// build would compile rather than what an editor happens to be showing.
+    /// Files too large to search and files that are not text are counted
+    /// rather than skipped in silence.
+    pub fn search(
+        root: &str,
+        needle: &str,
+        sensitive: bool,
+        whole_word: bool,
+    ) -> Result<Found, Diagnostic> {
+        if needle.is_empty() {
+            return Err(fail("EW160", "A search needs something to look for."));
+        }
+        if needle.len() > 1024 {
+            return Err(
+                fail("EW161", "That is longer than anything this searches for.")
+                    .with_context(format!("Length: {} bytes", needle.len())),
+            );
+        }
+
+        let entries = tree(root)?;
+        let mut found = Found::default();
+        let wanted = needle.as_bytes();
+        let mut at = Vec::new();
+
+        for entry in &entries {
+            if entry.folder {
+                continue;
+            }
+            if found.stopped_early {
+                break;
+            }
+            if entry.bytes > MAX_SEARCHED_BYTES {
+                found.files_too_large += 1;
+                continue;
+            }
+            let path = inside(root, &entry.path)?;
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            if !looks_like_text(&bytes) {
+                found.files_not_text += 1;
+                continue;
+            }
+            found.files_searched += 1;
+
+            for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+                let line = match line.split_last() {
+                    Some((b'\r', rest)) => rest,
+                    _ => line,
+                };
+                places(line, wanted, sensitive, whole_word, &mut at);
+                for start in &at {
+                    if found.matches.len() >= MAX_MATCHES {
+                        found.stopped_early = true;
+                        break;
+                    }
+                    // The line, shortened from the end rather than cut through
+                    // a character, so what comes back is always readable.
+                    let shown = String::from_utf8_lossy(line);
+                    let mut text = shown.into_owned();
+                    if text.len() > MATCH_LINE_BYTES {
+                        let mut end = MATCH_LINE_BYTES;
+                        while end > 0 && !text.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        text.truncate(end);
+                    }
+                    found.matches.push(Match {
+                        path: entry.path.clone(),
+                        line: index as u32 + 1,
+                        column: String::from_utf8_lossy(&line[..*start]).chars().count() as u32 + 1,
+                        text,
+                    });
+                }
+                if found.stopped_early {
+                    break;
+                }
+            }
+        }
+
+        Ok(found)
+    }
+
     pub fn read_text(root: &str, relative: &str) -> Result<String, Diagnostic> {
         let path = inside(root, relative)?;
         let size = std::fs::metadata(&path)
@@ -32984,6 +33192,38 @@ pub mod ffi {
                     w.end_array();
                 }
                 Err(error) => write_failure(&mut w, "read", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Looks through every text file in a project for a piece of text.
+    ///
+    /// `sensitive` and `whole_word` are the two switches a search needs and
+    /// the only two: the first says whether case counts, the second whether
+    /// `at` may match inside `that`.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_search_project(
+        root: *const c_char,
+        needle: *const c_char,
+        sensitive: bool,
+        whole_word: bool,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(needle)) = (text_from(root), text_from(needle)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::search(&root, &needle, sensitive, whole_word) {
+                Ok(found) => {
+                    w.field_bool("searched", true);
+                    w.field_str("needle", &needle);
+                    found.write_json(&mut w, "result");
+                }
+                Err(error) => write_failure(&mut w, "searched", &error),
             }
             w.end_object();
             hand_back(w)
@@ -39965,6 +40205,175 @@ public final class MainActivity extends Activity {
     /// word the compiler reserves. It may hold more -- `record`, `sealed`
     /// and `yield` are names to the compiler and read as keywords to a person
     /// -- but never fewer.
+    /// Looking through a project finds what is in it, where it is, and says
+    /// what it did not look at.
+    #[test]
+    fn a_search_finds_every_place_and_says_what_it_skipped() {
+        let directory = temp_directory("omni-search");
+        let root = directory.to_str().unwrap().to_string();
+        std::fs::create_dir_all(directory.join("Java/com/example")).unwrap();
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            "<manifest package=\"com.example\"><application/></manifest>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("Java/com/example/Main.java"),
+            "package com.example;\n\
+             // the answer is here\n\
+             class Main {\n\
+             \x20   int answer = 42;\n\
+             \x20   int Answer = 43;\n\
+             \x20   int answered = 44;\n\
+             }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("Java/com/example/Other.java"),
+            "class Other { String answer = \"answer\"; }\n",
+        )
+        .unwrap();
+        // Not text: a zero byte inside it, which is what every such tool
+        // decides on.
+        std::fs::write(directory.join("Icon.png"), [0x89u8, b'P', b'N', 0x00, b'G']).unwrap();
+
+        let found = crate::workspace::search(&root, "answer", false, false).unwrap();
+        assert_eq!(found.files_not_text, 1, "the image must not be searched");
+        assert_eq!(found.files_searched, 3);
+        assert!(!found.stopped_early);
+
+        // Every place, in the order the files are walked and the lines run.
+        let places: Vec<(String, u32, u32)> = found
+            .matches
+            .iter()
+            .map(|one| (one.path.clone(), one.line, one.column))
+            .collect();
+        assert_eq!(
+            places,
+            vec![
+                ("Java/com/example/Main.java".to_string(), 2, 8),
+                ("Java/com/example/Main.java".to_string(), 4, 9),
+                ("Java/com/example/Main.java".to_string(), 5, 9),
+                ("Java/com/example/Main.java".to_string(), 6, 9),
+                ("Java/com/example/Other.java".to_string(), 1, 22),
+                ("Java/com/example/Other.java".to_string(), 1, 32),
+            ],
+            "the places a search reports are the places the text is"
+        );
+        // The line comes back whole, without its newline.
+        assert_eq!(found.matches[0].text, "// the answer is here");
+
+        // Case, when it is asked for: `Answer` on line five goes.
+        let exact = crate::workspace::search(&root, "answer", true, false).unwrap();
+        assert!(
+            exact.matches.iter().all(|one| one.line != 5),
+            "a case-sensitive search matched a different case"
+        );
+        assert_eq!(exact.matches.len(), 5);
+
+        // Whole words, when they are asked for: `answered` goes too.
+        let words = crate::workspace::search(&root, "answer", true, true).unwrap();
+        assert!(
+            words.matches.iter().all(|one| one.line != 6),
+            "a whole-word search matched inside a longer word"
+        );
+        // And a string's quotes do not make a word boundary disappear.
+        assert_eq!(words.matches.len(), 4);
+
+        // Nothing to look for is a refusal rather than every line in the
+        // project.
+        assert_eq!(
+            crate::workspace::search(&root, "", false, false)
+                .unwrap_err()
+                .code,
+            "EW160"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A search stops at its limit and says so, rather than carrying a
+    /// project's worth of lines back across the bridge.
+    #[test]
+    fn a_search_that_would_never_end_stops_and_says_it_did() {
+        let directory = temp_directory("omni-search-many");
+        let root = directory.to_str().unwrap().to_string();
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            "<manifest package=\"com.example\"/>\n",
+        )
+        .unwrap();
+        let mut wide = String::new();
+        for _ in 0..(crate::workspace::MAX_MATCHES * 2) {
+            wide.push_str("here\n");
+        }
+        std::fs::write(directory.join("Wide.txt"), &wide).unwrap();
+
+        let found = crate::workspace::search(&root, "here", false, false).unwrap();
+        assert!(found.stopped_early);
+        assert_eq!(found.matches.len(), crate::workspace::MAX_MATCHES);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A search does not leave the project it was given, whatever it is asked.
+    #[test]
+    fn a_search_only_reads_what_is_inside_the_project() {
+        let directory = temp_directory("omni-search-inside");
+        let root = directory.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("AndroidManifest.xml"),
+            "<manifest package=\"com.example\"/>\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("Inside.txt"), "the secret is inside\n").unwrap();
+        std::fs::write(directory.join("Outside.txt"), "the secret is outside\n").unwrap();
+
+        let found =
+            crate::workspace::search(root.to_str().unwrap(), "secret", false, false).unwrap();
+        assert_eq!(found.matches.len(), 1);
+        assert_eq!(found.matches[0].path, "Inside.txt");
+        assert!(found.matches[0].text.contains("inside"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// What comes back over the bridge is what the search found.
+    #[test]
+    fn the_bridge_searches_a_project_and_hands_back_where_it_looked() {
+        let directory = temp_directory("omni-search-bridge");
+        let root = directory.to_str().unwrap().to_string();
+        std::fs::write(
+            directory.join("AndroidManifest.xml"),
+            "<manifest package=\"com.example\"/>\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("Notes.txt"), "one\ntwo needle two\nthree\n").unwrap();
+
+        let root_c = std::ffi::CString::new(root.clone()).unwrap();
+        let needle = std::ffi::CString::new("needle").unwrap();
+        let answer = unsafe {
+            let handed =
+                super::ffi::omni_search_project(root_c.as_ptr(), needle.as_ptr(), false, false);
+            assert!(!handed.is_null());
+            let held = std::ffi::CStr::from_ptr(handed)
+                .to_string_lossy()
+                .into_owned();
+            super::ffi::omni_string_free(handed);
+            held
+        };
+
+        assert!(is_structurally_valid(&answer), "{answer}");
+        assert!(answer.contains("\"searched\":true"), "{answer}");
+        assert!(answer.contains("\"matches\":1"), "{answer}");
+        assert!(answer.contains("\"line\":2"), "{answer}");
+        assert!(answer.contains("\"column\":5"), "{answer}");
+        assert!(answer.contains("two needle two"), "{answer}");
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     #[test]
     fn the_editor_colours_every_word_the_compiler_reserves() {
         let editor =

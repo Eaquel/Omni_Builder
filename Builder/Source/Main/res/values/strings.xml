@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">PASTE</string>
     <string name="omni_editor_unsaved">Unsaved changes</string>
     <string name="omni_editor_restored">What you typed here last time was kept and put back. Save it, or edit it away.</string>
+    <string name="omni_search_title">Find in project</string>
+    <string name="omni_search_hint">Text to look for</string>
+    <string name="omni_search_go">SEARCH</string>
+    <string name="omni_search_case">Match case</string>
+    <string name="omni_search_word">Whole word</string>
+    <string name="omni_search_none">Nothing in this project holds that.</string>
+    <string name="omni_search_found">%1$d in %2$d files</string>
+    <string name="omni_search_capped">First %1$d of more, in %2$d files</string>
+    <string name="omni_search_too_large">%1$d files were too large to look through.</string>
+    <string name="omni_search_not_text">%1$d files are not text, so they were left alone.</string>
 </resources>

@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">粘贴</string>
     <string name="omni_editor_unsaved">有未保存的改动</string>
     <string name="omni_editor_restored">你上次在这里输入的内容已保留并放回。保存它，或改掉它。</string>
+    <string name="omni_search_title">在项目中查找</string>
+    <string name="omni_search_hint">要查找的文本</string>
+    <string name="omni_search_go">查找</string>
+    <string name="omni_search_case">区分大小写</string>
+    <string name="omni_search_word">全字匹配</string>
+    <string name="omni_search_none">本项目中没有包含它的内容。</string>
+    <string name="omni_search_found">%2$d 个文件中的 %1$d 处</string>
+    <string name="omni_search_capped">%2$d 个文件中的前 %1$d 处，还有更多</string>
+    <string name="omni_search_too_large">%1$d 个文件太大，未能通读。</string>
+    <string name="omni_search_not_text">%1$d 个文件不是文本，未做处理。</string>
 </resources>

@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">COLAR</string>
     <string name="omni_editor_unsaved">Alterações por guardar</string>
     <string name="omni_editor_restored">O que escreveu aqui da última vez foi guardado e reposto. Guarde-o, ou edite-o até desaparecer.</string>
+    <string name="omni_search_title">Procurar no projeto</string>
+    <string name="omni_search_hint">Texto a procurar</string>
+    <string name="omni_search_go">PROCURAR</string>
+    <string name="omni_search_case">Maiúsculas</string>
+    <string name="omni_search_word">Palavra inteira</string>
+    <string name="omni_search_none">Nada neste projeto contém isso.</string>
+    <string name="omni_search_found">%1$d em %2$d ficheiros</string>
+    <string name="omni_search_capped">Os primeiros %1$d de mais, em %2$d ficheiros</string>
+    <string name="omni_search_too_large">%1$d ficheiros eram grandes demais para percorrer.</string>
+    <string name="omni_search_not_text">%1$d ficheiros não são texto, por isso ficaram de fora.</string>
 </resources>

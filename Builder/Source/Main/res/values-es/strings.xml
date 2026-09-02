@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">PEGAR</string>
     <string name="omni_editor_unsaved">Cambios sin guardar</string>
     <string name="omni_editor_restored">Lo que escribiste aquí la última vez se guardó y se ha devuelto. Guárdalo o edítalo hasta quitarlo.</string>
+    <string name="omni_search_title">Buscar en el proyecto</string>
+    <string name="omni_search_hint">Texto que buscar</string>
+    <string name="omni_search_go">BUSCAR</string>
+    <string name="omni_search_case">Mayúsculas</string>
+    <string name="omni_search_word">Palabra entera</string>
+    <string name="omni_search_none">Nada en este proyecto contiene eso.</string>
+    <string name="omni_search_found">%1$d en %2$d archivos</string>
+    <string name="omni_search_capped">Los primeros %1$d de más, en %2$d archivos</string>
+    <string name="omni_search_too_large">%1$d archivos eran demasiado grandes para recorrerlos.</string>
+    <string name="omni_search_not_text">%1$d archivos no son texto, así que se dejaron aparte.</string>
 </resources>

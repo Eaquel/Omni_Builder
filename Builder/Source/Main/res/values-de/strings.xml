@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">EINFÜGEN</string>
     <string name="omni_editor_unsaved">Nicht gespeicherte Änderungen</string>
     <string name="omni_editor_restored">Was Sie hier zuletzt getippt haben, wurde aufbewahrt und zurückgelegt. Speichern Sie es oder bearbeiten Sie es weg.</string>
+    <string name="omni_search_title">Im Projekt suchen</string>
+    <string name="omni_search_hint">Zu suchender Text</string>
+    <string name="omni_search_go">SUCHEN</string>
+    <string name="omni_search_case">Groß/klein</string>
+    <string name="omni_search_word">Ganzes Wort</string>
+    <string name="omni_search_none">In diesem Projekt steht das nirgends.</string>
+    <string name="omni_search_found">%1$d in %2$d Dateien</string>
+    <string name="omni_search_capped">Erste %1$d von mehr, in %2$d Dateien</string>
+    <string name="omni_search_too_large">%1$d Dateien waren zu groß zum Durchsuchen.</string>
+    <string name="omni_search_not_text">%1$d Dateien sind kein Text und blieben unberührt.</string>
 </resources>

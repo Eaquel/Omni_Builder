@@ -422,6 +422,21 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSearchProject(
+    JNIEnv *env, jobject , jstring root, jstring needle, jboolean sensitive,
+    jboolean whole_word) {
+  std::string root_text;
+  std::string needle_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text) ||
+      needle == nullptr || !JavaStringToUtf8(env, needle, &needle_text)) {
+    ThrowJava(env, kIllegalState, "Searching needs a project and something to look for.");
+    return nullptr;
+  }
+  return HandBack(env, omni_search_project(root_text.c_str(), needle_text.c_str(),
+                                           sensitive == JNI_TRUE,
+                                           whole_word == JNI_TRUE));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeReadFile(
     JNIEnv *env, jobject , jstring root, jstring relative) {
   std::string root_text;

@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">ВСТАВИТЬ</string>
     <string name="omni_editor_unsaved">Несохранённые изменения</string>
     <string name="omni_editor_restored">То, что вы набрали здесь в прошлый раз, сохранено и возвращено. Сохраните это или удалите правкой.</string>
+    <string name="omni_search_title">Поиск по проекту</string>
+    <string name="omni_search_hint">Что искать</string>
+    <string name="omni_search_go">НАЙТИ</string>
+    <string name="omni_search_case">Учитывать регистр</string>
+    <string name="omni_search_word">Слово целиком</string>
+    <string name="omni_search_none">В этом проекте такого нет.</string>
+    <string name="omni_search_found">%1$d в %2$d файлах</string>
+    <string name="omni_search_capped">Первые %1$d из большего, в %2$d файлах</string>
+    <string name="omni_search_too_large">%1$d файлов оказались слишком большими для просмотра.</string>
+    <string name="omni_search_not_text">%1$d файлов не являются текстом, они не тронуты.</string>
 </resources>

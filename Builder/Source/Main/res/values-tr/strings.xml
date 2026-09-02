@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">YAPIŞTIR</string>
     <string name="omni_editor_unsaved">Kaydedilmemiş değişiklikler</string>
     <string name="omni_editor_restored">Buraya en son yazdıkların saklanıp geri kondu. Kaydet ya da düzenleyip çıkar.</string>
+    <string name="omni_search_title">Projede ara</string>
+    <string name="omni_search_hint">Aranacak metin</string>
+    <string name="omni_search_go">ARA</string>
+    <string name="omni_search_case">Büyük küçük</string>
+    <string name="omni_search_word">Tam sözcük</string>
+    <string name="omni_search_none">Bu projede bunu içeren bir şey yok.</string>
+    <string name="omni_search_found">%2$d dosyada %1$d sonuç</string>
+    <string name="omni_search_capped">%2$d dosyada, daha fazlasının ilk %1$d tanesi</string>
+    <string name="omni_search_too_large">%1$d dosya taranamayacak kadar büyüktü.</string>
+    <string name="omni_search_not_text">%1$d dosya metin değil, o yüzden dokunulmadı.</string>
 </resources>

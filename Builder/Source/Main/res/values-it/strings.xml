@@ -150,4 +150,14 @@
     <string name="omni_editor_paste">INCOLLA</string>
     <string name="omni_editor_unsaved">Modifiche non salvate</string>
     <string name="omni_editor_restored">Quello che avevi scritto qui è stato conservato e rimesso. Salvalo, oppure modificalo via.</string>
+    <string name="omni_search_title">Cerca nel progetto</string>
+    <string name="omni_search_hint">Testo da cercare</string>
+    <string name="omni_search_go">CERCA</string>
+    <string name="omni_search_case">Maiuscole</string>
+    <string name="omni_search_word">Parola intera</string>
+    <string name="omni_search_none">Niente in questo progetto contiene quello.</string>
+    <string name="omni_search_found">%1$d in %2$d file</string>
+    <string name="omni_search_capped">I primi %1$d di altri, in %2$d file</string>
+    <string name="omni_search_too_large">%1$d file erano troppo grandi da percorrere.</string>
+    <string name="omni_search_not_text">%1$d file non sono testo, quindi sono stati lasciati.</string>
 </resources>
