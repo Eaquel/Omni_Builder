@@ -182,4 +182,8 @@
     <string name="omni_editor_name_found">%1$s olabilecek türler</string>
     <string name="omni_editor_name_yours">senin</string>
     <string name="omni_form_not_compiled">derlenmiyor</string>
+    <string name="omni_editor_go">GİT</string>
+    <string name="omni_editor_uses">KULLANIMLAR</string>
+    <string name="omni_editor_go_platform">%1$s platforma ait, bu yüzden bu cihazda yazılı değil.</string>
+    <string name="omni_palette_title">Buradan her şey</string>
 </resources>

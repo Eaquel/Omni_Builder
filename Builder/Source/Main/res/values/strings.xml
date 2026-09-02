@@ -182,4 +182,8 @@
     <string name="omni_editor_name_found">Types that could be %1$s</string>
     <string name="omni_editor_name_yours">yours</string>
     <string name="omni_form_not_compiled">not compiled</string>
+    <string name="omni_editor_go">GO TO</string>
+    <string name="omni_editor_uses">USES</string>
+    <string name="omni_editor_go_platform">%1$s belongs to the platform, so it is not written on this device.</string>
+    <string name="omni_palette_title">Everything from here</string>
 </resources>

@@ -1875,6 +1875,48 @@ class BuilderActivity : Activity() {
         }
     }
 
+    /**
+     * Everything reachable from here, in one list, filtered by typing.
+     *
+     * A phone has no keyboard to hang shortcuts off, and a bar has room for
+     * five things. What it does have is one gesture nothing else uses: the
+     * bar, held down. What opens is not a menu written beside the application
+     * -- every entry runs the same code the screen it belongs to runs, so an
+     * action that changed changed here too.
+     */
+    private fun openPalette() {
+        val root = openProject
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        actions += getString(R.string.omni_tab_projects) to { go(Screen.Projects) }
+        actions += getString(R.string.omni_projects_new) to { go(Screen.NewProject) }
+        if (root != null) {
+            actions += getString(R.string.omni_tab_files) to { go(Screen.Files(root, "")) }
+            actions += getString(R.string.omni_search_title) to { go(Screen.Search(root)) }
+            actions += getString(R.string.omni_check_title) to {
+                go(Screen.Files(root, ""))
+                checkProject(root)
+            }
+            actions += getString(R.string.omni_tab_build) to { go(Screen.Build(root)) }
+            actions += getString(R.string.omni_action_new_file) to {
+                go(Screen.Files(root, ""))
+                askForName(getString(R.string.omni_action_new_file), "") { name ->
+                    act(Builder.nativeWriteFile(root, name, ""), "saved")
+                }
+            }
+        }
+        actions += getString(R.string.omni_keys_title) to { go(Screen.Keys) }
+        actions += getString(R.string.omni_keys_new) to { go(Screen.NewKey) }
+        actions += getString(R.string.omni_tab_trash) to { go(Screen.Trash) }
+        actions += getString(R.string.omni_tab_settings) to { go(Screen.Settings) }
+
+        val labels = actions.map { it.first }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.omni_palette_title))
+            .setItems(labels) { _, index -> actions[index].second() }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
     private fun destination(tab: Tab): Screen {
         val root = openProject
         return when (tab) {
@@ -1928,6 +1970,11 @@ class BuilderActivity : Activity() {
                                 notice(getString(R.string.omni_no_project_open), palette.warning)
                             )
                         }
+                    }
+                    // Anywhere along the bar, held down, reaches everything.
+                    setOnLongClickListener {
+                        openPalette()
+                        true
                     }
                 },
                 LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
@@ -2549,6 +2596,7 @@ class BuilderActivity : Activity() {
                     one.optInt("line").toString() + ":" + one.optInt("column"),
                     palette.accent,
                 ) {
+                    editorLine = one.optInt("line")
                     go(Screen.Editor(root, path))
                 }
             )
@@ -2893,6 +2941,12 @@ class BuilderActivity : Activity() {
         tools.addView(tool(getString(R.string.omni_editor_name), palette.accent) {
             offerNames(root, editor)
         })
+        tools.addView(tool(getString(R.string.omni_editor_go), palette.accent) {
+            goToDefinition(root, editor)
+        })
+        tools.addView(tool(getString(R.string.omni_editor_uses), palette.accent) {
+            findUses(root, editor)
+        })
         content.addView(tools)
 
         val sheet = card()
@@ -2997,6 +3051,102 @@ class BuilderActivity : Activity() {
 
     private fun isNamePart(c: Char): Boolean =
         c.isLetterOrDigit() || c == '_' || c == '$'
+
+    /** The word the caret is in, or an empty string when it is not in one. */
+    private fun wordAt(editor: CodeEditor): String {
+        val held = editor.text ?: return ""
+        val caret = editor.selectionEnd.coerceIn(0, held.length)
+        var from = caret
+        while (from > 0 && isNamePart(held[from - 1])) from -= 1
+        var to = caret
+        while (to < held.length && isNamePart(held[to])) to += 1
+        return held.subSequence(from, to).toString()
+    }
+
+    /**
+     * Opens the file the name under the caret is written in.
+     *
+     * Only for a type this project declares. One on the platform is not
+     * written anywhere on this device, and this says so rather than opening
+     * the description of it and calling that the definition.
+     */
+    private fun goToDefinition(root: String, editor: CodeEditor) {
+        val word = wordAt(editor)
+        results.removeAllViews()
+        if (word.isEmpty()) {
+            results.addView(notice(getString(R.string.omni_editor_name_none), palette.muted))
+            return
+        }
+        working({ Builder.nativeSymbols(root, word) }) finished@{ answer ->
+            val named = runCatching { JSONObject(answer).optJSONArray("named") }.getOrNull()
+            var mine: JSONObject? = null
+            var anywhere: JSONObject? = null
+            for (index in 0 until (named?.length() ?: 0)) {
+                val one = named?.optJSONObject(index) ?: continue
+                if (one.optString("simple") != word) continue
+                if (anywhere == null) anywhere = one
+                if (one.optString("from") == "project") {
+                    mine = one
+                    break
+                }
+            }
+            val found = mine
+            if (found == null) {
+                results.addView(
+                    notice(
+                        getString(
+                            if (anywhere == null) R.string.omni_editor_name_nothing
+                            else R.string.omni_editor_go_platform,
+                            anywhere?.optString("qualified") ?: word,
+                        ),
+                        palette.muted,
+                    )
+                )
+                return@finished
+            }
+            val where = runCatching {
+                JSONObject(Builder.nativeWhereWritten(root, found.optString("qualified")))
+            }.getOrNull()
+            if (where == null || !where.optBoolean("written", false)) {
+                results.addView(
+                    notice(
+                        getString(R.string.omni_editor_go_platform, found.optString("qualified")),
+                        palette.muted,
+                    )
+                )
+                return@finished
+            }
+            editorLine = where.optInt("line")
+            go(Screen.Editor(root, where.optString("path")))
+        }
+    }
+
+    /**
+     * Every place in the project the name under the caret appears.
+     *
+     * Whole words only, and case as it was typed: a search for `Ledger` that
+     * turns up `ledgerEntry` is a list nobody reads twice. It is the project's
+     * files as they are on disk, so it finds what a build would compile.
+     */
+    private fun findUses(root: String, editor: CodeEditor) {
+        val word = wordAt(editor)
+        results.removeAllViews()
+        if (word.isEmpty()) {
+            results.addView(notice(getString(R.string.omni_editor_name_none), palette.muted))
+            return
+        }
+        working({ Builder.nativeSearchProject(root, word, true, true) }) finished@{ answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+            if (!document.optBoolean("searched", false)) {
+                showRefusal(Refusal.parse(document), results)
+                return@finished
+            }
+            searchFor = word
+            searchCase = true
+            searchWord = true
+            showFound(root, document.optJSONObject("result"))
+        }
+    }
 
     /**
      * Puts the chosen name where the word was, and imports it if it needs to be.

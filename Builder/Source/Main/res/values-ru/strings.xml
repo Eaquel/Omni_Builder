@@ -182,4 +182,8 @@
     <string name="omni_editor_name_found">Типы, которыми мог бы быть %1$s</string>
     <string name="omni_editor_name_yours">ваш</string>
     <string name="omni_form_not_compiled">не компилируется</string>
+    <string name="omni_editor_go">ПЕРЕЙТИ</string>
+    <string name="omni_editor_uses">ИСПОЛЬЗОВАНИЯ</string>
+    <string name="omni_editor_go_platform">%1$s принадлежит платформе, поэтому на этом устройстве не написан.</string>
+    <string name="omni_palette_title">Всё отсюда</string>
 </resources>
