@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">选择图像</string>
     <string name="omni_form_image_none">未选择图像。</string>
     <string name="omni_form_image_note">一张图像会变成十个启动图标：五种尺寸，方形与圆形各一。它们都写进项目里，可以看到也可以替换。</string>
-    <string name="omni_form_no_compiler">会为你选的语言创建文件夹。目前还没有编译器，所以里面的代码不会被编译。</string>
+    <string name="omni_form_no_compiler">会为你选择的语言创建文件夹。这里只编译 %1$s：项目中若有其他语言的代码，会被拒绝，而不是构建成缺少这些代码的应用。</string>
     <string name="omni_key_alias">密钥名称</string>
     <string name="omni_key_common_name">你的名字</string>
     <string name="omni_key_organisation">组织</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">没有名为 %1$s 的类型。</string>
     <string name="omni_editor_name_found">可能是 %1$s 的类型</string>
     <string name="omni_editor_name_yours">你的</string>
+    <string name="omni_form_not_compiled">不编译</string>
 </resources>

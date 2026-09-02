@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">CHOISIR UNE IMAGE</string>
     <string name="omni_form_image_none">Aucune image choisie.</string>
     <string name="omni_form_image_note">Une image devient dix icônes de lanceur : cinq tailles, en carré et en rond. Toutes sont écrites dans le projet, visibles et remplaçables.</string>
-    <string name="omni_form_no_compiler">Des dossiers sont créés pour ce que tu choisis. Aucun compilateur n\'existe encore, le code qu\'ils contiennent n\'est donc pas compilé.</string>
+    <string name="omni_form_no_compiler">Des dossiers sont créés pour ce que vous choisissez. Seul %1$s est compilé ici : un projet contenant du code dans les autres est refusé plutôt que construit sans lui.</string>
     <string name="omni_key_alias">Nom de la clé</string>
     <string name="omni_key_common_name">Ton nom</string>
     <string name="omni_key_organisation">Organisation</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">Aucun type ne répond à %1$s.</string>
     <string name="omni_editor_name_found">Types qui pourraient être %1$s</string>
     <string name="omni_editor_name_yours">le vôtre</string>
+    <string name="omni_form_not_compiled">non compilé</string>
 </resources>

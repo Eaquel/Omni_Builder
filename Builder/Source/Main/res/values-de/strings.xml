@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">BILD WÄHLEN</string>
     <string name="omni_form_image_none">Kein Bild gewählt.</string>
     <string name="omni_form_image_note">Aus einem Bild werden zehn Startsymbole: fünf Größen, jeweils eckig und rund. Alle liegen im Projekt, sichtbar und austauschbar.</string>
-    <string name="omni_form_no_compiler">Für das Gewählte werden Ordner angelegt. Es gibt noch keinen Compiler, der Code darin wird also nicht übersetzt.</string>
+    <string name="omni_form_no_compiler">Für Ihre Auswahl werden Ordner angelegt. Hier wird nur %1$s kompiliert: ein Projekt mit Code in einer der anderen Sprachen wird abgelehnt, statt ohne diesen Code gebaut zu werden.</string>
     <string name="omni_key_alias">Schlüsselname</string>
     <string name="omni_key_common_name">Dein Name</string>
     <string name="omni_key_organisation">Organisation</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">Kein Typ heißt %1$s.</string>
     <string name="omni_editor_name_found">Typen, die %1$s sein könnten</string>
     <string name="omni_editor_name_yours">Ihrer</string>
+    <string name="omni_form_not_compiled">nicht kompiliert</string>
 </resources>

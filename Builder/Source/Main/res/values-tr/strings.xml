@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">GÖRSEL SEÇ</string>
     <string name="omni_form_image_none">Görsel seçilmedi.</string>
     <string name="omni_form_image_note">Tek görsel on başlatıcı simgesine dönüşür: beş boy, kare ve yuvarlak. Hepsi projenin içine yazılır; görebilir ve değiştirebilirsin.</string>
-    <string name="omni_form_no_compiler">Seçtiklerin için klasörler oluşturulur. Henüz derleyici yok, bu yüzden içlerindeki kod derlenmez.</string>
+    <string name="omni_form_no_compiler">Seçtiklerin için klasörler oluşturulur. Burada yalnızca %1$s derlenir: diğerlerinde kod tutan bir proje, o kod olmadan uygulamaya çevrilmek yerine reddedilir.</string>
     <string name="omni_key_alias">Anahtar adı</string>
     <string name="omni_key_common_name">Adın</string>
     <string name="omni_key_organisation">Kurum</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">%1$s adına karşılık gelen tür yok.</string>
     <string name="omni_editor_name_found">%1$s olabilecek türler</string>
     <string name="omni_editor_name_yours">senin</string>
+    <string name="omni_form_not_compiled">derlenmiyor</string>
 </resources>

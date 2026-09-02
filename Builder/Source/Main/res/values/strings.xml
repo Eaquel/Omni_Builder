@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">CHOOSE IMAGE</string>
     <string name="omni_form_image_none">No image chosen.</string>
     <string name="omni_form_image_note">One image becomes ten launcher icons, five sizes in a square and a round shape, written into the project where you can see and replace them.</string>
-    <string name="omni_form_no_compiler">Folders are created for what you pick. No compiler exists yet, so the code in them is not compiled.</string>
+    <string name="omni_form_no_compiler">Folders are created for what you pick. Only %1$s is compiled here: a project holding code in any of the others is refused rather than built into an application without it.</string>
     <string name="omni_key_alias">Key name</string>
     <string name="omni_key_common_name">Your name</string>
     <string name="omni_key_organisation">Organisation</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">No type answers to %1$s.</string>
     <string name="omni_editor_name_found">Types that could be %1$s</string>
     <string name="omni_editor_name_yours">yours</string>
+    <string name="omni_form_not_compiled">not compiled</string>
 </resources>

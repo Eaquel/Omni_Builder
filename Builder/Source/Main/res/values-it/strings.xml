@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">SCEGLI IMMAGINE</string>
     <string name="omni_form_image_none">Nessuna immagine scelta.</string>
     <string name="omni_form_image_note">Una immagine diventa dieci icone di avvio: cinque misure, quadrata e rotonda. Tutte finiscono nel progetto, visibili e sostituibili.</string>
-    <string name="omni_form_no_compiler">Vengono create cartelle per ciò che scegli. Non esiste ancora un compilatore, quindi il codice al loro interno non viene compilato.</string>
+    <string name="omni_form_no_compiler">Vengono create cartelle per ciò che scegli. Qui si compila solo %1$s: un progetto con codice negli altri viene rifiutato invece che costruito senza.</string>
     <string name="omni_key_alias">Nome della chiave</string>
     <string name="omni_key_common_name">Il tuo nome</string>
     <string name="omni_key_organisation">Organizzazione</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">Nessun tipo risponde a %1$s.</string>
     <string name="omni_editor_name_found">Tipi che potrebbero essere %1$s</string>
     <string name="omni_editor_name_yours">tuo</string>
+    <string name="omni_form_not_compiled">non compilato</string>
 </resources>

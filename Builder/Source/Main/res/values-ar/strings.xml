@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">اختر صورة</string>
     <string name="omni_form_image_none">لم تُختر صورة.</string>
     <string name="omni_form_image_note">تصير الصورة الواحدة عشرة أيقونات إطلاق: خمسة أحجام، مربعة ومستديرة. جميعها تُكتب في المشروع حيث تراها وتستبدلها.</string>
-    <string name="omni_form_no_compiler">تُنشأ مجلدات لما تختاره. لا مترجم بعد، فالشيفرة التي بداخلها لا تُترجم.</string>
+    <string name="omni_form_no_compiler">تُنشأ مجلدات لما تختاره. لا يُترجم هنا سوى %1$s: المشروع الذي يحوي شيفرة بغيرها يُرفض بدل أن يُبنى بدونها.</string>
     <string name="omni_key_alias">اسم المفتاح</string>
     <string name="omni_key_common_name">اسمك</string>
     <string name="omni_key_organisation">المؤسسة</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">لا يوجد نوع باسم %1$s.</string>
     <string name="omni_editor_name_found">أنواع قد تكون %1$s</string>
     <string name="omni_editor_name_yours">لك</string>
+    <string name="omni_form_not_compiled">لا يُترجم</string>
 </resources>

@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">ESCOLHER IMAGEM</string>
     <string name="omni_form_image_none">Nenhuma imagem escolhida.</string>
     <string name="omni_form_image_note">Uma imagem vira dez ícones de lançador: cinco tamanhos, em quadrado e em redondo. Todos ficam no projeto, visíveis e substituíveis.</string>
-    <string name="omni_form_no_compiler">São criadas pastas para o que escolheres. Ainda não existe compilador, portanto o código dentro delas não é compilado.</string>
+    <string name="omni_form_no_compiler">São criadas pastas para o que escolher. Aqui só se compila %1$s: um projeto com código nos outros é recusado em vez de construído sem ele.</string>
     <string name="omni_key_alias">Nome da chave</string>
     <string name="omni_key_common_name">O teu nome</string>
     <string name="omni_key_organisation">Organização</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">Nenhum tipo responde a %1$s.</string>
     <string name="omni_editor_name_found">Tipos que poderiam ser %1$s</string>
     <string name="omni_editor_name_yours">seu</string>
+    <string name="omni_form_not_compiled">não compilado</string>
 </resources>

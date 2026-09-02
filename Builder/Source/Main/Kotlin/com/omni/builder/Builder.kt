@@ -1443,11 +1443,20 @@ class BuilderActivity : Activity() {
             30 to "11", 31 to "12", 32 to "12L",
             33 to "13", 34 to "14", 35 to "15", 36 to "16",
         )
+        /**
+         * The languages a project may hold, and whether a build compiles one.
+         *
+         * The third of these is not decoration. A folder for a language
+         * nothing compiles is a folder whose contents do not reach the
+         * package, so the build refuses rather than producing an application
+         * with none of that code in it -- and a person choosing here should
+         * know which is which before they write anything.
+         */
         val LANGUAGE_CHOICES = listOf(
-            "kotlin" to "Kotlin",
-            "java" to "Java",
-            "cpp" to "C++",
-            "rust" to "Rust",
+            Triple("java", "Java", true),
+            Triple("kotlin", "Kotlin", false),
+            Triple("cpp", "C++", false),
+            Triple("rust", "Rust", false),
         )
         const val LARGEST_ICON_EDGE = 512
         const val PROJECT_RES = "Res"
@@ -1481,7 +1490,7 @@ class BuilderActivity : Activity() {
     private var formVersionCode = "1"
     private var formMinSdk = 30
     private var formTargetSdk = 36
-    private val formLanguages = linkedSetOf("kotlin")
+    private val formLanguages = linkedSetOf("java")
     private val formLocales = Preferences.LANGUAGES.mapTo(linkedSetOf()) { it.first }
     private var formImage: String? = null
     private var imageForProject: String? = null
@@ -2017,14 +2026,24 @@ class BuilderActivity : Activity() {
         content.addView(label(getString(R.string.omni_form_languages)))
         content.addView(
             chips(
-                LANGUAGE_CHOICES.map { it.second },
+                LANGUAGE_CHOICES.map {
+                    if (it.third) it.second else it.second + "  ·  " +
+                        getString(R.string.omni_form_not_compiled)
+                },
                 { formLanguages.contains(LANGUAGE_CHOICES[it].first) },
             ) { index ->
                 val key = LANGUAGE_CHOICES[index].first
                 if (!formLanguages.remove(key)) formLanguages.add(key)
             }
         )
-        content.addView(quiet(getString(R.string.omni_form_no_compiler)))
+        content.addView(
+            quiet(
+                getString(
+                    R.string.omni_form_no_compiler,
+                    LANGUAGE_CHOICES.filter { it.third }.joinToString(", ") { it.second },
+                )
+            )
+        )
 
         content.addView(label(getString(R.string.omni_form_locales)))
         content.addView(

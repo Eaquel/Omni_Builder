@@ -24096,12 +24096,28 @@ pub mod scaffold {
     /// compiler knows on its own, which is the way it has always worked.
     pub const LIBRARY_FOLDER: &str = "Libraries";
 
-    pub const LANGUAGES: &[(&str, &str)] = &[
-        ("kotlin", "Kotlin"),
-        ("java", JAVA_FOLDER),
-        ("cpp", "Native"),
-        ("rust", "Rust"),
+    /// Each language a project may hold, the folder it lives in, the suffix
+    /// its files carry, and whether this build compiles it.
+    ///
+    /// That last one is here because it is the difference between a project
+    /// that produces an application and a project that produces an empty one.
+    /// A folder whose language is not compiled is a folder whose contents do
+    /// not reach the package, and a build that noticed that and said nothing
+    /// would be handing somebody an application missing the code they wrote.
+    pub const LANGUAGES: &[(&str, &str, &str, bool)] = &[
+        ("java", JAVA_FOLDER, ".java", true),
+        ("kotlin", "Kotlin", ".kt", false),
+        ("cpp", "Native", ".cpp", false),
+        ("rust", "Rust", ".rs", false),
     ];
+
+    /// The languages a build here turns into code the device runs.
+    pub fn compiled_languages() -> impl Iterator<Item = &'static str> {
+        LANGUAGES
+            .iter()
+            .filter(|(_, _, _, compiled)| *compiled)
+            .map(|(name, _, _, _)| *name)
+    }
 
     pub const LOCALES: &[(&str, &str)] = &[
         ("en", "English"),
@@ -24168,7 +24184,7 @@ pub mod scaffold {
                 abis: vec![ARM64.to_string()],
                 min_sdk: OLDEST_SUPPORTED,
                 target_sdk: NEWEST_DESCRIBED,
-                languages: vec!["kotlin".to_string()],
+                languages: vec!["java".to_string()],
                 locales: LOCALES.iter().map(|(tag, _)| (*tag).to_string()).collect(),
                 version_name: FIRST_VERSION_NAME.to_string(),
                 version_code: FIRST_VERSION_CODE,
@@ -24263,7 +24279,7 @@ pub mod scaffold {
                     "languages" => {
                         for language in value.split(',').filter(|l| !l.trim().is_empty()) {
                             let language = language.trim().to_ascii_lowercase();
-                            if !LANGUAGES.iter().any(|(known, _)| *known == language) {
+                            if !LANGUAGES.iter().any(|(known, ..)| *known == language) {
                                 return Err(fail(
                                     "EP004",
                                     "A language is not one this build knows.",
@@ -24544,7 +24560,7 @@ pub mod scaffold {
         let mut folders = Vec::new();
         let mut files = vec!["AndroidManifest.xml".to_string()];
 
-        for (language, folder) in LANGUAGES {
+        for (language, folder, _, _) in LANGUAGES {
             if !spec.languages.iter().any(|chosen| chosen == language) {
                 continue;
             }
@@ -30927,6 +30943,58 @@ public final class R {{
         out
     }
 
+    /// Source a project holds in a language this build does not compile.
+    ///
+    /// A folder for a language nothing compiles is a folder whose contents do
+    /// not reach the package. Left alone, that is a build which produces an
+    /// application, says it produced one, and has none of the code the person
+    /// wrote in it -- the worst kind of quiet, because the package installs
+    /// and launches and does nothing.
+    pub fn uncompiled_source(root: &str) -> Vec<(&'static str, String)> {
+        let mut found = Vec::new();
+        for (language, folder, suffix, compiled) in crate::scaffold::LANGUAGES {
+            if *compiled {
+                continue;
+            }
+            let here = std::path::Path::new(root).join(folder);
+            let mut held = Vec::new();
+            gather_by_suffix(&here, suffix, &mut held);
+            held.sort();
+            for path in held {
+                let named = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string()
+                    .replace('\\', "/");
+                found.push((*language, named));
+            }
+        }
+        found
+    }
+
+    fn gather_by_suffix(
+        folder: &std::path::Path,
+        suffix: &str,
+        found: &mut Vec<std::path::PathBuf>,
+    ) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                gather_by_suffix(&path, suffix, found);
+            } else if path
+                .file_name()
+                .and_then(|held| held.to_str())
+                .is_some_and(|held| held.ends_with(suffix))
+            {
+                found.push(path);
+            }
+        }
+    }
+
     /// Every class the project's Java comes to.
     ///
     /// The files are compiled together, so that a type written in one can be
@@ -30938,6 +31006,31 @@ public final class R {{
         generated: Vec<(String, String)>,
     ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
         crate::progress::enter("java");
+
+        // Before anything is compiled: source this build cannot compile is
+        // refused rather than walked past. What is compiled here is named, so
+        // the refusal is the whole answer rather than half of one.
+        let ignored = uncompiled_source(root);
+        if !ignored.is_empty() {
+            let mut refusal = fail(
+                "EB058",
+                "This project holds source in a language this build does not compile.",
+            )
+            .with_suggestion(
+                "Nothing was written. A package built from this would install, launch, \
+                 and hold none of that code, which is worse than not building it.",
+            );
+            for (language, path) in ignored.iter().take(12) {
+                refusal = refusal.with_context(format!("{language}: {path}"));
+            }
+            if ignored.len() > 12 {
+                refusal = refusal.with_context(format!("and {} more", ignored.len() - 12));
+            }
+            let compiled: Vec<&str> = crate::scaffold::compiled_languages().collect();
+            refusal = refusal.with_context(format!("Compiled here: {}", compiled.join(", ")));
+            return Err(refusal);
+        }
+
         let folder = std::path::Path::new(root).join(crate::scaffold::JAVA_FOLDER);
         let mut sources = Vec::new();
         gather_java(&folder, &mut sources);
@@ -45670,7 +45763,17 @@ public final class MainActivity extends Activity {
         let directory = temp_directory("omni-workspace");
         let root = directory.join("Edited");
         let text = root.to_str().unwrap().to_string();
-        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+        // A Kotlin folder, because this is about the file manager rather than
+        // about the build: a folder full of files is a folder full of files
+        // whatever the language, and this one is asked for by name.
+        super::scaffold::create(
+            &text,
+            &super::scaffold::Spec {
+                languages: vec!["kotlin".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
         let listed = super::workspace::list_projects(directory.to_str().unwrap());
         assert_eq!(listed.len(), 1);
@@ -47112,7 +47215,7 @@ public final class MainActivity extends Activity {
         here.sort();
         assert_eq!(
             here,
-            vec!["AndroidManifest.xml", "Kotlin", "Res"],
+            vec!["AndroidManifest.xml", "Java", "Res"],
             "the root holds the manifest, the folders for the languages chosen, and the \
              resource folder"
         );
@@ -49017,6 +49120,122 @@ public final class MainActivity extends Activity {
         let nowhere =
             read(unsafe { super::ffi::omni_where_written(root_c.as_ptr(), platform.as_ptr()) });
         assert!(nowhere.contains("\"written\":false"), "{nowhere}");
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Code this build cannot compile stops the build rather than being
+    /// walked past.
+    ///
+    /// This is the one gap worth being loud about. A folder for a language
+    /// nothing here compiles is a folder whose contents do not reach the
+    /// package, and a build that noticed and said nothing would hand somebody
+    /// an application that installs, launches, and holds none of the code
+    /// they wrote. So it refuses, names the files, and says what is compiled.
+    #[test]
+    fn source_this_build_cannot_compile_stops_it_rather_than_being_dropped() {
+        let directory = temp_directory("omni-uncompiled");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Mixed".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        // As made, in a language this compiles, it builds.
+        let clear = super::builder::check(&root);
+        assert!(clear.refusal.is_none(), "{:?}", clear.refusal);
+        assert!(super::builder::uncompiled_source(&root).is_empty());
+
+        // A Kotlin file put beside it is code that would not reach the
+        // package, so it stops the build instead.
+        super::workspace::write_text(
+            &root,
+            "Kotlin/com/tr/yt/Screen.kt",
+            "package com.tr.yt
+
+class Screen
+",
+        )
+        .unwrap();
+
+        let found = super::builder::uncompiled_source(&root);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].0, "kotlin");
+        assert_eq!(found[0].1, "Kotlin/com/tr/yt/Screen.kt");
+
+        let refused = super::builder::check(&root);
+        let refusal = refused.refusal.expect("it must refuse");
+        assert_eq!(refusal.code, "EB058");
+        assert!(
+            refusal
+                .context
+                .iter()
+                .any(|line| line.contains("Kotlin/com/tr/yt/Screen.kt")),
+            "the refusal names the file: {:?}",
+            refusal.context
+        );
+        assert!(
+            refusal
+                .context
+                .iter()
+                .any(|line| line.starts_with("Compiled here:") && line.contains("java")),
+            "and says what is compiled: {:?}",
+            refusal.context
+        );
+
+        // And a real build refuses in the same place, with nothing written.
+        assert_eq!(
+            super::builder::from_project(&root)
+                .expect_err("the build refuses")
+                .code,
+            "EB058"
+        );
+
+        // Taking it away puts the project back.
+        let bin = directory.join("bin").to_str().unwrap().to_string();
+        super::workspace::remove(&root, "Kotlin/com/tr/yt/Screen.kt", &bin, 1_800_000_000).unwrap();
+        assert!(super::builder::check(&root).refusal.is_none());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// What a language folder says about itself is what the build does with it.
+    #[test]
+    fn a_language_is_offered_as_compiled_only_where_it_is_compiled() {
+        let listed = super::scaffold::LANGUAGES;
+        assert!(listed.len() >= 4, "the four folders a project may hold");
+
+        let compiled: Vec<&str> = super::scaffold::compiled_languages().collect();
+        assert_eq!(
+            compiled,
+            vec!["java"],
+            "a language named as compiled that is not one is the fake this refuses to be"
+        );
+
+        // Each entry is a folder that exists and a suffix files really carry.
+        for (language, folder, suffix, _) in listed {
+            assert!(!language.is_empty());
+            assert!(!folder.is_empty());
+            assert!(suffix.starts_with('.'), "{suffix}");
+        }
+
+        // And a project made in a compiled language is one that finishes.
+        let directory = temp_directory("omni-languages");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(&root, &super::scaffold::Spec::default()).unwrap();
+        assert!(
+            std::path::Path::new(&root)
+                .join(super::scaffold::JAVA_FOLDER)
+                .is_dir(),
+            "a new project is made in a language this build compiles"
+        );
+        assert!(super::builder::check(&root).refusal.is_none());
 
         std::fs::remove_dir_all(&directory).ok();
     }

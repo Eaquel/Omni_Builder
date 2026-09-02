@@ -36,7 +36,7 @@
     <string name="omni_form_image_choose">ВЫБРАТЬ ИЗОБРАЖЕНИЕ</string>
     <string name="omni_form_image_none">Изображение не выбрано.</string>
     <string name="omni_form_image_note">Одно изображение становится десятью значками запуска: пять размеров, квадратный и круглый. Все они попадают в проект, где их видно и можно заменить.</string>
-    <string name="omni_form_no_compiler">Для выбранного создаются папки. Компилятора пока нет, поэтому код внутри них не компилируется.</string>
+    <string name="omni_form_no_compiler">Для выбранного создаются папки. Здесь компилируется только %1$s: проект с кодом на других языках отклоняется, а не собирается без него.</string>
     <string name="omni_key_alias">Имя ключа</string>
     <string name="omni_key_common_name">Ваше имя</string>
     <string name="omni_key_organisation">Организация</string>
@@ -181,4 +181,5 @@
     <string name="omni_editor_name_nothing">Ни один тип не отзывается на %1$s.</string>
     <string name="omni_editor_name_found">Типы, которыми мог бы быть %1$s</string>
     <string name="omni_editor_name_yours">ваш</string>
+    <string name="omni_form_not_compiled">не компилируется</string>
 </resources>
