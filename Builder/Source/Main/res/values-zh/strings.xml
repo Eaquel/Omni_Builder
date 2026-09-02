@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">使用处</string>
     <string name="omni_editor_go_platform">%1$s 属于平台，因此并不写在本设备上。</string>
     <string name="omni_palette_title">从这里到任何地方</string>
+    <string name="omni_manifest_title">清单</string>
+    <string name="omni_manifest_saved">已保存</string>
+    <string name="omni_manifest_permissions">申请的权限</string>
+    <string name="omni_manifest_none">它不申请任何权限。</string>
+    <string name="omni_manifest_other">其他权限</string>
+    <string name="omni_manifest_note">这里的每次改动只动一个属性，就地修改，文件的其余部分保持你留下的样子。本屏幕上没有的内容仍然存在，仍可作为文本编辑。</string>
 </resources>

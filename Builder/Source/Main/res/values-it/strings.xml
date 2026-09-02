@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">USI</string>
     <string name="omni_editor_go_platform">%1$s appartiene alla piattaforma, quindi non è scritto su questo dispositivo.</string>
     <string name="omni_palette_title">Tutto da qui</string>
+    <string name="omni_manifest_title">Manifest</string>
+    <string name="omni_manifest_saved">SALVATO</string>
+    <string name="omni_manifest_permissions">Permessi richiesti</string>
+    <string name="omni_manifest_none">Non ne chiede nessuno.</string>
+    <string name="omni_manifest_other">ALTRO PERMESSO</string>
+    <string name="omni_manifest_note">Ogni modifica qui è un attributo, cambiato dove sta, così il resto del file resta come l\'hai lasciato. Tutto ciò che non è in questa schermata è ancora lì e ancora modificabile come testo.</string>
 </resources>

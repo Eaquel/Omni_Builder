@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">KULLANIMLAR</string>
     <string name="omni_editor_go_platform">%1$s platforma ait, bu yüzden bu cihazda yazılı değil.</string>
     <string name="omni_palette_title">Buradan her şey</string>
+    <string name="omni_manifest_title">Manifest</string>
+    <string name="omni_manifest_saved">KAYDEDİLDİ</string>
+    <string name="omni_manifest_permissions">İstediği izinler</string>
+    <string name="omni_manifest_none">Hiçbir izin istemiyor.</string>
+    <string name="omni_manifest_other">BAŞKA BİR İZİN</string>
+    <string name="omni_manifest_note">Buradaki her değişiklik tek bir özniteliktir, yerinde düzenlenir; dosyanın geri kalanı bıraktığın gibi kalır. Bu ekranda olmayan her şey hâlâ orada ve hâlâ metin olarak düzenlenebilir.</string>
 </resources>

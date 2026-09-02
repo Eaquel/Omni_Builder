@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">الاستعمالات</string>
     <string name="omni_editor_go_platform">‏%1$s يخص المنصة، فهو غير مكتوب على هذا الجهاز.</string>
     <string name="omni_palette_title">كل شيء من هنا</string>
+    <string name="omni_manifest_title">البيان</string>
+    <string name="omni_manifest_saved">حُفظ</string>
+    <string name="omni_manifest_permissions">الأذونات المطلوبة</string>
+    <string name="omni_manifest_none">لا يطلب أيًّا منها.</string>
+    <string name="omni_manifest_other">إذن آخر</string>
+    <string name="omni_manifest_note">كل تغيير هنا سمة واحدة تُحرَّر في مكانها، فيبقى بقية الملف كما تركته. وكل ما ليس في هذه الشاشة ما زال موجودًا وقابلًا للتحرير كنص.</string>
 </resources>

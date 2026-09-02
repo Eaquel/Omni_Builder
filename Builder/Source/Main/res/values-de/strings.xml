@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">VERWENDUNGEN</string>
     <string name="omni_editor_go_platform">%1$s gehört zur Plattform und ist auf diesem Gerät nicht geschrieben.</string>
     <string name="omni_palette_title">Alles von hier aus</string>
+    <string name="omni_manifest_title">Manifest</string>
+    <string name="omni_manifest_saved">GESPEICHERT</string>
+    <string name="omni_manifest_permissions">Angeforderte Berechtigungen</string>
+    <string name="omni_manifest_none">Es fordert keine an.</string>
+    <string name="omni_manifest_other">WEITERE BERECHTIGUNG</string>
+    <string name="omni_manifest_note">Jede Änderung hier ist ein Attribut, an Ort und Stelle bearbeitet; der Rest der Datei bleibt genau so, wie Sie ihn gelassen haben. Alles, was nicht auf diesem Bildschirm steht, ist weiterhin da und als Text bearbeitbar.</string>
 </resources>

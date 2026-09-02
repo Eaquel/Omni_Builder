@@ -551,6 +551,22 @@ object Builder {
 
     external fun nativeProjectTree(root: String): String
 
+    /** What the manifest says, as the things a person changes. */
+    external fun nativeManifestFacts(root: String): String
+
+    /**
+     * Changes one of them.
+     *
+     * The edit is made on the text, so the spacing, the attribute order and
+     * the comments in the file stay as somebody left them, and nothing is
+     * written unless the result still reads as a manifest and says what it
+     * was told to say.
+     */
+    external fun nativeManifestSet(root: String, field: String, value: String): String
+
+    /** Asks for a permission, or stops asking for one. */
+    external fun nativeManifestPermission(root: String, name: String, wanted: Boolean): String
+
     /**
      * Every type in this project and on the platform that answers to this.
      *
@@ -1364,6 +1380,10 @@ private sealed interface Screen {
         override val tab = Tab.FILES
     }
 
+    data class Manifest(val root: String) : Screen {
+        override val tab = Tab.FILES
+    }
+
     data class Picture(val root: String, val path: String) : Screen {
         override val tab = Tab.FILES
     }
@@ -1458,6 +1478,26 @@ class BuilderActivity : Activity() {
             Triple("cpp", "C++", false),
             Triple("rust", "Rust", false),
         )
+        /**
+         * The permissions offered as one press.
+         *
+         * Not every permission Android has -- there are hundreds, and a list
+         * of hundreds is not a list. These are the ones an application asks
+         * for often enough that typing them out is the annoying part; anything
+         * else is typed once and is no worse for it.
+         */
+        val COMMON_PERMISSIONS = listOf(
+            "android.permission.INTERNET",
+            "android.permission.ACCESS_NETWORK_STATE",
+            "android.permission.CAMERA",
+            "android.permission.RECORD_AUDIO",
+            "android.permission.POST_NOTIFICATIONS",
+            "android.permission.VIBRATE",
+            "android.permission.ACCESS_FINE_LOCATION",
+            "android.permission.READ_MEDIA_IMAGES",
+            "android.permission.WAKE_LOCK",
+        )
+
         const val LARGEST_ICON_EDGE = 512
         const val PROJECT_RES = "Res"
         const val PROJECT_ICON = "Icon.png"
@@ -1829,6 +1869,7 @@ class BuilderActivity : Activity() {
             is Screen.NewProject -> renderNewProject()
             is Screen.Files -> renderFiles(here.root, here.folder)
             is Screen.Search -> renderSearch(here.root)
+            is Screen.Manifest -> renderManifest(here.root)
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
@@ -1868,6 +1909,7 @@ class BuilderActivity : Activity() {
                     go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
                 }
             is Screen.Search -> go(Screen.Files(here.root, ""))
+            is Screen.Manifest -> go(Screen.Files(here.root, ""))
             is Screen.Build -> go(Screen.Files(here.root, ""))
             is Screen.Keys -> go(Screen.Settings)
             is Screen.NewKey -> go(Screen.Keys)
@@ -2233,6 +2275,9 @@ class BuilderActivity : Activity() {
             })
         }
 
+        content.addView(subtle(getString(R.string.omni_manifest_title), palette.accent) {
+            go(Screen.Manifest(root))
+        })
         content.addView(subtle(getString(R.string.omni_check_title), palette.accent) {
             checkProject(root)
         })
@@ -2241,6 +2286,173 @@ class BuilderActivity : Activity() {
         })
         content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
         content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    /**
+     * The manifest, as the handful of things a person actually changes.
+     *
+     * Not a form that rewrites the file: each change is one attribute, edited
+     * where it stands, so a manifest somebody laid out a particular way is
+     * still laid out that way afterwards. Everything else in it -- the
+     * intent filters, the providers, whatever else is there -- is untouched
+     * and stays editable as text.
+     */
+    private fun renderManifest(root: String) {
+        content.addView(heading(getString(R.string.omni_manifest_title)))
+
+        val answer = runCatching { JSONObject(Builder.nativeManifestFacts(root)) }.getOrNull()
+        val facts = answer?.optJSONObject("manifest")
+        if (answer == null || !answer.optBoolean("read", false) || facts == null) {
+            answer?.let { showRefusal(Refusal.parse(it), content) }
+            content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+                go(Screen.Files(root, ""))
+            })
+            return
+        }
+
+        fun change(field: String, value: String) {
+            results.removeAllViews()
+            val done = runCatching {
+                JSONObject(Builder.nativeManifestSet(root, field, value))
+            }.getOrNull()
+            if (done != null && done.optBoolean("changed", false)) {
+                render(false)
+                results.addView(notice(getString(R.string.omni_manifest_saved), palette.ok))
+            } else {
+                done?.let { showRefusal(Refusal.parse(it), results) }
+            }
+        }
+
+        val identity = card()
+        identity.addView(
+            keyValue(
+                getString(R.string.omni_form_package),
+                facts.optString("package"),
+                "",
+                palette.muted,
+            )
+        )
+        identity.addView(
+            row(
+                getString(R.string.omni_form_label),
+                facts.optString("label"),
+                getString(R.string.omni_action_change),
+                palette.accent,
+            ) {
+                askForName(getString(R.string.omni_form_label), facts.optString("label")) {
+                    change("label", it)
+                }
+            }
+        )
+        identity.addView(
+            row(
+                getString(R.string.omni_form_version_name),
+                facts.optString("versionName"),
+                getString(R.string.omni_action_change),
+                palette.accent,
+            ) {
+                askForName(
+                    getString(R.string.omni_form_version_name),
+                    facts.optString("versionName"),
+                ) { change("versionName", it) }
+            }
+        )
+        identity.addView(
+            row(
+                getString(R.string.omni_form_version_code),
+                facts.optString("versionCode"),
+                getString(R.string.omni_action_change),
+                palette.accent,
+            ) {
+                askForName(
+                    getString(R.string.omni_form_version_code),
+                    facts.optString("versionCode"),
+                ) { change("versionCode", it) }
+            }
+        )
+        content.addView(identity)
+
+        content.addView(label(getString(R.string.omni_form_min_sdk)))
+        content.addView(
+            chips(
+                ANDROID_RELEASES.map { it.second },
+                { index ->
+                    ANDROID_RELEASES[index].first.toString() == facts.optString("minSdkVersion")
+                },
+            ) { index -> change("minSdkVersion", ANDROID_RELEASES[index].first.toString()) }
+        )
+
+        content.addView(label(getString(R.string.omni_form_target_sdk)))
+        content.addView(
+            chips(
+                ANDROID_RELEASES.map { it.second },
+                { index ->
+                    ANDROID_RELEASES[index].first.toString() == facts.optString("targetSdkVersion")
+                },
+            ) { index -> change("targetSdkVersion", ANDROID_RELEASES[index].first.toString()) }
+        )
+
+        content.addView(heading(getString(R.string.omni_manifest_permissions)))
+        val asked = facts.optJSONArray("permissions")
+        val holder = card()
+        if (asked == null || asked.length() == 0) {
+            holder.addView(quiet(getString(R.string.omni_manifest_none)))
+        } else {
+            for (index in 0 until asked.length()) {
+                val name = asked.getString(index)
+                if (index > 0) {
+                    holder.addView(rule(), MATCH_PARENT, 1)
+                }
+                holder.addView(
+                    row(name, "", getString(R.string.omni_action_delete), palette.error) {
+                        results.removeAllViews()
+                        val done = runCatching {
+                            JSONObject(Builder.nativeManifestPermission(root, name, false))
+                        }.getOrNull()
+                        if (done != null && done.optBoolean("changed", false)) {
+                            render(false)
+                        } else {
+                            done?.let { showRefusal(Refusal.parse(it), results) }
+                        }
+                    }
+                )
+            }
+        }
+        content.addView(holder)
+
+        content.addView(
+            chips(COMMON_PERMISSIONS.map { it.substringAfterLast('.') }, { false }) { index ->
+                results.removeAllViews()
+                val done = runCatching {
+                    JSONObject(
+                        Builder.nativeManifestPermission(root, COMMON_PERMISSIONS[index], true)
+                    )
+                }.getOrNull()
+                if (done != null && done.optBoolean("changed", false)) {
+                    render(false)
+                } else {
+                    done?.let { showRefusal(Refusal.parse(it), results) }
+                }
+            }
+        )
+        content.addView(subtle(getString(R.string.omni_manifest_other), palette.accent) {
+            askForName(getString(R.string.omni_manifest_other), "android.permission.") { name ->
+                results.removeAllViews()
+                val done = runCatching {
+                    JSONObject(Builder.nativeManifestPermission(root, name, true))
+                }.getOrNull()
+                if (done != null && done.optBoolean("changed", false)) {
+                    render(false)
+                } else {
+                    done?.let { showRefusal(Refusal.parse(it), results) }
+                }
+            }
+        })
+
+        content.addView(quiet(getString(R.string.omni_manifest_note)))
+        content.addView(subtle(getString(R.string.omni_action_open), palette.muted) {
+            go(Screen.Editor(root, "AndroidManifest.xml"))
+        })
     }
 
     /**

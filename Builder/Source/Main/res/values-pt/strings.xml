@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">USOS</string>
     <string name="omni_editor_go_platform">%1$s pertence à plataforma, por isso não está escrito neste dispositivo.</string>
     <string name="omni_palette_title">Tudo a partir daqui</string>
+    <string name="omni_manifest_title">Manifesto</string>
+    <string name="omni_manifest_saved">GUARDADO</string>
+    <string name="omni_manifest_permissions">Permissões que pede</string>
+    <string name="omni_manifest_none">Não pede nenhuma.</string>
+    <string name="omni_manifest_other">OUTRA PERMISSÃO</string>
+    <string name="omni_manifest_note">Cada alteração aqui é um atributo, editado onde está, por isso o resto do ficheiro fica tal como o deixou. Tudo o que não está neste ecrã continua lá e continua editável como texto.</string>
 </resources>

@@ -42,6 +42,12 @@ char *omni_list_projects(const char *directory);
 
 char *omni_project_tree(const char *root);
 
+char *omni_manifest_facts(const char *root);
+
+char *omni_manifest_set(const char *root, const char *field, const char *value);
+
+char *omni_manifest_permission(const char *root, const char *name, bool wanted);
+
 char *omni_symbols(const char *root, const char *needle);
 
 char *omni_where_written(const char *root, const char *qualified);

@@ -33679,6 +33679,414 @@ pub mod symbols {
     }
 }
 
+/// Editing a manifest without rewriting it.
+///
+/// A manifest is the one file in a project where a mistake costs the whole
+/// build, and it is the file least worth editing by hand on a phone. So the
+/// handful of things a person really changes -- the label, the versions, the
+/// platforms, the permissions -- are changed here instead.
+///
+/// Every edit is made on the text rather than by parsing the file and writing
+/// it back out. Writing it back would settle every question about spacing,
+/// attribute order and comments in favour of whatever this writer happens to
+/// do, and a person who laid their manifest out a particular way would find it
+/// rearranged for having changed a version number. What is changed is what was
+/// asked for and the rest is the bytes that were there.
+///
+/// Nothing is written until the result parses and says what it was meant to
+/// say. An edit that would leave a manifest this build cannot read leaves the
+/// file exactly as it was.
+pub mod manifest {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.manifest",
+            message,
+        )
+    }
+
+    pub const FILE: &str = "AndroidManifest.xml";
+
+    /// What a person may change here, and where each of them lives.
+    ///
+    /// The element is the one the attribute is on, and the name is the
+    /// attribute itself. A field not on this list is not editable through
+    /// here, which is deliberate: the rest of a manifest is structure rather
+    /// than settings, and a form is the wrong shape for structure.
+    pub const FIELDS: &[(&str, &str, &str)] = &[
+        ("package", "manifest", "package"),
+        ("versionName", "manifest", "android:versionName"),
+        ("versionCode", "manifest", "android:versionCode"),
+        ("minSdkVersion", "uses-sdk", "android:minSdkVersion"),
+        ("targetSdkVersion", "uses-sdk", "android:targetSdkVersion"),
+        ("label", "application", "android:label"),
+    ];
+
+    /// What the manifest says, as the things a person changes.
+    #[derive(Clone, Debug, Default)]
+    pub struct Facts {
+        pub package: String,
+        pub label: String,
+        pub version_name: String,
+        pub version_code: String,
+        pub min_sdk: String,
+        pub target_sdk: String,
+        pub permissions: Vec<String>,
+        pub activities: Vec<String>,
+    }
+
+    impl Facts {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("package", &self.package);
+            w.field_str("label", &self.label);
+            w.field_str("versionName", &self.version_name);
+            w.field_str("versionCode", &self.version_code);
+            w.field_str("minSdkVersion", &self.min_sdk);
+            w.field_str("targetSdkVersion", &self.target_sdk);
+            w.begin_array(Some("permissions"));
+            for one in &self.permissions {
+                w.element_str(one);
+            }
+            w.end_array();
+            w.begin_array(Some("activities"));
+            for one in &self.activities {
+                w.element_str(one);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    fn read(root: &str) -> Result<String, Diagnostic> {
+        crate::workspace::read_text(root, FILE).map_err(|error| {
+            fail("EM201", "The manifest could not be read.").with_context(error.message)
+        })
+    }
+
+    fn parsed(text: &str) -> Result<crate::xml::Element, Diagnostic> {
+        let mut sink = Sink::new();
+        crate::xml::parse(text, FILE, &mut sink).ok_or_else(|| {
+            let mut refusal = fail("EM202", "The manifest is not XML this build can read.");
+            for entry in sink.entries().iter().take(4) {
+                refusal = refusal.with_context(entry.message.clone());
+            }
+            refusal
+        })
+    }
+
+    fn attribute(element: &crate::xml::Element, name: &str) -> String {
+        element
+            .attributes
+            .iter()
+            .find(|held| held.name == name)
+            .map(|held| held.value.clone())
+            .unwrap_or_default()
+    }
+
+    fn under<'a>(root: &'a crate::xml::Element, name: &str) -> Option<&'a crate::xml::Element> {
+        root.children.iter().find(|held| held.name == name)
+    }
+
+    pub fn facts(root: &str) -> Result<Facts, Diagnostic> {
+        let element = parsed(&read(root)?)?;
+        let application = under(&element, "application");
+        Ok(Facts {
+            package: attribute(&element, "package"),
+            label: application
+                .map(|held| attribute(held, "android:label"))
+                .unwrap_or_default(),
+            version_name: attribute(&element, "android:versionName"),
+            version_code: attribute(&element, "android:versionCode"),
+            min_sdk: under(&element, "uses-sdk")
+                .map(|held| attribute(held, "android:minSdkVersion"))
+                .unwrap_or_default(),
+            target_sdk: under(&element, "uses-sdk")
+                .map(|held| attribute(held, "android:targetSdkVersion"))
+                .unwrap_or_default(),
+            permissions: element
+                .children
+                .iter()
+                .filter(|held| held.name == "uses-permission")
+                .map(|held| attribute(held, "android:name"))
+                .filter(|held| !held.is_empty())
+                .collect(),
+            activities: application
+                .map(|held| {
+                    held.children
+                        .iter()
+                        .filter(|one| one.name == "activity")
+                        .map(|one| attribute(one, "android:name"))
+                        .filter(|one| !one.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Where one element's opening tag runs from and to, in the text.
+    ///
+    /// Found by reading rather than by searching for the name: a name inside a
+    /// comment or a string would be found by a search and is not an element.
+    fn opening(text: &str, name: &str) -> Option<(usize, usize)> {
+        let bytes = text.as_bytes();
+        let mut at = 0usize;
+        while at < bytes.len() {
+            if bytes[at] != b'<' {
+                at += 1;
+                continue;
+            }
+            if text[at..].starts_with("<!--") {
+                at = text[at..]
+                    .find("-->")
+                    .map(|held| at + held + 3)
+                    .unwrap_or(bytes.len());
+                continue;
+            }
+            if text[at..].starts_with("<?") {
+                at = text[at..]
+                    .find("?>")
+                    .map(|held| at + held + 2)
+                    .unwrap_or(bytes.len());
+                continue;
+            }
+            let from = at;
+            at += 1;
+            let closing = bytes.get(at) == Some(&b'/');
+            if closing {
+                at += 1;
+            }
+            let start = at;
+            while at < bytes.len()
+                && !bytes[at].is_ascii_whitespace()
+                && bytes[at] != b'>'
+                && bytes[at] != b'/'
+            {
+                at += 1;
+            }
+            let here = &text[start..at];
+            // To the end of this tag, stepping over quoted values so a `>`
+            // inside one does not end it early.
+            let mut quote: Option<u8> = None;
+            while at < bytes.len() {
+                let byte = bytes[at];
+                match quote {
+                    Some(open) if byte == open => quote = None,
+                    Some(_) => {}
+                    None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+                    None if byte == b'>' => break,
+                    None => {}
+                }
+                at += 1;
+            }
+            if at >= bytes.len() {
+                return None;
+            }
+            if here == name && !closing {
+                return Some((from, at + 1));
+            }
+            at += 1;
+        }
+        None
+    }
+
+    /// Puts a value on an attribute of one element, adding it where it is not
+    /// there, in the text and nowhere else.
+    fn put(text: &str, element: &str, attribute: &str, value: &str) -> Result<String, Diagnostic> {
+        let (from, to) = opening(text, element).ok_or_else(|| {
+            fail("EM203", "The manifest holds no element to change.")
+                .with_context(format!("Element: {element}"))
+        })?;
+        let tag = &text[from..to];
+
+        let escaped = value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;");
+
+        // The attribute as it stands, found inside this tag alone.
+        let looking = format!("{attribute}=\"");
+        if let Some(at) = tag.find(&looking) {
+            let start = from + at + looking.len();
+            let end = text[start..]
+                .find('"')
+                .map(|held| start + held)
+                .ok_or_else(|| {
+                    fail("EM204", "An attribute in the manifest is never closed.")
+                        .with_context(format!("Attribute: {attribute}"))
+                })?;
+            return Ok(format!("{}{escaped}{}", &text[..start], &text[end..]));
+        }
+
+        // Not there: after the element's name, which is where an attribute
+        // reads most naturally and where nothing else can be disturbed.
+        let after_name = from
+            + 1
+            + tag[1..]
+                .find(|held: char| held.is_whitespace() || held == '>' || held == '/')
+                .unwrap_or(tag.len() - 1);
+        Ok(format!(
+            "{} {attribute}=\"{escaped}\"{}",
+            &text[..after_name],
+            &text[after_name..]
+        ))
+    }
+
+    /// Writes a manifest back only if it still reads as one and says what it
+    /// was told to say.
+    fn settle(root: &str, text: &str, check: impl Fn(&Facts) -> bool) -> Result<Facts, Diagnostic> {
+        let element = parsed(text)?;
+        let _ = element;
+        let before = read(root)?;
+        crate::workspace::write_text(root, FILE, text)?;
+        let after = facts(root)?;
+        if !check(&after) {
+            // Put it back. An edit that did not take is an edit that changed
+            // something else, and leaving that in place would be worse than
+            // refusing.
+            crate::workspace::write_text(root, FILE, &before)?;
+            return Err(fail(
+                "EM205",
+                "That change did not take, so the manifest was put back as it was.",
+            ));
+        }
+        Ok(after)
+    }
+
+    /// Changes one of the things a person changes.
+    pub fn set(root: &str, field: &str, value: &str) -> Result<Facts, Diagnostic> {
+        let Some((_, element, attribute)) = FIELDS.iter().find(|(name, _, _)| *name == field)
+        else {
+            return Err(
+                fail("EM206", "That is not something this changes in a manifest.")
+                    .with_context(format!("Field: {field}"))
+                    .with_context(format!(
+                        "Changed here: {}",
+                        FIELDS
+                            .iter()
+                            .map(|(name, _, _)| *name)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )),
+            );
+        };
+        if value.contains('\n') || value.len() > 512 {
+            return Err(fail("EM207", "That value is not one a manifest holds.")
+                .with_context(format!("Length: {}", value.len())));
+        }
+
+        let text = put(&read(root)?, element, attribute, value)?;
+        let wanted = value.to_string();
+        let field = field.to_string();
+        settle(root, &text, move |after| {
+            let held = match field.as_str() {
+                "package" => &after.package,
+                "versionName" => &after.version_name,
+                "versionCode" => &after.version_code,
+                "minSdkVersion" => &after.min_sdk,
+                "targetSdkVersion" => &after.target_sdk,
+                "label" => &after.label,
+                _ => return false,
+            };
+            *held == wanted
+        })
+    }
+
+    /// The most permissions one manifest is edited into holding here.
+    pub const MOST_PERMISSIONS: usize = 200;
+
+    /// Adds a permission, or takes one away.
+    pub fn permission(root: &str, name: &str, wanted: bool) -> Result<Facts, Diagnostic> {
+        let name = name.trim();
+        if name.is_empty()
+            || name.len() > 200
+            || !name
+                .chars()
+                .all(|held| held.is_ascii_alphanumeric() || held == '.' || held == '_')
+        {
+            return Err(fail("EM208", "That is not the name of a permission.")
+                .with_context(format!("Name: {name:?}"))
+                .with_suggestion(
+                    "A permission is named like android.permission.INTERNET: letters, \
+                     digits, dots and underscores.",
+                ));
+        }
+
+        let text = read(root)?;
+        let held = facts(root)?;
+        let there = held.permissions.iter().any(|one| one == name);
+        if there == wanted {
+            return Ok(held);
+        }
+        if wanted && held.permissions.len() >= MOST_PERMISSIONS {
+            return Err(fail("EM209", "That is more permissions than this edits.")
+                .with_context(format!("Limit: {MOST_PERMISSIONS}")));
+        }
+
+        let changed = if wanted {
+            // Straight after the manifest's own opening tag, which is where
+            // one belongs and where nothing else can be disturbed.
+            let (_, to) = opening(&text, "manifest")
+                .ok_or_else(|| fail("EM210", "The manifest has no opening tag."))?;
+            format!(
+                "{}\n    <uses-permission android:name=\"{name}\" />{}",
+                &text[..to],
+                &text[to..]
+            )
+        } else {
+            let looking = format!("android:name=\"{name}\"");
+            let mut out = String::with_capacity(text.len());
+            let mut rest = text.as_str();
+            let mut taken = false;
+            while let Some(at) = rest.find("<uses-permission") {
+                let end = rest[at..]
+                    .find('>')
+                    .map(|held| at + held + 1)
+                    .unwrap_or(rest.len());
+                if !taken && rest[at..end].contains(&looking) {
+                    // The line it is on, so removing it does not leave a
+                    // blank one behind.
+                    let mut start = at;
+                    while start > 0
+                        && rest.as_bytes()[start - 1] != b'\n'
+                        && rest.as_bytes()[start - 1].is_ascii_whitespace()
+                    {
+                        start -= 1;
+                    }
+                    let mut after = end;
+                    while after < rest.len() && rest.as_bytes()[after] == b'\r' {
+                        after += 1;
+                    }
+                    if after < rest.len() && rest.as_bytes()[after] == b'\n' {
+                        after += 1;
+                    } else {
+                        start = at;
+                    }
+                    out.push_str(&rest[..start]);
+                    rest = &rest[after..];
+                    taken = true;
+                    continue;
+                }
+                out.push_str(&rest[..end]);
+                rest = &rest[end..];
+            }
+            out.push_str(rest);
+            out
+        };
+
+        settle(root, &changed, |after| {
+            after.permissions.iter().any(|one| one == name) == wanted
+        })
+    }
+}
+
 pub mod progress {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
@@ -34539,6 +34947,82 @@ pub mod ffi {
     /// `sensitive` and `whole_word` are the two switches a search needs and
     /// the only two: the first says whether case counts, the second whether
     /// `at` may match inside `that`.
+    /// What the manifest says, as the things a person changes.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_manifest_facts(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::manifest::facts(&root) {
+                Ok(facts) => {
+                    w.field_bool("read", true);
+                    facts.write_json(&mut w, "manifest");
+                }
+                Err(error) => write_failure(&mut w, "read", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Changes one of them, on the text, leaving the rest of the file alone.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_manifest_set(
+        root: *const c_char,
+        field: *const c_char,
+        value: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(field), Some(value)) =
+                (text_from(root), text_from(field), text_from(value))
+            else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::manifest::set(&root, &field, &value) {
+                Ok(facts) => {
+                    w.field_bool("changed", true);
+                    facts.write_json(&mut w, "manifest");
+                }
+                Err(error) => write_failure(&mut w, "changed", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Asks for a permission, or stops asking for one.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_manifest_permission(
+        root: *const c_char,
+        name: *const c_char,
+        wanted: bool,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(name)) = (text_from(root), text_from(name)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::manifest::permission(&root, &name, wanted) {
+                Ok(facts) => {
+                    w.field_bool("changed", true);
+                    facts.write_json(&mut w, "manifest");
+                }
+                Err(error) => write_failure(&mut w, "changed", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     /// Every type in this project and on the platform that answers to this.
     ///
     /// The platform's types come out of the same classpath the compiler is
@@ -49351,6 +49835,190 @@ class Screen
         assert_eq!(policy.verdict(), super::guard::Verdict::Refused);
         assert!(super::guard::fired(&policy, "EG001"));
         assert!(!super::guard::fired(&policy, "EG002"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Editing a manifest changes what was asked for and nothing else.
+    #[test]
+    fn a_manifest_edit_changes_what_it_was_asked_to_and_leaves_the_rest() {
+        let directory = temp_directory("omni-manifest");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Edited".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        // A comment and an odd layout, to see whether either survives.
+        let original = super::workspace::read_text(&root, super::manifest::FILE).unwrap();
+        let marked = original.replace(
+            "<application",
+            "<!-- the application, laid out how somebody laid it out -->\n    <application",
+        );
+        super::workspace::write_text(&root, super::manifest::FILE, &marked).unwrap();
+
+        let before = super::manifest::facts(&root).expect("it must read");
+        assert_eq!(before.package, "com.tr.yt");
+        assert_eq!(before.version_name, "1.0.0");
+        assert_eq!(before.version_code, "1");
+        assert_eq!(before.min_sdk, "30");
+
+        let after = super::manifest::set(&root, "versionName", "2.5.0").expect("it must change");
+        assert_eq!(after.version_name, "2.5.0");
+        // Everything else as it was.
+        assert_eq!(after.package, before.package);
+        assert_eq!(after.version_code, before.version_code);
+        assert_eq!(after.min_sdk, before.min_sdk);
+        assert_eq!(after.target_sdk, before.target_sdk);
+        assert_eq!(after.label, before.label);
+
+        let text = super::workspace::read_text(&root, super::manifest::FILE).unwrap();
+        assert!(
+            text.contains("<!-- the application, laid out how somebody laid it out -->"),
+            "a comment was lost editing a version number"
+        );
+        // The file differs from what it was by exactly the value that changed.
+        assert_eq!(
+            text.replace("2.5.0", "1.0.0"),
+            marked,
+            "more than the version changed"
+        );
+
+        // A field with no attribute yet is added rather than refused.
+        let with_label = super::manifest::set(&root, "label", "Renamed").unwrap();
+        assert_eq!(with_label.label, "Renamed");
+        assert!(super::workspace::read_text(&root, super::manifest::FILE)
+            .unwrap()
+            .contains("android:label=\"Renamed\""));
+
+        // Something quoted is escaped rather than breaking the file.
+        let awkward = super::manifest::set(&root, "label", "Tom \"the\" Builder & Co").unwrap();
+        assert_eq!(awkward.label, "Tom \"the\" Builder & Co");
+        assert!(
+            super::manifest::facts(&root).is_ok(),
+            "the file still reads"
+        );
+
+        // A field this does not change is refused by name, with the list.
+        let refused = super::manifest::set(&root, "theme", "Dark").unwrap_err();
+        assert_eq!(refused.code, "EM206");
+        assert!(refused
+            .context
+            .iter()
+            .any(|line| line.contains("versionName")));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Permissions go in and come out, and the file is still a manifest.
+    #[test]
+    fn a_permission_can_be_added_and_taken_away_again() {
+        let directory = temp_directory("omni-permissions");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Asked".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let before = super::workspace::read_text(&root, super::manifest::FILE).unwrap();
+        assert!(super::manifest::facts(&root)
+            .unwrap()
+            .permissions
+            .is_empty());
+
+        let asked =
+            super::manifest::permission(&root, "android.permission.INTERNET", true).unwrap();
+        assert_eq!(asked.permissions, vec!["android.permission.INTERNET"]);
+        // And it is a manifest a build reads.
+        assert!(super::builder::from_project(&root).is_ok());
+
+        let twice =
+            super::manifest::permission(&root, "android.permission.INTERNET", true).unwrap();
+        assert_eq!(twice.permissions.len(), 1, "asking twice asks once");
+
+        let more = super::manifest::permission(&root, "android.permission.CAMERA", true).unwrap();
+        assert_eq!(more.permissions.len(), 2);
+
+        let fewer =
+            super::manifest::permission(&root, "android.permission.INTERNET", false).unwrap();
+        assert_eq!(fewer.permissions, vec!["android.permission.CAMERA"]);
+
+        let none = super::manifest::permission(&root, "android.permission.CAMERA", false).unwrap();
+        assert!(none.permissions.is_empty());
+
+        // Back to what it was, byte for byte, having gone there and back.
+        assert_eq!(
+            super::workspace::read_text(&root, super::manifest::FILE).unwrap(),
+            before,
+            "the manifest did not come back to what it was"
+        );
+
+        // Something that is not a permission name is refused.
+        for bad in ["", "not a permission", "android.permission.<script>"] {
+            assert_eq!(
+                super::manifest::permission(&root, bad, true)
+                    .unwrap_err()
+                    .code,
+                "EM208",
+                "{bad:?} was accepted"
+            );
+        }
+        assert_eq!(
+            super::workspace::read_text(&root, super::manifest::FILE).unwrap(),
+            before,
+            "a refused permission changed the file"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// An edit that would leave a manifest this build cannot read leaves the
+    /// file exactly as it was.
+    #[test]
+    fn an_edit_that_would_break_the_manifest_leaves_it_alone() {
+        let directory = temp_directory("omni-manifest-safe");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Safe".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+        let before = super::workspace::read_text(&root, super::manifest::FILE).unwrap();
+
+        // A value carrying a line of its own is not a value a manifest holds.
+        assert_eq!(
+            super::manifest::set(&root, "label", "one\ntwo")
+                .unwrap_err()
+                .code,
+            "EM207"
+        );
+        assert_eq!(
+            super::workspace::read_text(&root, super::manifest::FILE).unwrap(),
+            before
+        );
+
+        // And a manifest that was already broken is refused rather than
+        // half-edited into something else.
+        super::workspace::write_text(&root, super::manifest::FILE, "<manifest").unwrap();
+        assert_eq!(super::manifest::facts(&root).unwrap_err().code, "EM202");
+        assert!(super::manifest::set(&root, "label", "Anything").is_err());
 
         std::fs::remove_dir_all(&directory).ok();
     }

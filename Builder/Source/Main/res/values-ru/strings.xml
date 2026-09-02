@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">ИСПОЛЬЗОВАНИЯ</string>
     <string name="omni_editor_go_platform">%1$s принадлежит платформе, поэтому на этом устройстве не написан.</string>
     <string name="omni_palette_title">Всё отсюда</string>
+    <string name="omni_manifest_title">Манифест</string>
+    <string name="omni_manifest_saved">СОХРАНЕНО</string>
+    <string name="omni_manifest_permissions">Запрашиваемые разрешения</string>
+    <string name="omni_manifest_none">Не запрашивает ни одного.</string>
+    <string name="omni_manifest_other">ДРУГОЕ РАЗРЕШЕНИЕ</string>
+    <string name="omni_manifest_note">Каждое изменение здесь — один атрибут, правленный на месте, так что остальной файл остаётся таким, каким вы его оставили. Всё, чего нет на этом экране, по-прежнему там и по-прежнему правится как текст.</string>
 </resources>

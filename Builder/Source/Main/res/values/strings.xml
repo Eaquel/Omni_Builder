@@ -186,4 +186,10 @@
     <string name="omni_editor_uses">USES</string>
     <string name="omni_editor_go_platform">%1$s belongs to the platform, so it is not written on this device.</string>
     <string name="omni_palette_title">Everything from here</string>
+    <string name="omni_manifest_title">Manifest</string>
+    <string name="omni_manifest_saved">SAVED</string>
+    <string name="omni_manifest_permissions">Permissions it asks for</string>
+    <string name="omni_manifest_none">It asks for none.</string>
+    <string name="omni_manifest_other">ANOTHER PERMISSION</string>
+    <string name="omni_manifest_note">Each change here is one attribute, edited where it stands, so the rest of the file stays exactly as you left it. Everything not on this screen is still there and still editable as text.</string>
 </resources>

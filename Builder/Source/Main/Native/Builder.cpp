@@ -422,6 +422,44 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestFacts(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Reading a manifest needs its project.");
+    return nullptr;
+  }
+  return HandBack(env, omni_manifest_facts(root_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestSet(
+    JNIEnv *env, jobject , jstring root, jstring field, jstring value) {
+  std::string root_text;
+  std::string field_text;
+  std::string value_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text) ||
+      field == nullptr || !JavaStringToUtf8(env, field, &field_text) ||
+      value == nullptr || !JavaStringToUtf8(env, value, &value_text)) {
+    ThrowJava(env, kIllegalState, "Changing a manifest needs a project, a field and a value.");
+    return nullptr;
+  }
+  return HandBack(env, omni_manifest_set(root_text.c_str(), field_text.c_str(),
+                                         value_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestPermission(
+    JNIEnv *env, jobject , jstring root, jstring name, jboolean wanted) {
+  std::string root_text;
+  std::string name_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text) ||
+      name == nullptr || !JavaStringToUtf8(env, name, &name_text)) {
+    ThrowJava(env, kIllegalState, "Changing a permission needs a project and a name.");
+    return nullptr;
+  }
+  return HandBack(env, omni_manifest_permission(root_text.c_str(), name_text.c_str(),
+                                                wanted == JNI_TRUE));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSymbols(
     JNIEnv *env, jobject , jstring root, jstring needle) {
   std::string root_text;
