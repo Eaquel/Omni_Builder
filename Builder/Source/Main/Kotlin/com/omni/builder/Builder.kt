@@ -551,6 +551,18 @@ object Builder {
 
     external fun nativeProjectTree(root: String): String
 
+    /**
+     * What a project depends on, read out of the files themselves.
+     *
+     * There is no resolver and no network. What is in the project's library
+     * folder is what it depends on, which is the whole story on a device with
+     * no connection and the only story this build tells.
+     */
+    external fun nativeDependencies(root: String): String
+
+    /** Takes one away, by name and out of the library folder alone. */
+    external fun nativeDependencyRemove(root: String, name: String): String
+
     /** What the manifest says, as the things a person changes. */
     external fun nativeManifestFacts(root: String): String
 
@@ -1384,6 +1396,10 @@ private sealed interface Screen {
         override val tab = Tab.FILES
     }
 
+    data class Depends(val root: String) : Screen {
+        override val tab = Tab.FILES
+    }
+
     data class Picture(val root: String, val path: String) : Screen {
         override val tab = Tab.FILES
     }
@@ -1870,6 +1886,7 @@ class BuilderActivity : Activity() {
             is Screen.Files -> renderFiles(here.root, here.folder)
             is Screen.Search -> renderSearch(here.root)
             is Screen.Manifest -> renderManifest(here.root)
+            is Screen.Depends -> renderDepends(here.root)
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
@@ -1910,6 +1927,7 @@ class BuilderActivity : Activity() {
                 }
             is Screen.Search -> go(Screen.Files(here.root, ""))
             is Screen.Manifest -> go(Screen.Files(here.root, ""))
+            is Screen.Depends -> go(Screen.Files(here.root, ""))
             is Screen.Build -> go(Screen.Files(here.root, ""))
             is Screen.Keys -> go(Screen.Settings)
             is Screen.NewKey -> go(Screen.Keys)
@@ -2278,6 +2296,9 @@ class BuilderActivity : Activity() {
         content.addView(subtle(getString(R.string.omni_manifest_title), palette.accent) {
             go(Screen.Manifest(root))
         })
+        content.addView(subtle(getString(R.string.omni_depends_title), palette.accent) {
+            go(Screen.Depends(root))
+        })
         content.addView(subtle(getString(R.string.omni_check_title), palette.accent) {
             checkProject(root)
         })
@@ -2286,6 +2307,116 @@ class BuilderActivity : Activity() {
         })
         content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
         content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    /**
+     * What the project depends on, and what each of them brings.
+     *
+     * A dependency is a file in the project's library folder. Everything shown
+     * comes out of the archive: what classes it declares, what it ships beside
+     * them, and -- the one that matters -- which classes two of them both
+     * declare, because that is the refusal that otherwise turns up three
+     * screens later with no clue which two files caused it.
+     */
+    private fun renderDepends(root: String) {
+        content.addView(heading(getString(R.string.omni_depends_title)))
+
+        val answer = runCatching { JSONObject(Builder.nativeDependencies(root)) }.getOrNull()
+        val held = answer?.optJSONObject("dependencies")
+        if (answer == null || !answer.optBoolean("read", false) || held == null) {
+            answer?.let { showRefusal(Refusal.parse(it), content) }
+            content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+                go(Screen.Files(root, ""))
+            })
+            return
+        }
+
+        val each = held.optJSONArray("each")
+        if (each == null || each.length() == 0) {
+            content.addView(notice(getString(R.string.omni_depends_none), palette.muted))
+        } else {
+            content.addView(
+                notice(
+                    getString(
+                        R.string.omni_depends_summary,
+                        each.length(),
+                        held.optInt("classes"),
+                        size(held.optLong("bytes")),
+                    ),
+                    palette.ok,
+                )
+            )
+            for (index in 0 until each.length()) {
+                val one = each.optJSONObject(index) ?: continue
+                val card = card()
+                card.addView(
+                    keyValue(
+                        one.optString("name"),
+                        joined(one, "packages"),
+                        size(one.optLong("bytes")),
+                        palette.foreground,
+                    )
+                )
+                val brings = listOfNotNull(
+                    one.optInt("classes").takeIf { it > 0 }
+                        ?.let { getString(R.string.omni_depends_classes, it) },
+                    one.optInt("resources").takeIf { it > 0 }
+                        ?.let { getString(R.string.omni_depends_resources, it) },
+                    one.optInt("assets").takeIf { it > 0 }
+                        ?.let { getString(R.string.omni_depends_assets, it) },
+                    joined(one, "native").ifEmpty { null },
+                    if (one.optBoolean("manifest", false)) {
+                        getString(R.string.omni_manifest_title)
+                    } else {
+                        null
+                    },
+                )
+                card.addView(quiet(brings.joinToString("  ·  ")))
+                one.optString("note").ifEmpty { null }?.let {
+                    card.addView(notice(it, palette.warning))
+                }
+                card.addView(
+                    subtle(getString(R.string.omni_action_delete), palette.error) {
+                        results.removeAllViews()
+                        val done = runCatching {
+                            JSONObject(Builder.nativeDependencyRemove(root, one.optString("name")))
+                        }.getOrNull()
+                        if (done != null && done.optBoolean("removed", false)) {
+                            render(false)
+                        } else {
+                            done?.let { showRefusal(Refusal.parse(it), results) }
+                        }
+                    }
+                )
+                content.addView(card)
+            }
+        }
+
+        val clashes = held.optJSONArray("clashes")
+        if (clashes != null && clashes.length() > 0) {
+            content.addView(heading(getString(R.string.omni_depends_clashes)))
+            content.addView(
+                notice(getString(R.string.omni_depends_clash_note), palette.error)
+            )
+            val listed = card()
+            for (index in 0 until clashes.length()) {
+                val one = clashes.optJSONObject(index) ?: continue
+                listed.addView(
+                    keyValue(
+                        one.optString("class"),
+                        one.optString("first") + "  +  " + one.optString("second"),
+                        "",
+                        palette.error,
+                    )
+                )
+            }
+            content.addView(listed)
+        }
+
+        content.addView(quiet(getString(R.string.omni_depends_note, held.optString("folder"))))
+        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
+            go(Screen.Files(root, ""))
+        })
     }
 
     /**

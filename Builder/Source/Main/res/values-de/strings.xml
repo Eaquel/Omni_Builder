@@ -192,4 +192,13 @@
     <string name="omni_manifest_none">Es fordert keine an.</string>
     <string name="omni_manifest_other">WEITERE BERECHTIGUNG</string>
     <string name="omni_manifest_note">Jede Änderung hier ist ein Attribut, an Ort und Stelle bearbeitet; der Rest der Datei bleibt genau so, wie Sie ihn gelassen haben. Alles, was nicht auf diesem Bildschirm steht, ist weiterhin da und als Text bearbeitbar.</string>
+    <string name="omni_depends_title">Abhängigkeiten</string>
+    <string name="omni_depends_none">Dieses Projekt hängt von nichts außer der Plattform ab.</string>
+    <string name="omni_depends_summary">%1$d Dateien, %2$d Klassen, %3$s</string>
+    <string name="omni_depends_classes">%1$d Klassen</string>
+    <string name="omni_depends_resources">%1$d Ressourcen</string>
+    <string name="omni_depends_assets">%1$d Assets</string>
+    <string name="omni_depends_clashes">Doppelt deklariert</string>
+    <string name="omni_depends_clash_note">Zwei Dateien deklarieren dieselbe Klasse. Welche ein Build nimmt, ist nichts, was dem Zufall überlassen wird, also lehnt er ab. Entfernen Sie eine davon.</string>
+    <string name="omni_depends_note">Eine Abhängigkeit ist eine Datei im Ordner %1$s des Projekts. Es gibt keinen Resolver und kein Netz: was im Ordner liegt, ist das, wovon das Projekt abhängt.</string>
 </resources>

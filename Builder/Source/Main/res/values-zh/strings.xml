@@ -192,4 +192,13 @@
     <string name="omni_manifest_none">它不申请任何权限。</string>
     <string name="omni_manifest_other">其他权限</string>
     <string name="omni_manifest_note">这里的每次改动只动一个属性，就地修改，文件的其余部分保持你留下的样子。本屏幕上没有的内容仍然存在，仍可作为文本编辑。</string>
+    <string name="omni_depends_title">依赖</string>
+    <string name="omni_depends_none">本项目除平台外不依赖任何东西。</string>
+    <string name="omni_depends_summary">%1$d 个文件，%2$d 个类，%3$s</string>
+    <string name="omni_depends_classes">%1$d 个类</string>
+    <string name="omni_depends_resources">%1$d 个资源</string>
+    <string name="omni_depends_assets">%1$d 个 asset</string>
+    <string name="omni_depends_clashes">被声明了两次</string>
+    <string name="omni_depends_clash_note">有两个文件声明了同一个类。构建用哪一个不是可以碰运气的事，所以它拒绝。删掉其中一个。</string>
+    <string name="omni_depends_note">依赖是项目 %1$s 文件夹里的一个文件。没有解析器，也没有网络：文件夹里有什么，项目就依赖什么。</string>
 </resources>

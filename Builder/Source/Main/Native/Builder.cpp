@@ -422,6 +422,28 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDependencies(
+    JNIEnv *env, jobject , jstring root) {
+  std::string root_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text)) {
+    ThrowJava(env, kIllegalState, "Listing dependencies needs a project.");
+    return nullptr;
+  }
+  return HandBack(env, omni_dependencies(root_text.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeDependencyRemove(
+    JNIEnv *env, jobject , jstring root, jstring name) {
+  std::string root_text;
+  std::string name_text;
+  if (root == nullptr || !JavaStringToUtf8(env, root, &root_text) ||
+      name == nullptr || !JavaStringToUtf8(env, name, &name_text)) {
+    ThrowJava(env, kIllegalState, "Removing a dependency needs a project and a name.");
+    return nullptr;
+  }
+  return HandBack(env, omni_dependency_remove(root_text.c_str(), name_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeManifestFacts(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;

@@ -192,4 +192,13 @@
     <string name="omni_manifest_none">It asks for none.</string>
     <string name="omni_manifest_other">ANOTHER PERMISSION</string>
     <string name="omni_manifest_note">Each change here is one attribute, edited where it stands, so the rest of the file stays exactly as you left it. Everything not on this screen is still there and still editable as text.</string>
+    <string name="omni_depends_title">Dependencies</string>
+    <string name="omni_depends_none">This project depends on nothing but the platform.</string>
+    <string name="omni_depends_summary">%1$d files, %2$d classes, %3$s</string>
+    <string name="omni_depends_classes">%1$d classes</string>
+    <string name="omni_depends_resources">%1$d resources</string>
+    <string name="omni_depends_assets">%1$d assets</string>
+    <string name="omni_depends_clashes">Declared twice</string>
+    <string name="omni_depends_clash_note">Two files declare the same class. Which one a build uses is not something to leave to chance, so it refuses. Remove one of them.</string>
+    <string name="omni_depends_note">A dependency is a file in the project\'s %1$s folder. There is no resolver and no network: what is in the folder is what the project depends on.</string>
 </resources>

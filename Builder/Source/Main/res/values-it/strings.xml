@@ -192,4 +192,13 @@
     <string name="omni_manifest_none">Non ne chiede nessuno.</string>
     <string name="omni_manifest_other">ALTRO PERMESSO</string>
     <string name="omni_manifest_note">Ogni modifica qui è un attributo, cambiato dove sta, così il resto del file resta come l\'hai lasciato. Tutto ciò che non è in questa schermata è ancora lì e ancora modificabile come testo.</string>
+    <string name="omni_depends_title">Dipendenze</string>
+    <string name="omni_depends_none">Questo progetto non dipende da nulla oltre alla piattaforma.</string>
+    <string name="omni_depends_summary">%1$d file, %2$d classi, %3$s</string>
+    <string name="omni_depends_classes">%1$d classi</string>
+    <string name="omni_depends_resources">%1$d risorse</string>
+    <string name="omni_depends_assets">%1$d asset</string>
+    <string name="omni_depends_clashes">Dichiarato due volte</string>
+    <string name="omni_depends_clash_note">Due file dichiarano la stessa classe. Quale usi una costruzione non si lascia al caso, quindi rifiuta. Togline uno.</string>
+    <string name="omni_depends_note">Una dipendenza è un file nella cartella %1$s del progetto. Nessun resolver e nessuna rete: ciò che è nella cartella è ciò da cui il progetto dipende.</string>
 </resources>

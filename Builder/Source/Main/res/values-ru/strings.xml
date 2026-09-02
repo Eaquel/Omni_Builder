@@ -192,4 +192,13 @@
     <string name="omni_manifest_none">Не запрашивает ни одного.</string>
     <string name="omni_manifest_other">ДРУГОЕ РАЗРЕШЕНИЕ</string>
     <string name="omni_manifest_note">Каждое изменение здесь — один атрибут, правленный на месте, так что остальной файл остаётся таким, каким вы его оставили. Всё, чего нет на этом экране, по-прежнему там и по-прежнему правится как текст.</string>
+    <string name="omni_depends_title">Зависимости</string>
+    <string name="omni_depends_none">Этот проект не зависит ни от чего, кроме платформы.</string>
+    <string name="omni_depends_summary">%1$d файлов, %2$d классов, %3$s</string>
+    <string name="omni_depends_classes">%1$d классов</string>
+    <string name="omni_depends_resources">%1$d ресурсов</string>
+    <string name="omni_depends_assets">%1$d ресурсов assets</string>
+    <string name="omni_depends_clashes">Объявлено дважды</string>
+    <string name="omni_depends_clash_note">Два файла объявляют один и тот же класс. Какой возьмёт сборка — не то, что оставляют на случай, поэтому она отклоняется. Уберите один.</string>
+    <string name="omni_depends_note">Зависимость — это файл в папке %1$s проекта. Ни резолвера, ни сети: что лежит в папке, от того проект и зависит.</string>
 </resources>

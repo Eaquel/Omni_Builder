@@ -42,6 +42,10 @@ char *omni_list_projects(const char *directory);
 
 char *omni_project_tree(const char *root);
 
+char *omni_dependencies(const char *root);
+
+char *omni_dependency_remove(const char *root, const char *name);
+
 char *omni_manifest_facts(const char *root);
 
 char *omni_manifest_set(const char *root, const char *field, const char *value);

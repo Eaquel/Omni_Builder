@@ -34087,6 +34087,289 @@ pub mod manifest {
     }
 }
 
+/// What a project depends on, read out of the files themselves.
+///
+/// A dependency here is a file in the project's `Libraries` folder. There is
+/// no resolver and no network: what is in the folder is what the project
+/// depends on, which is the whole story on a device with no connection and
+/// the only story this build will tell.
+///
+/// Everything reported comes out of the archive. What classes a jar declares
+/// is read off the entries in it; what an Android library brings besides code
+/// is read off its own folders. Two dependencies declaring the same class are
+/// named as such, because that is the failure that turns into a build refused
+/// three screens later with no clue which two files caused it.
+pub mod depends {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.depends",
+            message,
+        )
+    }
+
+    /// One file in the project's library folder.
+    #[derive(Clone, Debug, Default)]
+    pub struct Dependency {
+        pub name: String,
+        pub bytes: u64,
+        /// `jar` or `aar`: what a jar is, and what an Android library is.
+        pub kind: String,
+        pub classes: usize,
+        /// A few of the packages it declares classes in, for saying what it is.
+        pub packages: Vec<String>,
+        pub resources: usize,
+        pub assets: usize,
+        pub native: Vec<String>,
+        /// Whether it carries a manifest of its own to be merged in.
+        pub manifest: bool,
+        /// What could not be read about it.
+        pub note: String,
+    }
+
+    impl Dependency {
+        pub fn write_json(&self, w: &mut Writer) {
+            w.begin_object(None);
+            w.field_str("name", &self.name);
+            w.field_u64("bytes", self.bytes);
+            w.field_str("kind", &self.kind);
+            w.field_u64("classes", self.classes as u64);
+            w.begin_array(Some("packages"));
+            for one in &self.packages {
+                w.element_str(one);
+            }
+            w.end_array();
+            w.field_u64("resources", self.resources as u64);
+            w.field_u64("assets", self.assets as u64);
+            w.begin_array(Some("native"));
+            for one in &self.native {
+                w.element_str(one);
+            }
+            w.end_array();
+            w.field_bool("manifest", self.manifest);
+            if !self.note.is_empty() {
+                w.field_str("note", &self.note);
+            }
+            w.end_object();
+        }
+    }
+
+    /// A class two dependencies both declare.
+    #[derive(Clone, Debug)]
+    pub struct Clash {
+        pub class: String,
+        pub first: String,
+        pub second: String,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct Held {
+        pub folder: String,
+        pub each: Vec<Dependency>,
+        pub clashes: Vec<Clash>,
+    }
+
+    impl Held {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_str("folder", &self.folder);
+            w.field_u64("count", self.each.len() as u64);
+            w.field_u64("bytes", self.each.iter().map(|one| one.bytes).sum::<u64>());
+            w.field_u64(
+                "classes",
+                self.each.iter().map(|one| one.classes as u64).sum::<u64>(),
+            );
+            w.begin_array(Some("each"));
+            for one in &self.each {
+                one.write_json(w);
+            }
+            w.end_array();
+            w.begin_array(Some("clashes"));
+            for one in &self.clashes {
+                w.begin_object(None);
+                w.field_str("class", &one.class);
+                w.field_str("first", &one.first);
+                w.field_str("second", &one.second);
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// The most clashes reported. Two jars of the same library differing by a
+    /// version produce thousands, and the first few say it as well as all.
+    pub const MOST_CLASHES: usize = 40;
+
+    /// The most packages named for one dependency, to say what it is.
+    pub const MOST_PACKAGES: usize = 6;
+
+    pub fn held(root: &str) -> Result<Held, Diagnostic> {
+        let folder = std::path::Path::new(root).join(crate::scaffold::LIBRARY_FOLDER);
+        let mut out = Held {
+            folder: crate::scaffold::LIBRARY_FOLDER.to_string(),
+            ..Held::default()
+        };
+
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            // No folder is not a failure: a project without dependencies
+            // compiles against what this build knows on its own.
+            return Ok(out);
+        };
+        let mut found: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|held| held == "jar" || held == "zip" || held == "aar")
+            })
+            .collect();
+        found.sort();
+
+        // Which file declared a class first, so a second one is a clash.
+        let mut declared: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+
+        for path in found {
+            let name = path
+                .file_name()
+                .and_then(|held| held.to_str())
+                .unwrap_or_default()
+                .to_string();
+            let mut one = Dependency {
+                name: name.clone(),
+                bytes: std::fs::metadata(&path).map(|held| held.len()).unwrap_or(0),
+                kind: path
+                    .extension()
+                    .and_then(|held| held.to_str())
+                    .unwrap_or("jar")
+                    .to_string(),
+                ..Dependency::default()
+            };
+
+            let Ok(bytes) = std::fs::read(&path) else {
+                one.note = "It could not be read.".to_string();
+                out.each.push(one);
+                continue;
+            };
+            let mut sink = Sink::new();
+            let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+                one.note = "It does not open as an archive.".to_string();
+                out.each.push(one);
+                continue;
+            };
+
+            let mut packages: Vec<String> = Vec::new();
+            for entry in archive.entries() {
+                let held = entry.name.as_str();
+                if held.ends_with(".class") {
+                    one.classes += 1;
+                    let internal = held.trim_end_matches(".class");
+                    if let Some((package, _)) = internal.rsplit_once('/') {
+                        let package = package.replace('/', ".");
+                        if !packages.contains(&package) {
+                            packages.push(package);
+                        }
+                    }
+                    if out.clashes.len() < MOST_CLASHES {
+                        match declared.get(internal) {
+                            Some(first) if *first != name => out.clashes.push(Clash {
+                                class: internal.replace('/', "."),
+                                first: first.clone(),
+                                second: name.clone(),
+                            }),
+                            Some(_) => {}
+                            None => {
+                                declared.insert(internal.to_string(), name.clone());
+                            }
+                        }
+                    } else {
+                        declared
+                            .entry(internal.to_string())
+                            .or_insert_with(|| name.clone());
+                    }
+                } else if held.starts_with("res/") && !held.ends_with('/') {
+                    one.resources += 1;
+                } else if held.starts_with("assets/") && !held.ends_with('/') {
+                    one.assets += 1;
+                } else if held.starts_with("jni/") && held.ends_with(".so") {
+                    if let Some(rest) = held.strip_prefix("jni/") {
+                        if let Some((abi, _)) = rest.split_once('/') {
+                            if !one.native.iter().any(|has| has == abi) {
+                                one.native.push(abi.to_string());
+                            }
+                        }
+                    }
+                } else if held == "AndroidManifest.xml" {
+                    one.manifest = true;
+                } else if held == "classes.jar" {
+                    // An Android library keeps its code in a jar of its own,
+                    // and counting that jar as one file rather than as the
+                    // classes inside it would say a library holds none.
+                    if let Ok(inner) = crate::builder::entry_bytes(&bytes, entry, &name) {
+                        let mut reading = Sink::new();
+                        if let Some(held) = crate::archive::read(&inner, &mut reading) {
+                            for entry in held.entries() {
+                                if !entry.name.ends_with(".class") {
+                                    continue;
+                                }
+                                one.classes += 1;
+                                let internal = entry.name.trim_end_matches(".class");
+                                if let Some((package, _)) = internal.rsplit_once('/') {
+                                    let package = package.replace('/', ".");
+                                    if !packages.contains(&package) {
+                                        packages.push(package);
+                                    }
+                                }
+                                declared
+                                    .entry(internal.to_string())
+                                    .or_insert_with(|| name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // The shortest packages, which are the ones that name a library.
+            packages.sort_by_key(|held| (held.matches('.').count(), held.clone()));
+            packages.truncate(MOST_PACKAGES);
+            one.packages = packages;
+            one.native.sort();
+            out.each.push(one);
+        }
+
+        Ok(out)
+    }
+
+    /// Removes one dependency from a project.
+    ///
+    /// By name rather than by path, and only from the library folder, so
+    /// nothing outside it can be reached by asking for it.
+    pub fn remove(root: &str, name: &str) -> Result<(), Diagnostic> {
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(fail("ED301", "That is not the name of a dependency.")
+                .with_context(format!("Name: {name:?}")));
+        }
+        let path = std::path::Path::new(root)
+            .join(crate::scaffold::LIBRARY_FOLDER)
+            .join(name);
+        if !path.is_file() {
+            return Err(fail("ED302", "That dependency is not in this project.")
+                .with_context(format!("Name: {name}")));
+        }
+        std::fs::remove_file(&path).map_err(|why| {
+            fail("ED303", "That dependency could not be removed.")
+                .with_context(format!("Reason: {why}"))
+        })
+    }
+}
+
 pub mod progress {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
@@ -34947,6 +35230,54 @@ pub mod ffi {
     /// `sensitive` and `whole_word` are the two switches a search needs and
     /// the only two: the first says whether case counts, the second whether
     /// `at` may match inside `that`.
+    /// What the manifest says, as the things a person changes.
+    /// What a project depends on, read out of the files themselves.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_dependencies(root: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(root) = text_from(root) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::depends::held(&root) {
+                Ok(found) => {
+                    w.field_bool("read", true);
+                    found.write_json(&mut w, "dependencies");
+                }
+                Err(error) => write_failure(&mut w, "read", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    /// Takes one away, by name and out of the library folder alone.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_dependency_remove(
+        root: *const c_char,
+        name: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(name)) = (text_from(root), text_from(name)) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::depends::remove(&root, &name) {
+                Ok(()) => {
+                    w.field_bool("removed", true);
+                    w.field_str("name", &name);
+                }
+                Err(error) => write_failure(&mut w, "removed", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     /// What the manifest says, as the things a person changes.
     #[no_mangle]
     pub unsafe extern "C" fn omni_manifest_facts(root: *const c_char) -> *mut c_char {
@@ -49835,6 +50166,164 @@ class Screen
         assert_eq!(policy.verdict(), super::guard::Verdict::Refused);
         assert!(super::guard::fired(&policy, "EG001"));
         assert!(!super::guard::fired(&policy, "EG002"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// What a project depends on is read out of the files, clashes included.
+    #[test]
+    fn a_projects_dependencies_are_read_out_of_the_files_themselves() {
+        let directory = temp_directory("omni-depends");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Depending".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        // No folder is not a failure: a project without dependencies is one
+        // that compiles against what this build knows on its own.
+        let empty = super::depends::held(&root).expect("it must read");
+        assert!(empty.each.is_empty());
+        assert!(empty.clashes.is_empty());
+
+        let folder = directory.join(super::scaffold::LIBRARY_FOLDER);
+        std::fs::create_dir_all(&folder).unwrap();
+
+        // A jar, made here so what is asserted about it is what was put in.
+        let jar = |classes: &[&str], extra: &[(&str, &[u8])]| -> Vec<u8> {
+            let mut writing = super::archive::Builder::new();
+            for name in classes {
+                writing
+                    .add(format!("{name}.class"), b"\xca\xfe\xba\xbe".to_vec())
+                    .unwrap();
+            }
+            for (name, bytes) in extra {
+                writing.add((*name).to_string(), bytes.to_vec()).unwrap();
+            }
+            writing.finish().unwrap()
+        };
+
+        std::fs::write(
+            folder.join("one.jar"),
+            jar(
+                &[
+                    "com/example/one/Alpha",
+                    "com/example/one/Beta",
+                    "com/example/Gamma",
+                ],
+                &[],
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("two.jar"),
+            jar(&["com/example/two/Delta", "com/example/Gamma"], &[]),
+        )
+        .unwrap();
+
+        let found = super::depends::held(&root).expect("it must read");
+        assert_eq!(found.each.len(), 2);
+        assert_eq!(found.each[0].name, "one.jar");
+        assert_eq!(found.each[0].kind, "jar");
+        assert_eq!(found.each[0].classes, 3);
+        assert!(found.each[0].bytes > 0);
+        assert!(
+            found.each[0].packages.contains(&"com.example".to_string()),
+            "the packages say what it is: {:?}",
+            found.each[0].packages
+        );
+        assert_eq!(found.each[1].name, "two.jar");
+        assert_eq!(found.each[1].classes, 2);
+
+        // The one class both of them declare, named with both files.
+        assert_eq!(found.clashes.len(), 1, "{:?}", found.clashes);
+        assert_eq!(found.clashes[0].class, "com.example.Gamma");
+        assert_eq!(found.clashes[0].first, "one.jar");
+        assert_eq!(found.clashes[0].second, "two.jar");
+
+        // An Android library keeps its code in a jar of its own, and its
+        // resources and its machine code beside that.
+        let inner = jar(&["com/example/lib/Widget"], &[]);
+        let mut writing = super::archive::Builder::new();
+        writing
+            .add(
+                "AndroidManifest.xml".to_string(),
+                b"<manifest package=\"com.example.lib\"/>".to_vec(),
+            )
+            .unwrap();
+        writing.add("classes.jar".to_string(), inner).unwrap();
+        writing
+            .add(
+                "res/values/strings.xml".to_string(),
+                b"<resources/>".to_vec(),
+            )
+            .unwrap();
+        writing
+            .add("assets/font.ttf".to_string(), b"not really".to_vec())
+            .unwrap();
+        writing
+            .add("jni/arm64-v8a/libthing.so".to_string(), b"\x7fELF".to_vec())
+            .unwrap();
+        std::fs::write(folder.join("three.aar"), writing.finish().unwrap()).unwrap();
+
+        let found = super::depends::held(&root).expect("it must read");
+        let library = found
+            .each
+            .iter()
+            .find(|one| one.name == "three.aar")
+            .expect("the library");
+        assert_eq!(library.kind, "aar");
+        assert_eq!(library.classes, 1, "the classes inside its own jar count");
+        assert_eq!(library.resources, 1);
+        assert_eq!(library.assets, 1);
+        assert_eq!(library.native, vec!["arm64-v8a"]);
+        assert!(library.manifest);
+        assert!(library.note.is_empty());
+
+        // Something that is not an archive is said rather than skipped.
+        std::fs::write(folder.join("broken.jar"), b"not a zip at all").unwrap();
+        let found = super::depends::held(&root).expect("it must still read");
+        let broken = found
+            .each
+            .iter()
+            .find(|one| one.name == "broken.jar")
+            .expect("it is still listed");
+        assert!(broken.note.contains("archive"), "{}", broken.note);
+        assert_eq!(broken.classes, 0);
+
+        // Taking one away takes that one and nothing else.
+        super::depends::remove(&root, "two.jar").unwrap();
+        let after = super::depends::held(&root).unwrap();
+        assert!(after.each.iter().all(|one| one.name != "two.jar"));
+        assert!(after.each.iter().any(|one| one.name == "one.jar"));
+        assert!(after.clashes.is_empty(), "the clash went with it");
+
+        // And nothing outside the folder can be reached by asking for it.
+        for bad in ["../AndroidManifest.xml", "", "a/b.jar"] {
+            assert_eq!(
+                super::depends::remove(&root, bad).unwrap_err().code,
+                "ED301",
+                "{bad:?} was accepted"
+            );
+        }
+        assert!(
+            std::path::Path::new(&root)
+                .join("AndroidManifest.xml")
+                .is_file(),
+            "the manifest survived"
+        );
+        assert_eq!(
+            super::depends::remove(&root, "never-was.jar")
+                .unwrap_err()
+                .code,
+            "ED302"
+        );
 
         std::fs::remove_dir_all(&directory).ok();
     }

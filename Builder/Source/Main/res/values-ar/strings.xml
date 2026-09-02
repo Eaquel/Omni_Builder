@@ -192,4 +192,13 @@
     <string name="omni_manifest_none">لا يطلب أيًّا منها.</string>
     <string name="omni_manifest_other">إذن آخر</string>
     <string name="omni_manifest_note">كل تغيير هنا سمة واحدة تُحرَّر في مكانها، فيبقى بقية الملف كما تركته. وكل ما ليس في هذه الشاشة ما زال موجودًا وقابلًا للتحرير كنص.</string>
+    <string name="omni_depends_title">الاعتماديات</string>
+    <string name="omni_depends_none">هذا المشروع لا يعتمد على شيء سوى المنصة.</string>
+    <string name="omni_depends_summary">%1$d ملفات، %2$d أصناف، %3$s</string>
+    <string name="omni_depends_classes">%1$d أصناف</string>
+    <string name="omni_depends_resources">%1$d موارد</string>
+    <string name="omni_depends_assets">%1$d أصول</string>
+    <string name="omni_depends_clashes">مُعلَن مرتين</string>
+    <string name="omni_depends_clash_note">ملفان يُعلنان الصنف نفسه. أيّهما يأخذه البناء ليس أمرًا يُترك للصدفة، لذا يرفض. احذف أحدهما.</string>
+    <string name="omni_depends_note">الاعتمادية ملف في مجلد %1$s الخاص بالمشروع. لا مُحلِّل ولا شبكة: ما في المجلد هو ما يعتمد عليه المشروع.</string>
 </resources>

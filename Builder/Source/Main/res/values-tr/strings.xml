@@ -192,4 +192,13 @@
     <string name="omni_manifest_none">Hiçbir izin istemiyor.</string>
     <string name="omni_manifest_other">BAŞKA BİR İZİN</string>
     <string name="omni_manifest_note">Buradaki her değişiklik tek bir özniteliktir, yerinde düzenlenir; dosyanın geri kalanı bıraktığın gibi kalır. Bu ekranda olmayan her şey hâlâ orada ve hâlâ metin olarak düzenlenebilir.</string>
+    <string name="omni_depends_title">Bağımlılıklar</string>
+    <string name="omni_depends_none">Bu proje platform dışında hiçbir şeye bağlı değil.</string>
+    <string name="omni_depends_summary">%1$d dosya, %2$d sınıf, %3$s</string>
+    <string name="omni_depends_classes">%1$d sınıf</string>
+    <string name="omni_depends_resources">%1$d kaynak</string>
+    <string name="omni_depends_assets">%1$d varlık</string>
+    <string name="omni_depends_clashes">İki kez tanımlanan</string>
+    <string name="omni_depends_clash_note">İki dosya aynı sınıfı tanımlıyor. Derlemenin hangisini kullanacağı şansa bırakılacak bir şey değil, o yüzden reddediyor. Birini kaldır.</string>
+    <string name="omni_depends_note">Bağımlılık, projenin %1$s klasöründeki bir dosyadır. Çözümleyici ve ağ yok: klasörde ne varsa proje ona bağlıdır.</string>
 </resources>
