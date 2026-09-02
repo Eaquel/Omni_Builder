@@ -30857,6 +30857,23 @@ pub mod builder {
     /// Every field is a `static final int` with a value, which is exactly what
     /// the platform's own `R` is. `android.R` is not this: that one belongs to
     /// the framework and is already on the device.
+    /// A resource's name, as the field `R` gives it.
+    ///
+    /// A resource may be called `Theme.App.Light` -- which is the convention
+    /// for a style, not an exception to it -- and no field can be. The
+    /// platform's own tools replace the characters a name is allowed to hold
+    /// and an identifier is not, so this does the same and by the same rule:
+    /// a dot, a dash and a colon each become an underscore, and everything
+    /// else is left alone.
+    pub fn r_field(name: &str) -> String {
+        name.chars()
+            .map(|held| match held {
+                '.' | '-' | ':' => '_',
+                other => other,
+            })
+            .collect()
+    }
+
     pub fn r_source(package: &str, compiled: &crate::resources::Compiled) -> String {
         let mut kinds: Vec<crate::resources::Kind> = Vec::new();
         for (kind, _, _) in compiled.assignments() {
@@ -30893,7 +30910,8 @@ public final class R {{
                 out.push_str(&format!(
                     "        public static final int {} = {};
 ",
-                    name, raw as i32
+                    r_field(name),
+                    raw as i32
                 ));
             }
             out.push_str(
@@ -30919,14 +30937,16 @@ public final class R {{
                 out.push_str(&format!(
                     "        public static final int[] {} = {{ {} }};
 ",
-                    styleable.name,
+                    r_field(&styleable.name),
                     numbers.join(", ")
                 ));
                 for (at, (field, _)) in styleable.attributes.iter().enumerate() {
                     out.push_str(&format!(
                         "        public static final int {}_{} = {};
 ",
-                        styleable.name, field, at
+                        r_field(&styleable.name),
+                        r_field(field),
+                        at
                     ));
                 }
             }
@@ -50661,6 +50681,321 @@ class Screen
         assert!(super::guard::fired(&policy, "EG001"));
         assert!(!super::guard::fired(&policy, "EG002"));
 
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A resource name that no field can be called gets the name aapt2 gives
+    /// it.
+    ///
+    /// `Theme.App.Light` is the convention for a style rather than an
+    /// exception to it, and `public static final int Theme.App.Light` is not
+    /// Java. Getting this wrong means every real project refuses on its own
+    /// `R`, which is what it did.
+    #[test]
+    fn a_resource_named_like_a_style_becomes_a_field_that_compiles() {
+        assert_eq!(
+            super::builder::r_field("Theme.App.Light"),
+            "Theme_App_Light"
+        );
+        assert_eq!(super::builder::r_field("some-name"), "some_name");
+        assert_eq!(super::builder::r_field("android:one"), "android_one");
+        assert_eq!(super::builder::r_field("plain_name"), "plain_name");
+        assert_eq!(super::builder::r_field("app_name"), "app_name");
+
+        let directory = temp_directory("omni-r-field");
+        let root = directory.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &root,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Styled".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+        super::workspace::write_text(
+            &root,
+            "Res/values/styles.xml",
+            "<resources>\n\
+             \x20 <style name=\"Theme.App\">\n\
+             \x20   <item name=\"android:textSize\">14sp</item>\n\
+             \x20 </style>\n\
+             \x20 <style name=\"Theme.App.Light\" parent=\"Theme.App\">\n\
+             \x20   <item name=\"android:textColor\">#FF000000</item>\n\
+             \x20 </style>\n\
+             </resources>\n",
+        )
+        .unwrap();
+
+        // It builds, which is the whole point: the `R` this writes is Java.
+        let project = super::builder::from_project(&root).expect("it must read");
+        assert!(project.code.len() > 1, "the R class and the activity");
+
+        // And the field is there under the name a person would write.
+        let mut sink = Sink::new();
+        let table = super::builder::compile_resources_for_test(&project, &mut sink)
+            .unwrap()
+            .unwrap();
+        let source = super::builder::r_source("com.tr.yt", &table.compiled);
+        assert!(source.contains("Theme_App_Light"), "{source}");
+        assert!(!source.contains("Theme.App.Light ="), "{source}");
+        // The resource keeps the name it was given; only the field changes.
+        assert!(table
+            .compiled
+            .entries()
+            .iter()
+            .any(|entry| entry.name == "Theme.App.Light"));
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// The resources a real application is made of, against aapt2's own.
+    ///
+    /// Not a chosen easy set: a vector drawable, an adaptive icon, a colour
+    /// state list, a style with a parent, a theme, a dimension file and a
+    /// colour file are what almost every Android application ships, and a
+    /// build that handles strings and not these is a build for one project.
+    /// Every one of them goes through both this and aapt2, and what comes out
+    /// is read back and compared attribute for attribute.
+    #[test]
+    fn the_resources_a_real_application_ships_come_out_as_aapt2_makes_them() {
+        let (Some(aapt2), Some(jar)) = (find_build_tool("aapt2"), android_jar()) else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 or android.jar is missing"
+            );
+            eprintln!("resources: aapt2 or android.jar is not available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-real-resources");
+        let root = directory.join("project");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Real".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        // Every file, written into the project and given to aapt2 alike.
+        let files: &[(&str, &str)] = &[
+            (
+                "drawable/mark.xml",
+                "<vector xmlns:android=\"http://schemas.android.com/apk/res/android\"\n\
+                 \x20   android:width=\"24dp\" android:height=\"24dp\"\n\
+                 \x20   android:viewportWidth=\"24\" android:viewportHeight=\"24\">\n\
+                 \x20 <path android:fillColor=\"#FF35B7FF\"\n\
+                 \x20       android:pathData=\"M12,2L2,22h20L12,2z\" />\n\
+                 </vector>\n",
+            ),
+            (
+                "color/tinted.xml",
+                "<selector xmlns:android=\"http://schemas.android.com/apk/res/android\">\n\
+                 \x20 <item android:state_pressed=\"true\" android:color=\"#FF2FE0B0\" />\n\
+                 \x20 <item android:state_enabled=\"false\" android:color=\"#806F7F94\" />\n\
+                 \x20 <item android:color=\"#FFDCE9F5\" />\n\
+                 </selector>\n",
+            ),
+            (
+                "values/colours.xml",
+                "<resources>\n\
+                 \x20 <color name=\"ground\">#FF04070C</color>\n\
+                 \x20 <color name=\"accent\">#FF35B7FF</color>\n\
+                 </resources>\n",
+            ),
+            (
+                "values/sizes.xml",
+                "<resources>\n\
+                 \x20 <dimen name=\"gutter\">16dp</dimen>\n\
+                 \x20 <dimen name=\"reading\">14sp</dimen>\n\
+                 \x20 <integer name=\"columns\">3</integer>\n\
+                 \x20 <bool name=\"wide\">false</bool>\n\
+                 </resources>\n",
+            ),
+            (
+                "values/styles.xml",
+                "<resources>\n\
+                 \x20 <style name=\"Plain\">\n\
+                 \x20   <item name=\"android:textColor\">#FFDCE9F5</item>\n\
+                 \x20   <item name=\"android:textSize\">14sp</item>\n\
+                 \x20 </style>\n\
+                 \x20 <style name=\"Plain.Loud\" parent=\"Plain\">\n\
+                 \x20   <item name=\"android:textStyle\">bold</item>\n\
+                 \x20 </style>\n\
+                 \x20 <style name=\"OmniTheme\" parent=\"android:Theme.Material.NoActionBar\">\n\
+                 \x20   <item name=\"android:windowBackground\">@color/ground</item>\n\
+                 \x20   <item name=\"android:colorAccent\">@color/accent</item>\n\
+                 \x20 </style>\n\
+                 </resources>\n",
+            ),
+            (
+                "layout/screen.xml",
+                "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\"\n\
+                 \x20   android:layout_width=\"match_parent\"\n\
+                 \x20   android:layout_height=\"match_parent\"\n\
+                 \x20   android:orientation=\"vertical\"\n\
+                 \x20   android:padding=\"@dimen/gutter\"\n\
+                 \x20   android:background=\"@color/ground\">\n\
+                 \x20 <TextView android:id=\"@+id/heading\"\n\
+                 \x20     android:layout_width=\"wrap_content\"\n\
+                 \x20     android:layout_height=\"wrap_content\"\n\
+                 \x20     android:textColor=\"@color/tinted\"\n\
+                 \x20     android:textSize=\"@dimen/reading\"\n\
+                 \x20     android:text=\"@string/app_name\" />\n\
+                 \x20 <ImageView android:layout_width=\"24dp\"\n\
+                 \x20     android:layout_height=\"24dp\"\n\
+                 \x20     android:src=\"@drawable/mark\" />\n\
+                 </LinearLayout>\n",
+            ),
+        ];
+
+        for (name, body) in files {
+            super::workspace::write_text(
+                &folder,
+                &format!("{}/{name}", super::scaffold::RES_FOLDER),
+                body,
+            )
+            .unwrap();
+        }
+
+        // This build's own package, which is what the whole thing is for.
+        let mine = super::builder::from_project(&folder).expect("the project must read");
+        let mut sink = Sink::new();
+        let table = super::builder::compile_resources_for_test(&mine, &mut sink)
+            .expect("the resources must compile")
+            .expect("and there must be some");
+        assert!(!sink.has_blocking(), "{:?}", sink.entries());
+
+        // Every one of them is in the table this build wrote, by name.
+        let named: Vec<&str> = table
+            .compiled
+            .entries()
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        for wanted in [
+            "mark",
+            "tinted",
+            "ground",
+            "accent",
+            "gutter",
+            "reading",
+            "columns",
+            "wide",
+            "Plain",
+            "Plain.Loud",
+            "OmniTheme",
+            "screen",
+            "heading",
+        ] {
+            assert!(
+                named.contains(&wanted),
+                "{wanted} is not in the table this build wrote: {named:?}"
+            );
+        }
+
+        // And the same folder through aapt2, whose answer is the one that
+        // counts. It compiles each file and links them into a package.
+        let theirs = directory.join("theirs");
+        std::fs::create_dir_all(&theirs).unwrap();
+        let compiled = std::process::Command::new(&aapt2)
+            .args([
+                "compile",
+                "--dir",
+                root.join(super::scaffold::RES_FOLDER).to_str().unwrap(),
+                "-o",
+                theirs.join("compiled.zip").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "aapt2 would not compile what this build accepted:\n{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+
+        let linked = std::process::Command::new(&aapt2)
+            .args([
+                "link",
+                "--manifest",
+                root.join("AndroidManifest.xml").to_str().unwrap(),
+                "-I",
+                jar.to_str().unwrap(),
+                "-o",
+                theirs.join("theirs.apk").to_str().unwrap(),
+                theirs.join("compiled.zip").to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            linked.status.success(),
+            "aapt2 would not link it:\n{}",
+            String::from_utf8_lossy(&linked.stderr)
+        );
+
+        // What aapt2 made of the layout, read back by this build's own reader
+        // and compared against what this build made of the same file.
+        let package = std::fs::read(theirs.join("theirs.apk")).unwrap();
+        let mut reading = Sink::new();
+        let archive = super::archive::read(&package, &mut reading).expect("their package reads");
+        let entry = archive
+            .entries()
+            .iter()
+            .find(|held| held.name == "res/layout/screen.xml")
+            .expect("aapt2 wrote the layout");
+        let bytes = super::builder::entry_bytes(&package, entry, "theirs.apk").unwrap();
+        let their_layout = super::axml::decode(&bytes).expect("and it reads back");
+
+        let ours = table
+            .files
+            .iter()
+            .find(|(name, _)| name == "res/layout/screen.xml")
+            .map(|(_, bytes)| bytes.clone())
+            .expect("this build wrote the layout too");
+        let our_layout = super::axml::decode(&ours).expect("and this build's reads back");
+
+        assert_eq!(our_layout.name, their_layout.name);
+        assert_eq!(
+            our_layout.children.len(),
+            their_layout.children.len(),
+            "a different number of views came out"
+        );
+        // Every attribute they wrote, this build wrote too, with the same
+        // identifier and the same kind of value. The numbers behind a
+        // reference differ -- two packages hand out their own -- so what is
+        // compared is the identifier and the type.
+        for (ours, theirs) in our_layout
+            .attributes
+            .iter()
+            .zip(their_layout.attributes.iter())
+        {
+            assert_eq!(ours.id, theirs.id, "{} against {}", ours.name, theirs.name);
+            assert_eq!(
+                ours.kind, theirs.kind,
+                "{} came out as a different kind of value",
+                ours.name
+            );
+            if ours.kind != 0x01 {
+                assert_eq!(
+                    ours.value, theirs.value,
+                    "{} says something else",
+                    ours.name
+                );
+            }
+        }
+
+        eprintln!(
+            "resources: {} entries, and aapt2 agrees on the layout attribute for attribute",
+            table.compiled.entries().len()
+        );
         std::fs::remove_dir_all(&directory).ok();
     }
 
