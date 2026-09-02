@@ -552,6 +552,16 @@ object Builder {
     external fun nativeProjectTree(root: String): String
 
     /**
+     * Opens a finished package and says what is in it.
+     *
+     * Everything it reports comes out of the file itself: the manifest is
+     * decoded from the binary XML a package really carries, the code counted
+     * from the Dalvik's own header, and the signature checked against the key
+     * that presents it.
+     */
+    external fun nativeInspectPackage(path: String): String
+
+    /**
      * Reads a project the way a build reads it, and stops before packaging.
      *
      * A refusal is the refusal a build would give, at the line it would give
@@ -2156,6 +2166,134 @@ class BuilderActivity : Activity() {
     }
 
     /**
+     * Opens a package and lays out what is really in it.
+     *
+     * None of this is remembered from building it. A package built on another
+     * device, or downloaded, or built a month ago, reads exactly the same
+     * way -- which is the point: it says what the file says.
+     */
+    private fun inspectPackage(path: String) {
+        working({ Builder.nativeInspectPackage(path) }) finished@{ answer ->
+            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
+            if (!document.optBoolean("opened", false)) {
+                showRefusal(Refusal.parse(document), results)
+                return@finished
+            }
+            val found = document.optJSONObject("package") ?: return@finished
+
+            // Whether it verifies, first, because it is the one thing that
+            // decides whether anything else here is worth reading.
+            val sound = found.optBoolean("sound", false)
+            results.addView(
+                notice(
+                    getString(
+                        if (sound) R.string.omni_open_sound else R.string.omni_open_unsound
+                    ),
+                    if (sound) palette.ok else palette.error,
+                )
+            )
+
+            val facts = card()
+            facts.addView(
+                keyValue(
+                    found.optString("package"),
+                    found.optString("label"),
+                    found.optString("versionName") + " (" +
+                        found.optString("versionCode") + ")",
+                    palette.foreground,
+                )
+            )
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_open_platforms),
+                    joined(found, "abis"),
+                    "API " + found.optString("minSdk") + "–" + found.optString("targetSdk"),
+                    palette.muted,
+                )
+            )
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_open_code),
+                    getString(
+                        R.string.omni_open_code_detail,
+                        found.optInt("classes"),
+                        found.optInt("methods"),
+                    ),
+                    found.optInt("dexFiles").toString() + " dex",
+                    palette.muted,
+                )
+            )
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_result_signature),
+                    joined(found, "signedBy"),
+                    joined(found, "schemes").replace(", ", " + ").ifEmpty { "?" },
+                    if (sound) palette.ok else palette.error,
+                )
+            )
+            found.optJSONArray("fingerprints")?.let { array ->
+                for (index in 0 until array.length()) {
+                    facts.addView(quiet(array.getString(index)))
+                }
+            }
+            facts.addView(
+                keyValue(
+                    getString(R.string.omni_open_entries),
+                    "",
+                    found.optInt("entries").toString(),
+                    palette.muted,
+                )
+            )
+            results.addView(facts)
+
+            listOf(
+                R.string.omni_open_permissions to "permissions",
+                R.string.omni_open_activities to "activities",
+            ).forEach { (label, key) ->
+                val array = found.optJSONArray(key) ?: return@forEach
+                if (array.length() == 0) return@forEach
+                results.addView(heading(getString(label)))
+                val listed = card()
+                for (index in 0 until array.length()) {
+                    listed.addView(quiet(array.getString(index)))
+                }
+                results.addView(listed)
+            }
+
+            // What is taking up the room, largest first.
+            found.optJSONArray("held")?.let { array ->
+                if (array.length() == 0) return@let
+                results.addView(heading(getString(R.string.omni_open_largest)))
+                val listed = card()
+                for (index in 0 until minOf(array.length(), 20)) {
+                    val one = array.optJSONObject(index) ?: continue
+                    listed.addView(
+                        keyValue(
+                            one.optString("name"),
+                            "",
+                            size(one.optLong("stored")),
+                            palette.muted,
+                        )
+                    )
+                }
+                results.addView(listed)
+            }
+
+            found.optJSONArray("notes")?.let { array ->
+                for (index in 0 until array.length()) {
+                    results.addView(notice(array.getString(index), palette.warning))
+                }
+            }
+        }
+    }
+
+    /** A JSON array of strings, as one line of them. */
+    private fun joined(holder: JSONObject, key: String): String {
+        val array = holder.optJSONArray(key) ?: return ""
+        return (0 until array.length()).joinToString(", ") { array.getString(it) }
+    }
+
+    /**
      * Reads the project the way a build reads it, and stops before packaging.
      *
      * The point is the wait: this is the front half of a build, so it takes
@@ -2828,6 +2966,11 @@ class BuilderActivity : Activity() {
                 )
             )
             actionsFor(file, shelf)
+            if (!one.bundle) {
+                shelf.addView(subtle(getString(R.string.omni_open_title), palette.accent) {
+                    inspectPackage(one.path)
+                })
+            }
             shelf.addView(
                 subtle(getString(R.string.omni_action_delete), palette.error) {
                     act(Builder.nativeTrashSend(trashFolder(), one.path), "removed")

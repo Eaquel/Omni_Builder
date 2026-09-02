@@ -422,6 +422,16 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeProjectTree(
   return HandBack(env, omni_project_tree(root_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeInspectPackage(
+    JNIEnv *env, jobject , jstring path) {
+  std::string path_text;
+  if (path == nullptr || !JavaStringToUtf8(env, path, &path_text)) {
+    ThrowJava(env, kIllegalState, "Opening a package needs its path.");
+    return nullptr;
+  }
+  return HandBack(env, omni_inspect_package(path_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCheckProject(
     JNIEnv *env, jobject , jstring root) {
   std::string root_text;

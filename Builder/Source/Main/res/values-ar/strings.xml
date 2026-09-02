@@ -163,4 +163,14 @@
     <string name="omni_check_title">افحص الشيفرة</string>
     <string name="omni_check_clear">%1$d أصناف، %2$d ملفات موارد، %3$d لغات. لم يُرفض شيء.</string>
     <string name="omni_check_open">افتحه هنا</string>
+    <string name="omni_open_title">افتحه</string>
+    <string name="omni_open_sound">المحتوى مطابق، والتوقيع صحيح، والمفتاح هو مفتاح الشهادة.</string>
+    <string name="omni_open_unsound">هذه الحزمة لا تتحقق بالمفتاح الذي تقدّمه.</string>
+    <string name="omni_open_platforms">المنصات</string>
+    <string name="omni_open_code">الشيفرة</string>
+    <string name="omni_open_code_detail">%1$d أصناف، %2$d دوال</string>
+    <string name="omni_open_entries">الملفات بداخلها</string>
+    <string name="omni_open_permissions">الأذونات المطلوبة</string>
+    <string name="omni_open_activities">الشاشات المعلنة</string>
+    <string name="omni_open_largest">ما يشغل المساحة</string>
 </resources>

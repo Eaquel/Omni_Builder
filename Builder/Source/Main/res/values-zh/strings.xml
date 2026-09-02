@@ -163,4 +163,14 @@
     <string name="omni_check_title">检查代码</string>
     <string name="omni_check_clear">%1$d 个类，%2$d 个资源文件，%3$d 种语言。没有被拒绝的内容。</string>
     <string name="omni_check_open">在此打开</string>
+    <string name="omni_open_title">打开它</string>
+    <string name="omni_open_sound">内容一致，签名通过，密钥与证书相符。</string>
+    <string name="omni_open_unsound">此安装包无法通过它所出示的密钥校验。</string>
+    <string name="omni_open_platforms">平台</string>
+    <string name="omni_open_code">代码</string>
+    <string name="omni_open_code_detail">%1$d 个类，%2$d 个方法</string>
+    <string name="omni_open_entries">内部文件</string>
+    <string name="omni_open_permissions">申请的权限</string>
+    <string name="omni_open_activities">声明的界面</string>
+    <string name="omni_open_largest">占用空间的内容</string>
 </resources>

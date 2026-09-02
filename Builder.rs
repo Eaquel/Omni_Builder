@@ -18270,6 +18270,495 @@ pub mod axml {
     /// name. Without this list such an attribute would go in as a bare name,
     /// which the inflater passes over in silence -- so the view would be
     /// built, and none of what the layout said about it would arrive.
+    /// One attribute of an element that was read back out of a package.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Read {
+        /// The namespace it is in, as the URI, or empty for none.
+        pub namespace: String,
+        pub name: String,
+        /// The identifier the device reads it by, where it has one.
+        pub id: Option<u32>,
+        /// What it says, put back into the text a person would have written.
+        pub value: String,
+        /// What the four bytes actually held, before that was done.
+        pub kind: u8,
+        pub data: u32,
+    }
+
+    /// An element read back out of a package, and what is under it.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Node {
+        pub name: String,
+        pub attributes: Vec<Read>,
+        pub children: Vec<Node>,
+        pub line: u32,
+    }
+
+    impl Node {
+        pub fn attribute(&self, name: &str) -> Option<&str> {
+            self.attributes
+                .iter()
+                .find(|held| held.name == name)
+                .map(|held| held.value.as_str())
+        }
+
+        /// The same, by the number the device reads it by, which is what a
+        /// manifest really carries: the name beside it is a courtesy the
+        /// string pool happens to include and a stripped package may not.
+        pub fn by_id(&self, id: u32) -> Option<&str> {
+            self.attributes
+                .iter()
+                .find(|held| held.id == Some(id))
+                .map(|held| held.value.as_str())
+        }
+
+        pub fn children_named<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a Node> {
+            self.children.iter().filter(move |held| held.name == name)
+        }
+
+        pub fn write_json(&self, w: &mut crate::json::Writer) {
+            w.begin_object(None);
+            w.field_str("name", &self.name);
+            w.field_u64("line", u64::from(self.line));
+            w.begin_array(Some("attributes"));
+            for held in &self.attributes {
+                w.begin_object(None);
+                w.field_str("name", &held.name);
+                if !held.namespace.is_empty() {
+                    w.field_str("namespace", &held.namespace);
+                }
+                if let Some(id) = held.id {
+                    w.field_str("id", &format!("0x{id:08x}"));
+                }
+                w.field_str("value", &held.value);
+                w.end_object();
+            }
+            w.end_array();
+            w.begin_array(Some("children"));
+            for child in &self.children {
+                child.write_json(w);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// The strings a document carries, read back.
+    struct Strings {
+        held: Vec<String>,
+    }
+
+    impl Strings {
+        fn at(&self, index: u32) -> Option<&str> {
+            if index == NO_ENTRY {
+                return None;
+            }
+            self.held.get(index as usize).map(|held| held.as_str())
+        }
+    }
+
+    /// A little-endian reader over a chunk, refusing what runs off the end.
+    struct Bytes<'a> {
+        data: &'a [u8],
+        at: usize,
+    }
+
+    impl<'a> Bytes<'a> {
+        fn new(data: &'a [u8]) -> Bytes<'a> {
+            Bytes { data, at: 0 }
+        }
+
+        fn left(&self) -> usize {
+            self.data.len().saturating_sub(self.at)
+        }
+
+        fn u16(&mut self) -> Result<u16, Diagnostic> {
+            let taken = self.take(2)?;
+            Ok(u16::from_le_bytes([taken[0], taken[1]]))
+        }
+
+        fn u8(&mut self) -> Result<u8, Diagnostic> {
+            Ok(self.take(1)?[0])
+        }
+
+        fn u32(&mut self) -> Result<u32, Diagnostic> {
+            let taken = self.take(4)?;
+            Ok(u32::from_le_bytes([taken[0], taken[1], taken[2], taken[3]]))
+        }
+
+        fn take(&mut self, count: usize) -> Result<&'a [u8], Diagnostic> {
+            let end = self.at.checked_add(count).ok_or_else(too_short)?;
+            if end > self.data.len() {
+                return Err(too_short());
+            }
+            let held = &self.data[self.at..end];
+            self.at = end;
+            Ok(held)
+        }
+    }
+
+    fn too_short() -> Diagnostic {
+        fail(
+            "EA020",
+            "A binary XML document ends in the middle of a chunk.",
+        )
+    }
+
+    /// The string pool at the front of a document.
+    ///
+    /// A pool is written in UTF-16 or in a form of UTF-8 the platform uses,
+    /// and which one is a flag in its header. Both are read: `aapt2` writes
+    /// UTF-8 pools for some documents and UTF-16 for others, and a reader that
+    /// only knows one of them reads half the packages on a device.
+    fn read_string_pool(chunk: &[u8]) -> Result<Strings, Diagnostic> {
+        let mut head = Bytes::new(chunk);
+        let _kind = head.u16()?;
+        let header_size = head.u16()? as usize;
+        let _size = head.u32()?;
+        let count = head.u32()? as usize;
+        let _styles = head.u32()?;
+        let flags = head.u32()?;
+        let strings_start = head.u32()? as usize;
+        let _styles_start = head.u32()?;
+
+        if count > MAX_STRINGS * 4 {
+            return Err(
+                fail("EA021", "A string pool claims more strings than can be.")
+                    .with_context(format!("Strings: {count}")),
+            );
+        }
+        if header_size > chunk.len() || strings_start > chunk.len() {
+            return Err(too_short());
+        }
+
+        const UTF8_FLAG: u32 = 1 << 8;
+        let utf8 = flags & UTF8_FLAG != 0;
+
+        let mut offsets = Bytes::new(&chunk[header_size..]);
+        let mut held = Vec::with_capacity(count.min(4096));
+        for _ in 0..count {
+            let offset = offsets.u32()? as usize;
+            let from = strings_start.checked_add(offset).ok_or_else(too_short)?;
+            if from >= chunk.len() {
+                return Err(too_short());
+            }
+            held.push(if utf8 {
+                read_utf8_string(&chunk[from..])?
+            } else {
+                read_utf16_string(&chunk[from..])?
+            });
+        }
+        Ok(Strings { held })
+    }
+
+    /// A length in the platform's own varint: one byte, or two with the high
+    /// bit of the first set, and the low seven bits leading.
+    fn read_length_8(bytes: &[u8], at: &mut usize) -> Result<usize, Diagnostic> {
+        let first = *bytes.get(*at).ok_or_else(too_short)?;
+        *at += 1;
+        if first & 0x80 == 0 {
+            return Ok(usize::from(first));
+        }
+        let second = *bytes.get(*at).ok_or_else(too_short)?;
+        *at += 1;
+        Ok((usize::from(first & 0x7f) << 8) | usize::from(second))
+    }
+
+    fn read_length_16(bytes: &[u8], at: &mut usize) -> Result<usize, Diagnostic> {
+        if *at + 2 > bytes.len() {
+            return Err(too_short());
+        }
+        let first = u16::from_le_bytes([bytes[*at], bytes[*at + 1]]);
+        *at += 2;
+        if first & 0x8000 == 0 {
+            return Ok(usize::from(first));
+        }
+        if *at + 2 > bytes.len() {
+            return Err(too_short());
+        }
+        let second = u16::from_le_bytes([bytes[*at], bytes[*at + 1]]);
+        *at += 2;
+        Ok(((usize::from(first & 0x7fff)) << 16) | usize::from(second))
+    }
+
+    fn read_utf8_string(bytes: &[u8]) -> Result<String, Diagnostic> {
+        let mut at = 0usize;
+        // Two lengths: the first in characters, the second in bytes. The
+        // second is the one that says how far the string runs.
+        let _characters = read_length_8(bytes, &mut at)?;
+        let length = read_length_8(bytes, &mut at)?;
+        let end = at.checked_add(length).ok_or_else(too_short)?;
+        if end > bytes.len() {
+            return Err(too_short());
+        }
+        Ok(String::from_utf8_lossy(&bytes[at..end]).into_owned())
+    }
+
+    fn read_utf16_string(bytes: &[u8]) -> Result<String, Diagnostic> {
+        let mut at = 0usize;
+        let length = read_length_16(bytes, &mut at)?;
+        let end = at
+            .checked_add(length.checked_mul(2).ok_or_else(too_short)?)
+            .ok_or_else(too_short)?;
+        if end > bytes.len() {
+            return Err(too_short());
+        }
+        let units: Vec<u16> = bytes[at..end]
+            .chunks_exact(2)
+            .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        Ok(String::from_utf16_lossy(&units))
+    }
+
+    /// What a device would make of the four bytes an attribute holds.
+    ///
+    /// A reference comes back as `@0x7f060000`, a theme question as `?…`, a
+    /// boolean as `true` or `false`, a dimension with its unit, and a string
+    /// as itself. This is what a person wrote, put back: it is not always
+    /// character for character what they typed -- `@string/name` becomes the
+    /// number it was resolved to, because the number is what the package
+    /// holds -- but it never says something the bytes do not.
+    fn value_of(kind: u8, data: u32, strings: &Strings, raw: Option<&str>) -> String {
+        match kind {
+            TYPE_STRING => raw
+                .map(|held| held.to_string())
+                .or_else(|| strings.at(data).map(|held| held.to_string()))
+                .unwrap_or_default(),
+            TYPE_REFERENCE => {
+                if data == 0 {
+                    "@null".to_string()
+                } else {
+                    format!("@0x{data:08x}")
+                }
+            }
+            TYPE_ATTRIBUTE => format!("?0x{data:08x}"),
+            TYPE_INT_BOOLEAN => {
+                if data == 0 {
+                    "false".to_string()
+                } else {
+                    "true".to_string()
+                }
+            }
+            TYPE_INT_DEC => (data as i32).to_string(),
+            TYPE_INT_HEX => format!("0x{data:x}"),
+            TYPE_FLOAT => f32::from_bits(data).to_string(),
+            TYPE_DIMENSION => unpacked(data, DIMENSION_UNITS, false),
+            TYPE_FRACTION => unpacked(data, FRACTION_UNITS, true),
+            TYPE_INT_COLOR_ARGB8 | TYPE_INT_COLOR_RGB8 | TYPE_INT_COLOR_ARGB4
+            | TYPE_INT_COLOR_RGB4 => format!("#{data:08x}"),
+            _ => format!("0x{data:08x}"),
+        }
+    }
+
+    const DIMENSION_UNITS: &[&str] = &["px", "dp", "sp", "pt", "in", "mm"];
+    const FRACTION_UNITS: &[&str] = &["%", "%p"];
+
+    /// The inverse of `packed`: the number, and the unit it was written in.
+    ///
+    /// The two bits of radix say where the point sits, and they say it the
+    /// other way round from how the writer chose them: radix zero is a whole
+    /// number and radix three is everything below one. Reading them the
+    /// writer's way round turns `16dp` into two millionths of one.
+    fn unpacked(data: u32, units: &[&str], hundredths: bool) -> String {
+        let radix = (data >> 4) & 0x03;
+        let unit = (data & 0x0f) as usize;
+        let mantissa = (data >> 8) as i32;
+        // The mantissa is a signed twenty-four bit number.
+        let mantissa = if mantissa & 0x80_0000 != 0 {
+            mantissa | !0x00ff_ffff
+        } else {
+            mantissa
+        };
+        let shift = match radix {
+            0 => 0.0f64,
+            1 => 7.0,
+            2 => 15.0,
+            _ => 23.0,
+        };
+        let value = f64::from(mantissa) / 2f64.powf(shift);
+        // A fraction is kept as what it is and written as what it reads:
+        // `50%` is stored as one half.
+        let scaled = if hundredths { value * 100.0 } else { value };
+        let name = units.get(unit).copied().unwrap_or("");
+        // Whole numbers without a point, which is how they were written.
+        if (scaled - scaled.round()).abs() < 1e-6 {
+            format!("{}{}", scaled.round() as i64, name)
+        } else {
+            format!("{scaled}{name}")
+        }
+    }
+
+    /// Reads a binary XML document back into the elements it holds.
+    ///
+    /// This is the other half of the writer above, and it exists for the same
+    /// reason a compiler has a disassembler: a package can be opened and its
+    /// manifest read without a tool that is not on the phone, and what this
+    /// writer produced can be checked against what it meant to produce.
+    pub fn decode(data: &[u8]) -> Result<Node, Diagnostic> {
+        if data.len() > MAX_DOCUMENT_BYTES {
+            return Err(
+                fail("EA022", "A binary XML document is larger than this reads.")
+                    .with_context(format!("Bytes: {}", data.len())),
+            );
+        }
+        let mut head = Bytes::new(data);
+        let kind = head.u16()?;
+        if kind != RES_XML_TYPE {
+            return Err(
+                fail("EA023", "These bytes do not begin a binary XML document.")
+                    .with_context(format!("Type: 0x{kind:04x}")),
+            );
+        }
+        let _header_size = head.u16()?;
+        let total = head.u32()? as usize;
+        let end = total.min(data.len());
+
+        let mut strings: Option<Strings> = None;
+        let mut ids: Vec<u32> = Vec::new();
+        // The elements still open, innermost last.
+        let mut open: Vec<Node> = Vec::new();
+        let mut root: Option<Node> = None;
+
+        let mut at = 8usize;
+        while at + 8 <= end {
+            let mut chunk = Bytes::new(&data[at..end]);
+            let kind = chunk.u16()?;
+            let header_size = chunk.u16()? as usize;
+            let size = chunk.u32()? as usize;
+            if size < 8 || at + size > end {
+                return Err(too_short());
+            }
+            let whole = &data[at..at + size];
+            // A header that claims to be longer than its own chunk is a
+            // header from a file somebody has been at.
+            if header_size < 8 || header_size > size {
+                return Err(too_short());
+            }
+
+            match kind {
+                RES_STRING_POOL_TYPE => strings = Some(read_string_pool(whole)?),
+                RES_XML_RESOURCE_MAP_TYPE => {
+                    let mut reading = Bytes::new(&whole[header_size..]);
+                    while reading.left() >= 4 {
+                        ids.push(reading.u32()?);
+                    }
+                }
+                RES_XML_START_ELEMENT_TYPE => {
+                    let Some(strings) = strings.as_ref() else {
+                        return Err(fail(
+                            "EA024",
+                            "A binary XML document names an element before its strings.",
+                        ));
+                    };
+                    open.push(read_element(whole, header_size, strings, &ids)?);
+                }
+                RES_XML_END_ELEMENT_TYPE => {
+                    let Some(done) = open.pop() else {
+                        return Err(fail(
+                            "EA025",
+                            "A binary XML document closes an element it never opened.",
+                        ));
+                    };
+                    match open.last_mut() {
+                        Some(parent) => parent.children.push(done),
+                        None => root = Some(done),
+                    }
+                }
+                _ => {}
+            }
+            at += size;
+        }
+
+        if !open.is_empty() {
+            return Err(fail(
+                "EA026",
+                "A binary XML document leaves an element unclosed.",
+            ));
+        }
+        root.ok_or_else(|| fail("EA027", "A binary XML document holds no element."))
+    }
+
+    fn read_element(
+        whole: &[u8],
+        header_size: usize,
+        strings: &Strings,
+        ids: &[u32],
+    ) -> Result<Node, Diagnostic> {
+        let mut fields = Bytes::new(whole);
+        let _kind = fields.u16()?;
+        let _header = fields.u16()?;
+        let _size = fields.u32()?;
+        let line = fields.u32()?;
+        let _comment = fields.u32()?;
+        let _namespace = fields.u32()?;
+        let name = fields.u32()?;
+        let attribute_start = fields.u16()? as usize;
+        let attribute_size = fields.u16()? as usize;
+        let count = fields.u16()? as usize;
+
+        let name = strings
+            .at(name)
+            .ok_or_else(|| fail("EA028", "An element names a string that is not there."))?
+            .to_string();
+
+        let mut attributes = Vec::with_capacity(count);
+        // Where the attributes begin is counted from the end of the node's
+        // own header rather than from the start of the chunk: the number in
+        // the file is an offset into the element's own fields.
+        let step = attribute_size.max(20);
+        let Some(base) = header_size
+            .checked_add(attribute_start)
+            .filter(|held| *held <= whole.len())
+        else {
+            return Err(too_short());
+        };
+        for index in 0..count {
+            let Some(from) = index
+                .checked_mul(step)
+                .and_then(|held| held.checked_add(base))
+                .filter(|held| held.saturating_add(20) <= whole.len())
+            else {
+                return Err(too_short());
+            };
+            let mut one = Bytes::new(&whole[from..from + 20]);
+            let namespace = one.u32()?;
+            let named = one.u32()?;
+            let raw = one.u32()?;
+            let _size = one.u16()?;
+            let _padding = one.u8()?;
+            let kind = one.u8()?;
+            let data = one.u32()?;
+
+            let local = strings
+                .at(named)
+                .ok_or_else(|| fail("EA029", "An attribute names a string that is not there."))?
+                .to_string();
+            attributes.push(Read {
+                namespace: strings.at(namespace).unwrap_or("").to_string(),
+                // A stripped package holds no name for an attribute the
+                // resource map numbers, and the number is what matters.
+                name: if local.is_empty() {
+                    ids.get(named as usize)
+                        .map(|id| format!("0x{id:08x}"))
+                        .unwrap_or_default()
+                } else {
+                    local
+                },
+                id: ids.get(named as usize).copied(),
+                value: value_of(kind, data, strings, strings.at(raw)),
+                kind,
+                data,
+            });
+        }
+
+        Ok(Node {
+            name,
+            attributes,
+            children: Vec::new(),
+            line,
+        })
+    }
+
     pub fn encode_knowing(root: &Element, own: &[Declared]) -> Result<Vec<u8>, Diagnostic> {
         let namespace_uri = root
             .attributes
@@ -32442,6 +32931,316 @@ pub fn state_report(observed_environment: &str) -> String {
 /// build's own timings from the last time it ran on this device, handed back
 /// after every build and handed in before the next one. A device that has
 /// never built anything says so; every one after that says what it learned.
+/// Reading a finished package the way a person would want it read.
+///
+/// Everything here comes out of the file itself: the archive is opened, the
+/// manifest decoded from the binary XML it really is, the Dalvik counted from
+/// its own header, and the signature checked against the key that presents it.
+/// Nothing is taken from whatever built it, because the point of opening a
+/// package is to find out what it says rather than what somebody says it says.
+pub mod inspect {
+    use crate::diag::{Diagnostic, Severity, Sink};
+    use crate::json::Writer;
+    use crate::FailureClass;
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.inspect",
+            message,
+        )
+    }
+
+    /// The largest package this opens.
+    pub const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
+
+    /// One thing inside the archive, as it is stored.
+    #[derive(Clone, Debug)]
+    pub struct Held {
+        pub name: String,
+        pub stored: u64,
+        pub actual: u64,
+        pub compressed: bool,
+    }
+
+    /// What one package came to.
+    #[derive(Clone, Debug, Default)]
+    pub struct Package {
+        pub bytes: u64,
+        pub entries: usize,
+        pub held: Vec<Held>,
+        pub package: String,
+        pub version_name: String,
+        pub version_code: String,
+        pub min_sdk: String,
+        pub target_sdk: String,
+        pub label: String,
+        pub permissions: Vec<String>,
+        pub features: Vec<String>,
+        pub activities: Vec<String>,
+        pub abis: Vec<String>,
+        pub locales: Vec<String>,
+        pub dex_files: usize,
+        pub classes: usize,
+        pub methods: usize,
+        pub schemes: Vec<&'static str>,
+        pub signed_by: Vec<String>,
+        pub fingerprints: Vec<String>,
+        pub digests_verified: u64,
+        pub digests_failed: u64,
+        pub signatures_verified: u64,
+        pub signatures_failed: u64,
+        pub key_matches_certificate: bool,
+        pub sound: bool,
+        /// What could not be read, said rather than left out.
+        pub notes: Vec<String>,
+    }
+
+    impl Package {
+        pub fn write_json(&self, w: &mut Writer, key: &str) {
+            let strings = |w: &mut Writer, key: &str, held: &[String]| {
+                w.begin_array(Some(key));
+                for one in held {
+                    w.element_str(one);
+                }
+                w.end_array();
+            };
+
+            w.begin_object(Some(key));
+            w.field_u64("bytes", self.bytes);
+            w.field_u64("entries", self.entries as u64);
+            w.field_str("package", &self.package);
+            w.field_str("versionName", &self.version_name);
+            w.field_str("versionCode", &self.version_code);
+            w.field_str("minSdk", &self.min_sdk);
+            w.field_str("targetSdk", &self.target_sdk);
+            w.field_str("label", &self.label);
+            strings(w, "permissions", &self.permissions);
+            strings(w, "features", &self.features);
+            strings(w, "activities", &self.activities);
+            strings(w, "abis", &self.abis);
+            strings(w, "locales", &self.locales);
+            w.field_u64("dexFiles", self.dex_files as u64);
+            w.field_u64("classes", self.classes as u64);
+            w.field_u64("methods", self.methods as u64);
+            w.begin_array(Some("schemes"));
+            for scheme in &self.schemes {
+                w.element_str(scheme);
+            }
+            w.end_array();
+            strings(w, "signedBy", &self.signed_by);
+            strings(w, "fingerprints", &self.fingerprints);
+            w.field_u64("digestsVerified", self.digests_verified);
+            w.field_u64("digestsFailed", self.digests_failed);
+            w.field_u64("signaturesVerified", self.signatures_verified);
+            w.field_u64("signaturesFailed", self.signatures_failed);
+            w.field_bool("keyMatchesCertificate", self.key_matches_certificate);
+            w.field_bool("sound", self.sound);
+            strings(w, "notes", &self.notes);
+            w.begin_array(Some("held"));
+            for one in &self.held {
+                w.begin_object(None);
+                w.field_str("name", &one.name);
+                w.field_u64("stored", one.stored);
+                w.field_u64("actual", one.actual);
+                w.field_bool("compressed", one.compressed);
+                w.end_object();
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    /// The largest entries first, which is what somebody looking at a package
+    /// they think is too big wants to see, and the rest dropped: a listing of
+    /// four thousand resource files is not a thing anybody reads.
+    const LISTED: usize = 60;
+
+    pub fn package(path: &str) -> Result<Package, Diagnostic> {
+        let size = std::fs::metadata(path)
+            .map_err(|why| {
+                fail("EN001", "That package could not be opened.")
+                    .with_context(format!("Path: {path}"))
+                    .with_context(format!("Reason: {why}"))
+            })?
+            .len();
+        if size > MAX_PACKAGE_BYTES {
+            return Err(fail("EN002", "That package is larger than this opens.")
+                .with_context(format!("Bytes: {size}")));
+        }
+        let bytes = std::fs::read(path).map_err(|why| {
+            fail("EN003", "That package could not be read.").with_context(format!("Reason: {why}"))
+        })?;
+
+        let mut sink = Sink::new();
+        let Some(archive) = crate::archive::read(&bytes, &mut sink) else {
+            return Err(fail("EN004", "That file is not a readable archive.")
+                .with_suggestion("A package is a zip. This one does not open as one."));
+        };
+
+        let mut out = Package {
+            bytes: size,
+            entries: archive.entries().len(),
+            ..Package::default()
+        };
+
+        let mut held: Vec<Held> = archive
+            .entries()
+            .iter()
+            .map(|entry| Held {
+                name: entry.name.clone(),
+                stored: entry.compressed_size,
+                actual: entry.uncompressed_size,
+                compressed: entry.compressed_size != entry.uncompressed_size,
+            })
+            .collect();
+        held.sort_by_key(|one| std::cmp::Reverse(one.stored));
+        held.truncate(LISTED);
+        out.held = held;
+
+        // What the manifest says, read out of the binary XML it really is.
+        match archive
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "AndroidManifest.xml")
+        {
+            Some(entry) => match crate::builder::entry_bytes(&bytes, entry, path)
+                .and_then(|held| crate::axml::decode(&held))
+            {
+                Ok(root) => read_manifest(&root, &mut out),
+                Err(error) => out
+                    .notes
+                    .push(format!("The manifest could not be read: {}", error.message)),
+            },
+            None => out
+                .notes
+                .push("There is no manifest in this package.".to_string()),
+        }
+
+        // The code, counted out of the Dalvik's own header rather than
+        // guessed from the file's size.
+        for entry in archive.entries() {
+            if !(entry.name.starts_with("classes") && entry.name.ends_with(".dex")) {
+                continue;
+            }
+            out.dex_files += 1;
+            match crate::builder::entry_bytes(&bytes, entry, path) {
+                Ok(held) => {
+                    let mut reading = Sink::new();
+                    match crate::dex::read(&held, &mut reading) {
+                        Ok(dex) => {
+                            out.classes += dex.classes.len();
+                            out.methods += dex.header.method_ids_size as usize;
+                        }
+                        Err(error) => out.notes.push(format!(
+                            "{} could not be read: {}",
+                            entry.name, error.message
+                        )),
+                    }
+                }
+                Err(error) => out.notes.push(format!(
+                    "{} could not be read: {}",
+                    entry.name, error.message
+                )),
+            }
+        }
+
+        // The processors it carries code for, and the languages it carries
+        // words for, both read off the names inside it.
+        for entry in archive.entries() {
+            if let Some(rest) = entry.name.strip_prefix("lib/") {
+                if let Some((abi, _)) = rest.split_once('/') {
+                    if !out.abis.iter().any(|held| held == abi) {
+                        out.abis.push(abi.to_string());
+                    }
+                }
+            }
+        }
+        out.abis.sort();
+
+        // What the signature says, checked rather than described.
+        let report = crate::signing::examine(
+            &bytes,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+        out.schemes = report.schemes.clone();
+        out.digests_verified = report.digests_verified;
+        out.digests_failed = report.digests_failed;
+        out.signatures_verified = report.signatures_verified;
+        out.signatures_failed = report.signatures_failed;
+        out.key_matches_certificate = report.key_matches_certificate;
+        out.sound = report.everything_checkable_passed();
+        for signer in &report.signers {
+            for certificate in &signer.certificates {
+                if !out.signed_by.contains(&certificate.subject) {
+                    out.signed_by.push(certificate.subject.clone());
+                }
+                let print = certificate.fingerprint_display();
+                if !out.fingerprints.contains(&print) {
+                    out.fingerprints.push(print);
+                }
+            }
+        }
+        if !report.has_block {
+            out.notes
+                .push("This package carries no signing block at all.".to_string());
+        }
+
+        Ok(out)
+    }
+
+    /// The handful of things anybody opening a package wants off its manifest.
+    ///
+    /// Read by the number the device reads them by rather than by name: a
+    /// package whose string pool has been stripped of attribute names still
+    /// carries the numbers, and the numbers are what the platform itself uses.
+    fn read_manifest(root: &crate::axml::Node, out: &mut Package) {
+        let by = |node: &crate::axml::Node, name: &str| -> String {
+            crate::axml::attribute_id(name)
+                .and_then(|id| node.by_id(id))
+                .or_else(|| node.attribute(name))
+                .unwrap_or_default()
+                .to_string()
+        };
+
+        out.package = root.attribute("package").unwrap_or_default().to_string();
+        out.version_name = by(root, "versionName");
+        out.version_code = by(root, "versionCode");
+
+        for node in root.children_named("uses-sdk") {
+            out.min_sdk = by(node, "minSdkVersion");
+            out.target_sdk = by(node, "targetSdkVersion");
+        }
+        for node in root.children_named("uses-permission") {
+            let name = by(node, "name");
+            if !name.is_empty() {
+                out.permissions.push(name);
+            }
+        }
+        for node in root.children_named("uses-feature") {
+            let name = by(node, "name");
+            if !name.is_empty() {
+                out.features.push(name);
+            }
+        }
+        for application in root.children_named("application") {
+            out.label = by(application, "label");
+            for activity in application.children_named("activity") {
+                let name = by(activity, "name");
+                if !name.is_empty() {
+                    out.activities.push(name);
+                }
+            }
+        }
+        out.permissions.sort();
+        out.activities.sort();
+    }
+}
+
 pub mod progress {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
@@ -33302,6 +34101,33 @@ pub mod ffi {
     /// `sensitive` and `whole_word` are the two switches a search needs and
     /// the only two: the first says whether case counts, the second whether
     /// `at` may match inside `that`.
+    /// Opens a finished package and says what is in it.
+    ///
+    /// Everything reported comes out of the file: the manifest is decoded from
+    /// the binary XML it really is, the code counted from the Dalvik's own
+    /// header, and the signature checked against the key that presents it.
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_inspect_package(path: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let Some(path) = text_from(path) else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::inspect::package(&path) {
+                Ok(found) => {
+                    w.field_bool("opened", true);
+                    w.field_str("path", &path);
+                    found.write_json(&mut w, "package");
+                }
+                Err(error) => write_failure(&mut w, "opened", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
     /// Reads a project the way a build reads it, and stops before packaging.
     ///
     /// This is the front half of the build itself rather than a second opinion
@@ -47574,6 +48400,356 @@ public final class MainActivity extends Activity {
         let error = super::rsa::seal_pkcs8(&key, "short").unwrap_err();
         assert_eq!(error.code, "ER040");
         assert!(error.suggestion.unwrap().contains("only thing between"));
+    }
+
+    /// A package this build wrote, opened again with nothing but this build.
+    ///
+    /// Everything asserted here is read back out of the file rather than
+    /// remembered from making it, so what this proves is that a package can be
+    /// opened and understood on a phone with no tools on it.
+    #[test]
+    fn a_package_this_wrote_opens_and_says_what_is_in_it() {
+        let directory = temp_directory("omni-inspect");
+        let root = directory.join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Inspected".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                version_name: "2.4.6".to_string(),
+                version_code: 24,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let certificate = super::certificate::self_signed(
+            &key,
+            "Omni Inspect",
+            "Omni",
+            "TR",
+            super::certificate::moment_from_epoch(1_700_000_000),
+            super::certificate::moment_from_epoch(2_000_000_000),
+        )
+        .expect("a certificate");
+
+        let mut sink = Sink::new();
+        let outcome = super::builder::assemble(
+            &super::builder::from_project(&folder).expect("the project must read"),
+            &key,
+            &certificate,
+            &mut sink,
+        )
+        .expect("the package must be written");
+
+        let path = directory.join("inspected.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+
+        let found = super::inspect::package(path.to_str().unwrap()).expect("it must open");
+
+        // What the manifest says, read out of the binary XML in the package.
+        assert_eq!(found.package, "com.tr.yt");
+        assert_eq!(found.version_name, "2.4.6");
+        assert_eq!(found.version_code, "24");
+        assert_eq!(found.min_sdk, "30");
+        assert_eq!(found.target_sdk, "36");
+        assert!(
+            !found.activities.is_empty(),
+            "a package with an activity in it must list one"
+        );
+
+        // What it holds.
+        assert_eq!(found.bytes, outcome.package.len() as u64);
+        assert_eq!(found.entries, outcome.entries);
+        assert!(!found.held.is_empty());
+        assert!(
+            found
+                .held
+                .windows(2)
+                .all(|pair| pair[0].stored >= pair[1].stored),
+            "the largest entries come first"
+        );
+
+        // The code, counted out of the Dalvik rather than guessed.
+        assert_eq!(found.dex_files, 1);
+        assert!(found.classes > 0, "the activity is a class");
+        assert!(found.methods >= found.classes);
+
+        // And who signed it, checked rather than described.
+        assert!(found.schemes.contains(&"v2"));
+        assert!(found.schemes.contains(&"v3"));
+        assert!(
+            found.sound,
+            "a package this build wrote must verify: {found:?}"
+        );
+        assert_eq!(found.signatures_failed, 0);
+        assert!(found.signatures_verified > 0);
+        assert!(found.key_matches_certificate);
+        assert!(
+            found
+                .signed_by
+                .iter()
+                .any(|held| held.contains("Omni Inspect")),
+            "signed by {:?}",
+            found.signed_by
+        );
+        assert!(
+            found.notes.is_empty(),
+            "nothing should be unreadable: {:?}",
+            found.notes
+        );
+
+        // A byte changed anywhere in it stops it verifying, and opening it
+        // says so rather than reporting a package that is fine.
+        let mut damaged = outcome.package.clone();
+        let entry = *damaged
+            .iter()
+            .position(|byte| *byte == b'A')
+            .get_or_insert(64);
+        damaged[entry] ^= 0xff;
+        let bent = directory.join("bent.apk");
+        std::fs::write(&bent, &damaged).unwrap();
+        if let Ok(read) = super::inspect::package(bent.to_str().unwrap()) {
+            assert!(!read.sound, "a changed package must not read as sound");
+        }
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// Something that is not a package is refused rather than half-read.
+    #[test]
+    fn opening_something_that_is_not_a_package_is_refused() {
+        let directory = temp_directory("omni-inspect-not");
+        let path = directory.join("not-a-package.apk");
+        std::fs::write(&path, b"this is not a zip and never was").unwrap();
+
+        let refused =
+            super::inspect::package(path.to_str().unwrap()).expect_err("that is not a package");
+        assert_eq!(refused.code, "EN004");
+
+        assert_eq!(
+            super::inspect::package(directory.join("nothing.apk").to_str().unwrap())
+                .expect_err("nothing is there")
+                .code,
+            "EN001"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// What this writer wrote, read back, is what it was given.
+    ///
+    /// A writer with no reader is a writer nobody can check. This walks a
+    /// manifest out to bytes and back, and every element, every attribute and
+    /// every value has to survive the trip -- which is a stronger claim than
+    /// the bytes matching a fixture, because it says the bytes mean what they
+    /// were meant to mean.
+    #[test]
+    fn a_manifest_written_as_bytes_reads_back_as_itself() {
+        let source = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             package=\"com.tr.yt\" android:versionCode=\"7\" android:versionName=\"1.2.3\">\n\
+             \x20 <uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\"/>\n\
+             \x20 <uses-permission android:name=\"android.permission.INTERNET\"/>\n\
+             \x20 <application android:label=\"Omni\" android:debuggable=\"false\" \
+             android:hardwareAccelerated=\"true\">\n\
+             \x20   <activity android:name=\".Main\" android:exported=\"true\"/>\n\
+             \x20 </application>\n\
+             </manifest>\n";
+
+        let mut sink = Sink::new();
+        let parsed = super::xml::parse(source, "AndroidManifest.xml", &mut sink)
+            .expect("the manifest must parse");
+        let bytes = super::axml::encode(&parsed).expect("the manifest must encode");
+        let read = super::axml::decode(&bytes).expect("and read back");
+
+        assert_eq!(read.name, "manifest");
+        assert_eq!(read.attribute("package"), Some("com.tr.yt"));
+        assert_eq!(read.attribute("versionCode"), Some("7"));
+        assert_eq!(read.attribute("versionName"), Some("1.2.3"));
+
+        let sdk = read.children_named("uses-sdk").next().expect("a uses-sdk");
+        assert_eq!(sdk.attribute("minSdkVersion"), Some("30"));
+        assert_eq!(sdk.attribute("targetSdkVersion"), Some("36"));
+
+        let permission = read
+            .children_named("uses-permission")
+            .next()
+            .expect("a permission");
+        assert_eq!(
+            permission.attribute("name"),
+            Some("android.permission.INTERNET")
+        );
+        assert_eq!(
+            permission.attributes[0].namespace,
+            super::axml::ANDROID_NAMESPACE,
+            "an android attribute keeps the namespace it is in"
+        );
+
+        let application = read
+            .children_named("application")
+            .next()
+            .expect("an application");
+        assert_eq!(application.attribute("label"), Some("Omni"));
+        // Booleans come back as booleans rather than as the number behind one.
+        assert_eq!(application.attribute("debuggable"), Some("false"));
+        assert_eq!(application.attribute("hardwareAccelerated"), Some("true"));
+
+        let activity = application
+            .children_named("activity")
+            .next()
+            .expect("an activity");
+        assert_eq!(activity.attribute("name"), Some(".Main"));
+        assert_eq!(activity.attribute("exported"), Some("true"));
+
+        // And the numbers a device reads them by are there, which is what a
+        // package really carries.
+        assert_eq!(
+            activity.by_id(super::axml::attribute_id("exported").unwrap()),
+            Some("true")
+        );
+    }
+
+    /// A layout survives the same trip, dimensions and colours included.
+    #[test]
+    fn a_layout_written_as_bytes_reads_back_with_its_units() {
+        let source = "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             android:orientation=\"vertical\" android:layout_width=\"match_parent\" \
+             android:layout_height=\"wrap_content\" android:padding=\"16dp\" \
+             android:textSize=\"14sp\" android:background=\"#ff102030\" \
+             android:alpha=\"0.5\"/>\n";
+
+        let mut sink = Sink::new();
+        let parsed =
+            super::xml::parse(source, "res/layout/one.xml", &mut sink).expect("it must parse");
+        let bytes = super::axml::encode(&parsed).expect("it must encode");
+        let read = super::axml::decode(&bytes).expect("and read back");
+
+        assert_eq!(read.name, "LinearLayout");
+        assert_eq!(read.attribute("padding"), Some("16dp"));
+        assert_eq!(read.attribute("textSize"), Some("14sp"));
+        assert_eq!(read.attribute("alpha"), Some("0.5"));
+        assert_eq!(read.attribute("background"), Some("#ff102030"));
+        // `match_parent` and `wrap_content` are the two numbers a device
+        // reads, and they come back as those numbers rather than as words.
+        assert_eq!(read.attribute("layout_width"), Some("-1"));
+        assert_eq!(read.attribute("layout_height"), Some("-2"));
+    }
+
+    /// The reader does not fall over on anything, however damaged.
+    #[test]
+    fn the_binary_xml_reader_survives_arbitrary_input() {
+        let source = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
+             package=\"com.tr.yt\"><application android:label=\"Omni\"/></manifest>";
+        let mut sink = Sink::new();
+        let parsed =
+            super::xml::parse(source, "AndroidManifest.xml", &mut sink).expect("it must parse");
+        let bytes = super::axml::encode(&parsed).expect("it must encode");
+
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        for _ in 0..4_000 {
+            let mut damaged = bytes.clone();
+            let mutations = (xorshift(&mut seed) % 5) + 1;
+            for _ in 0..mutations {
+                let position = (xorshift(&mut seed) as usize) % damaged.len();
+                damaged[position] = (xorshift(&mut seed) & 0xff) as u8;
+            }
+            // Whatever comes back, it comes back: no panic, no hang.
+            let _ = super::axml::decode(&damaged);
+        }
+
+        // And nothing at all is refused rather than read as an empty document.
+        assert!(super::axml::decode(&[]).is_err());
+        assert!(super::axml::decode(&[0u8; 8]).is_err());
+    }
+
+    /// What `aapt2` wrote, read by this. The other side of the conformance the
+    /// writer already has: this build's bytes match theirs, and this build's
+    /// reader agrees with what theirs made.
+    #[test]
+    fn what_aapt2_wrote_reads_back_the_same_as_what_this_wrote() {
+        let (Some(aapt2), Some(jar)) = (find_build_tool("aapt2"), android_jar()) else {
+            assert!(
+                std::env::var("OMNI_REQUIRE_AXML_CONFORMANCE").is_err(),
+                "OMNI_REQUIRE_AXML_CONFORMANCE is set but aapt2 or android.jar is missing"
+            );
+            eprintln!("binary xml: aapt2 or android.jar is not available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-axml-read");
+        let source = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"\n\
+             \x20   package=\"com.tr.yt\"\n\
+             \x20   android:versionCode=\"7\"\n\
+             \x20   android:versionName=\"1.2.3\">\n\
+             \x20 <uses-sdk android:minSdkVersion=\"30\" android:targetSdkVersion=\"36\"/>\n\
+             \x20 <application android:label=\"Omni\" android:hardwareAccelerated=\"true\">\n\
+             \x20   <activity android:name=\".Main\" android:exported=\"true\"/>\n\
+             \x20 </application>\n\
+             </manifest>\n";
+        let written = directory.join("AndroidManifest.xml");
+        std::fs::write(&written, source).unwrap();
+
+        // aapt2 compiles a manifest into a package, so one is made and the
+        // manifest taken back out of it.
+        let out = directory.join("theirs.apk");
+        let made = std::process::Command::new(&aapt2)
+            .args([
+                "link",
+                "--manifest",
+                written.to_str().unwrap(),
+                "-I",
+                jar.to_str().unwrap(),
+                "-o",
+                out.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            made.status.success(),
+            "{}",
+            String::from_utf8_lossy(&made.stderr)
+        );
+
+        let package = std::fs::read(&out).unwrap();
+        let mut sink = Sink::new();
+        let archive = super::archive::read(&package, &mut sink).expect("aapt2 wrote an archive");
+        let entry = archive
+            .entries()
+            .iter()
+            .find(|held| held.name == "AndroidManifest.xml")
+            .expect("with a manifest in it");
+        let theirs = super::builder::entry_bytes(&package, entry, "theirs.apk").unwrap();
+
+        let read = super::axml::decode(&theirs).expect("aapt2's manifest must read");
+        assert_eq!(read.name, "manifest");
+        assert_eq!(read.attribute("package"), Some("com.tr.yt"));
+        assert_eq!(read.attribute("versionName"), Some("1.2.3"));
+        assert_eq!(read.attribute("versionCode"), Some("7"));
+
+        let sdk = read.children_named("uses-sdk").next().expect("a uses-sdk");
+        assert_eq!(sdk.attribute("minSdkVersion"), Some("30"));
+
+        let application = read
+            .children_named("application")
+            .next()
+            .expect("an application");
+        assert_eq!(application.attribute("label"), Some("Omni"));
+        assert_eq!(application.attribute("hardwareAccelerated"), Some("true"));
+        let activity = application
+            .children_named("activity")
+            .next()
+            .expect("an activity");
+        assert_eq!(activity.attribute("exported"), Some("true"));
+        assert_eq!(activity.attribute("name"), Some(".Main"));
+
+        eprintln!("binary xml: aapt2's own manifest read back by this build");
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]

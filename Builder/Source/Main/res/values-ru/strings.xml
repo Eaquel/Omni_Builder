@@ -163,4 +163,14 @@
     <string name="omni_check_title">ПРОВЕРИТЬ КОД</string>
     <string name="omni_check_clear">%1$d классов, %2$d файлов ресурсов, %3$d языков. Ничего не отклонено.</string>
     <string name="omni_check_open">Открыть здесь</string>
+    <string name="omni_open_title">ОТКРЫТЬ</string>
+    <string name="omni_open_sound">Содержимое совпадает, подпись сходится, и ключ — тот, что в сертификате.</string>
+    <string name="omni_open_unsound">Этот пакет не проходит проверку ключом, который предъявляет.</string>
+    <string name="omni_open_platforms">Платформы</string>
+    <string name="omni_open_code">Код</string>
+    <string name="omni_open_code_detail">%1$d классов, %2$d методов</string>
+    <string name="omni_open_entries">Файлов внутри</string>
+    <string name="omni_open_permissions">Запрашиваемые разрешения</string>
+    <string name="omni_open_activities">Объявленные экраны</string>
+    <string name="omni_open_largest">Что занимает место</string>
 </resources>

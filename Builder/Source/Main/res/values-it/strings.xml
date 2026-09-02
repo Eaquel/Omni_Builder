@@ -163,4 +163,14 @@
     <string name="omni_check_title">CONTROLLA IL CODICE</string>
     <string name="omni_check_clear">%1$d classi, %2$d file di risorse, %3$d lingue. Niente rifiutato.</string>
     <string name="omni_check_open">Aprilo qui</string>
+    <string name="omni_open_title">APRILO</string>
+    <string name="omni_open_sound">Il contenuto corrisponde, la firma regge, e la chiave è quella del certificato.</string>
+    <string name="omni_open_unsound">Questo pacchetto non si verifica con la chiave che presenta.</string>
+    <string name="omni_open_platforms">Piattaforme</string>
+    <string name="omni_open_code">Codice</string>
+    <string name="omni_open_code_detail">%1$d classi, %2$d metodi</string>
+    <string name="omni_open_entries">File all\'interno</string>
+    <string name="omni_open_permissions">Permessi richiesti</string>
+    <string name="omni_open_activities">Schermate dichiarate</string>
+    <string name="omni_open_largest">Cosa occupa lo spazio</string>
 </resources>

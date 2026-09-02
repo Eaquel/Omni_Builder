@@ -163,4 +163,14 @@
     <string name="omni_check_title">CODE PRÜFEN</string>
     <string name="omni_check_clear">%1$d Klassen, %2$d Ressourcendateien, %3$d Sprachen. Nichts abgelehnt.</string>
     <string name="omni_check_open">Hier öffnen</string>
+    <string name="omni_open_title">ÖFFNEN</string>
+    <string name="omni_open_sound">Der Inhalt stimmt, die Signatur geht auf, und der Schlüssel ist der des Zertifikats.</string>
+    <string name="omni_open_unsound">Dieses Paket verifiziert nicht gegen den Schlüssel, den es vorlegt.</string>
+    <string name="omni_open_platforms">Plattformen</string>
+    <string name="omni_open_code">Code</string>
+    <string name="omni_open_code_detail">%1$d Klassen, %2$d Methoden</string>
+    <string name="omni_open_entries">Dateien darin</string>
+    <string name="omni_open_permissions">Angeforderte Berechtigungen</string>
+    <string name="omni_open_activities">Deklarierte Bildschirme</string>
+    <string name="omni_open_largest">Was den Platz belegt</string>
 </resources>

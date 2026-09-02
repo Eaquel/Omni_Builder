@@ -163,4 +163,14 @@
     <string name="omni_check_title">CHECK THE CODE</string>
     <string name="omni_check_clear">%1$d classes, %2$d resource files, %3$d languages. Nothing refused.</string>
     <string name="omni_check_open">Open it here</string>
+    <string name="omni_open_title">OPEN IT</string>
+    <string name="omni_open_sound">The contents match, the signature checks out, and the key is the certificate\'s.</string>
+    <string name="omni_open_unsound">This package does not verify against the key it presents.</string>
+    <string name="omni_open_platforms">Platforms</string>
+    <string name="omni_open_code">Code</string>
+    <string name="omni_open_code_detail">%1$d classes, %2$d methods</string>
+    <string name="omni_open_entries">Files inside</string>
+    <string name="omni_open_permissions">Permissions it asks for</string>
+    <string name="omni_open_activities">Screens it declares</string>
+    <string name="omni_open_largest">What is taking the room</string>
 </resources>
