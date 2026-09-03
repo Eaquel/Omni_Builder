@@ -42,7 +42,6 @@ CONFORMANCE = {
     "OMNI_REQUIRE_INFLATE_CONFORMANCE": "1",
 }
 
-
 def interface() -> str:
     """Every line of Kotlin in this application, as one text.
 
@@ -55,10 +54,8 @@ def interface() -> str:
         path.read_text(encoding="utf-8") for path in sorted(KOTLIN_ROOT.rglob("*.kt"))
     )
 
-
 class Skip(Exception):
     """A check cannot run here because a tool it needs is missing."""
-
 
 @dataclass
 class Result:
@@ -67,7 +64,6 @@ class Result:
     seconds: float
     detail: str = ""
     lines: list[str] = field(default_factory=list)
-
 
 def sdk_root() -> Path:
     for name in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
@@ -82,7 +78,6 @@ def sdk_root() -> Path:
         return Path(home) / "Android/Sdk"
     raise Skip("no Android SDK on this machine")
 
-
 def build_tool(name: str) -> Path:
     root = sdk_root()
     found = sorted((root / "build-tools").glob(f"*/{name}"))
@@ -90,14 +85,12 @@ def build_tool(name: str) -> Path:
         raise Skip(f"{name} is not in the Android build tools here")
     return found[-1]
 
-
 def ndk_tool(name: str) -> Path:
     root = sdk_root()
     found = sorted(root.glob(f"ndk/*/toolchains/llvm/prebuilt/*/bin/{name}"))
     if not found:
         raise Skip(f"{name} is not in the NDK here")
     return found[-1]
-
 
 def run(command: list[str] | str, *, env: dict[str, str] | None = None,
         cwd: Path = ROOT, check: bool = True) -> subprocess.CompletedProcess:
@@ -115,14 +108,9 @@ def run(command: list[str] | str, *, env: dict[str, str] | None = None,
         )
     return done
 
-
 def gradle(*tasks: str) -> subprocess.CompletedProcess:
     sdk_root()
     return run([str(ROOT / "gradlew"), *tasks, "--console=plain"])
-
-
-# ---------------------------------------------------------------- checks
-
 
 def check_layout() -> str:
     """The tree is the one this project agreed on."""
@@ -163,6 +151,115 @@ def check_layout() -> str:
         raise AssertionError(f"tests live in Builder_Test.py alone, found {stray}")
     return f"{len(required)} files and {len(compilers)} compilers in place"
 
+def check_comments() -> str:
+    """No source file in this project carries a comment.
+
+    Reading a file the way its own compiler reads it, so that a `//` inside a
+    string is a `//` inside a string, and the one `#!` that is not a comment
+    stays. A file that grew one back is named.
+    """
+    watched: list[Path] = [
+        CORE,
+        KOTLIN,
+        ROOT / "Builder_Test.py",
+        ROOT / "build.gradle.kts",
+        ROOT / "settings.gradle.kts",
+        ROOT / "Builder/build.gradle.kts",
+        ROOT / "Builder/Source/Main/Native/Builder.cpp",
+        ROOT / "Builder/Source/Main/Native/Builder.hpp",
+    ]
+    watched += sorted(COMPILERS.glob("*.rs"))
+    watched += sorted((ROOT / "Examples").rglob("*.java"))
+
+    found: list[str] = []
+    for path in watched:
+        text = path.read_text(encoding="utf-8")
+        for line, why in comments_in(text, path.suffix):
+            found.append(f"{path.relative_to(ROOT)}:{line} {why}")
+    if found:
+        raise AssertionError(
+            "these lines carry a comment:\n  " + "\n  ".join(found[:20])
+        )
+    return f"{len(watched)} files, and none of them explains itself"
+
+def comments_in(text: str, suffix: str) -> list[tuple[int, str]]:
+    """Where a file comments, reading strings the way the language does."""
+    found: list[tuple[int, str]] = []
+    at = 0
+    size = len(text)
+    line = 1
+    braced = suffix in (".kt", ".kts", ".java", ".cpp", ".hpp")
+
+    if suffix == ".py" and text.startswith("#!"):
+        stop = text.find("\n")
+        stop = size if stop < 0 else stop + 1
+        at = stop
+        line = 2
+
+    while at < size:
+        here = text[at]
+        if here == "\n":
+            line += 1
+            at += 1
+            continue
+
+        if suffix == ".rs" and here == "r":
+            probe = at + 1
+            while probe < size and text[probe] == "#":
+                probe += 1
+            if probe < size and text[probe] == '"' and (
+                at == 0 or not (text[at - 1].isalnum() or text[at - 1] == "_")
+            ):
+                close = '"' + "#" * (probe - at - 1)
+                stop = text.find(close, probe + 1)
+                stop = size if stop < 0 else stop + len(close)
+                line += text.count("\n", at, stop)
+                at = stop
+                continue
+
+        if (braced or suffix == ".py") and text.startswith('"""', at):
+            stop = text.find('"""', at + 3)
+            stop = size if stop < 0 else stop + 3
+            line += text.count("\n", at, stop)
+            at = stop
+            continue
+
+        if here in "\"'":
+            probe = at + 1
+            while probe < size:
+                if text[probe] == "\\":
+                    probe += 2
+                    continue
+                if text[probe] == here or text[probe] == "\n":
+                    probe += 1
+                    break
+                probe += 1
+            line += text.count("\n", at, probe)
+            at = probe
+            continue
+
+        if suffix == ".py" and here == "#":
+            found.append((line, "a # comment"))
+            while at < size and text[at] != "\n":
+                at += 1
+            continue
+
+        if suffix != ".py" and text.startswith("//", at):
+            found.append((line, "a // comment"))
+            while at < size and text[at] != "\n":
+                at += 1
+            continue
+
+        if suffix != ".py" and text.startswith("/*", at):
+            found.append((line, "a /* comment"))
+            stop = text.find("*/", at + 2)
+            stop = size if stop < 0 else stop + 2
+            line += text.count("\n", at, stop)
+            at = stop
+            continue
+
+        at += 1
+    return found
 
 def check_format() -> str:
     """The Core is formatted the way rustfmt writes it."""
@@ -171,7 +268,6 @@ def check_format() -> str:
     run(["cargo", "fmt", "--check"])
     return "rustfmt agrees"
 
-
 def check_lint() -> str:
     """Clippy finds nothing, with warnings treated as errors."""
     if shutil.which("cargo") is None:
@@ -179,13 +275,11 @@ def check_lint() -> str:
     run(["cargo", "clippy", "--locked", "--all-targets", "--", "-D", "warnings"])
     return "clippy is clean"
 
-
 def tool_present(finder, name: str) -> bool:
     try:
         return finder(name).is_file()
     except Skip:
         return False
-
 
 def sign_a_copy(package: Path) -> Path:
     """A signed copy of an unsigned package, for the checks that need one.
@@ -227,14 +321,11 @@ def sign_a_copy(package: Path) -> Path:
     ])
     return copy
 
-
 def check_core() -> str:
     """The Core's own suite, demanding every conformance check the tools here allow."""
     if shutil.which("cargo") is None:
         raise Skip("cargo is not on this machine")
 
-    # A conformance check is demanded only where the tool it needs is here, and
-    # only where the build outputs it reads have been produced.
     built = sorted(ROOT.glob("Builder/build/outputs/apk/*/*.apk"))
     release = [one for one in built if "/release/" in one.as_posix()]
     signed = [one for one in release if not one.name.endswith("-unsigned.apk")]
@@ -271,7 +362,6 @@ def check_core() -> str:
         raise AssertionError("no test reported a result\n" + done.stdout[-2000:])
     return f"{passed} tests passed, demanding {len(demanded)} conformance checks"
 
-
 def check_dependencies() -> str:
     """The Core carries no third-party dependency."""
     lock = (ROOT / "Cargo.lock").read_text(encoding="utf-8")
@@ -279,7 +369,6 @@ def check_dependencies() -> str:
     if packages != 1:
         raise AssertionError(f"Cargo.lock holds {packages} packages, expected 1")
     return "one package, and it is this one"
-
 
 def check_strings() -> str:
     """Every language carries every string the interface asks for."""
@@ -303,7 +392,6 @@ def check_strings() -> str:
     if len(translations) < 9:
         raise AssertionError(f"{len(translations)} translations, expected at least 9")
 
-    # android.R.string.* are the framework's own; only this project's are ours.
     used = set(
         re.findall(r"(?<!android\.)\bR\.string\.([a-z_0-9]+)", interface())
     )
@@ -316,7 +404,6 @@ def check_strings() -> str:
     if unused:
         raise AssertionError(f"strings nothing uses: {unused}")
     return f"{len(base)} strings in {len(translations) + 1} languages, none spare"
-
 
 def release_apk() -> Path:
     """The package this build produced, which is the only one it produces.
@@ -331,7 +418,6 @@ def release_apk() -> Path:
     signed = [one for one in made if not one.name.endswith("-unsigned.apk")]
     return (signed or made)[0]
 
-
 def check_release_apk() -> str:
     """The package and the bundle both build. This project ships one variant."""
     gradle(":Builder:assembleRelease", ":Builder:bundleRelease")
@@ -343,7 +429,6 @@ def check_release_apk() -> str:
         raise AssertionError("a debug package was built; this project ships one variant")
     return (f"{made[0].name}, {made[0].stat().st_size // 1024} KB, "
             f"and {bundles[0].name}")
-
 
 def check_bridge() -> str:
     """Every native method Kotlin declares is exported by every ABI, and nothing else is."""
@@ -381,7 +466,6 @@ def check_bridge() -> str:
         checked += 1
     return f"{len(declared)} symbols agree across {checked} ABIs"
 
-
 def check_reproducible() -> str:
     """The package and the bundle are the same bytes across a clean rebuild.
 
@@ -417,15 +501,14 @@ def check_reproducible() -> str:
             raise AssertionError(f"the {what} is not reproducible\n{before}\n{after}")
     return f"package and bundle identical across a clean rebuild, {first[0][:16]}"
 
-
 def check_installable() -> str:
     """The packages this build produces are ones Android would accept."""
     gradle(":Builder:verifyApkClasses", ":Builder:verifyApkInstallability", "--rerun-tasks")
     return "classes present and signatures accepted"
 
-
 CHECKS: dict[str, tuple[str, object]] = {
     "layout": ("the tree is the agreed one", check_layout),
+    "comments": ("no file explains itself", check_comments),
     "format": ("rustfmt", check_format),
     "lint": ("clippy", check_lint),
     "core": ("the Core suite", check_core),
@@ -437,12 +520,10 @@ CHECKS: dict[str, tuple[str, object]] = {
     "reproducible": ("byte-for-byte rebuild", check_reproducible),
 }
 
-# The Core suite reads the packages this build produced, so they are made first.
 DEFAULT = [
-    "layout", "format", "lint", "dependencies", "strings",
+    "layout", "comments", "format", "lint", "dependencies", "strings",
     "release", "core", "bridge", "installable",
 ]
-
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__,
@@ -489,7 +570,7 @@ def main() -> int:
             detail, state = str(why), "skipped"
         except AssertionError as why:
             detail, state = str(why), "failed"
-        except Exception as why:  # a check itself broke
+        except Exception as why:
             detail, state = f"{type(why).__name__}: {why}", "failed"
         spent = time.monotonic() - started
         results.append(Result(name, state, spent, detail))
@@ -520,7 +601,6 @@ def main() -> int:
         return 1
     print(summary)
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1251,39 +1251,6 @@ pub mod plugin {
     }
 }
 
-/// What a compiler is asked, and what it promises back.
-///
-/// Everything a compiler does here goes through five steps, in order, each one
-/// able to refuse:
-///
-///   probe        which compiler is this, is it usable here, and does it
-///                promise the same bytes twice
-///   plan         given these sources and this configuration, what will be
-///                built and what will it be called -- worked out without
-///                building anything
-///   compile      do it, inside a budget, able to be told to stop
-///   diagnostics  what it found, structured, whether it worked or not
-///   artifacts    what came out, checked, or nothing at all
-///
-/// The last word is the one that matters most. A compiler that fails halfway
-/// has produced files, and those files look exactly like the ones a compiler
-/// that succeeded produces. Publishing them is how a build starts lying: the
-/// next step reads half an object, or the cache remembers a key for something
-/// that was never finished. So nothing a compiler makes goes into the store
-/// while it is running. It offers what it produced, the offers are held, and
-/// only a compilation that ran to the end commits them -- and even then each
-/// one is read back out of the store and checked against what went in before
-/// any of it is called an artifact.
-///
-/// The invariant underneath all of it:
-///
-///   the same canonical source, the same dependencies, the same compiler and
-///   toolchain identity, and the same configuration produce the same artifact
-///   digest.
-///
-/// Everything in the plan key exists to make that true, and `Reproducibility`
-/// exists because it is not true of every compiler and a compiler that cannot
-/// promise it has to say so rather than be assumed.
 pub mod compiler {
     use crate::cache;
     use crate::caps::{Capability, Decision, Policy};
@@ -1306,23 +1273,6 @@ pub mod compiler {
         )
     }
 
-    /// The only machine anything built here is meant to run on.
-    ///
-    /// One. A sixty-four bit ARM phone, and nothing else -- not an emulator,
-    /// not a thirty-two bit device, not a desktop. Everything else was taken
-    /// out deliberately.
-    ///
-    /// The reason is not that the others are hard. It is that every one of them
-    /// is a second answer to every question: a second set of calling
-    /// conventions, a second pointer width for a native library to disagree
-    /// about, a second build of everything to produce, a second thing to test
-    /// on and a second thing nobody tests on. A back end aimed at one machine
-    /// can be finished. A back end aimed at four is four back ends, and the
-    /// three nobody runs are the three that quietly stop working.
-    ///
-    /// Google Play has required a sixty-four bit build since 2019 and Android
-    /// has shipped devices with no thirty-two bit support at all since 2023.
-    /// The width this drops is the width that is going away anyway.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum Abi {
         Arm64V8a,
@@ -1337,15 +1287,12 @@ pub mod compiler {
             }
         }
 
-        /// What a Rust or Clang toolchain calls the same machine.
         pub const fn triple(self) -> &'static str {
             match self {
                 Abi::Arm64V8a => "aarch64-linux-android",
             }
         }
 
-        /// True, and it stays a question that can be asked so that anything
-        /// depending on the answer says so rather than assuming.
         pub const fn is_64_bit(self) -> bool {
             true
         }
@@ -1355,44 +1302,22 @@ pub mod compiler {
         }
     }
 
-    /// The oldest and newest Android anything built here targets.
-    ///
-    /// API 30 to 37, which is Android 11 through 17 -- eight releases, since
-    /// 12L is its own API level. Below 30 is a platform nothing here supports.
-    ///
-    /// The classes this build writes calls against are the platform's own as
-    /// of API 37, read off the Android 17 `android.jar` and written out in
-    /// `Android.rs`. Targeting is a separate promise from calling:
-    /// `targetSdkVersion` is a number the device reads to decide which of its
-    /// own defaults apply, and a package built here runs on a newer Android
-    /// whatever it says. What may not be targeted is 38, because 38 is a
-    /// platform nobody has yet described.
     pub const OLDEST_API: u32 = 30;
     pub const NEWEST_API: u32 = 37;
 
-    /// The newest platform whose classes this build has been given, which is
-    /// what a call is checked against. It never runs ahead of what may be
-    /// targeted, and as of Android 17 the two are the same release.
     pub const NEWEST_DESCRIBED_API: u32 = 37;
 
     pub const fn api_is_supported(level: u32) -> bool {
         level >= OLDEST_API && level <= NEWEST_API
     }
 
-    /// Exactly which compiler this is.
-    ///
-    /// Not "Kotlin" but this Kotlin, this version, aimed at this machine, with
-    /// whatever else about it changes what comes out. The digest over all of it
-    /// goes into the plan key, so upgrading a compiler invalidates what the old
-    /// one built rather than quietly serving it.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Identity {
         pub language: String,
         pub compiler: String,
         pub version: String,
         pub target: String,
-        /// Anything else that decides what comes out: a sysroot, a standard
-        /// library, a linker. Sorted and length-prefixed like everything else.
+
         pub components: Vec<(String, String)>,
     }
 
@@ -1456,21 +1381,12 @@ pub mod compiler {
         }
     }
 
-    /// Whether a compiler promises the same bytes for the same inputs.
-    ///
-    /// This is asked rather than assumed, because it is not true of every
-    /// compiler and the ones it is not true of do not announce it. A build that
-    /// treats a compiler as reproducible when it is not gets cache hits that
-    /// are wrong, and finds out much later.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub enum Reproducibility {
-        /// Same inputs, same bytes, always.
         Always,
-        /// Same inputs, same bytes, as long as these are pinned. A compiler
-        /// that embeds a path or a timestamp unless told not to says so here.
+
         Given(Vec<String>),
-        /// Not known to be. Anything this produces is used once and not
-        /// remembered as standing for its inputs.
+
         Unknown,
     }
 
@@ -1488,7 +1404,6 @@ pub mod compiler {
         }
     }
 
-    /// One thing to be compiled, as the compiler sees it.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Source {
         pub path: String,
@@ -1506,15 +1421,10 @@ pub mod compiler {
         }
     }
 
-    /// What is being asked for.
-    ///
-    /// Everything in here reaches the plan key, so two requests that differ
-    /// anywhere are two different compilations and neither is served for the
-    /// other.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Request {
         pub sources: Vec<Source>,
-        /// What this compilation was given, by digest. Not what produced them.
+
         pub dependencies: Vec<Digest>,
         pub abi: Abi,
         pub api_level: u32,
@@ -1541,8 +1451,6 @@ pub mod compiler {
             self
         }
 
-        /// The sources, in a fixed order, so that handing them over in another
-        /// order is the same compilation.
         pub fn ordered_sources(&self) -> Vec<Source> {
             let mut sorted = self.sources.clone();
             sorted.sort_by(|left, right| {
@@ -1594,14 +1502,11 @@ pub mod compiler {
         }
     }
 
-    /// What was found when the compiler was asked whether it could work here.
     #[derive(Clone, Debug)]
     pub struct Probe {
         pub identity: Option<Identity>,
         pub reproducibility: Reproducibility,
-        /// Why not, when there is no identity. A compiler that is simply not
-        /// installed is not a failure of the build; it is a fact about the
-        /// machine, and it is said plainly.
+
         pub unavailable: Option<Diagnostic>,
     }
 
@@ -1649,14 +1554,12 @@ pub mod compiler {
         }
     }
 
-    /// What a compiler will produce, said before it produces it.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Expected {
         pub name: String,
         pub kind: Kind,
     }
 
-    /// What kind of thing came out.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
     pub enum Kind {
         JvmClass,
@@ -1682,11 +1585,6 @@ pub mod compiler {
         }
     }
 
-    /// What will be done, worked out without doing it.
-    ///
-    /// The key is the invariant. Two plans with one key are the same
-    /// compilation and either may stand for the other; two that differ anywhere
-    /// have different keys and neither does.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Plan {
         pub key: cache::Key,
@@ -1696,11 +1594,6 @@ pub mod compiler {
     }
 
     impl Plan {
-        /// The key for a request compiled by this identity.
-        ///
-        /// This is the one place the invariant is decided, so it is the one
-        /// place it can be got wrong. Everything that changes what comes out is
-        /// in here and nothing that does not is.
         pub fn key_for(identity: &Identity, request: &Request) -> cache::Key {
             let mut record = crate::canonical::Record::new();
             record
@@ -1726,12 +1619,6 @@ pub mod compiler {
         }
     }
 
-    /// How much a compilation may spend, and how it is told to stop.
-    ///
-    /// A build on a phone shares the machine with everything the person is
-    /// actually doing. A compiler with no limit is not thorough; it is a
-    /// compiler that will be killed by the system at a moment nobody chose,
-    /// leaving whatever it had written behind.
     #[derive(Clone, Debug)]
     pub struct Budget {
         pub seconds: u64,
@@ -1748,7 +1635,6 @@ pub mod compiler {
             }
         }
 
-        /// A handle that can stop this compilation from another thread.
         pub fn stopper(&self) -> Stopper {
             Stopper {
                 flag: Arc::clone(&self.cancelled),
@@ -1766,10 +1652,6 @@ pub mod compiler {
         }
     }
 
-    /// Asks a compilation to stop.
-    ///
-    /// Asking twice is asking once, and asking after it has finished is
-    /// nothing at all.
     #[derive(Clone, Debug)]
     pub struct Stopper {
         flag: Arc<AtomicBool>,
@@ -1785,7 +1667,6 @@ pub mod compiler {
         }
     }
 
-    /// One thing a compilation produced, in the store and checked.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Produced {
         pub name: String,
@@ -1794,7 +1675,6 @@ pub mod compiler {
         pub bytes: u64,
     }
 
-    /// What a compilation came to.
     #[derive(Clone, Debug)]
     pub struct Compiled {
         pub key: cache::Key,
@@ -1823,15 +1703,6 @@ pub mod compiler {
         }
     }
 
-    /// A compilation while it is happening.
-    ///
-    /// Everything a compiler produces is offered here and held. Nothing reaches
-    /// the store until [`Session::commit`], and commit happens only for a
-    /// compilation that ran to the end. A compiler that fails, is cancelled, or
-    /// runs past its budget drops the session, and what it had made goes with
-    /// it -- which is the point. Half a compilation looks exactly like a whole
-    /// one from the outside, and the only moment anybody can tell the
-    /// difference is this one.
     pub struct Session<'a> {
         origin: &'static str,
         store: &'a Store,
@@ -1871,9 +1742,6 @@ pub mod compiler {
             &self.budget
         }
 
-        /// Asks for a capability the contract declared. A compiler that asks
-        /// for one it did not declare is refused by the policy, not by
-        /// politeness.
         pub fn require(&mut self, capability: Capability) -> Decision {
             self.policy.request(self.origin, capability)
         }
@@ -1882,11 +1750,6 @@ pub mod compiler {
             self.diagnostics.emit(diagnostic);
         }
 
-        /// Whether to carry on.
-        ///
-        /// Called between units of work. A compiler that never calls this
-        /// cannot be stopped and cannot be held to a budget, which is why the
-        /// contract says to call it and a test checks that each one does.
         pub fn carry_on(&self) -> Result<(), Diagnostic> {
             if self.budget.is_cancelled() {
                 return Err(Diagnostic::new(
@@ -1918,11 +1781,6 @@ pub mod compiler {
             Ok(())
         }
 
-        /// Offers something the compilation produced.
-        ///
-        /// It is held, not stored. Two offers under one name are a mistake in
-        /// the compiler and are refused here rather than silently keeping one
-        /// of them.
         pub fn offer(
             &mut self,
             name: impl Into<String>,
@@ -1957,13 +1815,6 @@ pub mod compiler {
             self.offered.len()
         }
 
-        /// Puts everything the compilation offered into the store, and checks
-        /// every one of it on the way out.
-        ///
-        /// Storing and then reading back is not paranoia about the store, which
-        /// checks itself. It is the last place a compiler that offered bytes it
-        /// did not mean can be caught, and it is cheap next to having compiled
-        /// them.
         pub fn commit(self, plan: &Plan) -> Result<Compiled, Diagnostic> {
             if plan.expected.len() != self.offered.len() {
                 return Err(fail(
@@ -2042,23 +1893,13 @@ pub mod compiler {
         }
     }
 
-    /// What every compiler here is.
-    ///
-    /// A compiler never sees the build that called it and never reaches back
-    /// into it. It is handed a request and a session and it answers; everything
-    /// it needs is in front of it. That is what makes one replaceable by
-    /// another and what stops any of them growing a special case for whatever
-    /// happens to be calling.
     pub trait Compiler: Sync {
         fn contract(&self) -> &'static Contract;
 
-        /// Which compiler this is, and whether it can work here at all.
         fn probe(&self) -> Probe;
 
-        /// What would be built, without building it.
         fn plan(&self, request: &Request) -> Result<Plan, Diagnostic>;
 
-        /// Build it.
         fn compile(
             &self,
             plan: &Plan,
@@ -2067,12 +1908,6 @@ pub mod compiler {
         ) -> Result<Compiled, Diagnostic>;
     }
 
-    /// The checks every compiler here has to pass, whatever it compiles.
-    ///
-    /// A contract is only worth what is enforced, and most of these are things
-    /// that would otherwise be true of three compilers and quietly false of the
-    /// fourth. Running one function over all of them is how that stops
-    /// happening.
     pub fn check_contract(compiler: &dyn Compiler) -> Vec<String> {
         let contract = compiler.contract();
         let mut wrong = Vec::new();
@@ -2132,8 +1967,6 @@ pub mod compiler {
             }
         }
 
-        // A plan for one request has to be the same plan every time, or the
-        // invariant this whole contract exists for does not hold.
         let request = Request::new(Abi::Arm64V8a, OLDEST_API)
             .with_source(Source::of("probe.txt", b"anything at all"));
         if let (Ok(first), Ok(again)) = (compiler.plan(&request), compiler.plan(&request)) {
@@ -2151,8 +1984,6 @@ pub mod compiler {
             }
         }
 
-        // And two requests that differ have to plan differently. There is one
-        // machine now, so the thing varied here is the platform.
         let other = Request::new(Abi::Arm64V8a, NEWEST_API)
             .with_source(Source::of("probe.txt", b"anything at all"));
         if let (Ok(first), Ok(second)) = (compiler.plan(&request), compiler.plan(&other)) {
@@ -2661,11 +2492,6 @@ pub mod hash {
             out
         }
 
-        /// A digest read back from what [`Digest::to_hex`] wrote.
-        ///
-        /// Anything else is not a digest and comes back as nothing, which is
-        /// what a store wants when it meets a file whose name it did not
-        /// choose.
         pub fn from_hex(text: &str) -> Option<Digest> {
             if text.len() != 64 {
                 return None;
@@ -3297,26 +3123,6 @@ pub mod hash {
 pub mod canonical {
     use crate::hash::{sha256, Digest};
 
-    /// One way to write a thing down.
-    ///
-    /// A digest is only worth as much as the encoding under it. Joining fields
-    /// with a separator and hashing the result looks like it identifies a
-    /// structure, and it does not: a feature called `a=b` with nothing after it
-    /// and a feature called `a` set to `b` join to the same string, so they
-    /// share a digest, so one is served out of the cache when the other was
-    /// asked for. That is not a hash collision anybody has to find. It is one
-    /// anybody can write down.
-    ///
-    /// Everything here is length-prefixed, so no value can be mistaken for a
-    /// separator or for the start of the next one, and every encoding can be
-    /// read back to exactly the structure that produced it. Two different
-    /// structures cannot write the same bytes, which is the property the
-    /// digests above this actually need.
-    ///
-    /// Records are written in order of name, not in the order the caller
-    /// happened to add them, so the same set of facts about a project always
-    /// comes out the same way. Without that, adding a feature in a different
-    /// order is a cache miss and a rebuild for no reason at all.
     #[derive(Clone, Debug, Default)]
     pub struct Record {
         fields: Vec<(String, Vec<u8>)>,
@@ -3327,39 +3133,31 @@ pub mod canonical {
             Record::default()
         }
 
-        /// A field holding bytes.
         pub fn bytes(&mut self, name: &str, value: &[u8]) -> &mut Record {
             self.fields.push((name.to_string(), value.to_vec()));
             self
         }
 
-        /// A field holding text.
         pub fn text(&mut self, name: &str, value: &str) -> &mut Record {
             self.bytes(name, value.as_bytes())
         }
 
-        /// A field holding a number, written wide so that no width of the same
-        /// number writes differently.
         pub fn number(&mut self, name: &str, value: u64) -> &mut Record {
             self.bytes(name, &value.to_be_bytes())
         }
 
-        /// A field holding a yes or a no.
         pub fn flag(&mut self, name: &str, value: bool) -> &mut Record {
             self.bytes(name, &[u8::from(value)])
         }
 
-        /// A field holding a digest.
         pub fn digest(&mut self, name: &str, value: Digest) -> &mut Record {
             self.bytes(name, value.as_bytes())
         }
 
-        /// A field holding another record.
         pub fn record(&mut self, name: &str, value: &Record) -> &mut Record {
             self.bytes(name, &value.encode())
         }
 
-        /// A field holding things whose order carries meaning, kept in it.
         pub fn sequence(&mut self, name: &str, items: &[Vec<u8>]) -> &mut Record {
             let mut out = Vec::new();
             out.extend_from_slice(&(items.len() as u64).to_be_bytes());
@@ -3370,8 +3168,6 @@ pub mod canonical {
             self.bytes(name, &out)
         }
 
-        /// A field holding things whose order carries nothing, sorted so that
-        /// it cannot accidentally start to.
         pub fn set(&mut self, name: &str, items: &[Vec<u8>]) -> &mut Record {
             let mut sorted = items.to_vec();
             sorted.sort();
@@ -3379,7 +3175,6 @@ pub mod canonical {
             self.sequence(name, &sorted)
         }
 
-        /// Named things whose order carries nothing: pairs, sorted by name.
         pub fn table(&mut self, name: &str, entries: &[(String, Vec<u8>)]) -> &mut Record {
             let mut inner = Record::new();
             for (key, value) in entries {
@@ -3388,13 +3183,6 @@ pub mod canonical {
             self.record(name, &inner)
         }
 
-        /// The bytes this record comes to.
-        ///
-        /// A count, then every field in order of name, each one the length of
-        /// its name, the name, the length of its value and the value. Nothing
-        /// in there is ambiguous and nothing in there is positional, so the
-        /// same facts always come to the same bytes and different facts never
-        /// do.
         pub fn encode(&self) -> Vec<u8> {
             let mut fields = self.fields.clone();
             fields.sort();
@@ -3411,7 +3199,6 @@ pub mod canonical {
             out
         }
 
-        /// What this record hashes to.
         pub fn to_digest(&self) -> Digest {
             sha256(&self.encode())
         }
@@ -3425,16 +3212,8 @@ pub mod canonical {
         }
     }
 
-    /// In front of every record, so that a record can never be mistaken for a
-    /// bare value that happens to look like one.
     const MAGIC: &[u8; 4] = b"OMNC";
 
-    /// Reads back what [`Record::encode`] wrote, as the pairs that went in.
-    ///
-    /// Nothing in the build needs this. It is here because the claim being made
-    /// -- that no two structures write the same bytes -- is exactly the claim
-    /// that the bytes can be read back to the structure, and a claim that can
-    /// be tested is worth more than one that is argued.
     pub fn decode(data: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
         if data.len() < 12 || &data[..4] != MAGIC {
             return None;
@@ -4204,9 +3983,7 @@ pub mod project {
                 version: "0.1.0".to_string(),
                 edition: None,
                 min_sdk: crate::compiler::OLDEST_API,
-                // The newest platform whose classes are here, not the newest
-                // that may be targeted: what a project is built against by
-                // default is what this build can check a call against.
+
                 target_sdk: crate::compiler::NEWEST_DESCRIBED_API,
                 compile_sdk: crate::compiler::NEWEST_DESCRIBED_API,
                 profile: Profile::Debug,
@@ -4230,23 +4007,6 @@ pub mod project {
                 .unwrap_or(false)
         }
 
-        /// Everything about this project that decides what a build produces,
-        /// written down one way.
-        ///
-        /// This used to join its parts with separators, which meant a feature
-        /// called `a=b` and a feature `a` set to `b` came to the same string
-        /// and therefore to the same digest, and one would be served out of the
-        /// cache when the other was asked for. It also left the features in
-        /// whatever order they were read in, so listing two of them the other
-        /// way round was a different digest and a rebuild for no reason. Both
-        /// are gone: every part is length-prefixed and every unordered part is
-        /// sorted.
-        ///
-        /// The edition is in here now as well. It decides how the source is
-        /// read, so two projects that differ only in it do not build the same
-        /// thing and must not share a digest. The name is deliberately not: it
-        /// is what a person calls the project and changes nothing that comes
-        /// out of it.
         pub fn canonical(&self) -> crate::canonical::Record {
             let mut record = crate::canonical::Record::new();
             record
@@ -5324,20 +5084,6 @@ pub mod artifact {
     }
 }
 
-/// Where the things a build produced are kept, and got back.
-///
-/// A build that cannot find what it made last time builds it again, which is
-/// the whole reason a cache exists. Until now there was an index that could say
-/// a key had been seen before and nothing at all that could hand back what was
-/// made for it, so every answer was a miss the moment the process ended.
-///
-/// Objects are named by what is in them. That is not a filing convention; it is
-/// what makes every other property here fall out. Two builds producing the same
-/// bytes share one object. A read can check what it got against the name it
-/// asked for, so silent corruption is impossible rather than unlikely. And an
-/// object is written under a temporary name and moved over its final one, so a
-/// machine that stops in the middle leaves either nothing or the whole thing,
-/// never half of it under a name that says it is whole.
 pub mod store {
     use crate::diag::{Diagnostic, Severity};
     use crate::hash::{sha256, Digest};
@@ -5346,11 +5092,8 @@ pub mod store {
     use std::collections::{BTreeMap, BTreeSet};
     use std::sync::{Arc, Mutex};
 
-    /// Where a staged object waits while it is being written.
     pub const STAGING: &str = ".staging";
 
-    /// The largest single object this will hold. An artifact bigger than this
-    /// is not a build output; it is a mistake with a size.
     pub const LARGEST_OBJECT: u64 = 512 * 1024 * 1024;
 
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -5373,16 +5116,14 @@ pub mod store {
         )
     }
 
-    /// One object, as the store knows it without opening it.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Held {
         pub digest: Digest,
         pub bytes: u64,
-        /// When it was last handed out, in seconds. What a sweep sorts by.
+
         pub touched: i64,
     }
 
-    /// What a sweep did.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct Swept {
         pub removed: u64,
@@ -5391,12 +5132,6 @@ pub mod store {
         pub held_back: u64,
     }
 
-    /// A promise that something will still be there.
-    ///
-    /// A build that is about to read an object holds one of these, and a sweep
-    /// running at the same time steps around it. The promise lasts as long as
-    /// the value does and no longer: a build that dies does not leave storage
-    /// pinned for ever, which is what a lease written to disk would do.
     pub struct Lease {
         digest: Digest,
         held: Arc<Mutex<BTreeMap<Digest, usize>>>,
@@ -5433,8 +5168,6 @@ pub mod store {
     }
 
     impl Store {
-        /// A store under this folder. Nothing is written until something is put
-        /// there, so naming a store costs nothing and cannot fail.
         pub fn at(root: &str) -> Store {
             Store {
                 root: root.trim_end_matches('/').to_string(),
@@ -5446,19 +5179,11 @@ pub mod store {
             &self.root
         }
 
-        /// Objects are spread across folders by their first byte, so that a
-        /// store holding a hundred thousand of them is not one folder holding a
-        /// hundred thousand entries.
         fn path_of(&self, digest: Digest) -> String {
             let hex = digest.to_hex();
             format!("{}/{}/{}", self.root, &hex[..2], &hex[2..])
         }
 
-        /// Puts bytes in, and says what they are called.
-        ///
-        /// Writing the same bytes twice is not an error and does not write
-        /// twice: the second put finds the object already there under the name
-        /// its contents give it, and leaves it alone.
         pub fn put(&self, bytes: &[u8]) -> Result<Digest, Diagnostic> {
             if bytes.len() as u64 > LARGEST_OBJECT {
                 return Err(fail("ES001", "That is larger than this store will hold.")
@@ -5482,10 +5207,6 @@ pub mod store {
                 })?;
             }
 
-            // Written under a name nothing reads, then moved over the name
-            // everything reads. A move within one folder tree either happened
-            // or did not, so nobody ever meets half an object under a name that
-            // says it is whole.
             let ticket = crate::random::bytes(16)?;
             let mut staged = format!("{staging}/");
             for byte in ticket {
@@ -5505,12 +5226,6 @@ pub mod store {
             Ok(digest)
         }
 
-        /// Gets bytes back, and checks they are the ones that were asked for.
-        ///
-        /// An object that no longer hashes to its own name is removed and
-        /// reported. Storage that hands back different bytes than it was given
-        /// is rare and real, and a build that carries on with them produces
-        /// something nobody can explain later.
         pub fn get(&self, digest: Digest) -> Result<Vec<u8>, Diagnostic> {
             let path = self.path_of(digest);
             let bytes = std::fs::read(&path).map_err(|why| {
@@ -5533,16 +5248,11 @@ pub mod store {
                 );
             }
 
-            // A sweep takes the least recently wanted first, so wanting it now
-            // is what has to be recorded.
             self.touch(&path);
             Ok(bytes)
         }
 
         fn touch(&self, path: &str) {
-            // No portable way to set a time without a dependency, so the file
-            // is opened for append and closed. That moves the modification time
-            // on every system this runs on and writes nothing.
             std::fs::OpenOptions::new().append(true).open(path).ok();
         }
 
@@ -5550,7 +5260,6 @@ pub mod store {
             std::path::Path::new(&self.path_of(digest)).is_file()
         }
 
-        /// Holds an object against a sweep for as long as the lease lives.
         pub fn lease(&self, digest: Digest) -> Lease {
             let mut held = self.leased.lock().unwrap_or_else(|held| held.into_inner());
             *held.entry(digest).or_insert(0) += 1;
@@ -5580,11 +5289,6 @@ pub mod store {
             })
         }
 
-        /// Everything in here, oldest use first.
-        ///
-        /// A file whose name is not a digest is not an object. It is skipped
-        /// rather than reported, because a store is somewhere a person can
-        /// look, and something they left there should not stop a build.
         pub fn list(&self) -> Vec<Held> {
             let mut found = Vec::new();
             let Ok(folders) = std::fs::read_dir(&self.root) else {
@@ -5634,12 +5338,6 @@ pub mod store {
             self.list().iter().map(|held| held.bytes).sum()
         }
 
-        /// Brings the store down to a size, taking what was wanted longest ago
-        /// first.
-        ///
-        /// Nothing leased is taken, and nothing named in `keep` is taken. A
-        /// store already inside its budget is left entirely alone, so calling
-        /// this when there is nothing to do costs one listing and no writes.
         pub fn sweep(&self, budget: u64, keep: &BTreeSet<Digest>) -> Swept {
             let held = self.list();
             let mut total: u64 = held.iter().map(|one| one.bytes).sum();
@@ -5669,11 +5367,6 @@ pub mod store {
             swept
         }
 
-        /// Throws away anything left staged.
-        ///
-        /// A staged object is one a build was writing when it stopped. Nothing
-        /// reads them and nothing can, since the name they wait under is
-        /// random, so what is left is space nobody will ever claim.
         pub fn clear_staging(&self) -> u64 {
             let staging = format!("{}/{STAGING}", self.root);
             let Ok(entries) = std::fs::read_dir(&staging) else {
@@ -5728,14 +5421,6 @@ pub mod cache {
     }
 
     impl Inputs<'_> {
-        /// What this compilation is, written one way.
-        ///
-        /// The environment used to be joined with `=` between a name and its
-        /// value and a unit separator between pairs, which meant a variable
-        /// whose value held a unit separator could be written to look like two
-        /// variables, and two different environments could come to one key. It
-        /// was also left in the order it was handed over, so the same
-        /// environment listed differently missed the cache. Both are gone.
         pub fn canonical(&self) -> crate::canonical::Record {
             let environment: Vec<(String, Vec<u8>)> = self
                 .relevant_environment
@@ -5770,11 +5455,6 @@ pub mod cache {
     pub struct Key(Digest);
 
     impl Key {
-        /// A key over a digest somebody else worked out.
-        ///
-        /// The compiler contract builds its own key over its own canonical
-        /// record, and this is how that becomes the same kind of thing the
-        /// cache holds, without either side reaching into the other.
         pub fn from_digest(digest: Digest) -> Key {
             Key(digest)
         }
@@ -5822,10 +5502,9 @@ pub mod cache {
         key: Key,
         content: Digest,
         valid: bool,
-        /// How big what it points at is, so a budget can be worked out without
-        /// opening every object.
+
         bytes: u64,
-        /// When it was last useful, in seconds.
+
         used: i64,
     }
 
@@ -5852,8 +5531,6 @@ pub mod cache {
             self.record(key, content, 0, 0);
         }
 
-        /// The same, told how large the object is and when this happened, which
-        /// is what a sweep needs and what survives being written down.
         pub fn record(&mut self, key: Key, content: Digest, bytes: u64, now: i64) {
             match self.entries.iter_mut().find(|entry| entry.key == key) {
                 Some(entry) => {
@@ -5872,7 +5549,6 @@ pub mod cache {
             }
         }
 
-        /// What a key points at, if it points at anything usable.
         pub fn content_for(&self, key: Key) -> Option<Digest> {
             self.entries
                 .iter()
@@ -5880,8 +5556,6 @@ pub mod cache {
                 .map(|entry| entry.content)
         }
 
-        /// Everything the index still expects to find, which is what a sweep
-        /// must not take.
         pub fn wanted(&self) -> std::collections::BTreeSet<Digest> {
             self.entries
                 .iter()
@@ -5890,11 +5564,6 @@ pub mod cache {
                 .collect()
         }
 
-        /// Drops entries pointing at objects the store no longer holds.
-        ///
-        /// An index that outlives what it indexes is worse than no index: every
-        /// lookup says hit and every read then fails. Reconciling costs one
-        /// question per entry and is what makes the two safe to restart apart.
         pub fn reconcile(&mut self, store: &crate::store::Store) -> usize {
             let before = self.entries.len();
             self.entries
@@ -5952,12 +5621,6 @@ pub mod cache {
             w.end_object();
         }
 
-        /// The index written down, in the encoding everything else here is
-        /// written in.
-        ///
-        /// Statistics are not in it. They are what happened in one run and
-        /// carrying them forward would only make the numbers a person reads
-        /// meaningless.
         pub fn encode(&self) -> Vec<u8> {
             let mut sorted = self.entries.clone();
             sorted.sort_by_key(|entry| entry.key);
@@ -5982,13 +5645,6 @@ pub mod cache {
             record.encode()
         }
 
-        /// An index read back from what [`Index::encode`] wrote.
-        ///
-        /// Anything that does not read comes back as an empty index rather than
-        /// as a failure. A cache that cannot be read is a cache that is empty:
-        /// every lookup misses, every build runs, and the next write puts a
-        /// good one in its place. Refusing to start because a cache file got
-        /// damaged would be turning something harmless into something fatal.
         pub fn decode(data: &[u8]) -> Index {
             let Some(fields) = crate::canonical::decode(data) else {
                 return Index::new();
@@ -6038,18 +5694,12 @@ pub mod cache {
             index
         }
 
-        /// Reads an index from a file, or hands back an empty one.
         pub fn read(path: &str) -> Index {
             std::fs::read(path)
                 .map(|data| Index::decode(&data))
                 .unwrap_or_default()
         }
 
-        /// Writes the index beside itself and moves it over itself.
-        ///
-        /// A cache index half written is a cache index that says things that
-        /// are not so, and the machine that stopped in the middle is exactly
-        /// the one that will be asked to build again.
         pub fn write(&self, path: &str) -> Result<(), Diagnostic> {
             if let Some(folder) = std::path::Path::new(path).parent() {
                 std::fs::create_dir_all(folder).map_err(|why| {
@@ -7470,14 +7120,6 @@ pub mod binary {
             )
         }
 
-        /// Text as a class file holds it.
-        ///
-        /// Not UTF-8, however much it looks like it. A zero is written as two
-        /// bytes so that no string can contain one, and anything outside the
-        /// basic plane is written as the two surrogates it would be in UTF-16
-        /// rather than as one four-byte sequence. A writer that emits real
-        /// UTF-8 produces class files that most things read and some things
-        /// reject, which is the worst of both.
         pub fn encode(text: &str) -> Vec<u8> {
             let mut out = Vec::with_capacity(text.len() + 8);
             for point in text.chars() {
@@ -7494,8 +7136,6 @@ pub mod binary {
                     out.push(0x80 | ((value >> 6) & 0x3f) as u8);
                     out.push(0x80 | (value & 0x3f) as u8);
                 } else {
-                    // Written as the surrogate pair, each surrogate in three
-                    // bytes: six in total, where UTF-8 would use four.
                     let mut units = [0u16; 2];
                     let pair = point.encode_utf16(&mut units);
                     for unit in pair {
@@ -8434,10 +8074,6 @@ pub mod resources {
             Kind::Xml,
         ];
 
-        /// Whether what this kind holds is a file in the package rather than a
-        /// value in the table. A `layout` is a compiled XML sitting at
-        /// `res/layout/main.xml`, and the entry for it is the path; a `string`
-        /// is the text itself.
         pub const fn is_a_file(self) -> bool {
             matches!(
                 self,
@@ -8455,21 +8091,11 @@ pub mod resources {
             )
         }
 
-        /// Whether XML of this kind becomes binary XML in the package.
-        ///
-        /// Everything but a `raw` file does: a layout, a menu, a drawable that
-        /// is a vector or a shape or a list of states, an icon written as an
-        /// adaptive one. A `raw` file is carried exactly as it was written,
-        /// which is the whole point of `raw`. What is not XML in the first
-        /// place -- a picture, a sound -- is carried whatever folder it is in.
         pub const fn is_compiled_xml(self) -> bool {
             !matches!(self, Kind::Raw)
         }
 
         pub fn parse(value: &str) -> Option<Kind> {
-            // A list of strings and a list of numbers are both an `array` in
-            // the table; the element they are written as only says what the
-            // items in it are.
             if value == "string-array" || value == "integer-array" {
                 return Some(Kind::Array);
             }
@@ -8496,12 +8122,11 @@ pub mod resources {
         ExtraHigh,
         ExtraExtraHigh,
         ExtraExtraExtraHigh,
-        /// What a television is, which is between medium and high and has a
-        /// name of its own because nothing else is that.
+
         Television,
         None,
         Any,
-        /// A number of dots per inch said outright, which a folder may do.
+
         Exactly(u16),
     }
 
@@ -8518,13 +8143,11 @@ pub mod resources {
                 Density::Television => "tvdpi",
                 Density::None => "nodpi",
                 Density::Any => "anydpi",
-                // One said outright has no name of its own; `name` gives it
-                // the one the folder used.
+
                 Density::Exactly(_) => "dpi",
             }
         }
 
-        /// What a folder carrying this density is called.
         pub fn name(self) -> String {
             match self {
                 Density::Exactly(dots) => format!("{dots}dpi"),
@@ -8560,12 +8183,6 @@ pub mod resources {
         }
     }
 
-    /// Which people a resource is for: a language, and where it is spoken.
-    ///
-    /// The table keeps a language and a region in two bytes each, and a script
-    /// in four. Two letters go in as they are; three are packed into the same
-    /// two bytes with the top bit set, which is how the platform makes room
-    /// for `fil` and `gsw` in a field built for `en` and `de`.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
     pub struct Locale {
         language: Option<[u8; 2]>,
@@ -8591,7 +8208,6 @@ pub mod resources {
             })
         }
 
-        /// `rUS`, which only means anything after a language.
         pub fn with_region(self, value: &str) -> Option<Locale> {
             let rest = value.strip_prefix('r')?;
             if self.language.is_none() || self.region.is_some() {
@@ -8606,7 +8222,6 @@ pub mod resources {
             })
         }
 
-        /// `b+sr+Latn+RS`, which is how a folder says all of it at once.
         pub fn parse_bcp47(value: &str) -> Option<Locale> {
             let mut parts = value.strip_prefix("b+")?.split('+');
             let language = packed(parts.next()?, b'a')?;
@@ -8646,7 +8261,6 @@ pub mod resources {
             self.language.is_none()
         }
 
-        /// The language on its own, which is what a folder is named after.
         pub fn as_str(&self) -> &str {
             match &self.language {
                 Some(letters) if letters[0] & 0x80 == 0 => {
@@ -8657,7 +8271,6 @@ pub mod resources {
             }
         }
 
-        /// All of it, the way a bundle names a language.
         pub fn name(&self) -> String {
             let mut out = unpacked(self.language, b'a');
             if let Some(script) = &self.script {
@@ -8673,12 +8286,6 @@ pub mod resources {
         }
     }
 
-    /// Two letters as they are, or three squeezed into the same two bytes.
-    ///
-    /// The platform packs a three letter code as five bits each from a base --
-    /// `a` for a language, `0` for a region -- with the top bit set to say it
-    /// did. Two letters are left alone, so `en` reads as `en` on a platform
-    /// that never heard of the packing.
     fn packed(value: &str, base: u8) -> Option<[u8; 2]> {
         let bytes = value.as_bytes();
         match bytes.len() {
@@ -8696,7 +8303,6 @@ pub mod resources {
         }
     }
 
-    /// The other way round.
     fn unpacked(value: Option<[u8; 2]>, base: u8) -> String {
         let Some(held) = value else {
             return String::new();
@@ -8716,48 +8322,39 @@ pub mod resources {
         }
     }
 
-    /// Everything a folder name can say about which devices its contents are
-    /// for, kept the way the table keeps it.
-    ///
-    /// The names are the platform's own, and so are the numbers: a folder
-    /// called `values-night-sw600dp-v26` is these fields set, and nothing else
-    /// about it survives. What is not said is zero, which the platform reads as
-    /// "any", and a resource in a folder that says nothing is the one every
-    /// device falls back to.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
     pub struct Config {
         pub locale: Locale,
         pub density: Density,
-        /// The network the device is on.
+
         pub mcc: u16,
         pub mnc: u16,
-        /// Which way round the screen is held.
+
         pub orientation: u8,
-        /// What there is to touch it, type on and move around with.
+
         pub touchscreen: u8,
         pub keyboard: u8,
         pub navigation: u8,
         pub input_flags: u8,
-        /// How big it is in pixels, which no folder name says any more.
+
         pub screen_width: u16,
         pub screen_height: u16,
-        /// The oldest platform that understands the rest of this.
+
         pub version: u16,
-        /// How big it is, which way up it is long, and which way it reads.
+
         pub screen_layout: u8,
-        /// What kind of thing it is, and whether it is night.
+
         pub ui_mode: u8,
-        /// How big it is in the units a layout is written in.
+
         pub smallest_width: u16,
         pub width: u16,
         pub height: u16,
-        /// Whether it is round.
+
         pub screen_layout2: u8,
-        /// What colours it can show.
+
         pub colour_mode: u8,
     }
 
-    /// The numbers the platform gives the things a folder name can say.
     pub mod said {
         pub const ORIENTATION_PORT: u8 = 1;
         pub const ORIENTATION_LAND: u8 = 2;
@@ -8838,19 +8435,10 @@ pub mod resources {
             }
         }
 
-        /// Whether this says nothing at all, which is the folder every device
-        /// falls back to.
         pub fn says_nothing(&self) -> bool {
             *self == Config::DEFAULT
         }
 
-        /// The oldest platform that understands what this says.
-        ///
-        /// A folder naming something the platform learned later has to say so,
-        /// or an older one reads it as though the qualifier were not there and
-        /// picks the wrong resource. Which of them decides is a chain, not a
-        /// sum: the first that applies is the answer, exactly as `aapt2` does
-        /// it.
         pub fn oldest_platform(&self) -> u16 {
             if self.density == Density::Any {
                 21
@@ -8871,8 +8459,6 @@ pub mod resources {
 
         pub const VALUES_DIRECTORY: &'static str = "values";
 
-        /// Whether what a qualifier carries after its prefix is a number, so
-        /// that `mcc310` is a country code and `mccx` is not.
         fn is_a_number(held: &str) -> bool {
             !held.is_empty() && held.chars().all(|one| one.is_ascii_digit())
         }
@@ -8900,13 +8486,6 @@ pub mod resources {
             Config::parse_qualifiers(name, parts)
         }
 
-        /// Where a qualifier sits in the order a folder name has to write
-        /// them in.
-        ///
-        /// The order is the platform's own, and it is not a nicety: `aapt2`
-        /// refuses `values-night-land` and accepts `values-land-night`, so a
-        /// build that took either would be a build whose folders stop working
-        /// the moment the project is opened anywhere else.
         fn rank_of(qualifier: &str) -> Option<u8> {
             const KEYWORDS: &[(&[&str], u8)] = &[
                 (&["ldrtl", "ldltr"], 4),
@@ -8935,8 +8514,6 @@ pub mod resources {
                 (&["nonav", "dpad", "trackball", "wheel"], 21),
             ];
 
-            // In the order the reader below tries them, so that what a name
-            // is ranked as is what it is read as.
             if Density::parse(qualifier).is_some() {
                 return Some(16);
             }
@@ -8963,7 +8540,7 @@ pub mod resources {
                     return Some(rank);
                 }
             }
-            // A language, a region, or a whole locale said at once.
+
             Some(3)
         }
 
@@ -8976,8 +8553,6 @@ pub mod resources {
             let mut last: u8 = 0;
             for qualifier in qualifiers {
                 if let Some(rank) = Self::rank_of(qualifier) {
-                    // The locale is two qualifiers, a language and where it is
-                    // spoken, so that one may be said twice. Nothing else may.
                     if rank < last || (rank == last && rank != 3) {
                         return Err(format!(
                             "'{name}' writes its qualifiers in an order the platform \
@@ -8992,9 +8567,7 @@ pub mod resources {
                     config.density = density;
                     continue;
                 }
-                // Everything a folder name can say, in the order the platform
-                // lists them. Each is a name of its own, so which field it
-                // lands in is not a guess.
+
                 let one = |held: &mut u8, mask: u8, value: u8| {
                     *held = (*held & !mask) | value;
                 };
@@ -9154,7 +8727,6 @@ pub mod resources {
                     _ => {}
                 }
 
-                // And the ones that carry a number.
                 if let Some(number) = qualifier.strip_prefix("mcc") {
                     match number.parse::<u16>() {
                         Ok(held) => {
@@ -9173,8 +8745,7 @@ pub mod resources {
                         Err(_) => return Err(format!("'{qualifier}' is not a network code.")),
                     }
                 }
-                // A version, which is a `v` and a number. A language can
-                // begin with a `v` too, so anything else falls through.
+
                 if let Some(held) = qualifier
                     .strip_prefix('v')
                     .and_then(|number| number.parse::<u16>().ok())
@@ -9204,8 +8775,6 @@ pub mod resources {
                     continue;
                 }
 
-                // A whole locale said at once, which is how a folder names
-                // one that needs a script.
                 if let Some(locale) = Locale::parse_bcp47(qualifier) {
                     if !config.locale.is_any() {
                         return Err(format!(
@@ -9215,8 +8784,7 @@ pub mod resources {
                     config.locale = locale;
                     continue;
                 }
-                // Where it is spoken, which only means anything after which
-                // language it is.
+
                 if let Some(locale) = config.locale.with_region(qualifier) {
                     config.locale = locale;
                     continue;
@@ -9338,9 +8906,7 @@ pub mod resources {
             milli: i64,
             unit: Unit,
         },
-        /// `50%` of something, or `50%p` of whatever holds it: the same packed
-        /// number a dimension is, with the whole it is a part of in the low
-        /// bits rather than a unit.
+
         Fraction {
             milli: i64,
             of_parent: bool,
@@ -9350,39 +8916,21 @@ pub mod resources {
         Reference(Reference),
         File(String),
         Empty,
-        /// A value the framework has already decided the shape of.
-        ///
-        /// An attribute in a style says what it accepts, and `16sp` under
-        /// `android:textSize` is a packed dimension while `vertical` under
-        /// `android:orientation` is the number one. What is kept is the kind
-        /// the table stores and the four bytes beside it, together with the
-        /// text it was written as.
+
         Typed {
             source: String,
             as_what: u8,
             data: u32,
         },
-        /// `?attr/colorPrimary`: not a value but a question, which the device
-        /// answers out of whatever theme is in force when it reads this.
+
         Attribute(Reference),
-        /// Several values under one name, each with what the table calls it
-        /// by: an attribute's identifier in a style, a position in an array,
-        /// a quantity in a plural, what an attribute accepts and the names it
-        /// gives its own values.
+
         Bag {
             parent: Option<Reference>,
             items: Vec<(BagKey, Value)>,
         },
     }
 
-    /// What a bag calls one of the values it holds.
-    ///
-    /// Some of these numbers are known as the file is read: a position in an
-    /// array, a quantity in a plural, the identifier the framework long ago
-    /// gave an attribute a style sets. Others are the project's own, and the
-    /// project's own numbers are handed out when the table is compiled -- so
-    /// those are carried by name until then and resolved once, in the one
-    /// place that knows them.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub enum BagKey {
         Number(u32),
@@ -9390,8 +8938,6 @@ pub mod resources {
     }
 
     impl BagKey {
-        /// The number, where this is one. A key still carrying a name has not
-        /// been through `compile`, and nothing that writes a table may guess.
         pub fn number(&self) -> Option<u32> {
             match self {
                 BagKey::Number(held) => Some(*held),
@@ -9400,16 +8946,6 @@ pub mod resources {
         }
     }
 
-    /// The numbers the table gives the parts of a bag.
-    ///
-    /// An array's items are numbered from `0x0100_0001` upwards, and a plural's
-    /// quantities have one number each out of the same block the platform keeps
-    /// for itself. A style's are the identifiers of the attributes it sets,
-    /// which are numbers the framework already handed out.
-    ///
-    /// The quantities are written in the order they are listed here, which is
-    /// the order the platform names them in and the order `aapt2` writes them,
-    /// whatever order they were written in.
     pub const BAG_ARRAY_FIRST: u32 = 0x0100_0001;
     pub const BAG_PLURAL: &[(&str, u32)] = &[
         ("zero", 0x0100_0005),
@@ -9479,8 +9015,7 @@ pub mod resources {
                 Value::File(path) => path.clone(),
                 Value::Empty => String::new(),
                 Value::Typed { source, .. } => source.clone(),
-                // A bag has no one value to write out; what it holds is
-                // written where it is written.
+
                 Value::Bag { .. } => String::new(),
             }
         }
@@ -9533,12 +9068,6 @@ pub mod resources {
         }
     }
 
-    /// A group of attributes a view reads together.
-    ///
-    /// `obtainStyledAttributes` is handed an array of identifiers and gives
-    /// the values back in the same order, so what a styleable comes to, in the
-    /// end, is that array. None of it reaches the table -- `aapt2` writes no
-    /// entry for one -- and all of it reaches `R`.
     #[derive(Clone, Debug)]
     pub struct Styleable {
         pub name: String,
@@ -9547,8 +9076,6 @@ pub mod resources {
         pub position: Position,
     }
 
-    /// One attribute a styleable reads: the framework's, written
-    /// `android:textColor`, or this project's, written by its bare name.
     #[derive(Clone, Debug)]
     pub struct StyleableAttribute {
         pub platform: bool,
@@ -9556,10 +9083,6 @@ pub mod resources {
     }
 
     impl StyleableAttribute {
-        /// What `R.styleable` calls the offset of this one in the array.
-        ///
-        /// A field name cannot hold a colon or a dot, so `android:textColor`
-        /// becomes `android_textColor`, which is what `aapt2` writes too.
         pub fn field(&self) -> String {
             let held = if self.platform {
                 format!("android:{}", self.name)
@@ -9570,8 +9093,6 @@ pub mod resources {
         }
     }
 
-    /// A styleable with its attributes settled: the array `R` writes, in the
-    /// order the device reads it.
     #[derive(Clone, Debug)]
     pub struct CompiledStyleable {
         pub name: String,
@@ -9614,16 +9135,6 @@ pub mod resources {
             self.entries.is_empty()
         }
 
-        /// Settles what platform each entry is for, and drops the ones the
-        /// project has already left behind.
-        ///
-        /// A folder naming something the platform learned later has to say so,
-        /// or an older platform reads it as though the qualifier were not
-        /// there. But if the oldest platform the project runs on knows it
-        /// already, saying so is noise: the table carries a version nothing
-        /// will ever be older than, and two folders that now say the same
-        /// thing collide. The one asking for the newer platform wins, which is
-        /// the one the device would have chosen anyway.
         pub fn settle_versions(&mut self, oldest: u16) {
             let mut asked: Vec<u16> = Vec::with_capacity(self.entries.len());
             for entry in &self.entries {
@@ -9671,20 +9182,12 @@ pub mod resources {
             }
         }
 
-        /// Whether this already holds that resource for those devices.
         pub fn holds(&self, kind: Kind, name: &str, config: Config) -> bool {
             self.entries
                 .iter()
                 .any(|held| held.kind == kind && held.name == name && held.config == config)
         }
 
-        /// Takes from another table whatever this one does not already have.
-        ///
-        /// A library's resources sit underneath the project's: where both
-        /// declare the same thing for the same devices, the project's is the
-        /// one that ships, quietly, because overriding a library's resource is
-        /// a thing an application is meant to be able to do. What comes back
-        /// is what was taken.
         pub fn take_what_is_missing(&mut self, other: Table, sink: &mut Sink) -> Vec<Entry> {
             let mut taken = Vec::new();
             for entry in other.entries {
@@ -9696,9 +9199,7 @@ pub mod resources {
                     taken.push(held);
                 }
             }
-            // A library brings the groups of attributes its own views read, and
-            // a project that already declares a group of that name keeps its
-            // own -- the same rule the entries follow.
+
             for styleable in other.styleables {
                 if self
                     .styleables
@@ -9757,15 +9258,10 @@ pub mod resources {
             config: Config,
             sink: &mut Sink,
         ) -> bool {
-            // A styleable is the one thing here that is not a resource: it
-            // becomes an array in `R` and nothing in the table.
             if element.name == "declare-styleable" {
                 return self.read_styleable(element, origin, config, sink);
             }
 
-            // `<item type="id" name="save"/>` is how a values file declares a
-            // resource whose element it does not want to name: the type is
-            // written out rather than being the tag.
             let named = if element.name == "item" {
                 match element.attribute("type") {
                     Some(held) => held,
@@ -9840,16 +9336,10 @@ pub mod resources {
                 return false;
             }
 
-            // An attribute is a bag too, but the only one that declares
-            // resources of its own: every name it gives one of its values is
-            // an `id` the table has to carry.
             if kind == Kind::Attr {
                 return self.read_attr(name, element, origin, config, sink);
             }
 
-            // A style, an array and a plural are written as several values
-            // inside one element, and each kind numbers what it holds its own
-            // way.
             if kind.is_a_bag() {
                 let Some(value) = read_bag(kind, name, element, origin, sink) else {
                     return false;
@@ -9948,12 +9438,6 @@ pub mod resources {
             )
         }
 
-        /// Declares an `id` the way `@+id/save` in a layout does.
-        ///
-        /// An identifier is all it is: nothing is stored against it, and
-        /// `findViewById(R.id.save)` is the whole of what it is for. Written
-        /// twice in one project it is still one identifier, which is why a
-        /// name already declared is not an error here.
         pub fn declare_id(&mut self, name: &str, origin: &str, sink: &mut Sink) -> bool {
             if validate_name(name).is_err() {
                 return true;
@@ -9978,12 +9462,6 @@ pub mod resources {
             )
         }
 
-        /// Declares a group of attributes a view reads together.
-        ///
-        /// An `<attr>` inside one that says what it accepts declares that
-        /// attribute as well; one that only names an attribute is naming an
-        /// attribute declared somewhere else, which is how the framework's own
-        /// are pulled into a group.
         fn read_styleable(
             &mut self,
             element: &Element,
@@ -10110,8 +9588,6 @@ pub mod resources {
                     return false;
                 }
 
-                // An `<attr>` that says what it accepts is declaring the
-                // attribute, not just naming it.
                 let declares = child.attribute("format").is_some() || !child.children.is_empty();
                 if declares {
                     if platform {
@@ -10149,12 +9625,6 @@ pub mod resources {
             true
         }
 
-        /// Declares an attribute: what it accepts, and the names it gives its
-        /// own values.
-        ///
-        /// Each of those names is an `id` in its own right -- that is how the
-        /// table numbers them, and how `aapt2` writes them -- so declaring
-        /// `<enum name="left" value="0"/>` declares `R.id.left` as well.
         fn read_attr(
             &mut self,
             name: &str,
@@ -10327,12 +9797,6 @@ pub mod resources {
             })
         }
 
-        /// What each attribute this project declares accepts, and the names
-        /// it gives its own values.
-        ///
-        /// Read straight off the entries rather than off a compiled table,
-        /// because this is what a style needs while the table is still being
-        /// put together.
         #[allow(clippy::type_complexity)]
         fn declarations(&self) -> Vec<(String, String, Vec<(String, u32)>)> {
             let mut out = Vec::new();
@@ -10362,14 +9826,6 @@ pub mod resources {
             out
         }
 
-        /// The numbers a bag's own names come to.
-        ///
-        /// A style may set an attribute this project declares, and an
-        /// attribute names its own values by identifiers of the project's own.
-        /// Neither number exists while the file is being read, because neither
-        /// has been handed out yet. Both have now, so this is where the names
-        /// become the numbers a device reads -- and where a name nothing
-        /// declares is refused rather than written as some number.
         fn settle_bag_keys(
             &mut self,
             assignments: &[(Kind, String, ResourceId)],
@@ -10419,9 +9875,6 @@ pub mod resources {
                 }
             }
 
-            // What a style sets an attribute to is typed by what that
-            // attribute accepts, and for the project's own that was not known
-            // while the file was being read. It is now.
             let declared = self.declarations();
             let mut typed: Vec<(usize, Vec<Value>)> = Vec::new();
             for (at, entry) in self.entries.iter().enumerate() {
@@ -10472,11 +9925,6 @@ pub mod resources {
                 }
             }
 
-            // A style and an attribute are written in order of what they call
-            // their parts, which is the order `aapt2` writes and the order the
-            // device reads. An array keeps the order it was written in and a
-            // plural the order the platform names its quantities, so neither
-            // is touched here.
             for entry in &mut self.entries {
                 if !matches!(entry.kind, Kind::Style | Kind::Attr) {
                     continue;
@@ -10489,12 +9937,6 @@ pub mod resources {
             ok
         }
 
-        /// The array each styleable comes to.
-        ///
-        /// A styleable is a list of attributes, and what the device is handed
-        /// is their identifiers in ascending order -- ascending because
-        /// `obtainStyledAttributes` sorts what it is given, and the offsets
-        /// `R` writes have to be the offsets into what it sorted.
         fn settle_styleables(
             &self,
             assignments: &[(Kind, String, ResourceId)],
@@ -10721,13 +10163,6 @@ pub mod resources {
             &self.styleables
         }
 
-        /// What this project calls its own attributes, in the form the binary
-        /// XML writer needs: the number each was given, what it accepts, and
-        /// the names it gives its values.
-        ///
-        /// A layout writing `app:corner="rounded"` has to come out as that
-        /// number holding the number behind `rounded`, and this is where both
-        /// of those come from.
         pub fn declared_attributes(&self) -> Vec<crate::axml::Declared> {
             let mut out = Vec::new();
             for (kind, name, id) in &self.assignments {
@@ -10788,10 +10223,6 @@ pub mod resources {
     }
 
     impl Kind {
-        /// Whether what this kind holds is several values rather than one: a
-        /// style is a list of attributes, an array a list of items, a plural a
-        /// list of quantities. The table calls these complex entries and
-        /// writes them a different shape.
         pub const fn is_a_bag(self) -> bool {
             matches!(self, Kind::Style | Kind::Array | Kind::Plurals | Kind::Attr)
         }
@@ -10912,8 +10343,7 @@ pub mod resources {
                 }
             },
             Kind::Id => Some(Value::Empty),
-            // A bag is put together by the reader that walks the elements
-            // inside it, not from one run of text.
+
             Kind::Array | Kind::Plurals | Kind::Style | Kind::Attr => {
                 sink.emit(
                     reject(
@@ -10951,26 +10381,9 @@ pub mod resources {
         }
     }
 
-    /// A whole number, as it was written: `2` and `0x2` are the same number
-    /// and the table keeps which one the file said.
     const TYPE_INT_DEC: u8 = 0x10;
     const TYPE_INT_HEX: u8 = 0x11;
 
-    /// A style, an array or a plural: several values written inside one
-    /// element.
-    ///
-    /// What numbers the parts differs by kind. A style is keyed by the
-    /// identifiers of the attributes it sets; an array by where each item sits;
-    /// a plural by the quantity it is for. So does the order they are written
-    /// in: a style runs by identifier, an array in the order it was written,
-    /// and a plural in the order the platform names the quantities. That is the
-    /// order `aapt2` writes them, and a table is read back by what it holds.
-    /// What an attribute accepts, as the bits the table keeps.
-    ///
-    /// A device reads `android:orientation="vertical"` by looking the
-    /// attribute up, finding that it is an enumeration, and finding `vertical`
-    /// among the names it gives its values. None of that works unless what the
-    /// attribute accepts is written down, which is what these bits are.
     pub mod accepts {
         pub const REFERENCE: u32 = 1 << 0;
         pub const STRING: u32 = 1 << 1;
@@ -10980,8 +10393,7 @@ pub mod resources {
         pub const FLOAT: u32 = 1 << 5;
         pub const DIMENSION: u32 = 1 << 6;
         pub const FRACTION: u32 = 1 << 7;
-        /// Everything above at once, which is what an attribute that does not
-        /// say gets.
+
         pub const ANY: u32 = 0x0000_ffff;
         pub const ENUM: u32 = 1 << 16;
         pub const FLAGS: u32 = 1 << 17;
@@ -10999,9 +10411,6 @@ pub mod resources {
             ("flags", FLAGS),
         ];
 
-        /// These bits written the way the framework's own table writes them,
-        /// so that one declared here and one declared by the platform are read
-        /// by the same code.
         pub fn text(bits: u32) -> String {
             let mut said: Vec<&str> = Vec::new();
             if bits & ANY == ANY {
@@ -11022,13 +10431,8 @@ pub mod resources {
         }
     }
 
-    /// The number an attribute's bag calls what it accepts.
-    ///
-    /// It is `attr/type` in the framework's own table, which is why it is a
-    /// number out of the platform's block rather than one of the project's.
     pub const BAG_ATTR_TYPE: u32 = 0x0100_0000;
 
-    /// One `<attr>`: the bag it becomes, and the names it declares as ids.
     fn read_attr_value(
         name: &str,
         element: &Element,
@@ -11101,9 +10505,7 @@ pub mod resources {
                     return None;
                 }
             };
-            // Naming a value is itself saying what the attribute accepts, so
-            // an attribute that names values and says nothing else still says
-            // it is an enumeration or a set of flags.
+
             bits |= bit;
 
             let Some(held) = child.attribute("name") else {
@@ -11179,8 +10581,6 @@ pub mod resources {
             ));
         }
 
-        // Saying nothing is saying anything: an attribute with no format and
-        // no names accepts every kind of value there is.
         if bits == 0 {
             bits = accepts::ANY;
         }
@@ -11205,11 +10605,6 @@ pub mod resources {
         ))
     }
 
-    /// A number written for a device to carry, and how it was written.
-    ///
-    /// `0x2` and `2` are the same number and not the same text, and the table
-    /// keeps which one was written so that a dump reads back what the file
-    /// said.
     fn whole_number(raw: &str) -> Option<(u8, u32)> {
         if let Some(hex) = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
             return u32::from_str_radix(hex, 16)
@@ -11296,11 +10691,6 @@ pub mod resources {
             items.push(held);
         }
 
-        // A style is sorted by the identifier of the attribute it sets, but
-        // some of those identifiers are the project's own and are not handed
-        // out yet, so that sort happens in `compile` where they are known. A
-        // plural is written in the order the platform names its quantities,
-        // whatever order they were written in, and that is known here.
         if kind == Kind::Plurals {
             items.sort_by_key(|(key, _)| {
                 BAG_PLURAL
@@ -11313,13 +10703,6 @@ pub mod resources {
         Some(Value::Bag { parent, items })
     }
 
-    /// What a style is built on.
-    ///
-    /// It can say so — `parent="android:Theme.Material"`, or the same written
-    /// as `@android:style/Theme.Material` — and a style named `Theme.Dark` is
-    /// built on `Theme` without saying so, which is how most of them are
-    /// written. Saying `parent=""` is how one of those says it is built on
-    /// nothing.
     fn style_parent(
         name: &str,
         element: &Element,
@@ -11373,8 +10756,6 @@ pub mod resources {
         }))
     }
 
-    /// One `<item name="android:…">` of a style: which attribute it sets, and
-    /// the value typed the way that attribute says it should be.
     fn style_item(child: &Element, origin: &str, sink: &mut Sink) -> Option<(BagKey, Value)> {
         let Some(written) = child.attribute("name") else {
             sink.emit(
@@ -11392,9 +10773,7 @@ pub mod resources {
         let written = written.trim();
         let local = match written.split_once(':') {
             Some(("android", rest)) => rest,
-            // One the project declares itself, whose number is handed out when
-            // the table is compiled. What it accepts is what it was declared to
-            // accept, so the value is read for what it is written as.
+
             None => {
                 if validate_name(written).is_err() {
                     sink.emit(
@@ -11418,10 +10797,6 @@ pub mod resources {
                 } else if let Some(attribute) = theme_attribute(raw) {
                     Value::Attribute(attribute)
                 } else {
-                    // What this is depends on what the attribute accepts, and
-                    // the attribute may not have been read yet. So the text is
-                    // kept as written and typed in `compile`, where the
-                    // declaration is in hand.
                     Value::Text(child.text.clone())
                 };
                 return Some((BagKey::Named(Kind::Attr, written.to_string()), value));
@@ -11515,7 +10890,6 @@ pub mod resources {
         None
     }
 
-    /// Which quantity one `<item quantity="…">` of a plural is for.
     fn plural_quantity(child: &Element, origin: &str, sink: &mut Sink) -> Option<u32> {
         let Some(written) = child.attribute("quantity") else {
             sink.emit(
@@ -11559,9 +10933,6 @@ pub mod resources {
         }
     }
 
-    /// One item of an array, typed by the element the array was written as: a
-    /// `string-array` holds text, an `integer-array` whole numbers, and a plain
-    /// `array` whatever each item looks like.
     fn array_item(
         written_as: &str,
         child: &Element,
@@ -11577,11 +10948,6 @@ pub mod resources {
         }
     }
 
-    /// A value nothing has said the shape of, read as what it looks like.
-    ///
-    /// This is what a plain `<array>` holds: a reference, then true or false,
-    /// then a colour, then a whole number, then a size, and text where it is
-    /// none of those.
     fn anything_at_all(
         text: &str,
         origin: &str,
@@ -11614,8 +10980,6 @@ pub mod resources {
         Some(Value::Text(decode_string(text)))
     }
 
-    /// `?android:attr/colorAccent` and the shorter ways of writing it: a value
-    /// the device looks up in the theme rather than in the table.
     fn theme_attribute(raw: &str) -> Option<Reference> {
         let body = raw.strip_prefix('?')?;
         let (package, rest) = match body.split_once(':') {
@@ -11740,11 +11104,6 @@ pub mod resources {
         }
     }
 
-    /// `50%` of something, or `50%p` of whatever holds it.
-    ///
-    /// What the table keeps is the proportion rather than the percentage --
-    /// half is 0.5, not 50 -- so the number written is divided by a hundred,
-    /// and one that does not divide exactly is refused rather than rounded.
     fn parse_fraction(text: &str) -> Result<(i64, bool), String> {
         let (number, of_parent) = match text.strip_suffix("%p") {
             Some(number) => (number, true),
@@ -13429,21 +12788,11 @@ pub mod signing {
         VerityMerkle,
     }
 
-    /// What the signature over a signer's signed data is made with.
-    ///
-    /// This is a separate thing from the digest over the package's contents,
-    /// and the names run them together: `RSASSA-PKCS1-v1_5 with SHA-256` says
-    /// both that the contents were chunk-digested with SHA-256 and that the
-    /// signed data was signed with PKCS#1 v1.5 padding over its SHA-256. Only
-    /// the second of those is what checking a signature needs.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Padding {
         RsaPkcs1Sha256,
         RsaPkcs1Sha512,
-        /// Read and named, but not something this build can check. RSASSA-PSS,
-        /// ECDSA and DSA are all here: naming them and saying nothing about
-        /// them is the honest answer, and claiming otherwise would be worse
-        /// than not looking.
+
         NotImplemented,
     }
 
@@ -13680,12 +13029,6 @@ pub mod signing {
         }))
     }
 
-    /// Which block a signer came out of, which is what says how it is laid out.
-    ///
-    /// A v3 signer repeats the platform range it applies to outside its signed
-    /// data, between that and its signatures. Reading a v3 signer as a v2 one
-    /// lands eight bytes short of where the signatures begin and reads noise
-    /// from there on.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Scheme {
         V2,
@@ -13698,36 +13041,27 @@ pub mod signing {
         pub signature_algorithms: Vec<SignatureAlgorithm>,
         pub certificates: Vec<Certificate>,
         pub unknown_algorithms: Vec<u32>,
-        /// The exact bytes the signatures are over.
-        ///
-        /// Kept as they were read rather than rebuilt from what was parsed out
-        /// of them: a signature is over bytes, and a check against a
-        /// re-encoding of those bytes is a check of the encoder.
+
         pub signed_data: Vec<u8>,
-        /// Each signature, with the algorithm that made it.
+
         pub signatures: Vec<(SignatureAlgorithm, Vec<u8>)>,
-        /// The signer's public key, as a SubjectPublicKeyInfo.
+
         pub public_key: Vec<u8>,
-        /// The first certificate, as it was in the block.
+
         pub first_certificate: Vec<u8>,
     }
 
-    /// What checking one signature came to.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Checked {
-        /// The key in the block made this signature over these bytes.
         Verified,
-        /// It did not. The package is not what its signer signed.
+
         Failed,
-        /// The signature is of a kind this build does not implement, so
-        /// nothing is claimed about it either way.
+
         NotImplemented,
     }
 
-    /// What checking one signer came to, all of it.
     #[derive(Clone, Debug)]
     pub struct SignerCheck {
-        /// Whether the key in the block is the key in the certificate.
         pub key_matches_certificate: bool,
         pub signatures: Vec<(SignatureAlgorithm, Checked)>,
     }
@@ -13785,9 +13119,6 @@ pub mod signing {
                 certificates.push(Certificate::parse(der)?);
             }
 
-            // A v3 signer says again, outside what it signed, which
-            // platforms it is for. Skipping it is what puts the reader on the
-            // start of the signatures rather than in the middle of them.
             if scheme == Scheme::V3 {
                 let _minimum = signer.u32()?;
                 let _maximum = signer.u32()?;
@@ -13962,20 +13293,11 @@ pub mod signing {
         pub signatures_verified: u64,
         pub signatures_unimplemented: u64,
         pub signatures_failed: u64,
-        /// Whether every signer's public key is the one in its own first
-        /// certificate. A block that fails this names a key nobody vouched for.
+
         pub key_matches_certificate: bool,
     }
 
     impl Report {
-        /// Whether everything this build can check about the package passed.
-        ///
-        /// Three separate things, and all of them are needed. The contents
-        /// have to match the digest that was recorded, or the package has been
-        /// changed since. A signature over that digest has to verify, or
-        /// anybody could have recorded it. And the key that made the signature
-        /// has to be the one in the certificate, or the name on the package is
-        /// not the name of whoever signed it.
         pub fn everything_checkable_passed(&self) -> bool {
             self.has_block
                 && self.digests_failed == 0
@@ -14196,15 +13518,6 @@ pub mod signing {
         Ok(out)
     }
 
-    /// Checks one signer's signatures against the key it carries.
-    ///
-    /// Two things are established here and they are different. That the key in
-    /// the block signed these exact bytes -- which is what a signature is --
-    /// and that the key in the block is the one in the certificate the block
-    /// presents, which is what stops a package being signed by one key and
-    /// attributed to another. Neither says the certificate is one anybody
-    /// should trust: that is the caller's question, answered by comparing the
-    /// fingerprint against what was expected.
     pub fn verify_signer(signer: &Signer, sink: &mut Sink) -> SignerCheck {
         let mut out = SignerCheck {
             key_matches_certificate: false,
@@ -14362,10 +13675,6 @@ pub mod signing {
             }
         }
 
-        // Every scheme in the block, not the first one found. Android reads
-        // v3 where it can and falls back to v2, so a package where only one of
-        // them holds up is a package half of the platforms will refuse, and
-        // saying so needs both to be read.
         let mut anything = false;
         for (id, scheme) in [
             (V2_BLOCK_ID, Scheme::V2),
@@ -14508,8 +13817,6 @@ pub mod signing {
             }
         }
 
-        // Who made it, which is a separate question from whether it has
-        // changed, and the one a digest on its own cannot answer.
         report.key_matches_certificate = !report.signers.is_empty();
         let signers = report.signers.clone();
         for signer in &signers {
@@ -15699,25 +15006,6 @@ pub mod bignum {
                 return Ok(Natural::zero());
             }
 
-            // A ladder rather than square-and-multiply. Square-and-multiply
-            // does one operation for a zero bit and two for a one, so the
-            // shape of a private exponent is written in how long a signature
-            // took. Here every rung does exactly one multiplication and one
-            // squaring, and which register each lands in is worked out by
-            // arithmetic on the bit rather than by jumping on it.
-            //
-            // For a bit b, both rungs come to the same pair of statements:
-            //
-            //     rungs[1 - b] = rungs[0] * rungs[1]
-            //     rungs[b]     = rungs[b] * rungs[b]
-            //
-            // which is the ladder written without an `if`.
-            //
-            // What is left is the multiplication itself, whose timing still
-            // depends on the numbers going into it. That is not fixed here and
-            // is not claimed to be; what stands in front of it for a private
-            // key is the blinding in `rsa::exponentiate`, which makes sure the
-            // numbers going in are ones nobody outside chose.
             let base = self.modulus(modulus)?;
             let mut rungs = [Natural::one(), base];
             for index in (0..exponent.bit_len()).rev() {
@@ -15738,41 +15026,17 @@ pub mod cipher {
     use crate::hash::{Sha256, Sha512};
     use crate::FailureClass;
 
-    // Nothing below reads a table at an index a secret decides, and nothing
-    // below branches on one. A byte of the key or of the plaintext changes what
-    // comes out; it never changes which cache line is touched or which way a
-    // jump goes, and those are what a process sharing the machine can measure.
-    //
-    // The substitution is computed rather than looked up. It costs more than a
-    // table and it is worth it: the keys this seals are the ones every package
-    // built here is signed with, and they are unsealed on a device running
-    // whatever else the person installed.
-
-    /// All ones when the byte is zero, all zeros otherwise.
-    ///
-    /// A decision carried as a mask can be combined with `&` and `|` instead of
-    /// being taken as a jump, which is the whole point.
     const fn ones_if_zero(value: u8) -> u8 {
-        // Anything but zero has the top bit set in `value | -value`.
         let folded = value | value.wrapping_neg();
         0u8.wrapping_sub((folded >> 7) ^ 1)
     }
 
-    /// All ones when `left` is no greater than `right`.
     const fn ones_if_at_most(left: u8, right: u8) -> u8 {
-        // Subtracting in a wider type leaves the borrow in bit eight, and a
-        // borrow is exactly the case where left was the larger of the two.
         let difference = (right as u16).wrapping_sub(left as u16);
         let borrowed = ((difference >> 8) & 1) as u8;
         0u8.wrapping_sub(borrowed ^ 1)
     }
 
-    /// True when two byte strings are the same, taking the same time whether
-    /// they part at the first byte or the last.
-    ///
-    /// A tag compared any other way tells whoever is guessing how much of their
-    /// guess was right, and a tag that can be guessed a byte at a time is not a
-    /// tag at all.
     pub fn same_bytes(left: &[u8], right: &[u8]) -> bool {
         if left.len() != right.len() {
             return false;
@@ -15784,17 +15048,11 @@ pub mod cipher {
         differs == 0
     }
 
-    /// Doubling in the field, with the reduction applied as a mask.
     const fn xtime(value: u8) -> u8 {
         let overflowed = 0u8.wrapping_sub(value >> 7);
         (value << 1) ^ (0x1b & overflowed)
     }
 
-    /// Multiplication in the field AES is built on.
-    ///
-    /// All eight steps run whatever the operands are. The bit being tested
-    /// becomes a mask of ones or zeros rather than a branch, and so does the
-    /// reduction that follows an overflow.
     const fn multiply(value: u8, by: u8) -> u8 {
         let mut result = 0u8;
         let mut a = value;
@@ -15810,9 +15068,6 @@ pub mod cipher {
         result
     }
 
-    /// The multiplicative inverse, computed as `x` to the 254th, which is what
-    /// the inverse is in a field of 256 elements. Zero has none and comes back
-    /// zero, which is what the substitution asks for anyway.
     const fn inverse_in_field(x: u8) -> u8 {
         let x2 = multiply(x, x);
         let x3 = multiply(x2, x);
@@ -15827,23 +15082,16 @@ pub mod cipher {
         multiply(x252, x2)
     }
 
-    /// The AES substitution: invert in the field, then the affine map.
     const fn substitute(x: u8) -> u8 {
         let b = inverse_in_field(x);
         b ^ b.rotate_left(1) ^ b.rotate_left(2) ^ b.rotate_left(3) ^ b.rotate_left(4) ^ 0x63
     }
 
-    /// The substitution undone: the affine map undone, then invert in the field.
     const fn unsubstitute(x: u8) -> u8 {
         let b = x.rotate_left(1) ^ x.rotate_left(3) ^ x.rotate_left(6) ^ 0x05;
         inverse_in_field(b)
     }
 
-    /// The substitution as a table, built the way the standard describes it.
-    ///
-    /// This is here to be compared against, not to be used: a test walks all
-    /// 256 bytes through both and holds them to the same answer. Nothing that
-    /// touches a key reads it.
     #[cfg(test)]
     pub fn table_substitution() -> ([u8; 256], [u8; 256]) {
         let mut sbox = [0u8; 256];
@@ -15871,7 +15119,6 @@ pub mod cipher {
         (sbox, inverse)
     }
 
-    /// What the computed substitution answers, for a test to compare.
     #[cfg(test)]
     pub fn computed_substitution(x: u8) -> (u8, u8) {
         (substitute(x), unsubstitute(x))
@@ -16056,11 +15303,6 @@ pub mod cipher {
             previous = held;
         }
 
-        // The padding is read without letting how much of it was right show in
-        // what this does. Every byte of the last block is examined either way,
-        // and each answer is folded into a mask rather than taken as a branch.
-        // Only the one decision that has to be made — return the plaintext or
-        // refuse — is a branch, and it is the same branch for every failure.
         let length = out.len();
         let stated = out[length - 1];
         let last_block = length - BLOCK_BYTES;
@@ -16271,12 +15513,6 @@ pub mod rsa {
             self.modulus.bit_len()
         }
 
-        /// The same key with its Chinese-remainder parts taken away, so that
-        /// signing has to go through the whole private exponent instead.
-        ///
-        /// Both routes have to arrive at the same signature, and they blind
-        /// against different orders to get there. This is how a test walks the
-        /// route a key without those parts would take.
         #[cfg(test)]
         pub fn without_crt(&self) -> PrivateKey {
             let mut copy = self.clone();
@@ -16286,7 +15522,6 @@ pub mod rsa {
             copy
         }
 
-        /// The same key with nothing to build a blinding factor on.
         #[cfg(test)]
         pub fn without_public_exponent(&self) -> PrivateKey {
             let mut copy = self.clone();
@@ -16315,13 +15550,6 @@ pub mod rsa {
         Ok(Natural::from_bytes_be(bytes))
     }
 
-    /// The modulus and public exponent inside a SubjectPublicKeyInfo.
-    ///
-    /// This is the shape a public key travels in on its own: an algorithm
-    /// identifier, then a bit string holding the RSA key. A signing block
-    /// carries one of these beside the certificate, and a signature is checked
-    /// against this key rather than against the certificate's, which is why
-    /// the two being the same has to be checked separately.
     pub fn parse_public_key(spki: &[u8]) -> Result<(Natural, Natural), Diagnostic> {
         let mut outer = der::Reader::new(spki, 0);
         let sequence = outer.expect(der::tag::SEQUENCE).map_err(|error| {
@@ -16338,9 +15566,7 @@ pub mod rsa {
         }
 
         let key = fields.expect(der::tag::BIT_STRING)?;
-        // The first byte of a bit string counts the bits unused in the last
-        // one. A key is whole bytes, so it is zero, and what follows it is the
-        // key itself.
+
         let Some((unused, body)) = key.contents.split_first() else {
             return Err(fail("ER022", "A public key's bit string is empty."));
         };
@@ -16485,13 +15711,6 @@ pub mod rsa {
 
     pub const KEY_ITERATIONS: u32 = 210_000;
 
-    /// What the tag on a key container is taken with.
-    ///
-    /// It comes out of the key the sealed blob is already encrypted under, so
-    /// forging a tag costs exactly what unsealing costs. Deriving it from the
-    /// password by any cheaper route would turn the tag into somewhere to test
-    /// password guesses without paying for the unsealing, which is the whole
-    /// thing the iteration count is there to make expensive.
     pub fn container_tag_key(wrapping: &[u8; 32]) -> [u8; 32] {
         crate::cipher::hmac_sha256(wrapping, CONTAINER_TAG_DOMAIN)
     }
@@ -16502,9 +15721,6 @@ pub mod rsa {
         seal_pkcs8_tagging(key, password).map(|(sealed, _)| sealed)
     }
 
-    /// Seals a key and hands back the tag key alongside it, both out of the one
-    /// derivation. A caller that is about to write a container needs both, and
-    /// deriving twice would double what the person waits for.
     pub fn seal_pkcs8_tagging(
         key: &PrivateKey,
         password: &str,
@@ -16580,14 +15796,6 @@ pub mod rsa {
         open_pkcs8_authenticating(sealed, password, |_| Ok(()))
     }
 
-    /// Opens a sealed key, letting the caller check whatever the sealed blob was
-    /// carried inside before anything is decrypted.
-    ///
-    /// The check is handed the tag key and runs after the derivation and before
-    /// the decryption, which is the order that matters: a container whose tag
-    /// does not hold has been altered, and altered ciphertext should never
-    /// reach a decryption at all. This is also the only way to pay for the
-    /// derivation once rather than twice.
     pub fn open_pkcs8_authenticating(
         sealed: &[u8],
         password: &str,
@@ -16659,10 +15867,7 @@ pub mod rsa {
         wrapping.copy_from_slice(&derived);
         check(&container_tag_key(&wrapping))?;
         let plain = crate::cipher::decrypt_cbc(&wrapping, &iv, sealed_data)?;
-        // A wrong password decrypts to noise, and noise fails the padding
-        // check about two hundred and fifty five times out of two hundred and
-        // fifty six. The last time it gets past it and fails here instead --
-        // and it means the same thing, so it says the same thing.
+
         parse_pkcs8(&plain).map_err(|_| {
             fail(
                 "EK002",
@@ -16797,23 +16002,8 @@ pub mod rsa {
         Ok(out)
     }
 
-    /// How much random is mixed into a private exponent before it is used.
-    ///
-    /// Sixty-four bits is far more than enough to make two signings with the
-    /// same key take different paths through the ladder, and it costs sixty-four
-    /// more rungs on an exponent thousands of bits long.
     const EXPONENT_BLINDING_BITS: usize = 64;
 
-    /// A message nobody outside chose, and the number that turns the answer
-    /// back into the one that was wanted.
-    ///
-    /// The arithmetic underneath a signature is not constant-time: how long a
-    /// multiplication takes depends on the numbers going into it. This is what
-    /// stands in front of that. The exponentiation runs on `message * r^e` for
-    /// an `r` drawn fresh each time, so its timing depends on a number the
-    /// person timing it does not know and cannot influence, and cannot be
-    /// correlated with the message they are trying to learn about. Afterwards
-    /// `r` divides back out, because `(m * r^e)^d = m^d * r`.
     fn blind(
         message: &Natural,
         modulus: &Natural,
@@ -16825,9 +16015,7 @@ pub mod rsa {
             if drawn.compare(&Natural::one()) != Ordering::Greater {
                 continue;
             }
-            // A draw sharing a factor with the modulus has no inverse. It also
-            // means the modulus has just been factored, which does not happen;
-            // either way the answer is to draw again.
+
             let Ok(undo) = drawn.mod_inverse(modulus) else {
                 continue;
             };
@@ -16845,19 +16033,6 @@ pub mod rsa {
         ))
     }
 
-    /// A private exponent with a multiple of the order added to it.
-    ///
-    /// `m^(d + k·t) = m^d` whenever `t` is an order the exponent works modulo,
-    /// so this changes nothing about the answer and everything about the path
-    /// taken to it: two signings with one key walk different rungs.
-    ///
-    /// The order has to be the right one for the modulus the exponent is used
-    /// against, and the two cases are not the same. A CRT half runs modulo a
-    /// prime `p`, where the order is `p - 1`. A whole exponent runs modulo
-    /// `n = p·q`, where it is `(p-1)(q-1)` and emphatically not `p - 1`; adding
-    /// a multiple of `p - 1` there would give a different answer, not the same
-    /// one by another route. Where no order is known, the exponent is used as
-    /// it is, because a wrong one is worse than none.
     fn blind_exponent(exponent: &Natural, order: Option<Natural>) -> Result<Natural, Diagnostic> {
         let Some(order) = order else {
             return Ok(exponent.clone());
@@ -16869,7 +16044,6 @@ pub mod rsa {
         Ok(exponent.add(&drawn.mul(&order)))
     }
 
-    /// `p - 1`, for a prime that is there.
     fn order_below(prime: &Natural) -> Option<Natural> {
         if prime.is_zero() {
             return None;
@@ -16896,7 +16070,6 @@ pub mod rsa {
 
     fn exponentiate_blinded(key: &PrivateKey, message: &Natural) -> Result<Natural, Diagnostic> {
         if key.exponent1.is_zero() || key.exponent2.is_zero() || key.coefficient.is_zero() {
-            // Modulo n, so the order is (p-1)(q-1) and it takes both primes.
             let whole = match (order_below(&key.prime1), order_below(&key.prime2)) {
                 (Some(below_p), Some(below_q)) => Some(below_p.mul(&below_q)),
                 _ => None,
@@ -16904,7 +16077,7 @@ pub mod rsa {
             let exponent = blind_exponent(&key.private_exponent, whole)?;
             return message.mod_pow(&exponent, &key.modulus);
         }
-        // Each half runs modulo its own prime, so each takes that prime's order.
+
         let d1 = blind_exponent(&key.exponent1, order_below(&key.prime1))?;
         let d2 = blind_exponent(&key.exponent2, order_below(&key.prime2))?;
         let m1 = message.mod_pow(&d1, &key.prime1)?;
@@ -17165,8 +16338,6 @@ pub mod guard {
     use crate::xml::Element;
     use crate::FailureClass;
 
-    /// The security floor is the oldest platform anything here builds for.
-    /// Two numbers for one thing is how they drift apart.
     pub const MINIMUM_SDK: i64 = crate::compiler::OLDEST_API as i64;
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -17243,15 +16414,6 @@ pub mod guard {
         }
     }
 
-    /// Every rule this policy applies, in the order it applies them.
-    ///
-    /// This is a list of the rules rather than a second implementation of
-    /// them: each entry names one, and the suite checks that every rule the
-    /// inspection can produce a finding for is on it and that nothing on it is
-    /// a rule the inspection does not have. A screen showing a person what
-    /// their project is checked against reads this, and a rule that stopped
-    /// being applied would stop being listed rather than quietly staying on a
-    /// page that says it is.
     pub const RULES: &[(&str, &str, &str)] = &[
         (
             "EG001",
@@ -17310,7 +16472,6 @@ pub mod guard {
         ),
     ];
 
-    /// Whether a rule found something in this project.
     pub fn fired(report: &Report, code: &str) -> bool {
         report.findings.iter().any(|held| held.code == code)
     }
@@ -17514,8 +16675,7 @@ pub mod guard {
             if element.name != "activity" && element.name != "activity-alias" {
                 continue;
             }
-            // Reachable means exported outright, or carrying an intent filter and
-            // not having said no: that is what Android takes it to mean.
+
             let exported = match attribute(element, "android:exported") {
                 Some("true") => true,
                 Some("false") => false,
@@ -17574,7 +16734,7 @@ pub mod axml {
     const RES_XML_RESOURCE_MAP_TYPE: u16 = 0x0180;
 
     const TYPE_REFERENCE: u8 = 0x01;
-    /// What the device reads as a question for the theme rather than a value.
+
     const TYPE_ATTRIBUTE: u8 = 0x02;
     const TYPE_STRING: u8 = 0x03;
     const TYPE_FLOAT: u8 = 0x04;
@@ -17591,12 +16751,6 @@ pub mod axml {
     const NO_ENTRY: u32 = 0xffff_ffff;
     const BOOLEAN_TRUE: u32 = 0xffff_ffff;
 
-    /// A number with a unit, as the four bytes a device reads.
-    ///
-    /// The low four bits are the unit, the two above them say where the point
-    /// sits, and the top twenty-four are the number itself. Writing `16dp` as
-    /// the text `16dp` instead produces a layout the inflater throws on, so it
-    /// is written the way the platform packs it and no other way.
     fn packed(value: f64, unit: u8) -> u32 {
         let negative = value < 0.0;
         let held = if negative { -value } else { value };
@@ -17621,8 +16775,6 @@ pub mod axml {
         (mantissa << 8) | (radix << 4) | u32::from(unit)
     }
 
-    /// `16dp`, `14sp`, `2px` and the rest, as the unit the platform numbers
-    /// them by. Nothing where what follows the number is not a unit.
     fn dimension(raw: &str) -> Option<u32> {
         for (suffix, unit) in [
             ("dip", 1u8),
@@ -17641,7 +16793,6 @@ pub mod axml {
         None
     }
 
-    /// `50%` of the thing itself, and `50%p` of what it is inside.
     fn fraction(raw: &str) -> Option<u32> {
         let (number, unit) = match raw.strip_suffix("%p") {
             Some(number) => (number, 1u8),
@@ -17651,8 +16802,6 @@ pub mod axml {
         Some(packed(value / 100.0, unit))
     }
 
-    /// `#rgb`, `#argb`, `#rrggbb` and `#aarrggbb`, each with the kind the
-    /// platform reads it back as.
     fn colour(raw: &str) -> Option<(u8, u32)> {
         let digits = raw.strip_prefix('#')?;
         if !digits.chars().all(|held| held.is_ascii_hexdigit()) {
@@ -17678,21 +16827,12 @@ pub mod axml {
         }
     }
 
-    /// What the framework says an attribute accepts, and the names it gives
-    /// its own values.
     fn what_it_accepts(local: &str) -> Option<(&'static str, &'static [(&'static str, u32)])> {
         framework_attribute(local).map(|(_, formats, symbols)| (formats, symbols))
     }
 
-    /// What the framework says about one of its own attributes: the identifier
-    /// it hands out, what it accepts, and the names it gives its own values.
     pub type Says = (u32, &'static str, &'static [(&'static str, u32)]);
 
-    /// The same, for an attribute the project declared itself.
-    ///
-    /// A layout names one of these in a namespace of its own -- `res-auto` --
-    /// and the number behind it was handed out when this project's table was
-    /// compiled, so it is carried here rather than looked up in the platform.
     #[derive(Clone, Debug, Default)]
     pub struct Declared {
         pub name: String,
@@ -17701,11 +16841,8 @@ pub mod axml {
         pub symbols: Vec<(String, u32)>,
     }
 
-    /// The namespace a layout writes the project's own attributes in.
     pub const OWN_NAMESPACE: &str = "http://schemas.android.com/apk/res-auto";
 
-    /// The whole of what the framework says about one of its attributes. A
-    /// style setting `android:textSize` needs all three at once.
     pub fn framework_attribute(local: &str) -> Option<Says> {
         crate::compilers::android::THE_FRAMEWORK_ATTRIBUTES
             .iter()
@@ -17713,28 +16850,14 @@ pub mod axml {
             .map(|(_, id, formats, symbols)| (*id, *formats, *symbols))
     }
 
-    /// One attribute's value, typed the way the attribute says it should be.
-    ///
-    /// `android:orientation="vertical"` is the number one; `16dp` is a packed
-    /// dimension; `center|top` is two flags added together. What the attribute
-    /// does not accept is not tried: an `enum` that also accepts a dimension
-    /// is `match_parent` first and a number second, which is the order the
-    /// platform reads them in.
     pub fn typed_for(local: &str, raw: &str) -> Option<(u8, u32)> {
         let (formats, symbols) = what_it_accepts(local)?;
         typed_by(formats, symbols, raw)
     }
 
-    /// The same, for an attribute whose declaration is the project's own
-    /// rather than the framework's. What it accepts and the names it gives its
-    /// values are read the same way whoever declared it.
     pub fn typed_by(formats: &str, symbols: &[(&str, u32)], raw: &str) -> Option<(u8, u32)> {
-        // An attribute declared without a format takes whatever it is given,
-        // and the framework writes that down as `any`.
         let accepts = |what: &str| formats == "any" || formats.split('|').any(|held| held == what);
 
-        // A name the attribute gives one of its own values, or several of them
-        // added together where it takes flags.
         if !symbols.is_empty() {
             let found = |one: &str| {
                 symbols
@@ -17846,14 +16969,6 @@ pub mod axml {
         ("hasFragileUserData", 0x0101_059a),
     ];
 
-    /// What the framework calls an attribute, as the number a binary XML file
-    /// carries.
-    ///
-    /// The list above first, because two of its rows -- `compileSdkVersion`
-    /// and the codename beside it -- are attributes the platform keeps to
-    /// itself and does not put in `android.R.attr`, and because every other
-    /// row of it is one `aapt2` has agreed with. Then the platform's own,
-    /// which is where the fifteen hundred a layout reaches for live.
     pub fn attribute_id(name: &str) -> Option<u32> {
         if let Some((_, id)) = ATTRIBUTES.iter().find(|(known, _)| *known == name) {
             return Some(*id);
@@ -17861,8 +16976,6 @@ pub mod axml {
         framework_id("attr", name)
     }
 
-    /// The same question for any kind of framework resource, which is what
-    /// `@android:id/text1` and `@android:style/Theme` are asking.
     pub fn framework_id(kind: &str, name: &str) -> Option<u32> {
         let rows = crate::compilers::android::THE_FRAMEWORK_IDENTIFIERS
             .iter()
@@ -17871,8 +16984,7 @@ pub mod axml {
         if let Some((_, id)) = rows.iter().find(|(known, _)| *known == name) {
             return Some(*id);
         }
-        // The list is the platform's own `R`, and a field there cannot have a
-        // dot in it: `Theme.Material.Light` is written `Theme_Material_Light`.
+
         let under = name.replace('.', "_");
         rows.iter()
             .find(|(known, _)| *known == under)
@@ -17892,8 +17004,7 @@ pub mod axml {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Value {
         Reference(u32),
-        /// `?attr/colorPrimary`: not a value but a question, which the device
-        /// answers out of whatever theme is in force when it inflates.
+
         Attribute(u32),
         Boolean(bool),
         Decimal(i32),
@@ -17979,10 +17090,6 @@ pub mod axml {
 
     impl Pool {
         fn add_keyed(&mut self, name: &str, id: u32) {
-            // Two attributes may share a name and not an identifier -- the
-            // framework's `textColor` and a project's own -- and the pool
-            // carries a string per identifier, because the map beside it has
-            // one identifier per string.
             if !self
                 .keyed
                 .iter()
@@ -17994,8 +17101,6 @@ pub mod axml {
             }
         }
 
-        /// Where a name with this identifier sits, which is not always where
-        /// the same name with another identifier sits.
         fn index_of_keyed(&self, text: &str, id: u32) -> Option<u32> {
             self.keyed
                 .iter()
@@ -18065,7 +17170,6 @@ pub mod axml {
         Ok(())
     }
 
-    /// Whose attribute a prefix names.
     enum Namespace {
         Platform,
         Own,
@@ -18096,10 +17200,7 @@ pub mod axml {
                 continue;
             }
             pool.add_other(local);
-            // A typed value keeps the text it was written as beside it, which
-            // is what `aapt2` writes and what a dump reads back. So anything
-            // that is not a reference has its text in the pool, whether the
-            // value written out beside it is the text or a number.
+
             if !attribute.value.starts_with(['@', '?'])
                 || matches!(classify(&attribute.value)?, Value::Text)
             {
@@ -18182,9 +17283,6 @@ pub mod axml {
         out.extend_from_slice(&NO_ENTRY.to_le_bytes());
     }
 
-    /// One attribute on its way out: what it is written in, what it is
-    /// called, what it says, the number the device reads it by where somebody
-    /// declared it, and what that declaration says it accepts.
     type Writing<'a> = (&'a str, &'a str, &'a str, Option<u32>, Option<&'a Declared>);
 
     fn encode_element(
@@ -18197,9 +17295,6 @@ pub mod axml {
         let line = element.position.line;
         let name_index = pool.index_of(&element.name)?;
 
-        // Each attribute with what it is written in, what it is called, what
-        // it says, and -- where somebody declared it -- the number the device
-        // reads it by and what it accepts.
         let mut attributes: Vec<Writing<'_>> = Vec::new();
         for attribute in &element.attributes {
             let (prefix, local) = split_name(&attribute.name);
@@ -18218,9 +17313,7 @@ pub mod axml {
                         Some(held.id),
                         Some(held),
                     ),
-                    // A layout naming an attribute nothing declares is a
-                    // layout the inflater passes over in silence, which is
-                    // worse than being told.
+
                     None => {
                         return Err(
                             fail("EA010", "A layout names an attribute nothing declares.")
@@ -18237,11 +17330,6 @@ pub mod axml {
             attributes.push((uri, local, &attribute.value, id, declared));
         }
 
-        // In the order a device reads them: what has an identifier first, by
-        // identifier, and what has none after, by name. It is the order
-        // `aapt2` writes, and a file written in any other order is a file that
-        // does not match what the same folder built with the platform's own
-        // tools comes to.
         attributes.sort_by(|left, right| match (left.3, right.3) {
             (Some(one), Some(two)) => one.cmp(&two),
             (Some(_), None) => core::cmp::Ordering::Less,
@@ -18279,11 +17367,6 @@ pub mod axml {
             };
             out.extend_from_slice(&named.to_le_bytes());
 
-            // A reference is settled before anything else: `@0x7f060000` is
-            // an identifier whatever the attribute says it accepts. After
-            // that, what the framework says this attribute takes decides how
-            // the value is written -- and only for the framework's own, since
-            // an attribute nobody declared has nothing saying what it holds.
             let typed = if raw.starts_with('@') || raw.starts_with('?') || uri.is_empty() {
                 None
             } else if let Some(held) = declared {
@@ -18297,9 +17380,6 @@ pub mod axml {
                 typed_for(local, raw)
             };
             let (raw_index, kind, data) = match typed {
-                // A typed value carries no text beside it: the device reads
-                // the number, and `aapt2` keeps the text only where the value
-                // *is* the text.
                 Some((kind, data)) => (NO_ENTRY, kind, data),
                 None => match classify(raw)? {
                     Value::Text => {
@@ -18335,29 +17415,19 @@ pub mod axml {
         encode_knowing(root, &[])
     }
 
-    /// The same, told what the project calls its own attributes.
-    ///
-    /// A layout that reads a view's own attributes writes them in the
-    /// `res-auto` namespace, and what a device reads there is a number, not a
-    /// name. Without this list such an attribute would go in as a bare name,
-    /// which the inflater passes over in silence -- so the view would be
-    /// built, and none of what the layout said about it would arrive.
-    /// One attribute of an element that was read back out of a package.
     #[derive(Clone, Debug, PartialEq)]
     pub struct Read {
-        /// The namespace it is in, as the URI, or empty for none.
         pub namespace: String,
         pub name: String,
-        /// The identifier the device reads it by, where it has one.
+
         pub id: Option<u32>,
-        /// What it says, put back into the text a person would have written.
+
         pub value: String,
-        /// What the four bytes actually held, before that was done.
+
         pub kind: u8,
         pub data: u32,
     }
 
-    /// An element read back out of a package, and what is under it.
     #[derive(Clone, Debug, PartialEq)]
     pub struct Node {
         pub name: String,
@@ -18374,9 +17444,6 @@ pub mod axml {
                 .map(|held| held.value.as_str())
         }
 
-        /// The same, by the number the device reads it by, which is what a
-        /// manifest really carries: the name beside it is a courtesy the
-        /// string pool happens to include and a stripped package may not.
         pub fn by_id(&self, id: u32) -> Option<&str> {
             self.attributes
                 .iter()
@@ -18415,7 +17482,6 @@ pub mod axml {
         }
     }
 
-    /// The strings a document carries, read back.
     struct Strings {
         held: Vec<String>,
     }
@@ -18429,7 +17495,6 @@ pub mod axml {
         }
     }
 
-    /// A little-endian reader over a chunk, refusing what runs off the end.
     struct Bytes<'a> {
         data: &'a [u8],
         at: usize,
@@ -18476,12 +17541,6 @@ pub mod axml {
         )
     }
 
-    /// The string pool at the front of a document.
-    ///
-    /// A pool is written in UTF-16 or in a form of UTF-8 the platform uses,
-    /// and which one is a flag in its header. Both are read: `aapt2` writes
-    /// UTF-8 pools for some documents and UTF-16 for others, and a reader that
-    /// only knows one of them reads half the packages on a device.
     fn read_string_pool(chunk: &[u8]) -> Result<Strings, Diagnostic> {
         let mut head = Bytes::new(chunk);
         let _kind = head.u16()?;
@@ -18523,8 +17582,6 @@ pub mod axml {
         Ok(Strings { held })
     }
 
-    /// A length in the platform's own varint: one byte, or two with the high
-    /// bit of the first set, and the low seven bits leading.
     fn read_length_8(bytes: &[u8], at: &mut usize) -> Result<usize, Diagnostic> {
         let first = *bytes.get(*at).ok_or_else(too_short)?;
         *at += 1;
@@ -18555,8 +17612,7 @@ pub mod axml {
 
     fn read_utf8_string(bytes: &[u8]) -> Result<String, Diagnostic> {
         let mut at = 0usize;
-        // Two lengths: the first in characters, the second in bytes. The
-        // second is the one that says how far the string runs.
+
         let _characters = read_length_8(bytes, &mut at)?;
         let length = read_length_8(bytes, &mut at)?;
         let end = at.checked_add(length).ok_or_else(too_short)?;
@@ -18582,14 +17638,6 @@ pub mod axml {
         Ok(String::from_utf16_lossy(&units))
     }
 
-    /// What a device would make of the four bytes an attribute holds.
-    ///
-    /// A reference comes back as `@0x7f060000`, a theme question as `?…`, a
-    /// boolean as `true` or `false`, a dimension with its unit, and a string
-    /// as itself. This is what a person wrote, put back: it is not always
-    /// character for character what they typed -- `@string/name` becomes the
-    /// number it was resolved to, because the number is what the package
-    /// holds -- but it never says something the bytes do not.
     fn value_of(kind: u8, data: u32, strings: &Strings, raw: Option<&str>) -> String {
         match kind {
             TYPE_STRING => raw
@@ -18625,17 +17673,11 @@ pub mod axml {
     const DIMENSION_UNITS: &[&str] = &["px", "dp", "sp", "pt", "in", "mm"];
     const FRACTION_UNITS: &[&str] = &["%", "%p"];
 
-    /// The inverse of `packed`: the number, and the unit it was written in.
-    ///
-    /// The two bits of radix say where the point sits, and they say it the
-    /// other way round from how the writer chose them: radix zero is a whole
-    /// number and radix three is everything below one. Reading them the
-    /// writer's way round turns `16dp` into two millionths of one.
     fn unpacked(data: u32, units: &[&str], hundredths: bool) -> String {
         let radix = (data >> 4) & 0x03;
         let unit = (data & 0x0f) as usize;
         let mantissa = (data >> 8) as i32;
-        // The mantissa is a signed twenty-four bit number.
+
         let mantissa = if mantissa & 0x80_0000 != 0 {
             mantissa | !0x00ff_ffff
         } else {
@@ -18648,11 +17690,10 @@ pub mod axml {
             _ => 23.0,
         };
         let value = f64::from(mantissa) / 2f64.powf(shift);
-        // A fraction is kept as what it is and written as what it reads:
-        // `50%` is stored as one half.
+
         let scaled = if hundredths { value * 100.0 } else { value };
         let name = units.get(unit).copied().unwrap_or("");
-        // Whole numbers without a point, which is how they were written.
+
         if (scaled - scaled.round()).abs() < 1e-6 {
             format!("{}{}", scaled.round() as i64, name)
         } else {
@@ -18660,12 +17701,6 @@ pub mod axml {
         }
     }
 
-    /// Reads a binary XML document back into the elements it holds.
-    ///
-    /// This is the other half of the writer above, and it exists for the same
-    /// reason a compiler has a disassembler: a package can be opened and its
-    /// manifest read without a tool that is not on the phone, and what this
-    /// writer produced can be checked against what it meant to produce.
     pub fn decode(data: &[u8]) -> Result<Node, Diagnostic> {
         if data.len() > MAX_DOCUMENT_BYTES {
             return Err(
@@ -18687,7 +17722,7 @@ pub mod axml {
 
         let mut strings: Option<Strings> = None;
         let mut ids: Vec<u32> = Vec::new();
-        // The elements still open, innermost last.
+
         let mut open: Vec<Node> = Vec::new();
         let mut root: Option<Node> = None;
 
@@ -18701,8 +17736,7 @@ pub mod axml {
                 return Err(too_short());
             }
             let whole = &data[at..at + size];
-            // A header that claims to be longer than its own chunk is a
-            // header from a file somebody has been at.
+
             if header_size < 8 || header_size > size {
                 return Err(too_short());
             }
@@ -18774,9 +17808,7 @@ pub mod axml {
             .to_string();
 
         let mut attributes = Vec::with_capacity(count);
-        // Where the attributes begin is counted from the end of the node's
-        // own header rather than from the start of the chunk: the number in
-        // the file is an offset into the element's own fields.
+
         let step = attribute_size.max(20);
         let Some(base) = header_size
             .checked_add(attribute_start)
@@ -18807,8 +17839,7 @@ pub mod axml {
                 .to_string();
             attributes.push(Read {
                 namespace: strings.at(namespace).unwrap_or("").to_string(),
-                // A stripped package holds no name for an attribute the
-                // resource map numbers, and the number is what matters.
+
                 name: if local.is_empty() {
                     ids.get(named as usize)
                         .map(|id| format!("0x{id:08x}"))
@@ -18839,9 +17870,6 @@ pub mod axml {
             .map(|attribute| attribute.value.clone())
             .unwrap_or_else(|| ANDROID_NAMESPACE.to_string());
 
-        // Every prefix the document binds, in the order it binds them, so an
-        // attribute's prefix says which namespace it is in. The framework's is
-        // always there, whether or not the document said so.
         let mut bound: Vec<(String, String)> = vec![(ANDROID_PREFIX.to_string(), namespace_uri)];
         for attribute in &root.attributes {
             let Some(prefix) = attribute.name.strip_prefix("xmlns:") else {
@@ -18958,14 +17986,10 @@ pub mod dexwrite {
         }
     }
 
-    /// The signed form, which a catch handler list uses to say whether it ends
-    /// with a row that catches everything.
     fn sleb128(out: &mut Vec<u8>, mut value: i32) {
         loop {
             let byte = (value & 0x7f) as u8;
-            // An arithmetic shift, so the sign keeps filling in from the left
-            // and a negative number terminates once every remaining bit is the
-            // sign bit.
+
             value >>= 7;
             let done = (value == 0 && byte & 0x40 == 0) || (value == -1 && byte & 0x40 != 0);
             out.push(if done { byte } else { byte | 0x80 });
@@ -19002,15 +18026,6 @@ pub mod dexwrite {
         }
     }
 
-    /// What an instruction points at, when it points at something the pools
-    /// hold.
-    ///
-    /// A translator cannot write the final code units on its own: `iget` needs
-    /// the index of a field in this file's field table, and that index is not
-    /// known until every field in every class has been gathered and sorted.
-    /// So an instruction says what it means and the writer fills in where that
-    /// thing ended up. Anything else would mean two places deciding what a
-    /// pool index is, and they would disagree.
     #[derive(Clone, PartialEq, Eq, Debug, Default)]
     pub enum Operand {
         #[default]
@@ -19021,8 +18036,6 @@ pub mod dexwrite {
         Text(String),
     }
 
-    /// One instruction: its code units, and which unit holds the index that has
-    /// to be filled in.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Insn {
         pub units: Vec<u16>,
@@ -19031,7 +18044,6 @@ pub mod dexwrite {
     }
 
     impl Insn {
-        /// An instruction that points at nothing.
         pub fn raw(units: Vec<u16>) -> Insn {
             Insn {
                 units,
@@ -19040,8 +18052,6 @@ pub mod dexwrite {
             }
         }
 
-        /// An instruction whose unit at `patch` is filled in with where its
-        /// operand ended up.
         pub fn pointing(units: Vec<u16>, patch: usize, operand: Operand) -> Insn {
             Insn {
                 units,
@@ -19063,37 +18073,24 @@ pub mod dexwrite {
         pub inputs: u16,
         pub outputs: u16,
         pub instructions: Vec<Insn>,
-        /// Which line of the source each stretch of the method came from, in
-        /// code units. A crash on a device names a file and a line out of
-        /// this, and names only the method without it.
+
         pub lines: Vec<(u32, u32)>,
-        /// What was written on it, and on each of its parameters.
+
         pub annotations: Vec<crate::jvm::Annotation>,
         pub parameter_annotations: Vec<Vec<crate::jvm::Annotation>>,
-        /// The stretches of this method that are inside a `try`, and where
-        /// control goes when something is thrown out of them.
+
         pub tries: Vec<Try>,
     }
 
-    /// One protected stretch of a method.
-    ///
-    /// Dalvik keeps this apart from the instructions, in a table at the end of
-    /// the code item, rather than as instructions of its own. A `try` therefore
-    /// costs nothing at all when nothing is thrown: there is no instruction to
-    /// run when it is entered and none when it is left.
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Try {
-        /// Where the protected stretch begins, in code units.
         pub start: u32,
-        /// How long it is, in code units.
+
         pub units: u16,
-        /// What is caught and where it goes, in the order it is tried. A row
-        /// with no descriptor catches everything, and there is at most one of
-        /// those, at the end.
+
         pub catches: Vec<(Option<String>, u32)>,
     }
 
-    /// A field, named the way a dex file names one.
     #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
     pub struct FieldRef {
         pub class: String,
@@ -19112,27 +18109,21 @@ pub mod dexwrite {
     pub struct Class {
         pub descriptor: String,
         pub superclass: String,
-        /// What it implements, which the file says in a list of its own. A
-        /// class whose interfaces are not written is a class the runtime does
-        /// not believe implements them: a cast to one fails, and so does every
-        /// call made through one.
+
         pub interfaces: Vec<String>,
         pub access_flags: u32,
         pub source_file: Option<String>,
-        /// What was written on the class itself, which a library reads back at
-        /// run time.
+
         pub annotations: Vec<crate::jvm::Annotation>,
-        /// Constructors, static methods and anything private: everything that
-        /// is called without asking what the object actually is.
+
         pub direct_methods: Vec<Method>,
-        /// Everything dispatched on the object.
+
         pub virtual_methods: Vec<Method>,
         pub static_fields: Vec<Field>,
         pub instance_fields: Vec<Field>,
     }
 
     impl Class {
-        /// A class with nothing in it but its name, for a caller to fill in.
         pub fn named(descriptor: &str, superclass: &str, access_flags: u32) -> Class {
             Class {
                 descriptor: descriptor.to_string(),
@@ -19159,13 +18150,6 @@ pub mod dexwrite {
         }
     }
 
-    /// The constructor a class with none written gets: call the one above,
-    /// return.
-    ///
-    /// The body used to be left empty and filled in by the writer, which meant
-    /// "no instructions" had two meanings -- this, and a method that has no
-    /// body at all. An abstract method then came out with a constructor's body
-    /// and a device refused the file.
     pub fn default_constructor(class: &str, superclass: &str) -> Method {
         let up = MethodRef {
             class: superclass.to_string(),
@@ -19188,7 +18172,6 @@ pub mod dexwrite {
             annotations: Vec::new(),
             parameter_annotations: Vec::new(),
             instructions: vec![
-                // invoke-direct {v0}, superclass.<init>()V
                 Insn::pointing(
                     vec![(1 << 12) | OP_INVOKE_DIRECT, 0, 0],
                     1,
@@ -19269,7 +18252,6 @@ pub mod dexwrite {
         }
     }
 
-    /// The kinds of value an annotation can hold, as the format numbers them.
     mod value {
         pub(super) const BYTE: u8 = 0x00;
         pub(super) const SHORT: u8 = 0x02;
@@ -19286,8 +18268,6 @@ pub mod dexwrite {
         pub(super) const BOOLEAN: u8 = 0x1f;
     }
 
-    /// Everything an annotation names, put into the pools so the writer can
-    /// point at it.
     fn learn_annotation(pools: &mut Pools, one: &crate::jvm::Annotation) {
         pools.kind(&one.descriptor);
         for (name, held) in &one.values {
@@ -19327,12 +18307,6 @@ pub mod dexwrite {
         }
     }
 
-    /// One value, written the way an annotation carries it: a byte saying what
-    /// kind it is and how many bytes follow, and then those bytes.
-    ///
-    /// The format lets a number be written in as few bytes as it fits in. This
-    /// writes each in the width its kind has, which is always allowed and
-    /// never wrong.
     fn write_element(
         pools: &Pools,
         held: &crate::jvm::Element,
@@ -19389,8 +18363,6 @@ pub mod dexwrite {
         Ok(())
     }
 
-    /// One annotation: what it is, and what each of its elements is set to,
-    /// with the elements in the order the format insists on.
     fn write_annotation(
         pools: &Pools,
         one: &crate::jvm::Annotation,
@@ -19410,7 +18382,6 @@ pub mod dexwrite {
         Ok(())
     }
 
-    /// One annotation on its own, with a byte in front saying who may see it.
     fn write_annotation_item(
         pools: &Pools,
         one: &crate::jvm::Annotation,
@@ -19421,18 +18392,11 @@ pub mod dexwrite {
         Ok(out)
     }
 
-    /// Where a method came from, in the shape the format keeps it.
-    ///
-    /// It is a little machine: a line to start at, then instructions that step
-    /// the address and the line along, and one that says "a statement begins
-    /// here". Every kind of step is written out longhand rather than folded
-    /// into the one-byte form, which is a few bytes more and exactly right.
     fn debug_info(method: &Method) -> Vec<u8> {
         const END: u8 = 0x00;
         const ADVANCE_PC: u8 = 0x01;
         const ADVANCE_LINE: u8 = 0x02;
-        /// The one-byte instruction for "here, and nothing has moved": the
-        /// first special opcode, offset by the four lines it can go back.
+
         const HERE: u8 = 0x0a + 4;
 
         let mut out = Vec::new();
@@ -19442,7 +18406,6 @@ pub mod dexwrite {
         uleb128(&mut out, start);
         uleb128(&mut out, method.reference.parameters.len() as u32);
         for _ in &method.reference.parameters {
-            // No name for any of them, which is what a zero says here.
             uleb128(&mut out, 0);
         }
 
@@ -19470,15 +18433,8 @@ pub mod dexwrite {
         left.encode_utf16().cmp(right.encode_utf16())
     }
 
-    /// How many of one thing a dex file can hold.
-    ///
-    /// An instruction names a method, a field, a type or a string by an index
-    /// of sixteen bits, so a file that holds more of one of them than that has
-    /// entries nothing in it can reach. This is the wall every application
-    /// walks into once it carries enough of other people's code.
     const MOST_OF_ONE_THING: usize = 65_536;
 
-    /// What one class needs the file to hold, by name rather than by number.
     #[derive(Default)]
     struct Needs {
         types: Vec<String>,
@@ -19553,7 +18509,6 @@ pub mod dexwrite {
         }
     }
 
-    /// Everything one class asks the file it goes in to hold.
     fn needs_of(class: &Class) -> Needs {
         let mut needs = Needs::default();
         needs.kind(&class.descriptor);
@@ -19602,22 +18557,10 @@ pub mod dexwrite {
         needs
     }
 
-    /// Every class, in as many files as it takes.
-    ///
-    /// A package may carry more than one dex file, and the platform reads
-    /// `classes.dex`, `classes2.dex` and so on in order. Which class goes in
-    /// which is settled here: classes are taken in the order they were given
-    /// and put in the file being filled until one of them would not fit, and
-    /// then a new file is started. Nothing is reordered, so the same
-    /// application comes out the same way every time.
     pub fn write_all(classes: &[Class], extra: &[MethodRef]) -> Result<Vec<Vec<u8>>, Diagnostic> {
         write_all_holding(classes, extra, MOST_OF_ONE_THING)
     }
 
-    /// The same, with the wall put where the caller says. Nothing but a test
-    /// moves it: an application reaches the real one soon enough, and a test
-    /// that had to build one that big would take longer than the thing it is
-    /// checking.
     pub fn write_all_holding(
         classes: &[Class],
         extra: &[MethodRef],
@@ -19694,8 +18637,6 @@ pub mod dexwrite {
         Ok(out)
     }
 
-    /// What the file holding this many classes is called. The first has no
-    /// number, and the platform reads them in this order.
     pub fn dex_named(which: usize) -> String {
         if which == 0 {
             "classes.dex".to_string()
@@ -19749,16 +18690,7 @@ pub mod dexwrite {
                     pools.fields.push(field.reference.clone());
                 }
             }
-            // A constructor hands off to one of its own class's or its
-            // superclass's, and every other `<init>` it calls belongs to
-            // something it made itself. Which is which is a matter of
-            // counting: a `new-instance` is waiting for its constructor, so an
-            // `<init>` call with any of those outstanding belongs to one of
-            // them, and the first one with none outstanding is the hand-off.
-            //
-            // Writing the wrong class there produces a dex that reads, that
-            // disassembles, and that a device refuses the moment it tries to
-            // load it -- which is a long way from here.
+
             for method in class.direct_methods.iter() {
                 if method.reference.name != "<init>" {
                     continue;
@@ -19766,7 +18698,6 @@ pub mod dexwrite {
                 let mut waiting = 0usize;
                 let mut handed_off = None;
                 for instruction in &method.instructions {
-                    // new-instance is 0x22, in the low byte of the first unit.
                     if instruction
                         .units
                         .first()
@@ -19803,8 +18734,6 @@ pub mod dexwrite {
                 }
             }
 
-            // Anything the code points at has to be in the pools too, or the
-            // index filled in later would be an index into nothing.
             for method in class.methods() {
                 for instruction in &method.instructions {
                     match &instruction.operand {
@@ -19822,9 +18751,7 @@ pub mod dexwrite {
                         Operand::Text(text) => pools.string(text),
                     }
                 }
-                // What a `catch` catches is named in the handler list, which
-                // is not part of the instruction stream and would otherwise
-                // never reach the pools.
+
                 for one in &method.tries {
                     for (caught, _) in &one.catches {
                         if let Some(descriptor) = caught {
@@ -19868,12 +18795,7 @@ pub mod dexwrite {
                 .position(|held| held == descriptor)
                 .unwrap_or(0) as u32
         };
-        // Sorted by return type, then by the argument list read as a
-        // sequence of type indices -- which is lexicographic, so a shorter
-        // list that is a prefix of a longer one comes first. Comparing only
-        // the lengths agrees with that until two prototypes have the same
-        // return type and the same number of arguments, and then the file is
-        // out of order and a device refuses to load it.
+
         let argument_order = |parameters: &[String]| -> Vec<u32> {
             parameters.iter().map(|one| position_of_type(one)).collect()
         };
@@ -19941,12 +18863,6 @@ pub mod dexwrite {
             data.extend_from_slice(&encoded);
         }
 
-        // A prototype with parameters points at a type_list. Writing zero
-        // there instead says the method takes nothing, and then the shorty --
-        // which counts them -- disagrees with the list that is not there. Our
-        // own reader never looked, and dexdump only looks when it is asked to
-        // verify, so every dex this wrote for a method taking an argument was
-        // one a device would have thrown out.
         let mut parameter_offsets: Vec<u32> = Vec::with_capacity(pools.protos.len());
         for (_, _, parameters) in &pools.protos {
             if parameters.is_empty() {
@@ -19963,8 +18879,7 @@ pub mod dexwrite {
                 data.extend_from_slice(&at.to_le_bytes());
             }
         }
-        // What each class implements is written the same way, and lands
-        // beside the parameter lists so that the map can name both at once.
+
         let mut interface_offsets: Vec<u32> = Vec::with_capacity(classes.len());
         for class in classes {
             if class.interfaces.is_empty() {
@@ -19993,13 +18908,6 @@ pub mod dexwrite {
             .copied()
             .find(|at| *at != 0);
 
-        // What was written on each class, field, method and parameter.
-        //
-        // The file is read section by section, and a section is walked from
-        // its first item onwards -- so everything of one kind has to sit
-        // together. That is why this is four passes: every annotation, then
-        // every set of them, then the lists of sets a method's parameters
-        // need, then the directory each class points at.
         struct Wanted {
             class: Vec<usize>,
             fields: Vec<(u32, Vec<usize>)>,
@@ -20007,8 +18915,6 @@ pub mod dexwrite {
             parameters: Vec<(u32, Vec<Vec<usize>>)>,
         }
 
-        /// The same, once each set is somewhere: where the class's own set
-        /// sits, and where each field's, method's and parameter's does.
         struct Written {
             class: u32,
             fields: Vec<(u32, u32)>,
@@ -20077,8 +18983,6 @@ pub mod dexwrite {
             data.extend_from_slice(&write_annotation_item(&pools, one)?);
         }
 
-        // Every set of them, in the same order, so that a set is found by
-        // where it sits rather than by looking for it.
         let mut set_offsets: Vec<u32> = Vec::new();
         let set_of = |data: &mut Vec<u8>,
                       set_offsets: &mut Vec<u32>,
@@ -20092,8 +18996,7 @@ pub mod dexwrite {
                 let kind = pools.index_of_type(&every[*one].descriptor)?;
                 written.push((kind, item_offsets[*one]));
             }
-            // A set is read by looking a type up in it, so it is sorted by
-            // type and holds each only once.
+
             written.sort_by_key(|(kind, _)| *kind);
             written.dedup_by_key(|(kind, _)| *kind);
             while !(data_off + data.len()).is_multiple_of(4) {
@@ -20135,7 +19038,6 @@ pub mod dexwrite {
             });
         }
 
-        // The lists of sets, one per method whose parameters were written on.
         let mut list_offsets: Vec<Vec<(u32, u32)>> = Vec::with_capacity(sets.len());
         let mut set_lists = 0u32;
         let mut first_set_list = None;
@@ -20157,7 +19059,6 @@ pub mod dexwrite {
             list_offsets.push(here);
         }
 
-        // And the directory each class points at.
         let mut directory_offsets: Vec<u32> = Vec::with_capacity(classes.len());
         let mut first_directory = None;
         for (held, parameters) in sets.iter().zip(list_offsets.iter()) {
@@ -20197,8 +19098,6 @@ pub mod dexwrite {
         let annotation_sets = set_offsets.len() as u32;
         let first_annotation_set = set_offsets.first().copied();
 
-        // Where each method says it came from, laid down first because a
-        // code item points at it and has to know where it is.
         let mut debug_offsets: Vec<Vec<u32>> = Vec::new();
         for class in classes {
             let mut here = Vec::new();
@@ -20226,8 +19125,6 @@ pub mod dexwrite {
         for (index, class) in classes.iter().enumerate() {
             let mut here = Vec::new();
             for method in class.methods() {
-                // A method with no instructions is abstract or native: it has
-                // no code item at all, and its entry says so with a zero.
                 if method.instructions.is_empty() {
                     here.push(0);
                     continue;
@@ -20265,15 +19162,9 @@ pub mod dexwrite {
                     instructions.extend_from_slice(&units);
                 }
 
-                // The handler lists come first, because a try_item points at
-                // one by its offset into them and that offset has to be known
-                // before the try_item is written.
                 let mut handler_bytes: Vec<u8> = Vec::new();
                 let mut handler_offsets: Vec<u16> = Vec::new();
                 if !method.tries.is_empty() {
-                    // Two tries that catch the same things in the same order
-                    // share one list, which is what makes a `finally` around a
-                    // dozen statements cost one list rather than a dozen.
                     let mut distinct: Vec<&Vec<(Option<String>, u32)>> = Vec::new();
                     for one in &method.tries {
                         if !distinct.iter().any(|held| **held == one.catches) {
@@ -20286,8 +19177,7 @@ pub mod dexwrite {
                         written.push((index, handler_bytes.len() as u16));
                         let typed = catches.iter().filter(|(what, _)| what.is_some()).count();
                         let catch_all = catches.iter().find(|(what, _)| what.is_none());
-                        // Positive says "these and nothing else"; zero or
-                        // negative says "these, and then anything".
+
                         let size = if catch_all.is_some() {
                             -(typed as i32)
                         } else {
@@ -20325,8 +19215,6 @@ pub mod dexwrite {
                     data.extend_from_slice(&unit.to_le_bytes());
                 }
                 if !method.tries.is_empty() {
-                    // A try_item begins with a four-byte field, so an odd
-                    // number of instruction units needs one more to line up.
                     if !instructions.len().is_multiple_of(2) {
                         data.extend_from_slice(&0u16.to_le_bytes());
                     }
@@ -20350,11 +19238,6 @@ pub mod dexwrite {
             uleb128(&mut body, class.direct_methods.len() as u32);
             uleb128(&mut body, class.virtual_methods.len() as u32);
 
-            // Every list is written as differences from the entry before it,
-            // and each list starts again from zero. Sorting first is not
-            // tidiness: a difference that came out negative would be written as
-            // an enormous positive one, and the file would be read as
-            // describing a field nobody declared.
             for list in [&class.static_fields, &class.instance_fields] {
                 let mut indices = Vec::with_capacity(list.len());
                 for field in list {
@@ -20369,10 +19252,6 @@ pub mod dexwrite {
                 }
             }
 
-            // The code offsets were laid down in one pass over direct then
-            // virtual, so the slot a method's code sits at is its position in
-            // that walk -- which is not the order the entries are written in,
-            // because those are sorted. Each keeps hold of its own offset.
             let mut walked = 0usize;
             for list in [&class.direct_methods, &class.virtual_methods] {
                 let mut entries = Vec::with_capacity(list.len());
@@ -20481,8 +19360,7 @@ pub mod dexwrite {
         out[72..76].copy_from_slice(&(pools.protos.len() as u32).to_le_bytes());
         out[76..80].copy_from_slice(&(proto_ids_off as u32).to_le_bytes());
         out[80..84].copy_from_slice(&(pools.fields.len() as u32).to_le_bytes());
-        // The specification says an empty section has no offset, not an offset
-        // that happens to point at whatever follows it.
+
         let field_ids_header = if pools.fields.is_empty() {
             0
         } else {
@@ -20547,38 +19425,6 @@ pub mod dexwrite {
     }
 }
 
-/// JVM bytecode, turned into the bytecode Android runs.
-///
-/// The two machines disagree about the most basic thing. The JVM computes on a
-/// stack: `iadd` takes the top two values, whatever they are and wherever they
-/// came from. Dalvik computes on registers: `add-int v3, v1, v2` says exactly
-/// which three. Getting from one to the other means knowing, at every point in
-/// the method, what the stack currently holds -- which is knowable, because the
-/// stack depth at any instruction is the same however you got there. That is
-/// not a convenience of well-behaved code; it is a rule the class file format
-/// enforces, and it is what makes this translation possible at all.
-///
-/// # How the registers are laid out
-///
-/// Dalvik insists the incoming parameters occupy the *last* registers of a
-/// method. The JVM puts them in the first locals. Both cannot be true, so the
-/// method gets room for both and a prologue that moves each parameter down into
-/// the local it belongs in:
-///
-/// ```text
-///   v0 .. vL-1        the JVM's locals
-///   vL .. vL+S-1      the JVM's stack, one register per slot
-///   vL+S .. vN-1      where the parameters arrive
-/// ```
-///
-/// It costs a move per parameter, once, at the top of the method.
-///
-/// # What it refuses
-///
-/// Every instruction it does not translate, by name and by the offset it was
-/// found at. A translator that skips what it does not understand produces a
-/// method that runs and does the wrong thing, which is the worst outcome
-/// available.
 pub mod dalvik {
     use crate::dexwrite::{FieldRef, Insn, Method, MethodRef, Operand, Try};
     use crate::diag::{Diagnostic, Severity};
@@ -20595,12 +19441,8 @@ pub mod dalvik {
         )
     }
 
-    /// What an `invokedynamic` is asking for: the name and the descriptor of
-    /// the call, the class, name and descriptor of the method that works it
-    /// out, and the constants that method is handed.
     type CallSite = (String, String, (String, String, String), Vec<jvm::Constant>);
 
-    /// One piece of the recipe a joined string is written from.
     enum Piece {
         Value,
         Constant,
@@ -20631,8 +19473,6 @@ pub mod dalvik {
         out
     }
 
-    /// Which `append` takes a value of this kind. The builder has one for each
-    /// of the primitives, one for a string and one for anything else.
     fn appends(descriptor: &str) -> &'static str {
         match descriptor {
             "Z" => "Z",
@@ -20646,8 +19486,6 @@ pub mod dalvik {
         }
     }
 
-    /// The class the platform keeps a primitive's own class on. `int.class` is
-    /// `Integer.TYPE`, and there is one of those for each of the eight.
     fn boxed(descriptor: &str) -> Option<&'static str> {
         Some(match descriptor {
             "Z" => "Ljava/lang/Boolean;",
@@ -20662,20 +19500,12 @@ pub mod dalvik {
         })
     }
 
-    /// How far along the range form of a call is from the short form. Every
-    /// one of the five is the same distance away.
     const RANGE_AWAY: u16 = 0x0006;
 
-    /// How many registers a stack shuffle has to work in. The most any of them
-    /// reaches is four slots, and it never needs more room than it reaches.
     const SHUFFLE_ROOM: u16 = 4;
 
-    /// How many registers are kept at the bottom for the instructions that name
-    /// a register in four bits. The widest of them names two, and either may be
-    /// a long or a double.
     const LOW_ROOM: u16 = 4;
 
-    /// What an opcode is called, so a refusal names it rather than numbering it.
     fn name_of(opcode: u8) -> &'static str {
         match opcode {
             0xa8 | 0xa9 => "`jsr` or `ret`",
@@ -20697,85 +19527,61 @@ pub mod dalvik {
         )
     }
 
-    /// A branch waiting for the offset it jumps to.
     struct Fixup {
-        /// Which code unit holds the offset.
         unit: usize,
-        /// Where in the Dalvik code the instruction starts, which the offset is
-        /// measured from.
+
         from: usize,
-        /// The bytecode offset in the original method.
+
         target: usize,
-        /// True for the thirty-two bit offsets a switch uses, which take two
-        /// units rather than one.
+
         wide: bool,
     }
 
-    /// A `switch` whose payload has not been written yet.
-    ///
-    /// Dalvik keeps the table of keys and destinations out of line, as a
-    /// payload somewhere else in the method that the switch instruction points
-    /// at. Where that lands is not known until every instruction has been
-    /// written, so the table waits here until it is.
     struct PendingSwitch {
-        /// Which instruction is the switch, by its position in the list.
         instruction: usize,
-        /// Contiguous from `first`, or a sorted list of keys.
+
         packed: bool,
         first: i32,
         keys: Vec<i32>,
-        /// The bytecode offsets each key goes to.
+
         targets: Vec<usize>,
     }
 
     pub struct Translator<'a> {
         class: &'a jvm::Class,
         code: Vec<Insn>,
-        /// Where each JVM bytecode offset ended up, in code units.
+
         landed: std::collections::BTreeMap<usize, usize>,
         fixups: Vec<Fixup>,
         switches: Vec<PendingSwitch>,
-        /// The method's exception table, as the class file gave it.
+
         handlers: Vec<(u16, u16, u16, u16)>,
-        /// Where the registers kept for the instructions that name a register
-        /// in four bits begin, and how many there are. Everything else in the
-        /// method sits above them.
+
         low: u16,
         stack_base: u16,
         depth: u16,
-        /// The classes written to stand in for a lambda, which the format
-        /// makes as the method runs and Dalvik cannot.
+
         made: &'a mut Synthesised,
-        /// What each stack slot holds, one entry per slot, the top last.
+
         kinds: Vec<Kept>,
-        /// Where the shuffles have room to work, which is above the stack.
+
         scratch: u16,
-        /// What the stack holds where a branch lands, recorded by the branch
-        /// that goes there.
+
         kinds_at: std::collections::BTreeMap<usize, Vec<Kept>>,
         max_outputs: u16,
     }
 
-    /// What a stack slot holds, which decides which move moves it.
-    ///
-    /// Dalvik has three moves and they are not interchangeable: `move` for a
-    /// number, `move-object` for a reference, `move-wide` for the two halves of
-    /// a long or a double. Using the wrong one is not a detail the runtime
-    /// overlooks -- the verifier refuses the whole class. The JVM instruction
-    /// being translated says what it puts on the stack; `dup` and the shuffles
-    /// say only how many slots, so what is in them is carried along here.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum Kept {
         Number,
         Reference,
-        /// The first half of a long or a double.
+
         Wide,
-        /// The second half of one, which is never named on its own.
+
         Half,
     }
 
     impl Kept {
-        /// The move that moves one of these.
         const fn moved_by(self) -> u8 {
             match self {
                 Kept::Number => 0x01,
@@ -20784,7 +19590,6 @@ pub mod dalvik {
             }
         }
 
-        /// What a descriptor puts on the stack.
         fn of(descriptor: &str) -> Kept {
             match descriptor.chars().next() {
                 Some('J') | Some('D') => Kept::Wide,
@@ -20794,7 +19599,6 @@ pub mod dalvik {
         }
     }
 
-    /// How wide a descriptor's value is, in registers.
     fn width_of(descriptor: &str) -> u16 {
         match descriptor.chars().next() {
             Some('J') | Some('D') => 2,
@@ -20802,7 +19606,6 @@ pub mod dalvik {
         }
     }
 
-    /// The units an instruction takes, before it is written.
     fn units(code: &[Insn]) -> usize {
         code.iter().map(|one| one.width()).sum()
     }
@@ -20836,13 +19639,10 @@ pub mod dalvik {
             self.code.push(instruction);
         }
 
-        /// The register a stack slot lives in.
         fn slot(&self, from_top: u16) -> u16 {
             self.stack_base + self.depth - from_top
         }
 
-        /// Puts one value on the stack. A long or a double takes two slots, and
-        /// the second of them is never named on its own.
         fn puts(&mut self, kept: Kept) {
             match kept {
                 Kept::Wide | Kept::Half => {
@@ -20857,7 +19657,6 @@ pub mod dalvik {
             }
         }
 
-        /// The same, for a value known only by how wide it is.
         fn puts_wide(&mut self, width: u16) {
             match width {
                 0 => {}
@@ -20870,12 +19669,6 @@ pub mod dalvik {
             self.puts_wide(by);
         }
 
-        /// Where each line of the source ended up, in code units.
-        ///
-        /// The class file says which bytecode offset each line begins at; this
-        /// walk knows what every offset came to. A line whose offset never
-        /// landed anywhere -- which happens where an instruction was folded
-        /// away -- is left out rather than pointed somewhere wrong.
         pub fn where_they_landed(&self, lines: &[(u16, u16)]) -> Vec<(u32, u32)> {
             let mut out = Vec::with_capacity(lines.len());
             for (at, line) in lines {
@@ -20901,13 +19694,6 @@ pub mod dalvik {
     }
 
     impl Translator<'_> {
-        /// Walks the method once, translating as it goes.
-        ///
-        /// The stack depth is tracked as a number rather than as a list of
-        /// types, because that is all the register layout needs: slot `n` is
-        /// always register `stack_base + n`, whatever is in it. What each slot
-        /// holds matters only for choosing between `move` and `move-object`,
-        /// and the JVM instruction being translated always says which.
         pub fn walk(&mut self, bytes: &[u8]) -> Result<(), Diagnostic> {
             let entries: Vec<usize> = self
                 .handlers
@@ -20918,18 +19704,12 @@ pub mod dalvik {
             let mut at = 0usize;
             while at < bytes.len() {
                 self.landed.insert(at, units(&self.code));
-                // Where something jumps here, the depth it jumped with is the
-                // depth here -- whatever the instruction before this one left
-                // behind, which for one that threw is nothing.
+
                 if let Some(held) = self.kinds_at.get(&at) {
                     self.kinds = held.clone();
                     self.depth = self.kinds.len() as u16;
                 }
                 if entries.contains(&at) {
-                    // A handler is entered with the thrown object where the
-                    // JVM would have left it on the stack. Dalvik has no
-                    // stack, so it is asked for by name, and it has to be the
-                    // first thing the handler does.
                     let register = self.stack_base;
                     if register > 255 {
                         return Err(fail(
@@ -20951,12 +19731,9 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// Fills in every branch and lays down every switch payload, now that
-        /// every destination is known.
         pub fn finish(mut self) -> Result<(Vec<Insn>, Vec<Try>), Diagnostic> {
             self.lay_down_switch_payloads()?;
 
-            // Where each instruction begins, so a fixup can be found by unit.
             let mut positions = Vec::with_capacity(self.code.len());
             let mut running = 0usize;
             for instruction in &self.code {
@@ -20970,7 +19747,7 @@ pub mod dalvik {
                         .with_context(format!("Offset {}", fixup.target)));
                 };
                 let offset = landing as i64 - fixup.from as i64;
-                // Which instruction holds this unit.
+
                 let Some(index) = positions.iter().rposition(|start| *start <= fixup.unit) else {
                     return Err(fail("ED005", "A branch is not inside any instruction."));
                 };
@@ -21007,14 +19784,6 @@ pub mod dalvik {
             Ok((self.code, tries))
         }
 
-        /// Writes each switch's table of keys and destinations at the end of
-        /// the method, and points the switch instruction at it.
-        ///
-        /// The payload has to begin on a four-byte boundary, which for a stream
-        /// of two-byte units means an even one; a `nop` in front of it is how
-        /// that is arranged. The destinations inside it are measured from the
-        /// switch instruction, not from the payload -- so a `nop` moves the
-        /// payload without changing a single one of them.
         fn lay_down_switch_payloads(&mut self) -> Result<(), Diagnostic> {
             if self.switches.is_empty() {
                 return Ok(());
@@ -21031,9 +19800,6 @@ pub mod dalvik {
                 }
                 let payload_at = units(&self.code);
 
-                // The switch instruction says how far away its payload is, and
-                // it is the one thirty-two bit branch this compiler writes that
-                // is known outright rather than fixed up later.
                 let away = (payload_at as i64 - switch_at as i64) as i32 as u32;
                 self.code[one.instruction].units[1] = away as u16;
                 self.code[one.instruction].units[2] = (away >> 16) as u16;
@@ -21066,8 +19832,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// The exception table, in the code units it came to rather than the
-        /// bytecode offsets it was written in.
         fn tries(&self, positions: &[usize]) -> Result<Vec<Try>, Diagnostic> {
             let _ = positions;
             let mut out: Vec<Try> = Vec::new();
@@ -21096,17 +19860,6 @@ pub mod dalvik {
                 rows.push((start, end, descriptor, handler));
             }
 
-            // A class file's exception table is searched in order, so its rows
-            // may overlap and nest: a `catch` inside a `finally` is two rows
-            // over stretches that share a beginning. A Dalvik try table is
-            // searched by address, so its rows must not overlap at all.
-            //
-            // The same thing said the other way: every point in the method is
-            // cut at every boundary any row has, and each piece carries every
-            // handler covering it, in the order the class file listed them --
-            // which is the order the JVM would have tried them in. Pieces that
-            // end up with the same handlers are put back together, so a table
-            // that did not need splitting comes out as it went in.
             let mut edges: Vec<u32> = Vec::new();
             for (start, end, _, _) in &rows {
                 edges.push(*start);
@@ -21155,16 +19908,13 @@ pub mod dalvik {
             ])
         }
 
-        /// Puts a constant into the top of the stack.
         fn constant(&mut self, value: i32, kept: Kept) {
             let wide = kept == Kept::Wide;
             let to = self.stack_base + self.depth;
             if wide {
                 if i16::try_from(value).is_ok() {
-                    // const-wide/16
                     self.push(Insn::raw(vec![0x0016 | (to << 8), value as i16 as u16]));
                 } else {
-                    // const-wide/32
                     self.push(Insn::raw(vec![
                         0x0017 | (to << 8),
                         value as u32 as u16,
@@ -21175,15 +19925,12 @@ pub mod dalvik {
                 return;
             }
             if (-8..=7).contains(&value) && to < 16 {
-                // const/4
                 self.push(Insn::raw(vec![
                     0x0012 | (to << 8) | (((value as u16) & 0xf) << 12),
                 ]));
             } else if i16::try_from(value).is_ok() {
-                // const/16
                 self.push(Insn::raw(vec![0x0013 | (to << 8), value as i16 as u16]));
             } else {
-                // const
                 self.push(Insn::raw(vec![
                     0x0014 | (to << 8),
                     value as u32 as u16,
@@ -21193,13 +19940,6 @@ pub mod dalvik {
             self.puts(kept);
         }
 
-        /// A constant pool entry, by index, or nothing if it is not there.
-        ///
-        /// The pool is numbered from one, and the reader keeps a placeholder at
-        /// zero so that the index in a class file is the index here. Subtracting
-        /// one, which is what this did first, reads the entry before the one
-        /// asked for -- and since a pool is mostly names and descriptors, that
-        /// mostly reads as something plausible rather than as an error.
         fn constant_at(&self, index: u16) -> Option<&jvm::Constant> {
             self.class.constants.get(usize::from(index))
         }
@@ -21211,8 +19951,6 @@ pub mod dalvik {
             }
         }
 
-        /// A class entry holds the index of the text of its name, not the name,
-        /// so getting one out is two steps rather than one.
         fn class_name(&self, index: u16, start: usize) -> Result<String, Diagnostic> {
             let Some(jvm::Constant::Class(name)) = self.constant_at(index) else {
                 return Err(fail("ED010", "A class reference points at no class.")
@@ -21224,7 +19962,6 @@ pub mod dalvik {
             })
         }
 
-        /// `ldc`: an int, a float or a string.
         fn load_constant(&mut self, index: u16, start: usize) -> Result<(), Diagnostic> {
             match self.constant_at(index).cloned() {
                 Some(jvm::Constant::Integer(value)) => {
@@ -21266,7 +20003,6 @@ pub mod dalvik {
             }
         }
 
-        /// `ldc2_w`: a long or a double.
         fn load_wide_constant(&mut self, index: u16, start: usize) -> Result<(), Diagnostic> {
             match self.constant_at(index).cloned() {
                 Some(jvm::Constant::Long(value)) => {
@@ -21274,7 +20010,6 @@ pub mod dalvik {
                     if let Ok(narrow) = i32::try_from(value) {
                         self.constant(narrow, Kept::Wide);
                     } else {
-                        // const-wide, all sixty-four bits of it.
                         let raw = value as u64;
                         self.push(Insn::raw(vec![
                             0x0018 | (to << 8),
@@ -21299,8 +20034,6 @@ pub mod dalvik {
             }
         }
 
-        /// What a Fieldref or Methodref points at: the class, the name and the
-        /// descriptor.
         fn member_at(
             &self,
             index: u16,
@@ -21342,21 +20075,18 @@ pub mod dalvik {
                 descriptor: descriptor.clone(),
             };
 
-            // The opcode depends on what kind of value it is, because Dalvik
-            // has one instruction per width and one for objects.
             let kind = match descriptor.chars().next() {
-                Some('J') | Some('D') => 1u16, // -wide
-                Some('L') | Some('[') => 2,    // -object
-                Some('Z') => 3,                // -boolean
-                Some('B') => 4,                // -byte
-                Some('C') => 5,                // -char
-                Some('S') => 6,                // -short
+                Some('J') | Some('D') => 1u16,
+                Some('L') | Some('[') => 2,
+                Some('Z') => 3,
+                Some('B') => 4,
+                Some('C') => 5,
+                Some('S') => 6,
                 _ => 0,
             };
 
             match opcode {
                 0xb2 => {
-                    // sget
                     let to = self.stack_base + self.depth;
                     self.push(Insn::pointing(
                         vec![(0x0060 + kind) | (to << 8), 0],
@@ -21366,7 +20096,6 @@ pub mod dalvik {
                     self.puts(holds);
                 }
                 0xb3 => {
-                    // sput
                     let from = self.slot(width);
                     self.shrink(width)?;
                     self.push(Insn::pointing(
@@ -21376,7 +20105,6 @@ pub mod dalvik {
                     ));
                 }
                 0xb4 => {
-                    // iget
                     let object = self.slot(1);
                     self.shrink(1)?;
                     let to = self.stack_base + self.depth;
@@ -21391,7 +20119,6 @@ pub mod dalvik {
                     self.puts(holds);
                 }
                 _ => {
-                    // iput: the value is on top, the object under it.
                     let value = self.slot(width);
                     let object = self.slot(width + 1);
                     self.shrink(width + 1)?;
@@ -21407,9 +20134,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// What an `invokedynamic` is asking for: the name and descriptor of
-        /// the call, the method that works it out, and the constants it is
-        /// handed.
         fn dynamic_at(&self, index: u16, start: usize) -> Result<CallSite, Diagnostic> {
             let Some(jvm::Constant::InvokeDynamic(bootstrap, name_and_type)) =
                 self.constant_at(index)
@@ -21458,12 +20182,6 @@ pub mod dalvik {
             Ok((name, descriptor, told, handed))
         }
 
-        /// `invokedynamic`, which Dalvik has only for what the platform itself
-        /// arranges and not for what a compiler asks of it.
-        ///
-        /// Everything written this way is written by one of two bootstrap
-        /// methods, and both of them are asking for something that can be
-        /// written out instead. This one joins strings together.
         fn dynamic(&mut self, index: u16, start: usize) -> Result<(), Diagnostic> {
             let (name, descriptor, (holder, told, _), handed) = self.dynamic_at(index, start)?;
             let Some((parameters, returns)) = split_descriptor(&descriptor) else {
@@ -21495,12 +20213,6 @@ pub mod dalvik {
             ))
         }
 
-        /// A lambda, or a reference to a method, which the format asks for in
-        /// one instruction and Dalvik cannot make.
-        ///
-        /// The class that stands in for it is written out beside the one it
-        /// came from, and what is left here is making one of those: the values
-        /// it captured handed to its constructor.
         fn lambda(
             &mut self,
             called: &str,
@@ -21532,8 +20244,6 @@ pub mod dalvik {
             let (kind, reference) = (*kind, *reference);
             let (body_class, body_name, body_descriptor) = self.member_at(reference, start)?;
 
-            // What it is also marked with, and what has to be written twice
-            // because the interface says so in more than one shape.
             let mut markers: Vec<String> = Vec::new();
             let mut bridges: Vec<String> = Vec::new();
             if told == "altMetafactory" {
@@ -21606,7 +20316,6 @@ pub mod dalvik {
             })?;
             self.made.made.push(written);
 
-            // And here, one of those, made out of what it captured.
             let words: u16 = parameters.iter().map(|one| width_of(one)).sum();
             let base = self.slot(words);
             let object = self.scratch;
@@ -21641,12 +20350,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// Strings joined together, which javac writes as a dynamic call and
-        /// which the platform has done with a builder since it began.
-        ///
-        /// The recipe says what goes where: a one for the next value handed to
-        /// the call, a two for the next constant handed to the bootstrap, and
-        /// anything else for itself.
         fn joined(
             &mut self,
             parameters: &[String],
@@ -21670,8 +20373,7 @@ pub mod dalvik {
                     })?;
                     (text, handed[1..].iter())
                 }
-                // Every value and nothing else, in the order they were handed
-                // over.
+
                 "makeConcat" => (VALUE.to_string().repeat(parameters.len()), handed.iter()),
                 other => {
                     return Err(fail("ED054", "Strings are joined by something unexpected.")
@@ -21770,8 +20472,7 @@ pub mod dalvik {
                     hold,
                     1 + width,
                 );
-                // What `append` gives back is the builder itself, and taking it
-                // rather than the register keeps the two in step.
+
                 self.push(Insn::raw(vec![0x000c | (hold << 8)]));
             }
 
@@ -21802,10 +20503,10 @@ pub mod dalvik {
                 parameters.iter().map(|one| width_of(one)).sum::<u16>() + u16::from(opcode != 0xb8);
 
             let dalvik = match opcode {
-                0xb6 => 0x006eu16, // invoke-virtual
-                0xb7 => 0x0070,    // invoke-direct, which is also how super is called
-                0xb8 => 0x0071,    // invoke-static
-                _ => 0x0072,       // invoke-interface
+                0xb6 => 0x006eu16,
+                0xb7 => 0x0070,
+                0xb8 => 0x0071,
+                _ => 0x0072,
             };
 
             let reference = MethodRef {
@@ -21817,9 +20518,6 @@ pub mod dalvik {
             self.invoke(dalvik, reference, argument_words);
             self.shrink(argument_words)?;
 
-            // What it returned, if anything, is fetched into the stack slot it
-            // now belongs in. Dalvik keeps a result register apart from the
-            // ones a method uses, which is why this is a separate instruction.
             let width = if returns == "V" {
                 0
             } else {
@@ -21838,7 +20536,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// One JVM instruction.
         fn one(
             &mut self,
             opcode: u8,
@@ -21847,16 +20544,13 @@ pub mod dalvik {
             at: &mut usize,
         ) -> Result<(), Diagnostic> {
             match opcode {
-                // -- constants
-                0x00 => {} // nop
+                0x00 => {}
                 0x01 => {
-                    // aconst_null is const/4 with zero, which is what null is.
                     self.constant(0, Kept::Reference);
                 }
                 0x02..=0x08 => self.constant(i32::from(opcode) - 0x03, Kept::Number),
                 0x09 | 0x0a => self.constant(i32::from(opcode) - 0x09, Kept::Wide),
                 0x0b..=0x0d => {
-                    // fconst_0, fconst_1, fconst_2, as the bits they are.
                     let value = (f32::from(opcode - 0x0b)).to_bits();
                     self.wide_bits(u64::from(value), false);
                 }
@@ -21892,7 +20586,6 @@ pub mod dalvik {
                     self.load_wide_constant(index, start)?;
                 }
 
-                // -- loads: a local into the top of the stack
                 0x15 | 0x17 => {
                     let local = self.operand_local(bytes, at, opcode == 0x15);
                     self.load_local(local, 0x01, 1);
@@ -21911,7 +20604,6 @@ pub mod dalvik {
                 0x26..=0x29 => self.load_local(u16::from(opcode) - 0x26, 0x04, 2),
                 0x2a..=0x2d => self.load_local(u16::from(opcode) - 0x2a, 0x07, 1),
 
-                // -- stores: the top of the stack into a local
                 0x36 | 0x38 => {
                     let local = self.operand_local(bytes, at, opcode == 0x36);
                     self.store_local(local, 0x01, 1)?;
@@ -21930,20 +20622,17 @@ pub mod dalvik {
                 0x47..=0x4a => self.store_local(u16::from(opcode) - 0x47, 0x04, 2)?,
                 0x4b..=0x4e => self.store_local(u16::from(opcode) - 0x4b, 0x07, 1)?,
 
-                // -- arrays
                 0x2e..=0x35 => {
-                    // aget, and the six narrower forms. The index is on top and
-                    // the array under it.
                     let (dalvik, holds) = match opcode {
-                        0x2e => (0x0044u16, Kept::Number), // int
-                        0x2f => (0x0045, Kept::Wide),      // long
-                        // float, which is a word like an int
+                        0x2e => (0x0044u16, Kept::Number),
+                        0x2f => (0x0045, Kept::Wide),
+
                         0x30 => (0x0044, Kept::Number),
-                        0x31 => (0x0045, Kept::Wide),      // double
-                        0x32 => (0x0046, Kept::Reference), // object
-                        0x33 => (0x0047, Kept::Number),    // boolean or byte
-                        0x34 => (0x0049, Kept::Number),    // char
-                        _ => (0x004a, Kept::Number),       // short
+                        0x31 => (0x0045, Kept::Wide),
+                        0x32 => (0x0046, Kept::Reference),
+                        0x33 => (0x0047, Kept::Number),
+                        0x34 => (0x0049, Kept::Number),
+                        _ => (0x004a, Kept::Number),
                     };
                     let array = self.slot(2);
                     let index = self.slot(1);
@@ -21956,7 +20645,6 @@ pub mod dalvik {
                     self.puts(holds);
                 }
                 0x4f..=0x56 => {
-                    // aput. The value is on top, then the index, then the array.
                     let (dalvik, width) = match opcode {
                         0x4f => (0x004bu16, 1),
                         0x50 => (0x004c, 2),
@@ -21977,7 +20665,6 @@ pub mod dalvik {
                     ]));
                 }
                 0xbc => {
-                    // newarray, whose operand is a code for the element type.
                     let code = bytes[*at];
                     *at += 1;
                     let element = match code {
@@ -22008,28 +20695,22 @@ pub mod dalvik {
                     self.new_array(&descriptor)?;
                 }
 
-                // -- the stack itself
                 0x57 => self.shrink(1)?,
                 0x58 => self.shrink(2)?,
                 0x59..=0x5f => {
                     self.shuffle(opcode, start)?;
                 }
 
-                // -- arithmetic, two off the stack and one back on
                 0x60..=0x77 => self.arithmetic(opcode, start)?,
                 0x78..=0x83 => self.arithmetic(opcode, start)?,
 
                 0x84 => {
-                    // iinc: a local stepped where it stands.
                     let local = u16::from(bytes[*at]);
                     let by = i32::from(bytes[*at + 1] as i8);
                     *at += 2;
                     self.increment(local, by, start)?;
                 }
 
-                // wide: the same instruction again, with a local numbered by
-                // two bytes rather than one. A method with more than two
-                // hundred and fifty-six locals is written entirely this way.
                 0xc4 => {
                     let held = bytes[*at];
                     *at += 1;
@@ -22051,22 +20732,19 @@ pub mod dalvik {
                     }
                 }
 
-                // -- conversions
                 0x85..=0x93 => self.convert(opcode, start)?,
 
-                // -- comparisons that leave an int
                 0x94 => self.compare(0x31, 2)?,
                 0x95 => self.compare(0x2d, 1)?,
                 0x96 => self.compare(0x2e, 1)?,
                 0x97 => self.compare(0x2f, 2)?,
                 0x98 => self.compare(0x30, 2)?,
 
-                // -- branches
                 0x99..=0x9e => {
                     let target = self.jump_target(bytes, at, start);
                     let register = self.slot(1);
                     self.shrink(1)?;
-                    // if-eqz .. if-lez
+
                     self.branch(0x0038 + u16::from(opcode) - 0x99, vec![register], target);
                 }
                 0x9f..=0xa6 => {
@@ -22074,8 +20752,7 @@ pub mod dalvik {
                     let left = self.slot(2);
                     let right = self.slot(1);
                     self.shrink(2)?;
-                    // The two that compare references are if-eq and if-ne, the
-                    // same instructions the six that compare numbers use.
+
                     let (dalvik, kept) = match opcode {
                         0xa5 => (0x0032, Kept::Reference),
                         0xa6 => (0x0033, Kept::Reference),
@@ -22089,7 +20766,7 @@ pub mod dalvik {
                     let target = self.jump_target(bytes, at, start);
                     let register = self.slot(1);
                     self.shrink(1)?;
-                    // ifnull is if-eqz, ifnonnull is if-nez.
+
                     self.branch(
                         if opcode == 0xc6 { 0x0038 } else { 0x0039 },
                         vec![register],
@@ -22098,12 +20775,10 @@ pub mod dalvik {
                 }
                 0xa7 => {
                     let target = self.jump_target(bytes, at, start);
-                    // goto/16, always, so that every branch is two units and
-                    // one pass is enough.
+
                     self.branch(0x0029, Vec::new(), target);
                 }
-                // monitor-enter and monitor-exit, which is what a
-                // `synchronized` block comes to.
+
                 0xc2 | 0xc3 => {
                     let register = self.slot(1);
                     self.shrink(1)?;
@@ -22129,13 +20804,11 @@ pub mod dalvik {
                         .with_context(format!("Register {register}")));
                     }
                     self.push(Insn::raw(vec![0x0027 | (register << 8)]));
-                    // Nothing runs on from a throw, and what the stack held is
-                    // not what anything arriving here will find.
+
                     self.kinds.clear();
                     self.depth = 0;
                 }
 
-                // -- returns
                 0xac | 0xae => {
                     let register = self.slot(1);
                     self.shrink(1)?;
@@ -22153,14 +20826,12 @@ pub mod dalvik {
                 }
                 0xb1 => self.push(Insn::raw(vec![0x000e])),
 
-                // -- fields
                 0xb2..=0xb5 => {
                     let index = Self::u16_at(bytes, *at);
                     *at += 2;
                     self.field(opcode, index, start)?;
                 }
 
-                // -- calls
                 0xb6..=0xb8 => {
                     let index = Self::u16_at(bytes, *at);
                     *at += 2;
@@ -22256,12 +20927,6 @@ pub mod dalvik {
             (start as i64 + i64::from(offset)) as usize
         }
 
-        /// `tableswitch` and `lookupswitch`.
-        ///
-        /// Both become one Dalvik switch instruction and a payload written at
-        /// the end of the method. The one thing Dalvik does not have is the
-        /// JVM's default destination: a switch that matches nothing simply
-        /// runs on, so the default becomes a `goto` written directly after.
         fn switch(
             &mut self,
             opcode: u8,
@@ -22269,8 +20934,6 @@ pub mod dalvik {
             start: usize,
             at: &mut usize,
         ) -> Result<(), Diagnostic> {
-            // Both instructions pad to a four-byte boundary before their
-            // table, measured from the start of the method's code.
             while !at.is_multiple_of(4) {
                 *at += 1;
             }
@@ -22333,8 +20996,6 @@ pub mod dalvik {
                 .with_context(format!("Register {register}")));
             }
 
-            // An empty table is a switch that always takes the default, and
-            // Dalvik has no payload shape for nothing at all.
             if keys.is_empty() {
                 self.branch(
                     0x0029,
@@ -22345,15 +21006,13 @@ pub mod dalvik {
             }
 
             let instruction = self.code.len();
-            // packed-switch or sparse-switch, with the payload's distance left
-            // to be filled in once it has been written.
+
             self.push(Insn::raw(vec![
                 u16::from(if packed { 0x2bu8 } else { 0x2c }) | (register << 8),
                 0,
                 0,
             ]));
-            // Every arm is reached with the stack as it is here, the same as
-            // any other branch.
+
             for target in &targets {
                 self.kinds_at
                     .entry(*target)
@@ -22374,13 +21033,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// Brings a value down to the registers kept at the bottom, where the
-        /// four bits an instruction names it in cannot reach it.
-        ///
-        /// A register past fifteen written into a four bit field is a different
-        /// register, and the runtime reads it as one: the wrong value, or a
-        /// refusal. So the value is moved down, the instruction is done there,
-        /// and `put_back` takes the answer home.
         fn brought_down(&mut self, register: u16, kept: Kept, into: u16) -> u16 {
             if register <= 15 {
                 return register;
@@ -22396,28 +21048,15 @@ pub mod dalvik {
             self.push(move_register(kept.moved_by(), register, from));
         }
 
-        /// `dup`, `swap` and the rest of the stack shuffles.
-        ///
-        /// Every one of them says the same thing: take the top group of slots,
-        /// take the group under it, and put them back in another order, with
-        /// the top group written twice where the instruction duplicates. What
-        /// moves each value depends on what the value is, which is why the
-        /// kinds are carried along at all.
-        ///
-        /// Where anything is put back below where it started, the values go
-        /// through the scratch registers above the stack first. Writing them
-        /// straight back would overwrite a value that has not been read yet.
         fn shuffle(&mut self, opcode: u8, start: usize) -> Result<(), Diagnostic> {
-            // How many slots the top group is, how many the one under it, and
-            // whether the top group is written twice.
             let (above, below, twice) = match opcode {
-                0x59 => (1u16, 0u16, true), // dup
-                0x5a => (1, 1, true),       // dup_x1
-                0x5b => (1, 2, true),       // dup_x2
-                0x5c => (2, 0, true),       // dup2
-                0x5d => (2, 1, true),       // dup2_x1
-                0x5e => (2, 2, true),       // dup2_x2
-                _ => (1, 1, false),         // swap
+                0x59 => (1u16, 0u16, true),
+                0x5a => (1, 1, true),
+                0x5b => (1, 2, true),
+                0x5c => (2, 0, true),
+                0x5d => (2, 1, true),
+                0x5e => (2, 2, true),
+                _ => (1, 1, false),
             };
             let reach = above + below;
             if self.depth < reach {
@@ -22432,8 +21071,6 @@ pub mod dalvik {
                 while at < from + slots {
                     let held = kinds[usize::from(at)];
                     if held == Kept::Half {
-                        // A long or a double reaching across the group this
-                        // takes apart: no form of the instruction does that.
                         return None;
                     }
                     out.push((held, base + at));
@@ -22455,8 +21092,6 @@ pub mod dalvik {
                 );
             };
 
-            // Nothing moves down, so nothing needs keeping first: the copy goes
-            // above what is already there.
             if below == 0 && twice {
                 let mut to = base + above;
                 for (kept, from) in &over {
@@ -22506,16 +21141,9 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// `iinc`: a local stepped where it stands.
-        ///
-        /// The short form of the Dalvik instruction carries the step in one
-        /// byte and names the local in one. A step that does not fit, or a
-        /// local numbered past what a byte holds, is done the long way: the
-        /// step into a register of its own, and then an add.
         fn increment(&mut self, local: u16, by: i32, start: usize) -> Result<(), Diagnostic> {
             let local = self.low + local;
             if local < 256 && i32::from(by as i8) == by {
-                // add-int/lit8 vAA, vBB, #+CC
                 self.push(Insn::raw(vec![
                     0x00d8 | (local << 8),
                     local | ((by as u8 as u16) << 8),
@@ -22530,7 +21158,7 @@ pub mod dalvik {
                 )
                 .with_context(format!("Offset {start}, local {local}")));
             }
-            // const/16 vAA, #+BBBB, and then add-int vAA, vBB, vCC
+
             self.push(Insn::raw(vec![0x0013 | (step << 8), by as i16 as u16]));
             self.push(Insn::raw(vec![0x0090 | (local << 8), local | (step << 8)]));
             Ok(())
@@ -22558,7 +21186,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// `op vA, vB`: one value in and one out, both named in four bits.
         fn one_operand(
             &mut self,
             dalvik: u16,
@@ -22599,48 +21226,45 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// The binary operators, which all take the same shape in Dalvik:
-        /// `op vAA, vBB, vCC`.
         fn arithmetic(&mut self, opcode: u8, start: usize) -> Result<(), Diagnostic> {
-            // (dalvik opcode, width of each operand, width of the result)
             let (dalvik, left_width, right_width, result) = match opcode {
-                0x60 => (0x0090u16, 1, 1, 1), // add-int
-                0x61 => (0x009b, 2, 2, 2),    // add-long
-                0x64 => (0x0091, 1, 1, 1),    // sub-int
-                0x65 => (0x009c, 2, 2, 2),    // sub-long
-                0x68 => (0x0092, 1, 1, 1),    // mul-int
-                0x69 => (0x009d, 2, 2, 2),    // mul-long
-                0x6c => (0x0093, 1, 1, 1),    // div-int
-                0x6d => (0x009e, 2, 2, 2),    // div-long
-                0x70 => (0x0094, 1, 1, 1),    // rem-int
-                0x71 => (0x009f, 2, 2, 2),    // rem-long
-                // The four that take one operand are a different shape.
+                0x60 => (0x0090u16, 1, 1, 1),
+                0x61 => (0x009b, 2, 2, 2),
+                0x64 => (0x0091, 1, 1, 1),
+                0x65 => (0x009c, 2, 2, 2),
+                0x68 => (0x0092, 1, 1, 1),
+                0x69 => (0x009d, 2, 2, 2),
+                0x6c => (0x0093, 1, 1, 1),
+                0x6d => (0x009e, 2, 2, 2),
+                0x70 => (0x0094, 1, 1, 1),
+                0x71 => (0x009f, 2, 2, 2),
+
                 0x74 => return self.one_operand(0x007b, 1, 1),
                 0x75 => return self.one_operand(0x007d, 2, 2),
-                0x62 => (0x00a6, 1, 1, 1), // add-float
-                0x63 => (0x00ab, 2, 2, 2), // add-double
-                0x66 => (0x00a7, 1, 1, 1), // sub-float
-                0x67 => (0x00ac, 2, 2, 2), // sub-double
-                0x6a => (0x00a8, 1, 1, 1), // mul-float
-                0x6b => (0x00ad, 2, 2, 2), // mul-double
-                0x6e => (0x00a9, 1, 1, 1), // div-float
-                0x6f => (0x00ae, 2, 2, 2), // div-double
-                0x72 => (0x00aa, 1, 1, 1), // rem-float
-                0x73 => (0x00af, 2, 2, 2), // rem-double
+                0x62 => (0x00a6, 1, 1, 1),
+                0x63 => (0x00ab, 2, 2, 2),
+                0x66 => (0x00a7, 1, 1, 1),
+                0x67 => (0x00ac, 2, 2, 2),
+                0x6a => (0x00a8, 1, 1, 1),
+                0x6b => (0x00ad, 2, 2, 2),
+                0x6e => (0x00a9, 1, 1, 1),
+                0x6f => (0x00ae, 2, 2, 2),
+                0x72 => (0x00aa, 1, 1, 1),
+                0x73 => (0x00af, 2, 2, 2),
                 0x76 => return self.one_operand(0x007f, 1, 1),
                 0x77 => return self.one_operand(0x0080, 2, 2),
-                0x78 => (0x0098, 1, 1, 1), // shl-int
-                0x79 => (0x00a3, 2, 1, 2), // shl-long
-                0x7a => (0x0099, 1, 1, 1), // shr-int
-                0x7b => (0x00a4, 2, 1, 2), // shr-long
-                0x7c => (0x009a, 1, 1, 1), // ushr-int
-                0x7d => (0x00a5, 2, 1, 2), // ushr-long
-                0x7e => (0x0095, 1, 1, 1), // and-int
-                0x7f => (0x00a0, 2, 2, 2), // and-long
-                0x80 => (0x0096, 1, 1, 1), // or-int
-                0x81 => (0x00a1, 2, 2, 2), // or-long
-                0x82 => (0x0097, 1, 1, 1), // xor-int
-                0x83 => (0x00a2, 2, 2, 2), // xor-long
+                0x78 => (0x0098, 1, 1, 1),
+                0x79 => (0x00a3, 2, 1, 2),
+                0x7a => (0x0099, 1, 1, 1),
+                0x7b => (0x00a4, 2, 1, 2),
+                0x7c => (0x009a, 1, 1, 1),
+                0x7d => (0x00a5, 2, 1, 2),
+                0x7e => (0x0095, 1, 1, 1),
+                0x7f => (0x00a0, 2, 2, 2),
+                0x80 => (0x0096, 1, 1, 1),
+                0x81 => (0x00a1, 2, 2, 2),
+                0x82 => (0x0097, 1, 1, 1),
+                0x83 => (0x00a2, 2, 2, 2),
                 _ => return Err(unsupported(start, opcode, name_of(opcode))),
             };
 
@@ -22658,33 +21282,26 @@ pub mod dalvik {
 
         fn convert(&mut self, opcode: u8, start: usize) -> Result<(), Diagnostic> {
             let (dalvik, from_width, to_width) = match opcode {
-                0x85 => (0x0081u16, 1, 2), // int-to-long
-                0x86 => (0x0082, 1, 1),    // int-to-float
-                0x87 => (0x0083, 1, 2),    // int-to-double
-                0x88 => (0x0084, 2, 1),    // long-to-int
-                0x89 => (0x0085, 2, 1),    // long-to-float
-                0x8a => (0x0086, 2, 2),    // long-to-double
-                0x8b => (0x0087, 1, 1),    // float-to-int
-                0x8c => (0x0088, 1, 2),    // float-to-long
-                0x8d => (0x0089, 1, 2),    // float-to-double
-                0x8e => (0x008a, 2, 1),    // double-to-int
-                0x8f => (0x008b, 2, 2),    // double-to-long
-                0x90 => (0x008c, 2, 1),    // double-to-float
-                0x91 => (0x008d, 1, 1),    // int-to-byte
-                0x92 => (0x008e, 1, 1),    // int-to-char
-                0x93 => (0x008f, 1, 1),    // int-to-short
+                0x85 => (0x0081u16, 1, 2),
+                0x86 => (0x0082, 1, 1),
+                0x87 => (0x0083, 1, 2),
+                0x88 => (0x0084, 2, 1),
+                0x89 => (0x0085, 2, 1),
+                0x8a => (0x0086, 2, 2),
+                0x8b => (0x0087, 1, 1),
+                0x8c => (0x0088, 1, 2),
+                0x8d => (0x0089, 1, 2),
+                0x8e => (0x008a, 2, 1),
+                0x8f => (0x008b, 2, 2),
+                0x90 => (0x008c, 2, 1),
+                0x91 => (0x008d, 1, 1),
+                0x92 => (0x008e, 1, 1),
+                0x93 => (0x008f, 1, 1),
                 _ => return Err(unsupported(start, opcode, name_of(opcode))),
             };
             self.one_operand(dalvik, from_width, to_width)
         }
 
-        /// `new int[a][b]`, which Dalvik has no instruction for.
-        ///
-        /// The JVM makes the whole thing in one go. Dalvik does not, and the
-        /// platform's own answer is the one used here: the lengths go into an
-        /// array of their own, and `java.lang.reflect.Array.newInstance` is
-        /// handed that and the type the whole thing is an array of. What comes
-        /// back is an Object, and it is cast to what it is.
         fn many_dimensions(
             &mut self,
             name: &str,
@@ -22720,8 +21337,6 @@ pub mod dalvik {
                 .with_context(format!("Offset {start}, register {lengths}")));
             }
 
-            // The lengths are already in a row of registers, which is exactly
-            // what one instruction makes an array out of.
             self.max_outputs = self.max_outputs.max(dimensions.max(2));
             self.push(Insn::pointing(
                 vec![0x0025 | (dimensions << 8), 0, base],
@@ -22730,8 +21345,6 @@ pub mod dalvik {
             ));
             self.push(Insn::raw(vec![0x000c | (lengths << 8)]));
 
-            // The type the whole thing is an array of, as a class. A primitive
-            // has no class of its own; the platform keeps one on the box.
             match boxed(&inside) {
                 Some(box_class) => self.push(Insn::pointing(
                     vec![0x0062 | (of_what << 8), 0],
@@ -22770,8 +21383,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// `new-array vA, vB, type@CCCC`: the length is on the stack and the
-        /// array replaces it.
         fn new_array(&mut self, descriptor: &str) -> Result<(), Diagnostic> {
             let length = self.slot(1);
             self.shrink(1)?;
@@ -22788,10 +21399,6 @@ pub mod dalvik {
             Ok(())
         }
 
-        /// A constant put in by its bits rather than its value, which is how a
-        /// float or a double gets there. Dalvik has no float constant: it has a
-        /// register with the right bits in it, and the instruction that reads
-        /// the register decides what they mean.
         fn wide_bits(&mut self, bits: u64, wide: bool) {
             let to = self.stack_base + self.depth;
             if wide {
@@ -22813,14 +21420,7 @@ pub mod dalvik {
             self.puts(Kept::Number);
         }
 
-        /// A branch, recorded for `finish` to fill in.
         fn branch(&mut self, opcode: u16, registers: Vec<u16>, target: usize) {
-            // How deep the stack is where this jump was taken, which is how
-            // deep it is where the jump lands. A class file that verified says
-            // every road to that instruction agrees, so the first one to say
-            // so is enough -- and it is the only way to know for an
-            // instruction that follows a `throw`, where walking the bytes in
-            // order says nothing at all.
             self.kinds_at
                 .entry(target)
                 .or_insert_with(|| self.kinds.clone());
@@ -22840,14 +21440,11 @@ pub mod dalvik {
             });
         }
 
-        /// An invoke, in the form that names up to five registers.
         fn invoke(&mut self, opcode: u16, reference: MethodRef, argument_words: u16) {
             let first = self.slot(argument_words);
             self.invoke_at(opcode, reference, first, argument_words);
         }
 
-        /// The same, on registers named outright rather than taken off the
-        /// stack.
         fn invoke_at(
             &mut self,
             opcode: u16,
@@ -22858,11 +21455,6 @@ pub mod dalvik {
             let last = first + argument_words.saturating_sub(1);
             self.max_outputs = self.max_outputs.max(argument_words);
 
-            // The short form names each register in four bits and holds five of
-            // them. Anything past that is the range form, which names the first
-            // register and how many follow -- and the arguments are always in a
-            // row here, so it always reaches. Truncating a register to four bits
-            // instead would name a different one, quietly.
             if argument_words > 5 || last > 15 {
                 self.push(Insn::pointing(
                     vec![(opcode + RANGE_AWAY) | (argument_words << 8), 0, first],
@@ -22885,12 +21477,6 @@ pub mod dalvik {
         }
     }
 
-    /// The classes written to stand in for something the format says in one
-    /// instruction and Dalvik has no instruction for.
-    ///
-    /// A lambda is the one that needs a whole class: the JVM makes one as the
-    /// method runs, and Dalvik cannot, so it is written out here and put in the
-    /// package beside the class it came from.
     pub struct Synthesised {
         pub made: Vec<crate::dexwrite::Class>,
         owner: String,
@@ -22906,8 +21492,6 @@ pub mod dalvik {
             }
         }
 
-        /// The name of the next one. This is the name javac gives them, so a
-        /// stack trace off a device reads the way one off a desktop does.
         fn named(&mut self) -> String {
             let held = self.next;
             self.next += 1;
@@ -22915,7 +21499,6 @@ pub mod dalvik {
         }
     }
 
-    /// The box a primitive is kept in, and the method that takes it out again.
     fn boxes(descriptor: &str) -> Option<(&'static str, &'static str)> {
         Some(match descriptor {
             "Z" => ("Ljava/lang/Boolean;", "booleanValue"),
@@ -22934,14 +21517,11 @@ pub mod dalvik {
         !descriptor.starts_with('L') && !descriptor.starts_with('[') && descriptor != "V"
     }
 
-    /// The instruction that widens one primitive into another, where Java
-    /// allows it without being asked.
     fn widens(from: &str, to: &str) -> Option<Option<u16>> {
         if from == to {
             return Some(None);
         }
         Some(Some(match (from, to) {
-            // Everything narrower than an int is an int already.
             ("B" | "S" | "C" | "Z", "I") => return Some(None),
             ("B" | "S" | "C" | "I", "J") => 0x0081,
             ("B" | "S" | "C" | "I", "F") => 0x0082,
@@ -22953,15 +21533,11 @@ pub mod dalvik {
         }))
     }
 
-    /// The registers a written-out class works in, low enough that every
-    /// instruction can name them. Two for a value of any width coming in, two
-    /// for one going out, and one for the object whose fields are read.
     const SPARE_IN: u16 = 0;
     const SPARE_OUT: u16 = 2;
     const SELF: u16 = 4;
     const LOW: u16 = 5;
 
-    /// A method being written a piece at a time.
     struct Writing {
         code: Vec<Insn>,
         outputs: u16,
@@ -22981,8 +21557,6 @@ pub mod dalvik {
             }
         }
 
-        /// A call, always in the form that names a row of registers, because
-        /// what is written here is always in a row.
         fn call(&mut self, opcode: u16, reference: MethodRef, first: u16, words: u16) {
             self.outputs = self.outputs.max(words);
             self.code.push(Insn::pointing(
@@ -23009,9 +21583,6 @@ pub mod dalvik {
             ));
         }
 
-        /// Puts a value of one kind where a value of another is wanted, doing
-        /// whatever Java would have done on the way: a cast, a box, a value out
-        /// of a box, or a widening.
         fn adapted(
             &mut self,
             from: &str,
@@ -23043,8 +21614,6 @@ pub mod dalvik {
                     match widening {
                         None => self.moved(Kept::of(from), target, source),
                         Some(opcode) => {
-                            // The instruction names its registers in four bits,
-                            // so it is done in the ones kept low for it.
                             self.moved(Kept::of(from), SPARE_IN, source);
                             self.code.push(Insn::raw(vec![
                                 opcode | (SPARE_OUT << 8) | (SPARE_IN << 12),
@@ -23053,7 +21622,7 @@ pub mod dalvik {
                         }
                     }
                 }
-                // A primitive where an object is wanted, which is the box.
+
                 (true, false) => {
                     let Some((box_class, _)) = boxes(from) else {
                         return Err(refused("it is not a primitive with a box"));
@@ -23076,8 +21645,7 @@ pub mod dalvik {
                         self.cast(target, to);
                     }
                 }
-                // An object where a primitive is wanted, which is the value out
-                // of the box.
+
                 (false, true) => {
                     let Some((box_class, taken)) = boxes(to) else {
                         return Err(refused("it is not a primitive with a box"));
@@ -23102,40 +21670,25 @@ pub mod dalvik {
         }
     }
 
-    /// Everything a lambda needs to become a class of its own.
     struct Recipe<'a> {
-        /// The name the class is given, as a descriptor.
         named: &'a str,
-        /// The interface it implements, and any it is also marked with.
+
         interface: &'a str,
         markers: &'a [String],
-        /// The interface's own method: its name, its descriptor as the
-        /// interface declares it, and any bridges asked for beside it.
+
         method: &'a str,
         sam: &'a str,
         bridges: &'a [String],
-        /// What actually runs, and how it is reached.
+
         kind: u8,
         body: (String, String, String),
-        /// What the lambda took with it from where it was written.
+
         captured: &'a [String],
     }
 
-    /// The class a lambda comes to.
-    ///
-    /// The format says all of this in one instruction: the JVM works out a
-    /// class as the method runs, from the interface, the method that holds the
-    /// body, and whatever was captured. Dalvik has no such instruction, so the
-    /// class is written here instead -- the captured values as fields, a
-    /// constructor that takes them, and the interface's own method calling the
-    /// body with whatever converting Java would have done on the way.
     fn a_lambda(recipe: &Recipe<'_>) -> Result<crate::dexwrite::Class, Diagnostic> {
-        let mut out = crate::dexwrite::Class::named(
-            recipe.named,
-            "Ljava/lang/Object;",
-            // public final synthetic
-            0x0011 | 0x1000,
-        );
+        let mut out =
+            crate::dexwrite::Class::named(recipe.named, "Ljava/lang/Object;", 0x0011 | 0x1000);
         out.interfaces.push(recipe.interface.to_string());
         for one in recipe.markers {
             if one != recipe.interface {
@@ -23161,7 +21714,7 @@ pub mod dalvik {
         for (reference, _) in &held {
             out.instance_fields.push(crate::dexwrite::Field {
                 reference: reference.clone(),
-                // private final synthetic
+
                 access_flags: 0x0002 | 0x0010 | 0x1000,
                 annotations: Vec::new(),
             });
@@ -23181,7 +21734,6 @@ pub mod dalvik {
         Ok(out)
     }
 
-    /// The constructor, which takes what was captured and puts it away.
     fn a_lambda_constructor(
         recipe: &Recipe<'_>,
         held: &[(FieldRef, String)],
@@ -23227,8 +21779,7 @@ pub mod dalvik {
                 return_type: "V".to_string(),
                 parameters: recipe.captured.to_vec(),
             },
-            // public synthetic, because it is called from the class the lambda
-            // was written in and a private one would not be reachable.
+
             access_flags: 0x0001 | 0x1000,
             registers,
             inputs,
@@ -23241,8 +21792,6 @@ pub mod dalvik {
         })
     }
 
-    /// Which `iget`/`iput` a field of this kind takes, as a step along from the
-    /// first of them.
     fn field_kind(descriptor: &str) -> u16 {
         match descriptor.chars().next() {
             Some('J') | Some('D') => 1,
@@ -23255,7 +21804,6 @@ pub mod dalvik {
         }
     }
 
-    /// The interface's own method, which calls the body.
     fn a_lambda_method(
         recipe: &Recipe<'_>,
         held: &[(FieldRef, String)],
@@ -23278,7 +21826,6 @@ pub mod dalvik {
             return Err(refused("the body has a descriptor that will not read"));
         };
 
-        // What the call takes, in order, and what the call is.
         let mut wants: Vec<String> = Vec::new();
         let makes = recipe.kind == 8;
         if !makes && matches!(recipe.kind, 5 | 7 | 9) {
@@ -23298,8 +21845,7 @@ pub mod dalvik {
 
         let run_words: u16 = wants.iter().map(|one| width_of(one)).sum::<u16>() + u16::from(makes);
         let inputs: u16 = 1 + given.iter().map(|one| width_of(one)).sum::<u16>();
-        // The low registers to work in, the run the call is made from, four
-        // for what comes back and what it is turned into, and the parameters.
+
         let run = LOW;
         let answer = run + run_words;
         let turned = answer + 2;
@@ -23314,7 +21860,6 @@ pub mod dalvik {
         let mut writing = Writing::new();
         writing.moved(Kept::Reference, SELF, this);
 
-        // The object being made, where this is a reference to a constructor.
         let mut slot = run;
         if makes {
             writing.code.push(Insn::pointing(
@@ -23328,7 +21873,6 @@ pub mod dalvik {
         let mut parameter = this + 1;
         for (at, (have, want)) in haves.iter().zip(wants.iter()).enumerate() {
             let source = if at < held.len() {
-                // Out of a field, into the two registers kept for it.
                 let (reference, descriptor) = &held[at];
                 writing.code.push(Insn::pointing(
                     vec![
@@ -23413,17 +21957,6 @@ pub mod dalvik {
         })
     }
 
-    /// What a class file says in an attribute and a dex file has nowhere else
-    /// to put.
-    ///
-    /// Erasure throws the types away and the class file keeps them in a
-    /// `Signature` attribute beside the descriptor. A dex file has no such
-    /// attribute, so the platform reads them out of an annotation instead --
-    /// and everything that asks a class what it really is at run time, from
-    /// `getGenericSuperclass` to the token a library uses to know it was handed
-    /// a `List<String>`, reads that annotation. The same goes for what a method
-    /// declares it throws, for which class is written inside which, and for
-    /// what the elements of an annotation fall back to.
     fn what_the_platform_is_told(
         class: &jvm::Class,
         signature: Option<&str>,
@@ -23468,8 +22001,6 @@ pub mod dalvik {
             return out;
         }
 
-        // Where this class is written inside another, and which classes are
-        // written inside it.
         let internal = |name: &str| format!("L{};", name.replace('.', "/"));
         let mine = internal(&class.name);
         if let Some((inner, outer, simple, flags)) = class
@@ -23495,8 +22026,7 @@ pub mod dalvik {
                     ),
                 ],
             });
-            // A class declared inside a method says so with the method; one
-            // declared inside a class says so with the class.
+
             match &class.enclosing_method {
                 Some((inside, Some((name, descriptor)))) => {
                     out.push(jvm::Annotation {
@@ -23541,12 +22071,7 @@ pub mod dalvik {
         out
     }
 
-    /// What a whole class comes to.
     pub fn translate_class(class: &jvm::Class) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
-        // The reader hands back names the way a person writes them, with dots,
-        // because that is what a report wants. A dex descriptor wants the
-        // internal form with slashes. Reading one as the other produces a
-        // descriptor that looks right and names a class nobody has.
         let descriptor = format!("L{};", class.name.replace('.', "/"));
         let superclass = format!(
             "L{};",
@@ -23565,8 +22090,7 @@ pub mod dalvik {
             .collect();
         out.source_file = class.source_file.clone();
         out.annotations = class.annotations.clone();
-        // What an annotation type's elements fall back to, which the platform
-        // is told in an annotation of its own.
+
         let defaults: Vec<(String, jvm::Element)> = class
             .methods
             .iter()
@@ -23619,8 +22143,7 @@ pub mod dalvik {
         let mut made = Synthesised::new(&descriptor);
         for method in &class.methods {
             let translated = translate_method(class, method, &descriptor, &mut made)?;
-            // Constructors, static methods and private ones are called without
-            // asking what the object is; everything else is dispatched on it.
+
             let direct = method.access_flags & (0x0008 | 0x0002) != 0
                 || method.name == "<init>"
                 || method.name == "<clinit>";
@@ -23631,14 +22154,11 @@ pub mod dalvik {
             }
         }
 
-        // The class itself first, and then whatever had to be written to stand
-        // in for something the format says in one instruction.
         let mut every = vec![out];
         every.append(&mut made.made);
         Ok(every)
     }
 
-    /// What was written on a method, and what the platform is told beside it.
     fn told_about(class: &jvm::Class, method: &jvm::Member) -> Vec<jvm::Annotation> {
         let mut held = method.annotations.clone();
         held.extend(what_the_platform_is_told(
@@ -23675,7 +22195,6 @@ pub mod dalvik {
             parameters.iter().map(|one| width_of(one)).sum::<u16>() + u16::from(!is_static);
 
         let Some(code) = &method.code else {
-            // Abstract or native: no body, no registers.
             return Ok(Method {
                 reference,
                 access_flags: u32::from(method.access_flags),
@@ -23690,10 +22209,6 @@ pub mod dalvik {
             });
         };
 
-        // A shuffle that puts a value back below where it started needs
-        // somewhere to keep the values while it works, and that is above the
-        // stack. Only the shuffles that reach downwards need it, so a method
-        // without one of them is laid out as it always was.
         let mut room = if code.max_locals > 255
             || code
                 .bytes
@@ -23704,10 +22219,7 @@ pub mod dalvik {
         } else {
             0
         };
-        // A lambda is made out of what it captured, and the values have to be
-        // in a row for the call that makes it. How long a row is not known
-        // until the call is read, so the widest one the class has anywhere is
-        // the room kept for it.
+
         if code.bytes.contains(&0xba) {
             for constant in &class.constants {
                 let jvm::Constant::InvokeDynamic(_, what) = constant else {
@@ -23735,9 +22247,7 @@ pub mod dalvik {
                 }
             }
         }
-        // And most of the one-operand instructions name their registers in
-        // four bits, which reaches the first sixteen and no further. A method
-        // that needs more than that keeps the first few for them.
+
         let low = if code.max_locals + code.max_stack + room >= 16 {
             LOW_ROOM
         } else {
@@ -23758,7 +22268,6 @@ pub mod dalvik {
 
         let mut translator = Translator::new(class, code, low, made);
 
-        // The parameters arrive at the top and belong at the bottom.
         let mut at = low + code.max_locals + code.max_stack + room;
         let mut local = low;
         if !is_static {
@@ -23780,8 +22289,6 @@ pub mod dalvik {
             local += width_of(parameter);
         }
 
-        // Which method it was is the first thing anybody reading a refusal
-        // wants, and the translator itself only sees bytes.
         let named = |error: Diagnostic| {
             error.with_context(format!(
                 "Method: {}.{}{}",
@@ -23807,17 +22314,15 @@ pub mod dalvik {
         })
     }
 
-    /// `move`, `move-wide` or `move-object`, in whichever width reaches.
     fn move_register(kind: u8, to: u16, from: u16) -> Insn {
         if to < 16 && from < 16 {
             return Insn::raw(vec![u16::from(kind) | (to << 8) | (from << 12)]);
         }
-        // The /from16 forms, which are the next opcode along in every case.
+
         let wide = u16::from(kind + 1);
         Insn::raw(vec![wide | (to << 8), from])
     }
 
-    /// A method descriptor as its parameter descriptors and its return one.
     pub fn split_descriptor(descriptor: &str) -> Option<(Vec<String>, String)> {
         let bytes = descriptor.as_bytes();
         if bytes.first() != Some(&b'(') {
@@ -23875,9 +22380,7 @@ pub mod integrity {
         pub has_block: bool,
         pub digest_verified: bool,
         pub digest_failed: bool,
-        /// Whether the signature over the digest was checked against the key
-        /// in the block, and whether it held. A digest says the package has
-        /// not changed; only this says who recorded that digest.
+
         pub signature_verified: bool,
         pub signature_failed: bool,
         pub certificate: Option<String>,
@@ -24073,37 +22576,14 @@ pub mod scaffold {
     use crate::json::Writer;
     use crate::FailureClass;
 
-    /// The one machine a project here is built for. See `compiler::Abi`.
     pub const ARM64: &str = "arm64-v8a";
 
-    /// The folder a project's Java lives in, which the builder reads to find
-    /// what to compile.
     pub const JAVA_FOLDER: &str = "Java";
 
-    /// The folder a project's assets live in.
-    ///
-    /// Whatever is in it is carried into the package as it was written, under
-    /// `assets`, which is where `AssetManager` looks. Nothing here is
-    /// compiled, renamed or given an identifier: a font, a database, a JSON
-    /// file somebody ships with the application.
     pub const ASSETS_FOLDER: &str = "Assets";
 
-    /// The folder a project's dependencies live in.
-    ///
-    /// A jar dropped in here is a jar the code may call into: `android.jar`
-    /// for the platform, or anything else somebody wants to use. Nothing
-    /// creates it -- a project without one compiles against what this
-    /// compiler knows on its own, which is the way it has always worked.
     pub const LIBRARY_FOLDER: &str = "Libraries";
 
-    /// Each language a project may hold, the folder it lives in, the suffix
-    /// its files carry, and whether this build compiles it.
-    ///
-    /// That last one is here because it is the difference between a project
-    /// that produces an application and a project that produces an empty one.
-    /// A folder whose language is not compiled is a folder whose contents do
-    /// not reach the package, and a build that noticed that and said nothing
-    /// would be handing somebody an application missing the code they wrote.
     pub const LANGUAGES: &[(&str, &str, &str, bool)] = &[
         ("java", JAVA_FOLDER, ".java", true),
         ("kotlin", "Kotlin", ".kt", false),
@@ -24111,7 +22591,6 @@ pub mod scaffold {
         ("rust", "Rust", ".rs", false),
     ];
 
-    /// The languages a build here turns into code the device runs.
     pub fn compiled_languages() -> impl Iterator<Item = &'static str> {
         LANGUAGES
             .iter()
@@ -24136,13 +22615,9 @@ pub mod scaffold {
 
     pub const LABEL_RESOURCE: &str = "app_name";
 
-    /// The scaffold does not get to have an opinion about which Android
-    /// releases are supported. It asks the compilers, because they are the
-    /// ones that have to produce something a device of that age can run.
     pub const OLDEST_SUPPORTED: u32 = crate::compiler::OLDEST_API;
     pub const NEWEST_SUPPORTED: u32 = crate::compiler::NEWEST_API;
-    /// What a new project is created targeting: the newest platform whose
-    /// classes are here.
+
     pub const NEWEST_DESCRIBED: u32 = crate::compiler::NEWEST_DESCRIBED_API;
 
     pub const DEFAULT_PACKAGE: &str = "com.my.app";
@@ -24728,13 +23203,6 @@ pub mod scaffold {
         found
     }
 
-    /// Every values file the project holds, whichever folder and whichever
-    /// name.
-    ///
-    /// A person writes `strings.xml` and then `colors.xml` and `dimens.xml`
-    /// and `arrays.xml` beside it, in `values` and in `values-tr` and in
-    /// `values-night`, and every one of them is read. What each holds is
-    /// decided by the elements inside it, not by the name of the file.
     pub fn values_files(root: &str) -> Vec<(String, String)> {
         let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
         let mut found = Vec::new();
@@ -24757,8 +23225,7 @@ pub mod scaffold {
                 .map(|entry| entry.path())
                 .filter(|path| path.extension().is_some_and(|held| held == "xml"))
                 .collect();
-            // In a settled order, so two builds of one project come out the
-            // same way.
+
             files.sort();
             for path in files {
                 if let Ok(text) = std::fs::read_to_string(&path) {
@@ -24769,20 +23236,6 @@ pub mod scaffold {
         found
     }
 
-    /// Every resource the project holds as a file of its own: a layout, a
-    /// menu, a drawable, an animation, whatever is in `res` and is not a
-    /// values folder.
-    ///
-    /// The folder decides the kind and the qualifiers; the file name, without
-    /// its extension, is the name it is reached by. Nothing here reads the
-    /// file: what is in it is the resource, and the build decides what to do
-    /// with it.
-    /// Everything under the project's `Assets` folder, with the name it will
-    /// have in the package.
-    ///
-    /// Read in a settled order, so that two builds of the same folder produce
-    /// the same package. A folder inside a folder is kept: `Assets/fonts/a.ttf`
-    /// is `assets/fonts/a.ttf`, which is the path the application asks for.
     pub fn asset_files(root: &str) -> Vec<(String, Vec<u8>)> {
         let base = std::path::Path::new(root.trim_end_matches('/')).join(ASSETS_FOLDER);
         let mut found = Vec::new();
@@ -26364,9 +24817,6 @@ pub mod image {
         Some(held)
     }
 
-    /// Above this the difference stops being something an eye can find. It is the
-    /// usual visually-lossless bar, a peak signal-to-noise ratio of forty decibels,
-    /// written as the mean squared error that corresponds to it.
     pub const INVISIBLE_ERROR: f64 = 255.0 * 255.0 / 10_000.0;
 
     fn distinct_colours(raster: &Raster) -> Vec<([u8; 4], u32)> {
@@ -26399,10 +24849,6 @@ pub mod image {
         made
     }
 
-    /// Median cut: the colours are held in one box, and the box with the widest
-    /// spread is split at its middle along its widest channel, until there are as
-    /// many boxes as the palette has room for. Each box becomes the colour its
-    /// pixels average out to.
     pub fn quantise(raster: &Raster, wanted: usize) -> Vec<[u8; 4]> {
         let colours = distinct_colours(raster);
         if colours.is_empty() || wanted == 0 {
@@ -26412,10 +24858,6 @@ pub mod image {
             return colours.into_iter().map(|(colour, _)| colour).collect();
         }
 
-        // How far a box's colours lie from the colour it would become, weighted by
-        // how much of the picture they are. Splitting the worst box each time puts
-        // the palette where the error is, rather than where the range happens to
-        // be widest.
         fn cost(held: &[([u8; 4], u32)]) -> u64 {
             if held.len() < 2 {
                 return 0;
@@ -26460,8 +24902,6 @@ pub mod image {
                 .unwrap_or(0);
             held.sort_unstable_by_key(|(colour, _)| colour[channel]);
 
-            // Split where half the pixels lie, not half the colours, so a colour
-            // most of the picture is made of keeps a box to itself.
             let total: u64 = held.iter().map(|(_, count)| u64::from(*count)).sum();
             let mut running = 0u64;
             let mut at = 1usize;
@@ -26487,12 +24927,6 @@ pub mod image {
         palette
     }
 
-    /// The same picture with every invisible pixel reduced to one colour.
-    ///
-    /// A pixel at alpha zero shows nothing, so the three channels underneath it
-    /// are whatever the tool that wrote it happened to leave there. Letting them
-    /// into a palette spends entries on colours nobody can see and drags the
-    /// entries that are seen away from where they belong.
     fn without_invisible_colour(raster: &Raster) -> Raster {
         let mut pixels = Vec::with_capacity(raster.pixels.len());
         for pixel in raster.pixels.chunks_exact(4) {
@@ -26510,9 +24944,6 @@ pub mod image {
     }
 
     fn nearest(palette: &[[u8; 4]], colour: [u8; 4]) -> usize {
-        // What is invisible stays invisible. A round icon whose clear corners
-        // came back faintly opaque draws a square halo around itself, and no
-        // measure of average error would ever notice: it is four pixels.
         if colour[3] == 0 {
             if let Some(index) = palette.iter().position(|held| held[3] == 0) {
                 return index;
@@ -26538,8 +24969,6 @@ pub mod image {
         best
     }
 
-    /// How far the picture moves when every pixel is replaced by its nearest
-    /// palette entry, as a mean squared error over all four channels.
     pub fn error_against(raster: &Raster, palette: &[[u8; 4]]) -> f64 {
         if palette.is_empty() || raster.pixels.is_empty() {
             return f64::MAX;
@@ -26666,14 +25095,6 @@ pub mod image {
         Ok(direct)
     }
 
-    /// The same picture, written as small as it will go. Where it holds more
-    /// colours than a palette does, it is cut down to the ones it can spare —
-    /// but only while the difference stays under what an eye can find, so a
-    /// photograph whose gradients would band keeps every colour it came with.
-    ///
-    /// This is for pictures this build makes, the launcher icons above all.
-    /// [`encode`] stays exact, because a picture somebody handed us is theirs
-    /// and comes back out as it went in.
     pub fn encode_smallest(raster: &Raster) -> Result<Vec<u8>, Diagnostic> {
         let exact = encode(raster)?;
         if palette_of(raster).is_some() {
@@ -26683,9 +25104,6 @@ pub mod image {
         let flat = without_invisible_colour(raster);
         let mut palette = quantise(&flat, LARGEST_PALETTE);
 
-        // Where the picture has clear pixels the palette must have somewhere to
-        // put them, or `nearest` has nothing to hold them at and they come back
-        // as whatever colour lies closest.
         let clear = flat.pixels.chunks_exact(4).any(|pixel| pixel[3] == 0);
         if clear && !palette.iter().any(|entry| entry[3] == 0) {
             if palette.len() >= LARGEST_PALETTE {
@@ -27488,23 +25906,18 @@ pub mod workspace {
         Ok(entries)
     }
 
-    /// The largest file searched through. Past this it is skipped and said so.
     pub const MAX_SEARCHED_BYTES: u64 = 2 * 1024 * 1024;
 
-    /// The most matches carried back from one search.
     pub const MAX_MATCHES: usize = 500;
 
-    /// How much of a line is carried back with a match.
     pub const MATCH_LINE_BYTES: usize = 400;
 
-    /// One place a search found what it was looking for.
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct Match {
         pub path: String,
-        /// Counted from one, as an editor counts them.
+
         pub line: u32,
-        /// Where in the line it starts, in characters rather than in bytes,
-        /// so a line with an emoji in it does not point somewhere else.
+
         pub column: u32,
         pub text: String,
     }
@@ -27520,18 +25933,13 @@ pub mod workspace {
         }
     }
 
-    /// What a search came to, including what it did not look at.
-    ///
-    /// A search that quietly skipped half a project and reported nothing is
-    /// worse than one that reports nothing, so what was skipped and why is
-    /// carried out with the matches rather than dropped.
     #[derive(Clone, Debug, Default)]
     pub struct Found {
         pub matches: Vec<Match>,
         pub files_searched: usize,
         pub files_too_large: usize,
         pub files_not_text: usize,
-        /// Whether the limit was reached, which means there are more.
+
         pub stopped_early: bool,
     }
 
@@ -27552,17 +25960,10 @@ pub mod workspace {
         }
     }
 
-    /// Whether a byte can be part of a word, for a whole-word search.
     fn wordish(byte: u8) -> bool {
         byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$' || byte >= 0x80
     }
 
-    /// Every place `needle` appears in one line.
-    ///
-    /// Byte offsets, found on bytes: the needle and the line are both UTF-8,
-    /// and a byte sequence that is a whole character can only match at a
-    /// character boundary, so matching on bytes finds exactly what matching on
-    /// characters would and does no decoding to do it.
     fn places(
         line: &[u8],
         needle: &[u8],
@@ -27600,22 +26001,10 @@ pub mod workspace {
         }
     }
 
-    /// Whether these bytes are text, decided the way every such tool decides.
-    ///
-    /// A file with a zero byte near its start is not text. Nothing else is
-    /// checked: a search that insisted on valid UTF-8 would skip a file with
-    /// one bad byte in it, and that file is exactly the one somebody is
-    /// looking through a project to find.
     fn looks_like_text(bytes: &[u8]) -> bool {
         !bytes.iter().take(8192).any(|byte| *byte == 0)
     }
 
-    /// Looks through every text file in a project for a piece of text.
-    ///
-    /// The search is over the project as it is on disk, so it finds what a
-    /// build would compile rather than what an editor happens to be showing.
-    /// Files too large to search and files that are not text are counted
-    /// rather than skipped in silence.
     pub fn search(
         root: &str,
         needle: &str,
@@ -27669,8 +26058,7 @@ pub mod workspace {
                         found.stopped_early = true;
                         break;
                     }
-                    // The line, shortened from the end rather than cut through
-                    // a character, so what comes back is always readable.
+
                     let shown = String::from_utf8_lossy(line);
                     let mut text = shown.into_owned();
                     if text.len() > MATCH_LINE_BYTES {
@@ -27922,7 +26310,6 @@ pub mod protobuf {
             self
         }
 
-        /// Four bytes as they are, which is how a float is written.
         pub fn fixed32(&mut self, field: u32, value: u32) -> &mut Message {
             self.body.extend_from_slice(&tag(field, FIXED32));
             self.body.extend_from_slice(&value.to_le_bytes());
@@ -28169,7 +26556,7 @@ pub mod bundle {
     const PRIMITIVE_FRACTION: u32 = 14;
     const REFERENCE_TYPE: u32 = 1;
     const REFERENCE_TYPE_ATTRIBUTE: u64 = 1;
-    /// The kind the table stores a reference to a theme attribute as.
+
     const TYPE_ATTRIBUTE: u8 = 0x02;
     const VALUE_COMPOUND: u32 = 5;
     const COMPOUND_ATTR: u32 = 1;
@@ -28193,33 +26580,19 @@ pub mod bundle {
     const SYMBOL_VALUE: u32 = 4;
     const SYMBOL_TYPE: u32 = 5;
 
-    /// The kinds of value the table stores, and the field each is written as
-    /// here. A float is four bytes as they are; the rest are numbers.
     const PRIMITIVE_FIELDS: &[(u8, u32, bool)] = &[
-        // float
         (0x04, 3, true),
-        // dimension
         (0x05, 13, false),
-        // fraction
         (0x06, 14, false),
-        // a whole number, written as one
         (0x10, 6, false),
-        // a whole number, written in hexadecimal
         (0x11, 7, false),
-        // true or false
         (0x12, 8, false),
-        // #aarrggbb
         (0x1c, 9, false),
-        // #rrggbb
         (0x1d, 10, false),
-        // #argb
         (0x1e, 11, false),
-        // #rgb
         (0x1f, 12, false),
     ];
 
-    /// The names the platform gives the quantities of a plural, and the numbers
-    /// this format gives them.
     const ARITIES: &[(u32, u64)] = &[
         (0x0100_0005, 0),
         (0x0100_0006, 1),
@@ -28291,8 +26664,7 @@ pub mod bundle {
                 );
                 item.message(ITEM_REFERENCE, &held);
             }
-            // The same, except that what the number names is a question for
-            // the theme rather than a resource to read.
+
             Value::Attribute(reference) => {
                 let mut held = Message::new();
                 held.number(REFERENCE_TYPE, REFERENCE_TYPE_ATTRIBUTE);
@@ -28302,8 +26674,7 @@ pub mod bundle {
                 );
                 item.message(ITEM_REFERENCE, &held);
             }
-            // A value the framework has already typed. What is kept is the kind
-            // the table stores, and each kind is written as its own field here.
+
             Value::Typed {
                 source,
                 as_what,
@@ -28351,8 +26722,6 @@ pub mod bundle {
         Ok(item)
     }
 
-    /// The number one reference stands for: what the framework handed out for
-    /// its own, and what this table gave the rest.
     fn reference_id(
         reference: &crate::resources::Reference,
         compiled: &crate::resources::Compiled,
@@ -28380,12 +26749,6 @@ pub mod bundle {
             })
     }
 
-    /// A style, an array or a plural, written as what it holds.
-    /// The number a bag key carries, where `compile` has handed one out.
-    ///
-    /// Every key is a number by the time a package is written. One that is
-    /// still a name is a table that was never compiled, which is a fault here
-    /// rather than something to guess a number for.
     fn numbered_key(key: &crate::resources::BagKey, named: &str) -> Result<u32, Diagnostic> {
         key.number().ok_or_else(|| {
             fail(
@@ -28406,10 +26769,6 @@ pub mod bundle {
         use crate::resources::Kind;
         let mut compound = Message::new();
         match kind {
-            // An attribute is written as what it accepts and the names it
-            // gives its own values, rather than as a list of parts: the first
-            // of its parts is the acceptance itself and the rest are the
-            // names, and the bundle keeps those two things apart.
             Kind::Attr => {
                 let mut attribute = Message::new();
                 let mut accepts = 0u64;
@@ -28425,8 +26784,7 @@ pub mod bundle {
                     symbols.push(held);
                 }
                 attribute.number(ATTRIBUTE_ACCEPTS, accepts);
-                // The range a number may be in, which nothing here narrows,
-                // written out because that is what `aapt2` writes.
+
                 attribute.number(ATTRIBUTE_SMALLEST, i64::from(i32::MIN) as u64);
                 attribute.number(ATTRIBUTE_LARGEST, i64::from(i32::MAX) as u64);
                 for (key, value) in symbols {
@@ -28698,9 +27056,9 @@ pub mod arsc {
     pub const MAX_STRINGS: usize = 65_535;
 
     const TYPE_REFERENCE: u8 = 0x01;
-    /// What the device reads as a question for the theme rather than a value.
+
     const TYPE_ATTRIBUTE: u8 = 0x02;
-    /// A number of a whole, which is what `50%` is.
+
     const TYPE_FRACTION: u8 = 0x06;
     const TYPE_STRING: u8 = 0x03;
     const TYPE_DIMENSION: u8 = 0x05;
@@ -28710,7 +27068,7 @@ pub mod arsc {
 
     const NO_ENTRY: u32 = 0xffff_ffff;
     const BOOLEAN_TRUE: u32 = 0xffff_ffff;
-    /// The flag on an entry that holds several values rather than one.
+
     const ENTRY_COMPLEX: u16 = 0x0001;
     const CONFIG_MCC: u32 = 0x0000_0001;
     const CONFIG_MNC: u32 = 0x0000_0002;
@@ -28767,8 +27125,6 @@ pub mod arsc {
         }
     }
 
-    /// `50%` and `50%p`, packed the way a dimension is: the same fixed point,
-    /// with what the fraction is of in the low bits rather than a unit.
     pub fn encode_fraction(milli: i64, of_parent: bool) -> Result<u32, Diagnostic> {
         encode_fixed(milli, u32::from(of_parent), "of a whole")
     }
@@ -28777,15 +27133,6 @@ pub mod arsc {
         encode_fixed(milli, unit_index(unit), unit.as_str())
     }
 
-    /// The platform's own fixed point, and the platform's own choice of where
-    /// to put the point.
-    ///
-    /// The number is scaled by two to the twenty-third and the widest radix it
-    /// still fits is taken, in the order the runtime tries them -- which is
-    /// what decides the bytes, so it is done here the way it is done there
-    /// rather than in whatever order looks tidiest. A number too large for any
-    /// of them is refused; one too precise is rounded, because that is what a
-    /// twenty-four bit mantissa is and the runtime rounds it too.
     fn encode_fixed(milli: i64, index: u32, said: &str) -> Result<u32, Diagnostic> {
         let negative = milli < 0;
         let held = i128::from(milli.abs());
@@ -28922,8 +27269,6 @@ pub mod arsc {
         where_from: &str,
     ) -> Result<(u8, u32), Diagnostic> {
         match value {
-            // A bag is several values, and the writer that walks it asks about
-            // each of them in turn rather than about the bag.
             Value::Bag { .. } => Err(fail(
                 "EZ012",
                 "A bag holds several values and has no one value of its own.",
@@ -28941,8 +27286,7 @@ pub mod arsc {
                 Ok((TYPE_FRACTION, encode_fraction(*milli, *of_parent)?))
             }
             Value::Typed { as_what, data, .. } => Ok((*as_what, *data)),
-            // A question for the theme: the number of the attribute to ask
-            // about, typed so the device knows to ask rather than to read.
+
             Value::Attribute(reference) => {
                 Ok((TYPE_ATTRIBUTE, identifier(reference, compiled, where_from)?))
             }
@@ -28953,7 +27297,6 @@ pub mod arsc {
         }
     }
 
-    /// The number behind a name, whoever handed it out.
     fn identifier(
         reference: &crate::resources::Reference,
         compiled: &Compiled,
@@ -28961,9 +27304,6 @@ pub mod arsc {
     ) -> Result<u32, Diagnostic> {
         {
             {
-                // The framework hands out its own identifiers, and the build
-                // carries the list of them, so a reference to one is the number
-                // it was given.
                 if reference.is_platform() {
                     let Some(id) =
                         crate::axml::framework_id(reference.kind.as_str(), &reference.name)
@@ -29057,9 +27397,7 @@ pub mod arsc {
                     .filter(|entry| entry.kind == *kind && entry.name == *name)
                     .map(|entry| entry.config)
                     .collect();
-                // Which of the things a folder can say this resource is
-                // told apart by. The platform reads it to know which changes
-                // to a device make it look this resource up again.
+
                 let mut flags = 0u32;
                 let differs = |what: &dyn Fn(&Config) -> u32| -> bool {
                     held.iter().any(|one| what(one) != what(&held[0]))
@@ -29141,10 +27479,7 @@ pub mod arsc {
                         continue;
                     };
                     let where_from = format!("{}/{}", kind.as_str(), name);
-                    // A style, an array and a plural hold several values, and
-                    // the table writes those a different shape: a longer
-                    // header carrying what it is built on and how many it
-                    // holds, and then one name-and-value pair per part.
+
                     if let Value::Bag { parent, items } = &entry.value {
                         let above = match parent {
                             Some(reference) => {
@@ -29261,16 +27596,6 @@ pub mod keystore {
 
     pub const MAGIC: &[u8; 8] = b"OMNIKEY1";
 
-    /// Version two carries a tag over everything before it, taken with a key
-    /// derived from the one the sealed blob is encrypted under. Version one
-    /// carried no tag, and a file altered in place was found only later, by the
-    /// padding of a decryption that should never have been attempted or by the
-    /// certificate failing to match the key. Both of those are real checks and
-    /// both still run; neither is a substitute for knowing, before anything is
-    /// decrypted, that the bytes are the ones that were written.
-    ///
-    /// A version one file is still read, and is written back as version two the
-    /// first time it is opened with the password that made it.
     pub const CONTAINER_VERSION: u32 = 2;
     pub const OLDEST_CONTAINER_VERSION: u32 = 1;
     pub const TAG_BYTES: usize = 32;
@@ -29296,45 +27621,20 @@ pub mod keystore {
     pub const DEFAULT_BITS: u32 = LARGEST_KEY_BITS;
     pub const DEFAULT_PASSWORD: &str = "My_App_Builder";
 
-    /// What the shared key is bound to, as far as this process is concerned.
-    ///
-    /// The application sets it once, at start, from something that belongs to
-    /// the installation and the device rather than to this build's source.
-    /// Everything else about a key is a parameter of the call that needs it;
-    /// this is not, because it is not a property of any one call. It is a
-    /// property of where the process is running, and threading it through every
-    /// signature would only be more places to forget it.
-    ///
-    /// Left unset — on a machine that is not a phone, which is where the tests
-    /// run — the shared key is sealed under the published password alone, and
-    /// says so.
     static DEVICE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
 
     const SHARED_BINDING_DOMAIN: &[u8] = b"Omni_Builder shared key, bound to this device";
 
-    /// Binds the shared key to this device. Setting it again replaces it, which
-    /// is what has to happen when an installation is restored somewhere else:
-    /// the shared key there is a different key and is made afresh.
     pub fn bind_device(secret: &str) {
         let held = secret.trim();
         let mut slot = DEVICE.write().unwrap_or_else(|held| held.into_inner());
         *slot = (!held.is_empty()).then(|| held.to_string());
     }
 
-    /// Whether the shared key on this machine is bound to anything.
     pub fn device_is_bound() -> bool {
         DEVICE.read().map(|held| held.is_some()).unwrap_or_default()
     }
 
-    /// The password the shared key is really sealed under.
-    ///
-    /// What a person is shown is [`DEFAULT_PASSWORD`], and that stays true: the
-    /// shared key is a way to start rather than a secret, and the interface
-    /// says as much in every language it speaks. What the file is sealed with
-    /// is that password bound to the device it was made on, so the file is
-    /// worth nothing anywhere else. A key that leaves this device — in a
-    /// backup, in a folder somebody shared, in any of the ways a file goes
-    /// somewhere it was not meant to — does not open there.
     pub fn shared_password() -> String {
         shared_password_for(
             &DEVICE
@@ -29345,13 +27645,6 @@ pub mod keystore {
         )
     }
 
-    /// The same, for a device named outright rather than the one this process
-    /// was told about. Nothing about it depends on ambient state, which is what
-    /// lets it be reasoned about and tested.
-    ///
-    /// An empty device is a machine that would not say which one it is. There
-    /// the shared key falls back to the published password alone, which is what
-    /// it always was; it is simply not bound.
     pub fn shared_password_for(device: &str) -> String {
         if device.is_empty() {
             return DEFAULT_PASSWORD.to_string();
@@ -29367,11 +27660,6 @@ pub mod keystore {
         out
     }
 
-    /// The password a key at this path is sealed under, given what was typed.
-    ///
-    /// Only the shared key is bound, and only when what was offered for it is
-    /// the published password. A password somebody chose is theirs and passes
-    /// through untouched, whatever the key is called.
     fn effective_password(path: &str, password: &str) -> String {
         if is_default(path) && password == DEFAULT_PASSWORD {
             shared_password()
@@ -29631,41 +27919,27 @@ pub mod keystore {
         Ok(part)
     }
 
-    /// A key container, read but not yet vouched for.
-    ///
-    /// Nothing here has been checked against the tag: reading is what a listing
-    /// does, and a listing has no password. What the tag covers is recorded so
-    /// that whoever does have the password can check it without parsing again.
     #[derive(Clone, Debug)]
     pub struct Container<'a> {
         pub version: u32,
         pub alias: String,
         pub certificate: &'a [u8],
         pub sealed: &'a [u8],
-        /// Absent on a version one file, which carried none.
+
         pub tag: Option<&'a [u8]>,
-        /// Absent on a version one file, which carried none.
+
         pub checksum: Option<&'a [u8]>,
-        /// The bytes from the start of the file that the tag is taken over.
+
         pub covered: usize,
-        /// The bytes from the start of the file that the checksum is taken over.
+
         pub summed: usize,
     }
 
     impl Container<'_> {
-        /// Whether this file can be shown to be the one that was written, given
-        /// the password. A version one file cannot; it is upgraded on first use.
         pub fn is_authenticated(&self) -> bool {
             self.tag.is_some()
         }
 
-        /// Whether the file still adds up to what it says it does.
-        ///
-        /// This asks nothing of the password and proves nothing against anybody
-        /// who set out to alter the file, since the checksum can be recomputed
-        /// as easily as it can be read. What it does catch is a file that got
-        /// damaged rather than edited, and it is what lets a wrong password be
-        /// reported as a wrong password.
         pub fn adds_up(&self, whole: &[u8]) -> bool {
             match self.checksum {
                 None => true,
@@ -29685,14 +27959,6 @@ pub mod keystore {
         put(&mut out, certificate);
         put(&mut out, sealed);
 
-        // A plain digest of everything above, which anybody can recompute and
-        // therefore anybody can forge. It is not a security control and nothing
-        // is trusted because of it. It is here to tell two true sentences
-        // apart: the tag below fails both when a password is wrong and when a
-        // file has changed, and telling somebody their key has been altered
-        // when they only mistyped would be a cruel way to be right half the
-        // time. This says which happened, and the tag still decides whether
-        // anything is decrypted.
         let summary = crate::hash::sha256(&out);
         put(&mut out, summary.as_bytes());
 
@@ -29849,14 +28115,6 @@ pub mod keystore {
         record_from(&request.alias, &path, &certificate)
     }
 
-    /// The tag key for a container, derived from the password the way the
-    /// container's own tag was.
-    ///
-    /// A caller that changes something a container carries — an alias, say —
-    /// has to write a tag that matches what it wrote, and this is where that
-    /// key comes from. It costs a full unlock, because it is a full unlock: the
-    /// derivation is the expensive part and there is no cheaper honest route to
-    /// this key.
     pub fn tag_key_for(sealed: &[u8], password: &str) -> Result<[u8; 32], Diagnostic> {
         let mut found = [0u8; 32];
         rsa::open_pkcs8_authenticating(sealed, password, |derived| {
@@ -29936,14 +28194,6 @@ pub mod keystore {
         let certificate = container.certificate;
         let sealed = container.sealed;
 
-        // The tag is checked between the derivation and the decryption. A file
-        // that has been altered never reaches the decryption at all, which is
-        // the point of putting the tag over the ciphertext rather than under
-        // it. A version one file has no tag; it is opened the old way and
-        // written back with one below.
-        // The plain checksum first, which needs no password. A file that got
-        // damaged is caught here, before anybody is asked to wait for a
-        // derivation that cannot succeed.
         if !container.adds_up(&data) {
             return Err(
                 fail("EY051", "The key file is not the one that was written.")
@@ -29967,13 +28217,7 @@ pub mod keystore {
             if crate::cipher::same_bytes(tag, &crate::cipher::hmac_sha256(derived, covered)) {
                 return Ok(());
             }
-            // The file adds up, so it is the one that was written and this is a
-            // password that does not open it. Somebody who altered the file and
-            // recomputed its checksum lands here too and is told the same
-            // thing; nothing is decrypted for them either, which is what
-            // actually matters. Being wrong about which of the two it was costs
-            // nothing. Being wrong the other way would tell a person their key
-            // had been tampered with every time they mistyped.
+
             Err(fail("EY021", "The password did not open this key.").with_context(format!(
                 "Path: {path}"
             )))
@@ -30011,10 +28255,6 @@ pub mod keystore {
 
         let record = record_from(&alias, path, certificate)?;
 
-        // A file written before there were tags is written back with one, now
-        // that the password that made it has been shown. It goes out beside the
-        // original and is moved over it, so a machine that stops in the middle
-        // still has a key afterwards.
         if !container.is_authenticated() {
             let upgraded = encode(&alias, certificate, sealed, &tag_key);
             let beside = format!("{path}.upgrading");
@@ -30085,17 +28325,12 @@ pub mod builder {
         pub icon: Option<Vec<u8>>,
         pub launcher: Vec<crate::scaffold::Supplied>,
         pub values: Vec<(String, String)>,
-        /// Every resource the project holds as a file of its own: a layout, a
-        /// menu, a drawable, whatever `res` holds outside a values folder.
+
         pub resources: Vec<crate::scaffold::Supplied>,
-        /// The same again, out of the Android libraries the project depends
-        /// on. These sit underneath the project's own: where both declare the
-        /// same thing for the same devices, the project's is the one that
-        /// ships, which is what overriding a library's resource means.
+
         pub library_values: Vec<(String, String)>,
         pub library_resources: Vec<crate::scaffold::Supplied>,
-        /// The packages those libraries are written in, each of which needs an
-        /// `R` of its own with the numbers this build handed out.
+
         pub library_packages: Vec<String>,
     }
 
@@ -30125,12 +28360,6 @@ pub mod builder {
             .collect())
     }
 
-    /// Every `@+id/name` written anywhere in an XML resource.
-    ///
-    /// A layout declares the identifiers it uses, and `findViewById(R.id.save)`
-    /// is how the code reaches them. They are found before the table is
-    /// compiled, because an identifier that is not in it is one the generated
-    /// `R` does not carry.
     fn ids_declared_in(element: &crate::xml::Element, into: &mut Vec<String>) {
         for attribute in &element.attributes {
             let Some(reference) = crate::resources::Reference::parse(&attribute.value) else {
@@ -30155,11 +28384,6 @@ pub mod builder {
         compile_resources(project, sink)
     }
 
-    /// The oldest platform the project says it runs on.
-    ///
-    /// A folder qualified for something the platform learned later says which
-    /// platform it needs, and where every device the project runs on has it
-    /// already, saying so is noise the table does not carry.
     fn oldest_platform_wanted(manifest: &str) -> u16 {
         let mut sink = Sink::new();
         let Some(root) = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink) else {
@@ -30196,15 +28420,8 @@ pub mod builder {
             files.push((entry, made.bytes.clone()));
         }
 
-        // Every other file in `res`: a layout, a menu, a drawable, whatever is
-        // there. Each is an entry in the table pointing at where it sits in
-        // the package, and each XML one is parsed here so the identifiers it
-        // declares are in the table before the table is compiled.
         let mut compiling: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
         for held in &project.resources {
-            // The launcher icons above are read off the same folders. One
-            // resource is one entry, and registering it twice is what the
-            // table refuses.
             if files
                 .iter()
                 .any(|(entry, _)| *entry == format!("res/{}/{}", held.folder, held.name))
@@ -30268,9 +28485,6 @@ pub mod builder {
             }
         }
 
-        // And underneath all of it, whatever the Android libraries brought.
-        // A library's resource is used where the project does not declare one
-        // of its own for the same devices, and is left out where it does.
         if !project.library_values.is_empty() || !project.library_resources.is_empty() {
             let mut theirs =
                 crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
@@ -30324,10 +28538,6 @@ pub mod builder {
             .compile(sink)
             .ok_or_else(|| fail("EB041", "The resource table could not be built."))?;
 
-        // And now the identifiers are settled, every XML resource is written
-        // as the binary XML a device reads, with each `@string/x` in it
-        // replaced by the number it came to and each attribute the project
-        // declared itself by the number it was given.
         let own = compiled.declared_attributes();
         for (entry, held) in compiling {
             let mut named = crate::diag::Sink::new();
@@ -30354,8 +28564,6 @@ pub mod builder {
         compiled: Option<&crate::resources::Compiled>,
     ) -> Result<(), Diagnostic> {
         for attribute in &mut element.attributes {
-            // `?attr/colorPrimary` is a question for whatever theme is in
-            // force, and what the device carries is the attribute's number.
             if let Some(rest) = attribute.value.strip_prefix('?') {
                 if rest.starts_with("0x") || rest.starts_with("0X") {
                     continue;
@@ -30397,9 +28605,7 @@ pub mod builder {
             let Some(reference) = crate::resources::Reference::parse(&attribute.value) else {
                 continue;
             };
-            // `@android:id/text1` and `@android:style/Theme.NoTitleBar` name
-            // the framework's own, which the project does not hold and does
-            // not have to: the platform gave them their numbers.
+
             if reference.package.as_deref() == Some("android") {
                 let Some(found) =
                     crate::axml::framework_id(reference.kind.as_str(), &reference.name)
@@ -30503,9 +28709,7 @@ pub mod builder {
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
                 annotations: Vec::new(),
-                // Up into the superclass, which for an activity is the
-                // activity: a constructor calling Object's instead would be a
-                // class the device refuses to load.
+
                 direct_methods: vec![crate::dexwrite::default_constructor(
                     &descriptor,
                     "Landroid/app/Activity;",
@@ -30539,11 +28743,7 @@ pub mod builder {
         pub signed: bool,
         pub carries_code: bool,
         pub certificate_fingerprint: String,
-        /// What re-reading the finished package said about its own signature.
-        ///
-        /// The package handed back is read again from its own bytes, as
-        /// anything installing it would read it, rather than being declared
-        /// signed because the code that signed it returned without an error.
+
         pub verified: crate::signing::Report,
     }
 
@@ -30626,9 +28826,7 @@ pub mod builder {
                 access_flags: crate::dexwrite::ACC_PUBLIC,
                 source_file: Some("MainActivity.java".to_string()),
                 annotations: Vec::new(),
-                // Up into the superclass, which for an activity is the
-                // activity: a constructor calling Object's instead would be a
-                // class the device refuses to load.
+
                 direct_methods: vec![crate::dexwrite::default_constructor(
                     &descriptor,
                     "Landroid/app/Activity;",
@@ -30663,8 +28861,7 @@ pub mod builder {
     pub fn from_project(root: &str) -> Result<Project, Diagnostic> {
         crate::progress::enter("project");
         let manifest = crate::scaffold::read_manifest(root)?;
-        // And what the Android libraries brought with them, which sits
-        // underneath the project's own.
+
         let brought = brought_by_libraries(root)?;
         let manifest = merged_manifest(&manifest, &brought.manifests)?;
         let mut project = from_manifest(&manifest)?;
@@ -30672,9 +28869,7 @@ pub mod builder {
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
         project.resources = crate::scaffold::resource_files(root);
-        // What the project ships as it is, and what its libraries do. The
-        // project's own is written last and wins, so a library that carries a
-        // file of the same name does not overwrite it.
+
         let mut carried: Vec<(String, Vec<u8>)> = Vec::new();
         for (name, bytes) in brought
             .carried
@@ -30692,11 +28887,6 @@ pub mod builder {
         project.library_resources = brought.resources;
         project.library_packages = brought.packages;
 
-        // The identifiers the resource table hands out, worked out here rather
-        // than at packaging time, because `R.string.app_name` is how a person
-        // reaches a resource and the compiler needs the number behind it.
-        // Assignment is from sorted order, so working it out twice gives the
-        // same answers both times.
         let mut sink = crate::diag::Sink::new();
         let table = compile_resources(&project, &mut sink)?;
         let mut sources = Vec::new();
@@ -30707,10 +28897,7 @@ pub mod builder {
             if !package.is_empty() {
                 sources.push(("R.java".to_string(), r_source(&package, &icons.compiled)));
             }
-            // A library's own `R` was written when the library was built, with
-            // numbers that mean nothing here. One is written for each of them
-            // with the numbers this build handed out, and it wins over the one
-            // the library brought because it is compiled rather than unpacked.
+
             for held in &project.library_packages {
                 if held.is_empty() || *held == package {
                     continue;
@@ -30719,9 +28906,6 @@ pub mod builder {
             }
         }
 
-        // What the person wrote, compiled, and put in the package instead of
-        // the empty activity `from_manifest` describes. Until this, everything
-        // in the Java folder was carried around and none of it was built.
         let written = compiled_java(root, sources)?;
         if !written.is_empty() {
             project.code = written;
@@ -30729,20 +28913,15 @@ pub mod builder {
         Ok(project)
     }
 
-    /// What checking a project's code came to.
     #[derive(Clone, Debug)]
     pub struct Checked {
         pub classes: usize,
         pub resources: usize,
         pub locales: usize,
         pub package: String,
-        /// The one thing that stopped it, if anything did.
+
         pub refusal: Option<Diagnostic>,
-        /// What the security policy makes of the manifest, rule by rule.
-        ///
-        /// The policy runs before anything is written, so a project that
-        /// compiles and would be refused on policy is a project worth knowing
-        /// about before pressing build rather than after waiting for one.
+
         pub policy: Option<guard::Report>,
     }
 
@@ -30768,8 +28947,6 @@ pub mod builder {
                 w.end_array();
             }
             if let Some(refusal) = &self.refusal {
-                // The whole refusal, location included: a mark on a line needs
-                // a line, and a sentence saying which one is not one.
                 w.field_str("code", &refusal.code);
                 w.field_str("error", &refusal.message);
                 if let Some(suggestion) = &refusal.suggestion {
@@ -30792,16 +28969,6 @@ pub mod builder {
         }
     }
 
-    /// Reads a project the way a build reads it, and stops before packaging.
-    ///
-    /// This is not a second opinion about the project: it is the front half of
-    /// the build itself -- the manifest, the resources, the identifiers, the
-    /// Java -- run and then dropped. So an answer of clear means the same
-    /// files compiled, with the same classpath, in the same order, and a
-    /// refusal is the refusal the build would give, at the line it would give
-    /// it at.
-    ///
-    /// Nothing is written anywhere. It is the check to run while typing.
     pub fn check(root: &str) -> Checked {
         match from_project(root) {
             Ok(project) => {
@@ -30846,25 +29013,6 @@ pub mod builder {
         }
     }
 
-    /// The `R` class, as Java, from the identifiers the resource table gave
-    /// out.
-    ///
-    /// It is written as source rather than assembled as a class file because
-    /// that is one road instead of two: whatever the compiler does with a
-    /// nested class holding static final ints, it does here as well, and there
-    /// is no second description of a class file to keep in step.
-    ///
-    /// Every field is a `static final int` with a value, which is exactly what
-    /// the platform's own `R` is. `android.R` is not this: that one belongs to
-    /// the framework and is already on the device.
-    /// A resource's name, as the field `R` gives it.
-    ///
-    /// A resource may be called `Theme.App.Light` -- which is the convention
-    /// for a style, not an exception to it -- and no field can be. The
-    /// platform's own tools replace the characters a name is allowed to hold
-    /// and an identifier is not, so this does the same and by the same rule:
-    /// a dot, a dash and a colon each become an underscore, and everything
-    /// else is left alone.
     pub fn r_field(name: &str) -> String {
         name.chars()
             .map(|held| match held {
@@ -30904,9 +29052,6 @@ public final class R {{
                 .collect();
             named.sort();
             for (name, raw) in named {
-                // Written as a signed decimal, because `0x7f...` is above what
-                // an `int` holds as a positive number and this compiler reads
-                // a literal the way Java does.
                 out.push_str(&format!(
                     "        public static final int {} = {};
 ",
@@ -30920,9 +29065,6 @@ public final class R {{
             );
         }
 
-        // A styleable is not a resource and has no identifier of its own. What
-        // it is, is the array `obtainStyledAttributes` is handed and the offset
-        // of each attribute in it, so that is what is written.
         if !compiled.styleables().is_empty() {
             out.push_str(
                 "    public static final class styleable {
@@ -30963,13 +29105,6 @@ public final class R {{
         out
     }
 
-    /// Source a project holds in a language this build does not compile.
-    ///
-    /// A folder for a language nothing compiles is a folder whose contents do
-    /// not reach the package. Left alone, that is a build which produces an
-    /// application, says it produced one, and has none of the code the person
-    /// wrote in it -- the worst kind of quiet, because the package installs
-    /// and launches and does nothing.
     pub fn uncompiled_source(root: &str) -> Vec<(&'static str, String)> {
         let mut found = Vec::new();
         for (language, folder, suffix, compiled) in crate::scaffold::LANGUAGES {
@@ -31015,21 +29150,12 @@ public final class R {{
         }
     }
 
-    /// Every class the project's Java comes to.
-    ///
-    /// The files are compiled together, so that a type written in one can be
-    /// named by another, and each class file is turned into the Dalvik the
-    /// device runs. A project with no Java is not an error: it keeps the
-    /// activity the manifest describes, which is enough to install and launch.
     pub fn compiled_java(
         root: &str,
         generated: Vec<(String, String)>,
     ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
         crate::progress::enter("java");
 
-        // Before anything is compiled: source this build cannot compile is
-        // refused rather than walked past. What is compiled here is named, so
-        // the refusal is the whole answer rather than half of one.
         let ignored = uncompiled_source(root);
         if !ignored.is_empty() {
             let mut refusal = fail(
@@ -31055,17 +29181,11 @@ public final class R {{
         let mut sources = Vec::new();
         gather_java(&folder, &mut sources);
         if sources.is_empty() {
-            // A project may be nothing but what it depends on, and that still
-            // has to be packaged.
             return library_classes(root, &[]);
         }
-        // In a settled order, so that the same project comes to the same
-        // package whatever the filesystem hands back first.
+
         sources.sort();
 
-        // Read first, compiled as one. A class in one file names a class in
-        // another without saying where it lives, which only works if every
-        // file is on the table before any body is written.
         let mut read = Vec::new();
         for path in &sources {
             let text = std::fs::read_to_string(path).map_err(|why| {
@@ -31073,9 +29193,7 @@ public final class R {{
                     .with_context(format!("Path: {}", path.display()))
                     .with_context(format!("Reason: {why}"))
             })?;
-            // Named the way the project names it, so a refusal points at a
-            // file somebody can open rather than at wherever this device
-            // happens to keep its projects.
+
             let named = path
                 .strip_prefix(root)
                 .unwrap_or(path)
@@ -31102,7 +29220,6 @@ public final class R {{
         Ok(out)
     }
 
-    /// One entry of an archive, as the bytes it holds.
     pub(crate) fn entry_bytes(
         bytes: &[u8],
         entry: &crate::archive::Entry,
@@ -31134,12 +29251,6 @@ public final class R {{
         }
     }
 
-    /// The jars one dependency amounts to.
-    ///
-    /// A jar is one. An `aar` -- which is how an Android library is published
-    /// -- is an archive with the jar inside it, and any more it brings under
-    /// `libs`. Everything else it holds is resources, a manifest and notes,
-    /// which are read elsewhere.
     pub fn jars_within(path: &std::path::Path, bytes: &[u8]) -> Result<Vec<Vec<u8>>, Diagnostic> {
         let where_from = path.display().to_string();
         if path.extension().is_none_or(|held| held != "aar") {
@@ -31175,13 +29286,6 @@ public final class R {{
         Ok(out)
     }
 
-    /// One element written back out as the XML it was read from.
-    ///
-    /// This is how a library's `<uses-permission>` or `<provider>` gets into
-    /// the application's manifest: it is read from the library, written out
-    /// again here, and put where it belongs. Only what a manifest holds is
-    /// written -- elements, attributes and elements inside them -- because
-    /// that is all a manifest is.
     fn as_xml(element: &crate::xml::Element, indent: usize) -> String {
         let pad = " ".repeat(indent);
         let mut out = format!("{pad}<{}", element.name);
@@ -31212,8 +29316,6 @@ public final class R {{
             .replace('"', "&quot;")
     }
 
-    /// What one element is known by, which is what makes two of them the same
-    /// one rather than two.
     fn known_as(element: &crate::xml::Element) -> (String, String) {
         (
             element.name.clone(),
@@ -31224,14 +29326,6 @@ public final class R {{
         )
     }
 
-    /// The application's manifest with what its libraries ask for in it.
-    ///
-    /// A library declares the permissions it needs, the features it needs and
-    /// the components it brings -- a provider that starts it, a receiver it
-    /// listens with -- and an application that does not carry them ships
-    /// something that does not work. Each is added where the application does
-    /// not already declare one by the same name, so an application that says
-    /// something about a library's component keeps what it said.
     pub fn merged_manifest(application: &str, libraries: &[String]) -> Result<String, Diagnostic> {
         if libraries.is_empty() {
             return Ok(application.to_string());
@@ -31272,8 +29366,7 @@ public final class R {{
                     }
                     continue;
                 }
-                // A library says nothing about which platform the application
-                // runs on; the application does.
+
                 if child.name == "uses-sdk" {
                     continue;
                 }
@@ -31293,9 +29386,6 @@ public final class R {{
         Ok(out)
     }
 
-    /// The same element with `${applicationId}` in it replaced by the
-    /// application it is being put into, which is what a library writes when
-    /// it needs a name of the application's own.
     fn instead(element: &crate::xml::Element, package: &str) -> crate::xml::Element {
         let mut out = element.clone();
         for attribute in &mut out.attributes {
@@ -31309,26 +29399,16 @@ public final class R {{
         out
     }
 
-    /// What an Android library brings besides its code: the resources it
-    /// declares, the values files among them, the package it is written in,
-    /// and the manifest it asks to have merged.
     #[derive(Default)]
     pub struct Brought {
         pub values: Vec<(String, String)>,
         pub resources: Vec<crate::scaffold::Supplied>,
         pub packages: Vec<String>,
         pub manifests: Vec<String>,
-        /// What the library ships beside its code: files under `assets`, and
-        /// the machine code under `jni`, each with the name it will have in
-        /// the package.
+
         pub carried: Vec<(String, Vec<u8>)>,
     }
 
-    /// Everything the Android libraries a project depends on bring with them.
-    ///
-    /// They are read in a settled order and land underneath the project's own,
-    /// so a project that overrides a library's string keeps its own and a
-    /// project that does not gets the library's.
     pub fn brought_by_libraries(root: &str) -> Result<Brought, Diagnostic> {
         let mut out = Brought::default();
         for path in packaged_jars(root) {
@@ -31366,10 +29446,7 @@ public final class R {{
                     out.manifests.push(text);
                     continue;
                 }
-                // What a library ships beside its code. `assets` is carried
-                // as it is; `jni/arm64-v8a/libx.so` is what the same file is
-                // called `lib/arm64-v8a/libx.so` in a package, which is the
-                // one rename an aar needs.
+
                 if entry.name.starts_with("assets/") {
                     let held = entry_bytes(&bytes, entry, &where_from)?;
                     out.carried.push((entry.name.clone(), held));
@@ -31411,20 +29488,12 @@ public final class R {{
         Ok(out)
     }
 
-    /// The package a manifest declares, which is the package a library's `R`
-    /// is written in.
     fn package_of(manifest: &str) -> Option<String> {
         let mut sink = Sink::new();
         let root = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink)?;
         root.attribute("package").map(|held| held.to_string())
     }
 
-    /// The jars a project brings with it that have to go into the package.
-    ///
-    /// The platform's own jar is what the device already has: compiling
-    /// against it is right and putting it in the package is not. Everything
-    /// else in `Libraries` is code the application is made of, and a package
-    /// without it installs and then cannot find its own classes.
     pub fn packaged_jars(root: &str) -> Vec<std::path::PathBuf> {
         let folder = std::path::Path::new(root).join(crate::scaffold::LIBRARY_FOLDER);
         let Ok(entries) = std::fs::read_dir(&folder) else {
@@ -31439,26 +29508,17 @@ public final class R {{
                     && path.file_name().is_some_and(|held| held != "android.jar")
             })
             .collect();
-        // In a settled order, so that two jars holding the same class come out
-        // the same way every time.
+
         found.sort();
         found
     }
 
-    /// Everything in those jars, translated, less whatever is already there.
-    ///
-    /// A class the project declares itself wins over one a jar brought, and
-    /// the first jar to declare a class wins over the next. Writing both would
-    /// produce a package the tools refuse, and choosing quietly by whichever
-    /// came last would make the build depend on the order of a directory.
     pub fn library_classes(
         root: &str,
         already: &[String],
     ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
         let mut out: Vec<crate::dexwrite::Class> = Vec::new();
-        // Every class already accounted for, and where it came from, so that
-        // two libraries declaring the same class can be told apart from one
-        // library declaring it twice.
+
         let mut held: Vec<(String, String)> = already
             .iter()
             .map(|one| (one.clone(), "the project's own code".to_string()))
@@ -31482,12 +29542,9 @@ public final class R {{
                     .iter()
                     .filter(|entry| {
                         !entry.is_directory()
-                        && entry.name.ends_with(".class")
-                        // What is under META-INF describes the jar rather than
-                        // being part of it, and the copies kept there for
-                        // newer releases would collide with the originals.
-                        && !entry.name.starts_with("META-INF/")
-                        && !entry.name.ends_with("module-info.class")
+                            && entry.name.ends_with(".class")
+                            && !entry.name.starts_with("META-INF/")
+                            && !entry.name.ends_with("module-info.class")
                     })
                     .collect();
                 names.sort_by(|left, right| left.name.cmp(&right.name));
@@ -31502,13 +29559,6 @@ public final class R {{
                     let descriptor = format!("L{};", class.name.replace('.', "/"));
                     let where_from = path.display().to_string();
                     if let Some((_, before)) = held.iter().find(|(known, _)| *known == descriptor) {
-                        // The same jar carrying the same class twice is a jar
-                        // read twice -- an aar whose `classes.jar` is also
-                        // under `libs`, say -- and the second reading is the
-                        // same class. Two different ones is a package with two
-                        // answers to the same name, and which one a device
-                        // would load is not something to leave to the order
-                        // the folder was read in.
                         if *before == where_from {
                             continue;
                         }
@@ -31534,17 +29584,6 @@ public final class R {{
         Ok(out)
     }
 
-    /// Everything the project's Java may call into.
-    ///
-    /// Every jar in the project's own `Libraries` folder, and the platform's
-    /// `android.jar` where one can be found. A project with neither compiles
-    /// against what the compiler knows on its own, which is the standard
-    /// library and the whole of the platform, both written out in the compiler
-    /// itself. A jar here adds to that rather than making it possible.
-    ///
-    /// A jar that cannot be read stops the build. It was put there on purpose,
-    /// and quietly ignoring it would mean a refusal three screens later about
-    /// a class that is right in front of the person.
     pub fn what_it_may_call_into(
         root: &str,
     ) -> Result<crate::compilers::java::Classpath, Diagnostic> {
@@ -31561,13 +29600,11 @@ public final class R {{
                         .is_some_and(|held| held == "jar" || held == "zip" || held == "aar")
                 })
                 .collect();
-            // In a settled order, so that two jars declaring the same class
-            // come out the same way every time.
+
             found.sort();
             jars.extend(found);
         }
 
-        // The platform, unless the project brought its own.
         if !jars
             .iter()
             .any(|path| path.file_name().is_some_and(|held| held == "android.jar"))
@@ -31592,11 +29629,6 @@ public final class R {{
         Ok(classpath)
     }
 
-    /// The newest `android.jar` this machine has, where it has one.
-    ///
-    /// On a device there is no SDK and this finds nothing, which is why a
-    /// project may carry its own in `Libraries`. Off one -- a desktop, a
-    /// build server -- the SDK is where it always is.
     pub fn platform_jar() -> Option<std::path::PathBuf> {
         let mut roots: Vec<std::path::PathBuf> = Vec::new();
         for name in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
@@ -31623,9 +29655,7 @@ public final class R {{
                     Some((level.0, level.1, path))
                 })
                 .collect();
-            // By the API level the folder names, not by the name: `android-9`
-            // sorts after `android-37` as text, and picking that one would
-            // hand a compilation a platform ten releases too old.
+
             platforms.sort();
             for (_, _, platform) in platforms.into_iter().rev() {
                 let candidate = platform.join("android.jar");
@@ -31637,11 +29667,6 @@ public final class R {{
         None
     }
 
-    /// The API level an SDK platform folder names, as a pair so that
-    /// `android-37.2` is read as 37 then 2 and settles above `android-37`.
-    ///
-    /// A folder whose name is not `android-<level>` is not a platform and is
-    /// left out rather than sorted somewhere arbitrary.
     pub fn api_level_of(path: &std::path::Path) -> Option<(u32, u32)> {
         let name = path.file_name()?.to_str()?;
         let held = name.strip_prefix("android-")?;
@@ -31790,9 +29815,6 @@ public final class R {{
             }
         }
         if !project.code.is_empty() {
-            // More than one where one will not hold it. The platform reads
-            // them in order, and has since long before the oldest this builds
-            // for.
             crate::progress::enter("dex");
             for (which, held) in crate::dexwrite::write_all(&project.code, &project.references)?
                 .into_iter()
@@ -31837,14 +29859,6 @@ public final class R {{
         crate::progress::enter("verify");
         let parsed = crate::x509::Certificate::parse(certificate_der)?;
 
-        // What was just written, read back the way an installer reads it.
-        //
-        // Signing returning without an error says the signing code ran. It
-        // does not say the bytes it produced carry a signature that verifies
-        // against the key that made it, and the only way to know that is to
-        // read those bytes as a stranger would. A package that fails this is
-        // never handed back: it would be one this build called signed and
-        // Android would refuse.
         let mut checking = Sink::new();
         let verified = match crate::archive::read(&package, &mut checking) {
             Some(archive) => crate::signing::examine(
@@ -31932,26 +29946,17 @@ pub mod jvm {
         Class(u16),
         String(u16),
         NameAndType(u16, u16),
-        /// The three member references, each holding the class it is in and
-        /// the name-and-type that says what it is.
-        ///
-        /// These were all thrown into `Other` before, which was enough to say a
-        /// class file had references in it and not enough to say what they
-        /// pointed at. Translating a call needs to know.
+
         FieldRef(u16, u16),
         MethodRef(u16, u16),
         InterfaceMethodRef(u16, u16),
-        /// A reference to a member as a value: what kind of reference it is,
-        /// and the member it points at. This is what a bootstrap method is,
-        /// and what a lambda's body is named by.
+
         MethodHandle(u8, u16),
-        /// A descriptor on its own, with no name attached to it.
+
         MethodType(u16),
-        /// A call whose target is worked out the first time it runs: which
-        /// bootstrap method works it out, and the name and descriptor of the
-        /// call itself.
+
         InvokeDynamic(u16, u16),
-        /// The same, for a constant rather than a call.
+
         Dynamic(u16, u16),
         Unusable,
         Other(u8),
@@ -31962,44 +29967,27 @@ pub mod jvm {
         pub access_flags: u16,
         pub name: String,
         pub descriptor: String,
-        /// What the method actually does, for a method that does anything.
-        ///
-        /// This was thrown away before, along with every other attribute, and
-        /// what was left described a class well enough to say what was in it
-        /// and not well enough to turn it into anything else. Translating to
-        /// dex needs the code.
+
         pub code: Option<Code>,
-        /// The generic signature, where the class file carries one.
-        ///
-        /// The descriptor says `(I)Ljava/lang/Object;`, because that is what
-        /// erasure left. This says `(I)TT;` -- that the return is the type
-        /// parameter, which is what a caller with a `List<String>` in its hand
-        /// needs to know.
+
         pub signature: Option<String>,
-        /// What it says it throws, the way a person writes them. This is what
-        /// makes a call to it a call that has to be caught or declared.
+
         pub throws: Vec<String>,
-        /// What was written on it, and on each of its parameters.
+
         pub annotations: Vec<Annotation>,
         pub parameter_annotations: Vec<Vec<Annotation>>,
-        /// What an element of an annotation type falls back to, where it has
-        /// one.
+
         pub annotation_default: Option<Element>,
     }
 
-    /// A method body as the class file carries it.
     #[derive(Clone, Debug, PartialEq, Eq, Default)]
     pub struct Code {
         pub max_stack: u16,
         pub max_locals: u16,
         pub bytes: Vec<u8>,
-        /// Where exceptions are caught: start, end, handler, and the type
-        /// caught, zero meaning anything.
+
         pub handlers: Vec<(u16, u16, u16, u16)>,
-        /// Which line of the source each stretch of bytecode came from, as the
-        /// class file's own table gives it: an offset and a line, in the order
-        /// they were written. Without this a crash on a device names a method
-        /// and nothing else.
+
         pub lines: Vec<(u16, u16)>,
     }
 
@@ -32009,13 +29997,10 @@ pub mod jvm {
         pub length: u32,
     }
 
-    /// One row of the `BootstrapMethods` attribute.
     #[derive(Clone, Debug)]
     pub struct Bootstrap {
-        /// The constant pool index of the method handle that works the call
-        /// out.
         pub handle: u16,
-        /// The constant pool indices of what it is handed.
+
         pub arguments: Vec<u16>,
     }
 
@@ -32048,26 +30033,17 @@ pub mod jvm {
         pub methods: Vec<Member>,
         pub attributes: Vec<Attribute>,
         pub kotlin: Option<KotlinMetadata>,
-        /// The file it was written in, which is what a crash on a device
-        /// names beside the line.
+
         pub source_file: Option<String>,
-        /// What was written on the class itself.
+
         pub annotations: Vec<Annotation>,
-        /// The classes named inside this one, and this one where it is named
-        /// inside another: the inner class, the class it is in, the name it
-        /// was written with, and how it was declared.
+
         pub inner_classes: Vec<(String, Option<String>, Option<String>, u16)>,
-        /// The method this class was declared inside, where it was: the class,
-        /// and the method's name and descriptor where it has one.
+
         pub enclosing_method: Option<(String, Option<(String, String)>)>,
-        /// How each `invokedynamic` in the class works out what it calls: the
-        /// method handle that does the working out, and the constants it is
-        /// handed. A lambda and a string joined together are both written this
-        /// way, and neither can be read without this.
+
         pub bootstrap: Vec<Bootstrap>,
-        /// The generic signature the class was declared with, where it has
-        /// one: `<T:Ljava/lang/Object;>Ljava/lang/Object;` for a `Box<T>`.
-        /// This is the only place the names of its type parameters survive.
+
         pub signature: Option<String>,
     }
 
@@ -32211,9 +30187,7 @@ pub mod jvm {
                     attribute_name == "RuntimeVisibleAnnotations",
                 ));
             }
-            // Which classes are written inside which, and under what name.
-            // A dex file has nowhere to say this but an annotation, and
-            // without it `getSimpleName` and `getEnclosingClass` are wrong.
+
             if attribute_name == "InnerClasses" && content_length >= 2 {
                 let content = reader.slice_at(content_start as u64, content_length as u64)?;
                 let count = usize::from(u16::from_be_bytes([content[0], content[1]]));
@@ -32298,9 +30272,6 @@ pub mod jvm {
         })
     }
 
-    /// The `BootstrapMethods` attribute, which is a count and then one row per
-    /// `invokedynamic` the class has: a method handle and the constants that
-    /// go with it.
     fn read_bootstrap_methods(content: &[u8]) -> Result<Vec<Bootstrap>, Diagnostic> {
         let short = || fail("EJ012", "The bootstrap methods attribute stops early.");
         if content.len() < 2 {
@@ -32382,9 +30353,7 @@ pub mod jvm {
                     let high = u64::from(reader.u32()?);
                     let low = u64::from(reader.u32()?);
                     let raw = (high << 32) | low;
-                    // A long or a double takes two entries, and the second is
-                    // a hole the format leaves and every reader has to step
-                    // over.
+
                     constants.push(if tag == 5 {
                         Constant::Long(raw as i64)
                     } else {
@@ -32472,32 +30441,20 @@ pub mod jvm {
         }
     }
 
-    /// One annotation, as it was written on a class, a field, a method or a
-    /// parameter.
-    ///
-    /// These are not decoration: a library reads them back at run time and
-    /// behaves differently for them. A package that drops them builds, runs,
-    /// and quietly does something else -- fields under the wrong names, a
-    /// request to the wrong address.
     #[derive(Clone, Debug, PartialEq)]
     pub struct Annotation {
-        /// What it is, as a descriptor.
         pub descriptor: String,
-        /// Who may see it. One the run time cannot see is still carried; the
-        /// tools read those, and the platform's own are for the platform.
+
         pub visibility: Visibility,
         pub values: Vec<(String, Element)>,
     }
 
-    /// Who may look at an annotation.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum Visibility {
-        /// Only what builds the application.
         Build,
-        /// Anything, including the application itself while it runs.
+
         Runtime,
-        /// The platform, which is how it is told the things a class file says
-        /// in an attribute and a dex file has nowhere else to put.
+
         System,
     }
 
@@ -32511,7 +30468,6 @@ pub mod jvm {
         }
     }
 
-    /// What one element of an annotation is set to.
     #[derive(Clone, Debug, PartialEq)]
     pub enum Element {
         Byte(i8),
@@ -32523,19 +30479,14 @@ pub mod jvm {
         Short(i16),
         Boolean(bool),
         Text(String),
-        /// A constant of an enumeration: which enumeration, and which one.
-        Enum {
-            descriptor: String,
-            name: String,
-        },
-        /// A class named as a value, as a descriptor.
+
+        Enum { descriptor: String, name: String },
+
         Class(String),
         Nested(Annotation),
         List(Vec<Element>),
     }
 
-    /// The `RuntimeVisibleAnnotations` attribute and the three like it: a
-    /// count, and then one annotation each.
     fn read_annotations(content: &[u8], constants: &[Constant], visible: bool) -> Vec<Annotation> {
         if content.len() < 2 {
             return Vec::new();
@@ -32552,7 +30503,6 @@ pub mod jvm {
         out
     }
 
-    /// One annotation: what it is, and what each of its elements is set to.
     fn read_annotation(
         content: &[u8],
         at: &mut usize,
@@ -32578,7 +30528,6 @@ pub mod jvm {
         })
     }
 
-    /// One element's value, which says its own kind in a single letter.
     fn read_element(content: &[u8], at: &mut usize, constants: &[Constant]) -> Option<Element> {
         let tag = *content.get(*at)?;
         *at += 1;
@@ -32644,8 +30593,6 @@ pub mod jvm {
         Some(u16::from_be_bytes([held[0], held[1]]))
     }
 
-    /// The `RuntimeVisibleParameterAnnotations` attribute: a count of
-    /// parameters, and then a set of annotations for each.
     fn read_parameter_annotations(
         content: &[u8],
         constants: &[Constant],
@@ -32704,16 +30651,13 @@ pub mod jvm {
                     let content = reader.slice_at(start as u64, length as u64)?;
                     code = read_code(content, constants)?;
                 }
-                // Two bytes, an index into the pool, and the string there is
-                // what was written before erasure got to it.
+
                 if named == "Signature" && length == 2 {
                     let content = reader.slice_at(start as u64, 2)?;
                     let index = u16::from_be_bytes([content[0], content[1]]);
                     signature = constant_utf8(constants, index, "signature").ok();
                 }
-                // A count, and then one class-pool index per exception. This
-                // is what a `throws` comes to, and the only place a class file
-                // records one.
+
                 if named == "RuntimeVisibleAnnotations" || named == "RuntimeInvisibleAnnotations" {
                     let content = reader.slice_at(start as u64, length as u64)?;
                     annotations.extend(read_annotations(
@@ -32780,12 +30724,6 @@ pub mod jvm {
         Ok(members)
     }
 
-    /// The body out of a Code attribute.
-    ///
-    /// Anything malformed comes back as no code rather than as a failure: a
-    /// class file that cannot be translated is still one whose shape can be
-    /// read and reported, and refusing to read it at all would turn a
-    /// question into a dead end.
     fn read_code(content: &[u8], constants: &[Constant]) -> Result<Option<Code>, Diagnostic> {
         let mut reader = Reader::new(content, Endian::Big, "code");
         let Ok(max_stack) = reader.u16() else {
@@ -32821,8 +30759,6 @@ pub mod jvm {
             }
         }
 
-        // What is left is the code's own attributes, and one of them says
-        // which line each instruction came from.
         let mut lines = Vec::new();
         if let Ok(count) = reader.u16() {
             for _ in 0..count {
@@ -32854,7 +30790,6 @@ pub mod jvm {
         }))
     }
 
-    /// The `LineNumberTable`: a count, and then an offset and a line each.
     fn read_lines(content: &[u8]) -> Vec<(u16, u16)> {
         if content.len() < 2 {
             return Vec::new();
@@ -33131,26 +31066,6 @@ pub fn state_report(observed_environment: &str) -> String {
     w.finish()
 }
 
-/// What a build is doing, while it is doing it.
-///
-/// A build on a phone takes long enough that a spinner is not an answer. A
-/// person watching one wants to know what it is working on and roughly how
-/// much is left, and both of those have to be true or they are worse than
-/// nothing.
-///
-/// So neither is invented here. The stage is written down by the code that
-/// actually enters it -- `enter` is called from inside the resource compiler,
-/// the Java compiler, the dex writer, the signer -- and the estimate is this
-/// build's own timings from the last time it ran on this device, handed back
-/// after every build and handed in before the next one. A device that has
-/// never built anything says so; every one after that says what it learned.
-/// Reading a finished package the way a person would want it read.
-///
-/// Everything here comes out of the file itself: the archive is opened, the
-/// manifest decoded from the binary XML it really is, the Dalvik counted from
-/// its own header, and the signature checked against the key that presents it.
-/// Nothing is taken from whatever built it, because the point of opening a
-/// package is to find out what it says rather than what somebody says it says.
 pub mod inspect {
     use crate::diag::{Diagnostic, Severity, Sink};
     use crate::json::Writer;
@@ -33166,10 +31081,8 @@ pub mod inspect {
         )
     }
 
-    /// The largest package this opens.
     pub const MAX_PACKAGE_BYTES: u64 = 512 * 1024 * 1024;
 
-    /// One thing inside the archive, as it is stored.
     #[derive(Clone, Debug)]
     pub struct Held {
         pub name: String,
@@ -33178,7 +31091,6 @@ pub mod inspect {
         pub compressed: bool,
     }
 
-    /// What one package came to.
     #[derive(Clone, Debug, Default)]
     pub struct Package {
         pub bytes: u64,
@@ -33207,7 +31119,7 @@ pub mod inspect {
         pub signatures_failed: u64,
         pub key_matches_certificate: bool,
         pub sound: bool,
-        /// What could not be read, said rather than left out.
+
         pub notes: Vec<String>,
     }
 
@@ -33266,9 +31178,6 @@ pub mod inspect {
         }
     }
 
-    /// The largest entries first, which is what somebody looking at a package
-    /// they think is too big wants to see, and the rest dropped: a listing of
-    /// four thousand resource files is not a thing anybody reads.
     const LISTED: usize = 60;
 
     pub fn package(path: &str) -> Result<Package, Diagnostic> {
@@ -33313,7 +31222,6 @@ pub mod inspect {
         held.truncate(LISTED);
         out.held = held;
 
-        // What the manifest says, read out of the binary XML it really is.
         match archive
             .entries()
             .iter()
@@ -33332,8 +31240,6 @@ pub mod inspect {
                 .push("There is no manifest in this package.".to_string()),
         }
 
-        // The code, counted out of the Dalvik's own header rather than
-        // guessed from the file's size.
         for entry in archive.entries() {
             if !(entry.name.starts_with("classes") && entry.name.ends_with(".dex")) {
                 continue;
@@ -33360,8 +31266,6 @@ pub mod inspect {
             }
         }
 
-        // The processors it carries code for, and the languages it carries
-        // words for, both read off the names inside it.
         for entry in archive.entries() {
             if let Some(rest) = entry.name.strip_prefix("lib/") {
                 if let Some((abi, _)) = rest.split_once('/') {
@@ -33373,7 +31277,6 @@ pub mod inspect {
         }
         out.abis.sort();
 
-        // What the signature says, checked rather than described.
         let report = crate::signing::examine(
             &bytes,
             archive.central_directory_offset(),
@@ -33406,11 +31309,6 @@ pub mod inspect {
         Ok(out)
     }
 
-    /// The handful of things anybody opening a package wants off its manifest.
-    ///
-    /// Read by the number the device reads them by rather than by name: a
-    /// package whose string pool has been stripped of attribute names still
-    /// carries the numbers, and the numbers are what the platform itself uses.
     fn read_manifest(root: &crate::axml::Node, out: &mut Package) {
         let by = |node: &crate::axml::Node, name: &str| -> String {
             crate::axml::attribute_id(name)
@@ -33454,28 +31352,16 @@ pub mod inspect {
     }
 }
 
-/// The types a person can name, and where each of them is.
-///
-/// This is what stands behind completing a name, importing it without being
-/// asked, and going to where it was written. It is not a separate index kept
-/// beside the compiler and hoped to agree with it: the platform's types come
-/// out of the same classpath the compiler is handed, and the project's come
-/// out of parsing the project's own files with the same parser. A type this
-/// answers with is a type that compiles.
 pub mod symbols {
     use crate::diag::Diagnostic;
     use crate::json::Writer;
 
-    /// The most names handed back for one question.
     pub const MOST: usize = 60;
 
-    /// Where a type was found.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum From {
-        /// The Android platform and the standard library, which this build
-        /// carries rather than reads off a jar.
         Platform,
-        /// Written in this project.
+
         Project,
     }
 
@@ -33488,20 +31374,17 @@ pub mod symbols {
         }
     }
 
-    /// One type, as somebody looking for it would want it.
     #[derive(Clone, Debug)]
     pub struct Named {
-        /// `android.widget.TextView`, which is what an import says.
         pub qualified: String,
-        /// `TextView`.
+
         pub simple: String,
-        /// `android.widget`, empty for the default package.
+
         pub package: String,
         pub from: From,
-        /// The file it is written in, for one written in this project.
+
         pub path: String,
-        /// How well it answered, largest first. Kept so the interface can show
-        /// what it thinks the best answer is without deciding again.
+
         pub rank: u32,
     }
 
@@ -33519,14 +31402,6 @@ pub mod symbols {
         }
     }
 
-    /// How well a name answers what was typed.
-    ///
-    /// Four ways, and they are ordered the way somebody typing means them.
-    /// The whole name is what they meant. A name starting with what they typed
-    /// is nearly what they meant. Initials -- `TV` for `TextView`, the way
-    /// every editor worth using reads them -- is what they meant when they
-    /// could not be bothered. And the letters appearing somewhere inside is a
-    /// last resort, offered because it costs nothing and sometimes helps.
     fn how_well(simple: &str, needle: &str) -> Option<u32> {
         if needle.is_empty() {
             return Some(1);
@@ -33537,8 +31412,6 @@ pub mod symbols {
         let lower_simple = simple.to_ascii_lowercase();
         let lower_needle = needle.to_ascii_lowercase();
         if lower_simple.starts_with(&lower_needle) {
-            // A shorter name matching the same prefix is the better answer:
-            // `View` before `ViewAnimationUtils` for `Vie`.
             return Some(800 - (simple.len().min(200) as u32));
         }
         if initials(simple).starts_with(&needle.to_ascii_uppercase()) {
@@ -33550,7 +31423,6 @@ pub mod symbols {
         None
     }
 
-    /// `TextView` is `TV`, `ArrayList` is `AL`, `URLConnection` is `URLC`.
     fn initials(simple: &str) -> String {
         simple
             .chars()
@@ -33558,15 +31430,10 @@ pub mod symbols {
             .collect()
     }
 
-    /// A class file's name for a type, as a person writes it.
     fn as_written(internal: &str) -> String {
         internal.replace(['/', '$'], ".")
     }
 
-    /// Every type in the project and on the platform that answers to this.
-    ///
-    /// The project's own come first where they rank the same, because a person
-    /// typing a name in their own project usually means their own type.
     pub fn matching(root: &str, needle: &str) -> Result<Vec<Named>, Diagnostic> {
         let mut found: Vec<Named> = Vec::new();
 
@@ -33582,7 +31449,7 @@ pub mod symbols {
                         .unwrap_or_default(),
                     from: From::Project,
                     path,
-                    // A project's own types answer first at the same rank.
+
                     rank: rank + 1,
                 });
             }
@@ -33590,8 +31457,7 @@ pub mod symbols {
 
         for internal in crate::compilers::java::Classpath::everything().names() {
             let simple = internal.rsplit(['/', '$']).next().unwrap_or(internal);
-            // A type with no name is one written without one, which nothing
-            // can be typed to reach.
+
             if simple.is_empty() || simple.chars().next().is_some_and(|c| c.is_ascii_digit()) {
                 continue;
             }
@@ -33611,8 +31477,6 @@ pub mod symbols {
             }
         }
 
-        // Best first, and alike ones in a settled order so the same question
-        // gives the same answer twice.
         found.sort_by(|left, right| {
             right
                 .rank
@@ -33623,11 +31487,6 @@ pub mod symbols {
         Ok(found)
     }
 
-    /// Every type this project declares, with the file it is written in.
-    ///
-    /// Parsed with the compiler's own parser rather than read off the file
-    /// names: a file may declare more than one type, and the type a person is
-    /// looking for is as likely to be the second one.
     fn declared_in(root: &str) -> Vec<(String, String)> {
         let mut out = Vec::new();
         let Ok(entries) = crate::workspace::tree(root) else {
@@ -33650,11 +31509,6 @@ pub mod symbols {
         out
     }
 
-    /// Where a type is written, for one this project declares.
-    ///
-    /// A type on the platform has no file to go to: it is not written
-    /// anywhere on this device, and saying so is better than pointing at a
-    /// file that would turn out to be a description of it.
     pub fn where_written(root: &str, qualified: &str) -> Option<(String, u32)> {
         let internal = qualified.replace('.', "/");
         let Ok(entries) = crate::workspace::tree(root) else {
@@ -33674,8 +31528,7 @@ pub mod symbols {
                 if unit.internal_name() != internal {
                     continue;
                 }
-                // The line it is declared on, found in the text rather than
-                // carried out of the parse, so it is the line a person sees.
+
                 let simple = internal.rsplit('/').next().unwrap_or(&internal);
                 let line = text
                     .lines()
@@ -33699,23 +31552,6 @@ pub mod symbols {
     }
 }
 
-/// Editing a manifest without rewriting it.
-///
-/// A manifest is the one file in a project where a mistake costs the whole
-/// build, and it is the file least worth editing by hand on a phone. So the
-/// handful of things a person really changes -- the label, the versions, the
-/// platforms, the permissions -- are changed here instead.
-///
-/// Every edit is made on the text rather than by parsing the file and writing
-/// it back out. Writing it back would settle every question about spacing,
-/// attribute order and comments in favour of whatever this writer happens to
-/// do, and a person who laid their manifest out a particular way would find it
-/// rearranged for having changed a version number. What is changed is what was
-/// asked for and the rest is the bytes that were there.
-///
-/// Nothing is written until the result parses and says what it was meant to
-/// say. An edit that would leave a manifest this build cannot read leaves the
-/// file exactly as it was.
 pub mod manifest {
     use crate::diag::{Diagnostic, Severity, Sink};
     use crate::json::Writer;
@@ -33733,12 +31569,6 @@ pub mod manifest {
 
     pub const FILE: &str = "AndroidManifest.xml";
 
-    /// What a person may change here, and where each of them lives.
-    ///
-    /// The element is the one the attribute is on, and the name is the
-    /// attribute itself. A field not on this list is not editable through
-    /// here, which is deliberate: the rest of a manifest is structure rather
-    /// than settings, and a form is the wrong shape for structure.
     pub const FIELDS: &[(&str, &str, &str)] = &[
         ("package", "manifest", "package"),
         ("versionName", "manifest", "android:versionName"),
@@ -33748,7 +31578,6 @@ pub mod manifest {
         ("label", "application", "android:label"),
     ];
 
-    /// What the manifest says, as the things a person changes.
     #[derive(Clone, Debug, Default)]
     pub struct Facts {
         pub package: String,
@@ -33850,10 +31679,6 @@ pub mod manifest {
         })
     }
 
-    /// Where one element's opening tag runs from and to, in the text.
-    ///
-    /// Found by reading rather than by searching for the name: a name inside a
-    /// comment or a string would be found by a search and is not an element.
     fn opening(text: &str, name: &str) -> Option<(usize, usize)> {
         let bytes = text.as_bytes();
         let mut at = 0usize;
@@ -33891,8 +31716,7 @@ pub mod manifest {
                 at += 1;
             }
             let here = &text[start..at];
-            // To the end of this tag, stepping over quoted values so a `>`
-            // inside one does not end it early.
+
             let mut quote: Option<u8> = None;
             while at < bytes.len() {
                 let byte = bytes[at];
@@ -33916,8 +31740,6 @@ pub mod manifest {
         None
     }
 
-    /// Puts a value on an attribute of one element, adding it where it is not
-    /// there, in the text and nowhere else.
     fn put(text: &str, element: &str, attribute: &str, value: &str) -> Result<String, Diagnostic> {
         let (from, to) = opening(text, element).ok_or_else(|| {
             fail("EM203", "The manifest holds no element to change.")
@@ -33931,7 +31753,6 @@ pub mod manifest {
             .replace('>', "&gt;")
             .replace('"', "&quot;");
 
-        // The attribute as it stands, found inside this tag alone.
         let looking = format!("{attribute}=\"");
         if let Some(at) = tag.find(&looking) {
             let start = from + at + looking.len();
@@ -33945,8 +31766,6 @@ pub mod manifest {
             return Ok(format!("{}{escaped}{}", &text[..start], &text[end..]));
         }
 
-        // Not there: after the element's name, which is where an attribute
-        // reads most naturally and where nothing else can be disturbed.
         let after_name = from
             + 1
             + tag[1..]
@@ -33959,8 +31778,6 @@ pub mod manifest {
         ))
     }
 
-    /// Writes a manifest back only if it still reads as one and says what it
-    /// was told to say.
     fn settle(root: &str, text: &str, check: impl Fn(&Facts) -> bool) -> Result<Facts, Diagnostic> {
         let element = parsed(text)?;
         let _ = element;
@@ -33968,9 +31785,6 @@ pub mod manifest {
         crate::workspace::write_text(root, FILE, text)?;
         let after = facts(root)?;
         if !check(&after) {
-            // Put it back. An edit that did not take is an edit that changed
-            // something else, and leaving that in place would be worse than
-            // refusing.
             crate::workspace::write_text(root, FILE, &before)?;
             return Err(fail(
                 "EM205",
@@ -33980,7 +31794,6 @@ pub mod manifest {
         Ok(after)
     }
 
-    /// Changes one of the things a person changes.
     pub fn set(root: &str, field: &str, value: &str) -> Result<Facts, Diagnostic> {
         let Some((_, element, attribute)) = FIELDS.iter().find(|(name, _, _)| *name == field)
         else {
@@ -34019,10 +31832,8 @@ pub mod manifest {
         })
     }
 
-    /// The most permissions one manifest is edited into holding here.
     pub const MOST_PERMISSIONS: usize = 200;
 
-    /// Adds a permission, or takes one away.
     pub fn permission(root: &str, name: &str, wanted: bool) -> Result<Facts, Diagnostic> {
         let name = name.trim();
         if name.is_empty()
@@ -34051,8 +31862,6 @@ pub mod manifest {
         }
 
         let changed = if wanted {
-            // Straight after the manifest's own opening tag, which is where
-            // one belongs and where nothing else can be disturbed.
             let (_, to) = opening(&text, "manifest")
                 .ok_or_else(|| fail("EM210", "The manifest has no opening tag."))?;
             format!(
@@ -34071,8 +31880,6 @@ pub mod manifest {
                     .map(|held| at + held + 1)
                     .unwrap_or(rest.len());
                 if !taken && rest[at..end].contains(&looking) {
-                    // The line it is on, so removing it does not leave a
-                    // blank one behind.
                     let mut start = at;
                     while start > 0
                         && rest.as_bytes()[start - 1] != b'\n'
@@ -34107,18 +31914,6 @@ pub mod manifest {
     }
 }
 
-/// What a project depends on, read out of the files themselves.
-///
-/// A dependency here is a file in the project's `Libraries` folder. There is
-/// no resolver and no network: what is in the folder is what the project
-/// depends on, which is the whole story on a device with no connection and
-/// the only story this build will tell.
-///
-/// Everything reported comes out of the archive. What classes a jar declares
-/// is read off the entries in it; what an Android library brings besides code
-/// is read off its own folders. Two dependencies declaring the same class are
-/// named as such, because that is the failure that turns into a build refused
-/// three screens later with no clue which two files caused it.
 pub mod depends {
     use crate::diag::{Diagnostic, Severity, Sink};
     use crate::json::Writer;
@@ -34134,22 +31929,21 @@ pub mod depends {
         )
     }
 
-    /// One file in the project's library folder.
     #[derive(Clone, Debug, Default)]
     pub struct Dependency {
         pub name: String,
         pub bytes: u64,
-        /// `jar` or `aar`: what a jar is, and what an Android library is.
+
         pub kind: String,
         pub classes: usize,
-        /// A few of the packages it declares classes in, for saying what it is.
+
         pub packages: Vec<String>,
         pub resources: usize,
         pub assets: usize,
         pub native: Vec<String>,
-        /// Whether it carries a manifest of its own to be merged in.
+
         pub manifest: bool,
-        /// What could not be read about it.
+
         pub note: String,
     }
 
@@ -34180,7 +31974,6 @@ pub mod depends {
         }
     }
 
-    /// A class two dependencies both declare.
     #[derive(Clone, Debug)]
     pub struct Clash {
         pub class: String,
@@ -34223,11 +32016,8 @@ pub mod depends {
         }
     }
 
-    /// The most clashes reported. Two jars of the same library differing by a
-    /// version produce thousands, and the first few say it as well as all.
     pub const MOST_CLASHES: usize = 40;
 
-    /// The most packages named for one dependency, to say what it is.
     pub const MOST_PACKAGES: usize = 6;
 
     pub fn held(root: &str) -> Result<Held, Diagnostic> {
@@ -34238,8 +32028,6 @@ pub mod depends {
         };
 
         let Ok(entries) = std::fs::read_dir(&folder) else {
-            // No folder is not a failure: a project without dependencies
-            // compiles against what this build knows on its own.
             return Ok(out);
         };
         let mut found: Vec<std::path::PathBuf> = entries
@@ -34252,7 +32040,6 @@ pub mod depends {
             .collect();
         found.sort();
 
-        // Which file declared a class first, so a second one is a clash.
         let mut declared: std::collections::BTreeMap<String, String> =
             std::collections::BTreeMap::new();
 
@@ -34329,9 +32116,6 @@ pub mod depends {
                 } else if held == "AndroidManifest.xml" {
                     one.manifest = true;
                 } else if held == "classes.jar" {
-                    // An Android library keeps its code in a jar of its own,
-                    // and counting that jar as one file rather than as the
-                    // classes inside it would say a library holds none.
                     if let Ok(inner) = crate::builder::entry_bytes(&bytes, entry, &name) {
                         let mut reading = Sink::new();
                         if let Some(held) = crate::archive::read(&inner, &mut reading) {
@@ -34356,7 +32140,6 @@ pub mod depends {
                 }
             }
 
-            // The shortest packages, which are the ones that name a library.
             packages.sort_by_key(|held| (held.matches('.').count(), held.clone()));
             packages.truncate(MOST_PACKAGES);
             one.packages = packages;
@@ -34367,10 +32150,6 @@ pub mod depends {
         Ok(out)
     }
 
-    /// Removes one dependency from a project.
-    ///
-    /// By name rather than by path, and only from the library folder, so
-    /// nothing outside it can be reached by asking for it.
     pub fn remove(root: &str, name: &str) -> Result<(), Diagnostic> {
         if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
             return Err(fail("ED301", "That is not the name of a dependency.")
@@ -34390,41 +32169,22 @@ pub mod depends {
     }
 }
 
-/// Laying out a file, without changing what is in it.
-///
-/// A formatter that rewrites code is a formatter nobody trusts on a phone,
-/// where the file is the only copy. This one makes exactly one promise and
-/// keeps it: the only thing that changes is the whitespace at the start and
-/// the end of a line. Every character that is not whitespace, in the order it
-/// was in, comes out the same -- so a file that compiled before compiles
-/// after, to the same bytes, and the suite says so by compiling both.
-///
-/// What that buys is the thing worth having on a phone: indentation that
-/// follows the braces without anybody counting spaces with a thumb.
 pub mod shape {
 
-    /// One level of indentation, in spaces. Four, as Java has always been.
     pub const STEP: usize = 4;
 
-    /// The most a line is indented, past which something is wrong and making
-    /// it worse by another eighty spaces helps nobody.
     pub const DEEPEST: usize = 24;
 
-    /// What the scanner is in the middle of, at the start of a line.
     #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
     struct Standing {
         braces: usize,
         brackets: usize,
-        /// Inside a `/* */`, which runs across lines.
+
         comment: bool,
-        /// Inside a `"""` text block, where every character is the string's.
+
         text_block: bool,
     }
 
-    /// Reads one line and says what the next one starts inside.
-    ///
-    /// Strings, characters and comments are stepped over rather than counted,
-    /// so a brace in a string is a brace in a string.
     fn after(line: &str, mut held: Standing) -> Standing {
         let bytes = line.as_bytes();
         let mut at = 0usize;
@@ -34498,23 +32258,19 @@ pub mod shape {
         held
     }
 
-    /// How far in this line belongs, given what it starts inside.
     fn indent_for(trimmed: &str, held: Standing) -> usize {
         let mut depth = held.braces;
-        // A line that begins by closing what the last one opened belongs a
-        // level out, with the thing it closes.
+
         if trimmed.starts_with('}') || trimmed.starts_with(')') || trimmed.starts_with(']') {
             depth = depth.saturating_sub(1);
         }
-        // A label, and the arms of a switch, sit a level in from the switch
-        // itself, which the braces do not say.
+
         if held.brackets > 0 {
             depth += 1;
         }
         depth.min(DEEPEST)
     }
 
-    /// Lays out Java, changing nothing but the whitespace around each line.
     pub fn java(source: &str) -> String {
         let mut out = String::with_capacity(source.len() + source.len() / 8);
         let mut held = Standing::default();
@@ -34523,14 +32279,12 @@ pub mod shape {
             let trimmed = line.trim();
 
             if trimmed.is_empty() {
-                // A blank line is blank rather than a line of spaces.
                 out.push('\n');
                 held = after(line, held);
                 continue;
             }
 
             if held.text_block {
-                // Every character inside one belongs to the string.
                 out.push_str(line);
                 out.push('\n');
                 held = after(line, held);
@@ -34538,9 +32292,6 @@ pub mod shape {
             }
 
             if held.comment {
-                // The middle of a block comment: a `*` line is lined up under
-                // the one that opened it, and anything else is left alone,
-                // because somebody drawing a diagram in a comment meant it.
                 if trimmed.starts_with('*') {
                     out.push_str(&" ".repeat(indent_for(trimmed, held) * STEP + 1));
                     out.push_str(trimmed);
@@ -34558,8 +32309,6 @@ pub mod shape {
             held = after(line, held);
         }
 
-        // One newline at the end, and one only. A file that ended without one
-        // gets one; a file that ended with six gets one.
         while out.ends_with("\n\n") {
             out.pop();
         }
@@ -34569,10 +32318,6 @@ pub mod shape {
         out
     }
 
-    /// Everything on a line that is not whitespace, in the order it is in.
-    ///
-    /// This is what laying a file out is not allowed to change, and it is what
-    /// the suite compares before and after.
     pub fn ink(source: &str) -> String {
         source
             .chars()
@@ -34581,36 +32326,22 @@ pub mod shape {
     }
 }
 
-/// What is right and wrong about a project, said before a build finds out.
-///
-/// Not a second compiler and not a linter: everything here is a fact about
-/// the files, counted or compared. What it is for is the class of mistake a
-/// build cannot see -- a language file that lost a string when somebody
-/// translated it, an icon nobody set, a folder of code in a language nothing
-/// compiles -- which turn into an application that installs and is wrong
-/// rather than a build that refuses.
 pub mod health {
     use crate::diag::Diagnostic;
     use crate::json::Writer;
 
-    /// One language file, against the one every other is compared to.
     #[derive(Clone, Debug)]
     pub struct Language {
-        /// The folder it is in: `values`, `values-tr`, and so on.
         pub folder: String,
         pub strings: usize,
-        /// What the base language declares and this one does not.
+
         pub missing: Vec<String>,
-        /// What this one declares and the base language does not, which is a
-        /// string nothing can ever ask for.
+
         pub extra: Vec<String>,
     }
 
-    /// How many names are listed for one language before the rest are counted.
     pub const MOST_NAMED: usize = 12;
 
-    /// The folder every other language is compared against: the one with no
-    /// qualifier on it, which is what a device falls back to.
     pub const BASE_VALUES: &str = "values";
 
     #[derive(Clone, Debug, Default)]
@@ -34626,15 +32357,14 @@ pub mod health {
         pub library_files: usize,
         pub library_bytes: u64,
         pub has_icon: bool,
-        /// The folder every other language is compared against.
+
         pub base: String,
         pub languages: Vec<Language>,
-        /// Source in a language this build does not compile.
+
         pub uncompiled: Vec<(String, String)>,
     }
 
     impl Report {
-        /// Whether anything here needs doing.
         pub fn settled(&self) -> bool {
             self.uncompiled.is_empty()
                 && self.has_icon
@@ -34691,11 +32421,6 @@ pub mod health {
         }
     }
 
-    /// Every string a values file declares, by name.
-    ///
-    /// Read with the project's own XML reader rather than by looking for
-    /// quotes, so a name inside a comment is not a string and a file that does
-    /// not parse says so by declaring nothing.
     fn names(text: &str, where_from: &str) -> Vec<String> {
         let mut sink = crate::diag::Sink::new();
         let Some(root) = crate::xml::parse(text, where_from, &mut sink) else {
@@ -34757,10 +32482,6 @@ pub mod health {
 
         out.has_icon = std::path::Path::new(&crate::scaffold::icon_path(root)).is_file();
 
-        // Every language against the base one. A string the base declares and
-        // a language does not is a screen in English on a phone set to
-        // something else; one a language declares and the base does not is a
-        // string nothing can ever ask for.
         let strings_file = crate::scaffold::STRINGS_FILE;
         let base_path = format!(
             "{}/{}/{strings_file}",
@@ -34809,8 +32530,6 @@ pub mod health {
             });
         }
 
-        // The base itself, so the count of what everything is compared to is
-        // on the same list as everything else.
         out.languages.insert(
             0,
             Language {
@@ -34829,12 +32548,6 @@ pub mod progress {
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
-    /// The stages a build goes through, in the order it goes through them.
-    ///
-    /// These are not a description of a build written beside one: each name is
-    /// entered by the code that does that work, so a stage that stopped
-    /// happening would stop being reported rather than quietly stay on the
-    /// list.
     pub const STAGES: &[&str] = &[
         "project",
         "resources",
@@ -34847,27 +32560,14 @@ pub mod progress {
         "verify",
     ];
 
-    /// What to expect of each stage before this device has built anything, in
-    /// microseconds.
-    ///
-    /// Measured on one machine building the project the scaffold writes, which
-    /// makes it a starting point and not a promise -- the first build on a
-    /// device says its estimate is a guess, and the second one does not,
-    /// because by then the timings are that device's own.
-    ///
-    /// Microseconds rather than milliseconds because several of these stages
-    /// finish inside one millisecond on a desktop, and a measurement that
-    /// rounds them all to zero teaches the next build nothing.
     const FIRST_GUESS: &[u64] = &[
         120_000, 340_000, 1_450_000, 90_000, 620_000, 260_000, 210_000, 180_000, 40_000,
     ];
 
     #[derive(Clone, Debug, Default)]
     pub struct Channel {
-        /// What each stage took last time, in microseconds. Empty until a
-        /// build finishes or timings are handed in.
         learned: Vec<u64>,
-        /// The same for this build, one per finished stage.
+
         measured: Vec<u64>,
         began: Option<Instant>,
         entered: Option<Instant>,
@@ -34901,13 +32601,7 @@ pub mod progress {
             Channel::default()
         }
 
-        /// What this build expects each stage to take: what was learned where
-        /// anything was, and the first guess where nothing was.
         fn expected(&self) -> Vec<u64> {
-            // All of it or none of it. A stage that really takes no time --
-            // `dex` on a project with no code -- measured zero and is expected
-            // to be zero, and mixing that with a guess for the others would
-            // put the guess back in the middle of a measurement.
             if self.knows_this_device() {
                 return self.learned.clone();
             }
@@ -34918,11 +32612,6 @@ pub mod progress {
             self.learned.len() == STAGES.len()
         }
 
-        /// Takes the timings of an earlier build, as `timings` wrote them.
-        ///
-        /// Anything that is not a list of the right length is ignored rather
-        /// than refused: a stored estimate from an older version of this build
-        /// is not worth failing over, and the first guess is right there.
         pub fn learn(&mut self, held: &str) {
             let mut found = Vec::with_capacity(STAGES.len());
             for piece in held.split(',') {
@@ -34936,7 +32625,6 @@ pub mod progress {
             }
         }
 
-        /// What this build took, in the form `learn` reads.
         pub fn timings(&self) -> String {
             self.measured
                 .iter()
@@ -34955,11 +32643,6 @@ pub mod progress {
             self.outcome = Outcome::Building;
         }
 
-        /// Marks the build as having reached a stage.
-        ///
-        /// A stage that is not on the list, or one already passed, is ignored:
-        /// this is called from inside the build, and a build that is not
-        /// running -- a test compiling one file, say -- has nothing to report.
         pub fn enter(&mut self, stage: &str) {
             if !self.running {
                 return;
@@ -34972,9 +32655,7 @@ pub mod progress {
             }
             let now = Instant::now();
             let taken = self.entered.map(|held| elapsed(held, now)).unwrap_or(0);
-            // Every stage between the one that was running and the one being
-            // entered is finished too: a build that skips a stage -- a project
-            // with no Java, say -- passed through it in no time at all.
+
             while self.measured.len() < next {
                 self.measured.push(if self.measured.len() == self.at {
                     taken
@@ -35010,13 +32691,6 @@ pub mod progress {
             }
         }
 
-        /// Where the build has got to, as JSON.
-        ///
-        /// The percentage is what has elapsed against what the whole is now
-        /// expected to take, and what it is expected to take is stretched by
-        /// how far ahead or behind this build already is -- so a device slower
-        /// than the one that produced the estimate does not sit at 90% for
-        /// half the build.
         pub fn report(&self) -> String {
             let expected = self.expected();
             let now = Instant::now();
@@ -35024,9 +32698,7 @@ pub mod progress {
 
             let behind: u64 = expected.iter().take(self.at).sum();
             let so_far: u64 = self.measured.iter().take(self.at).sum();
-            // How this device is doing against what was expected of it, taken
-            // from the stages already finished. Nothing finished yet means
-            // nothing to say, which is a factor of one.
+
             let pace = if behind > 0 && so_far > 0 {
                 so_far as f64 / behind as f64
             } else {
@@ -35093,15 +32765,10 @@ pub mod progress {
         HELD.get_or_init(|| Mutex::new(Channel::new()))
     }
 
-    /// The one channel a build writes into, for the one build a device runs at
-    /// a time. A lock nobody can hold for long: every one of these is a few
-    /// arithmetic operations on a handful of numbers.
     fn with<T>(what: impl FnOnce(&mut Channel) -> T) -> T {
         match held().lock() {
             Ok(mut channel) => what(&mut channel),
-            // A panic while the lock was held leaves it poisoned. What is
-            // behind it is a progress report, so carrying on with it is
-            // better than taking a build down over it.
+
             Err(poisoned) => what(&mut poisoned.into_inner()),
         }
     }
@@ -35193,13 +32860,6 @@ pub mod ffi {
         }
     }
 
-    /// Where the build running right now has got to.
-    ///
-    /// Safe to call at any time and from any thread: a build that is not
-    /// running answers `waiting`, and one that is answers with the stage it is
-    /// in, what fraction of the way through it is, and how long is left. This
-    /// is polled while a build runs, so it does no work beyond reading a
-    /// handful of numbers.
     #[no_mangle]
     pub extern "C" fn omni_build_progress() -> *mut c_char {
         let result = catch_unwind(|| match CString::new(crate::progress::report()) {
@@ -35209,12 +32869,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Hands the timings of an earlier build back to the estimator.
-    ///
-    /// Every build hands its own timings out in `timings`; handing them back
-    /// before the next one is what turns "we guessed" into "this is what your
-    /// device did last time". Anything that is not a list of the right shape
-    /// is ignored, because a stored estimate is not worth failing a build for.
     #[no_mangle]
     pub unsafe extern "C" fn omni_build_expect(timings: *const c_char) {
         let _ = catch_unwind(|| {
@@ -35281,8 +32935,6 @@ pub mod ffi {
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
 
-            // From here to the end of this call, every stage the build enters
-            // is written where `omni_build_progress` can read it.
             crate::progress::begin();
             let mut sink = crate::diag::Sink::new();
             let now = now_seconds();
@@ -35320,8 +32972,6 @@ pub mod ffi {
                 Err(error) => write_failure(&mut w, "built", &error),
             }
 
-            // What this build took, stage by stage, so the next one on this
-            // device has something better than a first guess to say.
             crate::progress::finish(built);
             w.field_str("timings", &crate::progress::timings());
             sink.write_json(&mut w, "diagnostics");
@@ -35434,13 +33084,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Tells the Core which device it is running on, so the shared key can be
-    /// bound to it. Called once, at start, before any key is made or opened.
-    ///
-    /// What comes in is not a password and is never treated as one. It is
-    /// mixed into the shared key's seal so that the file is worth nothing off
-    /// this device, and it is never written anywhere, never returned, and never
-    /// put in a log.
     #[no_mangle]
     pub unsafe extern "C" fn omni_bind_device(secret: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
@@ -35501,8 +33144,6 @@ pub mod ffi {
             let mut w = crate::json::Writer::new();
             w.begin_object(None);
 
-            // From here to the end of this call, every stage the build enters
-            // is written where `omni_build_progress` can read it.
             crate::progress::begin();
             let mut sink = crate::diag::Sink::new();
             let now = now_seconds();
@@ -35553,8 +33194,6 @@ pub mod ffi {
                 Err(error) => write_failure(&mut w, "built", &error),
             }
 
-            // What this build took, stage by stage, so the next one on this
-            // device has something better than a first guess to say.
             crate::progress::finish(built);
             w.field_str("timings", &crate::progress::timings());
             sink.write_json(&mut w, "diagnostics");
@@ -35680,13 +33319,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Looks through every text file in a project for a piece of text.
-    ///
-    /// `sensitive` and `whole_word` are the two switches a search needs and
-    /// the only two: the first says whether case counts, the second whether
-    /// `at` may match inside `that`.
-    /// What the manifest says, as the things a person changes.
-    /// What is right and wrong about a project, counted off its own files.
     #[no_mangle]
     pub unsafe extern "C" fn omni_project_health(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
@@ -35708,11 +33340,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Lays out a file, changing nothing but the whitespace around lines.
-    ///
-    /// The text goes over and comes back; nothing is read from disk and
-    /// nothing is written to it, so what an editor is showing is what is laid
-    /// out rather than whatever was last saved.
     #[no_mangle]
     pub unsafe extern "C" fn omni_lay_out(name: *const c_char, text: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
@@ -35727,8 +33354,6 @@ pub mod ffi {
                 w.field_bool("changed", laid != text);
                 w.field_str("text", &laid);
             } else {
-                // Only Java, and said so rather than handing back something
-                // laid out by rules that are not that language's.
                 w.field_bool("laid", false);
                 w.field_str("code", "EF001");
                 w.field_str(
@@ -35745,7 +33370,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// What a project depends on, read out of the files themselves.
     #[no_mangle]
     pub unsafe extern "C" fn omni_dependencies(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
@@ -35767,7 +33391,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Takes one away, by name and out of the library folder alone.
     #[no_mangle]
     pub unsafe extern "C" fn omni_dependency_remove(
         root: *const c_char,
@@ -35792,7 +33415,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// What the manifest says, as the things a person changes.
     #[no_mangle]
     pub unsafe extern "C" fn omni_manifest_facts(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
@@ -35814,7 +33436,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Changes one of them, on the text, leaving the rest of the file alone.
     #[no_mangle]
     pub unsafe extern "C" fn omni_manifest_set(
         root: *const c_char,
@@ -35842,7 +33463,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Asks for a permission, or stops asking for one.
     #[no_mangle]
     pub unsafe extern "C" fn omni_manifest_permission(
         root: *const c_char,
@@ -35868,11 +33488,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Every type in this project and on the platform that answers to this.
-    ///
-    /// The platform's types come out of the same classpath the compiler is
-    /// handed and the project's out of parsing its files with the same parser,
-    /// so a name this answers with is a name that compiles.
     #[no_mangle]
     pub unsafe extern "C" fn omni_symbols(
         root: *const c_char,
@@ -35904,10 +33519,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Where a type this project declares is written.
-    ///
-    /// A type on the platform has no file on this device to go to, and saying
-    /// so is better than pointing at the description of one.
     #[no_mangle]
     pub unsafe extern "C" fn omni_where_written(
         root: *const c_char,
@@ -35936,11 +33547,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Opens a finished package and says what is in it.
-    ///
-    /// Everything reported comes out of the file: the manifest is decoded from
-    /// the binary XML it really is, the code counted from the Dalvik's own
-    /// header, and the signature checked against the key that presents it.
     #[no_mangle]
     pub unsafe extern "C" fn omni_inspect_package(path: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
@@ -35963,11 +33569,6 @@ pub mod ffi {
         result.unwrap_or(std::ptr::null_mut())
     }
 
-    /// Reads a project the way a build reads it, and stops before packaging.
-    ///
-    /// This is the front half of the build itself rather than a second opinion
-    /// about it, so a refusal is the refusal a build would give, at the line it
-    /// would give it at, and nothing is written anywhere.
     #[no_mangle]
     pub unsafe extern "C" fn omni_check_project(root: *const c_char) -> *mut c_char {
         let result = catch_unwind(|| {
@@ -36616,13 +34217,6 @@ mod tests {
 
     #[test]
     fn a_plugin_that_claims_to_be_implemented_is() {
-        // This used to say that none of them were, and that was true and worth
-        // saying: a registry full of contracts that describe work nobody wrote
-        // is how a project starts believing its own table of contents. Java is
-        // written now, so the claim changes -- but it does not get dropped. A
-        // plugin allowed to publish artifacts has to have a compiler behind it
-        // that keeps the contract, and one that has no compiler has to still
-        // say PLANNED.
         let implemented: &[(&str, &dyn super::compiler::Compiler)] =
             &[("omni.plugin.java", &super::compilers::java::COMPILER)];
 
@@ -36666,10 +34260,7 @@ mod tests {
                 policy: &mut policy,
                 diagnostics: &mut sink,
             };
-            // Nothing compiles through this surface, whether it is written or
-            // not: it has no request and nowhere to put what comes out. One
-            // that is written says where to go instead; one that is not says it
-            // does not exist. Neither reports success.
+
             let error = plugin
                 .execute(&mut ctx)
                 .expect_err("nothing compiles through the plugin surface");
@@ -36937,10 +34528,6 @@ mod tests {
         assert!(report.contains("\"selfHosted\":false"));
         assert!(report.contains("Gradle"));
 
-        // What the report says is implemented has to be what the registry says,
-        // not a number somebody typed. It was zero for a long time and is not
-        // any more; the check is that the two agree, which stays true whatever
-        // the number becomes.
         let counted = Registry::builtin()
             .all()
             .iter()
@@ -38060,14 +35647,6 @@ mod tests {
 </manifest>
 "####;
 
-    /// A layout, a menu and three values files become a package aapt2 reads
-    /// back the way it wrote its own.
-    ///
-    /// This is the shape of every Android project: XML in `Res`, identifiers
-    /// declared by `@+id` where they are used, `@string` and `@color` and
-    /// `@dimen` pointing at values, and code reaching all of it through `R`.
-    /// What comes out is compared with what `aapt2` makes of the same folder,
-    /// attribute for attribute.
     #[test]
     fn a_layout_and_a_menu_become_what_aapt2_makes_of_them() {
         let directory = temp_directory("omni-layout");
@@ -38075,8 +35654,7 @@ mod tests {
         for folder in ["layout", "menu", "values", "drawable", "mipmap-anydpi-v26"] {
             std::fs::create_dir_all(res.join(folder)).unwrap();
         }
-        // The declaration has to be the first thing in the file, and a raw
-        // string written in Rust begins with the newline after its quote.
+
         for (path, text) in [
             ("layout/screen.xml", A_LAYOUT),
             ("menu/main.xml", A_MENU),
@@ -38111,8 +35689,6 @@ mod tests {
             .expect("and there are some");
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
 
-        // Every `@+id` written in the layout and the menu is an identifier the
-        // generated `R` carries, which is what `findViewById` reaches through.
         let named: Vec<&str> = icons
             .compiled
             .assignments()
@@ -38135,8 +35711,7 @@ mod tests {
                 "R.{kind}.{name} is missing"
             );
         }
-        // And each XML resource is in the package as the binary XML a device
-        // reads, not as the text it was written in.
+
         for entry in [
             "res/layout/screen.xml",
             "res/menu/main.xml",
@@ -38165,7 +35740,6 @@ mod tests {
         let ours = directory.join("ours.apk");
         std::fs::write(&ours, &outcome.package).unwrap();
 
-        // The same folder, through the platform's own tool.
         let compiled = directory.join("compiled.zip");
         let made = std::process::Command::new(&aapt2)
             .args(["compile", "--dir"])
@@ -38298,14 +35872,6 @@ mod tests {
 </manifest>
 "####;
 
-    /// Every qualifier a folder name can carry means to `aapt2` what it means
-    /// here.
-    ///
-    /// A folder called `values-night` or `mipmap-anydpi-v26` is how an
-    /// application says which devices something is for, and a build that does
-    /// not understand one of them either refuses the folder or, worse, drops
-    /// the qualifier and ships the wrong resource. The same folders go through
-    /// both tools, and what each makes of the table is compared line for line.
     #[test]
     fn every_qualifier_a_folder_can_carry_means_the_same_to_aapt2() {
         const QUALIFIERS: &[&str] = &[
@@ -38468,8 +36034,6 @@ mod tests {
             String::from_utf8_lossy(&linked.stderr)
         );
 
-        // The order the configurations come out in is the writer's own; what
-        // matters is that both hold the same ones, saying the same things.
         let dump = |apk: &std::path::Path| -> Vec<String> {
             let out = std::process::Command::new(&aapt2)
                 .args(["dump", "resources"])
@@ -38491,9 +36055,7 @@ mod tests {
             lines
         };
         let mine = dump(&ours);
-        // One line per folder, less `values-v26`: every device the project
-        // runs on is past 26, so what that folder says is nothing, and it
-        // becomes the folder everything falls back to.
+
         assert_eq!(
             mine.len(),
             QUALIFIERS.len() - 1,
@@ -38504,9 +36066,7 @@ mod tests {
             dump(&theirs),
             "a qualifier does not mean here what it means to aapt2"
         );
-        // And the orders this build refuses are the orders `aapt2` refuses.
-        // A rule kept here and nowhere else would be a rule that only makes
-        // this build harder to use.
+
         const WRONG: &[&str] = &[
             "values-night-land",
             "values-v31-xxhdpi",
@@ -38543,14 +36103,6 @@ mod tests {
         );
     }
 
-    /// Styles, arrays and plurals become the table `aapt2` writes for the same
-    /// file, entry for entry and value for value.
-    ///
-    /// These are the entries that hold several values rather than one, and the
-    /// table gives each part a number: a style by the attribute it sets, an
-    /// array by where the item sits, a plural by the quantity it is for. What
-    /// is compared is `aapt2`'s own reading of both packages, which is the
-    /// reading a device does.
     #[test]
     fn styles_arrays_and_plurals_are_the_table_aapt2_writes() {
         let directory = temp_directory("omni-bags");
@@ -38643,8 +36195,7 @@ mod tests {
                 .collect()
         };
         let mine = dump(&ours);
-        // A comparison that passes because neither side holds anything is no
-        // comparison, so what the table has to hold is named here.
+
         for held in [
             "resource 0x7f010000 array/counts",
             "resource 0x7f060000 plurals/apples",
@@ -38672,9 +36223,6 @@ mod tests {
             "the table is not what aapt2 makes of the same file"
         );
 
-        // And the same table written the way a bundle carries it, read back
-        // through aapt2's own converter: what a store is handed has to say the
-        // same thing as what a device is handed.
         let mut ready = crate::diag::Sink::new();
         let prepared = super::builder::prepare(&project, &mut ready).expect("the project prepares");
         let held = prepared.icons.as_ref().expect("there are resources");
@@ -38721,15 +36269,6 @@ mod tests {
         eprintln!("bag conformance: styles, arrays and plurals agree with aapt2 value for value");
     }
 
-    /// An attribute a project declares, and a group of them a view reads, mean
-    /// to `aapt2` what they mean here.
-    ///
-    /// This is what a custom view is: `<attr>` says what it accepts,
-    /// `<declare-styleable>` groups the ones it reads, `R.styleable` is the
-    /// array handed to `obtainStyledAttributes`, and a layout writes them in a
-    /// namespace of its own. Every one of those has to line up with what the
-    /// device expects, and the way to know it does is to put the same folder
-    /// through `aapt2` and compare.
     #[test]
     fn attributes_and_styleables_are_what_aapt2_makes_of_them() {
         let directory = temp_directory("omni-attrs");
@@ -38756,9 +36295,6 @@ mod tests {
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
         let icons = icons.expect("there are resources");
 
-        // What the project's own code indexes into. Nothing else in `R` is an
-        // array, and an offset that is not the offset the table sorted to is a
-        // view reading the wrong attribute.
         let generated = super::builder::r_source("com.my.app", &icons.compiled);
         for held in [
             "public static final class styleable {",
@@ -38846,8 +36382,7 @@ mod tests {
         };
 
         let mine = dump(&ours, &["resources"]);
-        // A comparison that passes because neither side holds anything is no
-        // comparison, so what the table has to hold is named here.
+
         for held in [
             "resource 0x7f010005 attr/withEnum",
             "(attr) type=enum size=3",
@@ -38858,12 +36393,7 @@ mod tests {
             "second(0x7f030006)=0x00000001",
             "negative(0x7f030003)=0xffffffff",
             "resource 0x7f030002 id/left",
-            // A style setting one of the project's own attributes, with the
-            // name of a value it declared read as the number behind it.
             "withEnum(0x7f010005)=1",
-            // And one answering out of the theme rather than out of the table,
-            // for an attribute the framework declares and one this project
-            // declares itself.
             "0x01010098=?0x01010435",
             "0x01010031=?attr/manyFormats",
         ] {
@@ -38878,9 +36408,6 @@ mod tests {
             "the table is not what aapt2 makes of the same file"
         );
 
-        // And the layout: an attribute in the project's own namespace carries
-        // the number the project gave it, and a name it declared for one of
-        // its values carries the number behind that name.
         let layout = ["xmltree", "--file", "res/layout/view.xml"];
         let seen = dump(&ours, &layout);
         for held in [
@@ -38901,8 +36428,6 @@ mod tests {
             "the layout is not what aapt2 makes of the same file"
         );
 
-        // And the array `R` writes is the array `aapt2` writes, number for
-        // number and offset for offset.
         let written = std::fs::read_to_string(java.join("com/my/app/R.java"))
             .expect("aapt2 writes an R of its own");
         for name in ["MyView", "Empty"] {
@@ -38922,7 +36447,6 @@ mod tests {
         );
     }
 
-    /// The numbers one `R.styleable` array holds, whoever wrote the `R`.
     fn styleable_array(source: &str, name: &str) -> Vec<i64> {
         let at = source
             .find(&format!("int[] {name}="))
@@ -38995,13 +36519,6 @@ mod tests {
     app:plainRef="@color/ink" />
 "####;
 
-    /// A build that says where it is, and says it honestly.
-    ///
-    /// The stage is whatever the build last entered, the percentage never
-    /// arrives before the build does, and the estimate is this device's own
-    /// timings once it has any. Driven on a channel of its own rather than the
-    /// one a build writes into, so that a build running beside this test in
-    /// another thread cannot make it pass or fail.
     #[test]
     fn a_build_says_where_it_is_and_how_long_is_left() {
         use super::progress::{Channel, STAGES};
@@ -39018,8 +36535,6 @@ mod tests {
             }
         };
 
-        // Nothing has been asked of it, so it says so rather than saying zero
-        // per cent of something.
         let mut channel = Channel::new();
         assert_eq!(read(&channel.report(), "state"), "waiting");
         assert_eq!(read(&channel.report(), "percent"), "0");
@@ -39032,9 +36547,6 @@ mod tests {
         assert_eq!(read(&channel.report(), "steps"), STAGES.len().to_string());
         assert_eq!(read(&channel.report(), "estimated"), "false");
 
-        // A stage nobody declared, and one already passed, say nothing: this
-        // is called from inside the build, and the build is not a place to
-        // find out that a name was misspelled.
         channel.enter("polishing");
         assert_eq!(read(&channel.report(), "stage"), "project");
         channel.enter("dex");
@@ -39042,8 +36554,6 @@ mod tests {
         channel.enter("resources");
         assert_eq!(read(&channel.report(), "stage"), "dex");
 
-        // While it runs it never claims to be finished, whatever the estimate
-        // says: the only thing that says a build is done is a build being done.
         let held = channel.report();
         assert!(read(&held, "percent").parse::<u64>().unwrap() < 100);
         assert!(held.contains("\"state\":\"running\""), "{held}");
@@ -39055,13 +36565,10 @@ mod tests {
         assert_eq!(read(&done, "leftMillis"), "0");
         assert!(!done.contains("\"state\":\"waiting\""), "{done}");
 
-        // And what it took is now what it expects, one number per stage.
         assert!(channel.knows_this_device());
         assert_eq!(channel.timings().split(',').count(), STAGES.len());
         assert_eq!(read(&channel.report(), "estimated"), "true");
 
-        // A build that is refused stops where it was refused, and says so
-        // there rather than marking everything done.
         let mut refused = Channel::new();
         refused.begin();
         refused.enter("java");
@@ -39077,8 +36584,6 @@ mod tests {
             "a refused build teaches nothing"
         );
 
-        // Timings handed back are the timings used, and anything else is
-        // ignored rather than refused.
         let mut learned = Channel::new();
         learned.learn("1,2,3");
         assert!(!learned.knows_this_device());
@@ -39089,11 +36594,6 @@ mod tests {
         assert_eq!(read(&learned.report(), "estimated"), "true");
     }
 
-    /// The stages the channel names are the stages the build enters.
-    ///
-    /// A list of stages written beside a build rather than by it would drift
-    /// the first time one of them moved. This puts a real project through a
-    /// real build and reads back which stages it was seen in.
     #[test]
     fn every_stage_a_build_reports_is_one_it_really_went_through() {
         let directory = temp_directory("omni-progress");
@@ -39109,10 +36609,6 @@ mod tests {
 
         let key = super::rsa::generate(2048).expect("a key");
 
-        // The channel a build writes into is one per process, so this watches
-        // it from the thread that is not building -- which is what the app
-        // does too. It begins before the project is read, because reading the
-        // project is the first stage.
         super::progress::begin();
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let watching = std::sync::Arc::clone(&seen);
@@ -39144,10 +36640,7 @@ mod tests {
         assert!(outcome.is_ok(), "{:?}", sink.entries());
 
         let held = seen.lock().unwrap().clone();
-        // Sampling cannot promise to catch every stage -- some of them are
-        // over in under a millisecond -- but what it caught has to be stages
-        // that exist, in the order they are declared, and it has to have
-        // caught the slow ones.
+
         for name in &held {
             assert!(
                 super::progress::STAGES.contains(&name.as_str()),
@@ -39189,20 +36682,12 @@ mod tests {
         );
     }
 
-    /// What a register holds, as far as the runtime's own check is concerned.
-    ///
-    /// Dalvik is typed: a register holding a reference cannot be read by `move`
-    /// and one holding a number cannot be read by `move-object`. Getting that
-    /// wrong does not merely misbehave -- the verifier refuses the class as it
-    /// is loaded, and nothing in the file runs at all. None of it is visible in
-    /// a package that merely builds, which is why it is read here.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     enum Register {
-        /// Never written on any road to here.
         Nothing,
-        /// Written as two different things on two different roads.
+
         Disagreed,
-        /// A literal zero, which is a number and a null both.
+
         Zero,
         Number,
         Reference,
@@ -39242,11 +36727,10 @@ mod tests {
         }
     }
 
-    /// Every register of one method, at one point in it.
     #[derive(Clone, PartialEq, Eq)]
     struct Held {
         registers: Vec<Register>,
-        /// What the last call left behind, which `move-result` picks up.
+
         result: Register,
     }
 
@@ -39263,7 +36747,7 @@ mod tests {
             if at >= self.registers.len() {
                 return;
             }
-            // Writing over half of a pair leaves the other half meaning nothing.
+
             if at > 0 && self.registers[at - 1] == Register::WideLow {
                 self.registers[at - 1] = Register::Disagreed;
             }
@@ -39300,19 +36784,11 @@ mod tests {
         }
     }
 
-    /// Where an instruction can go on to, other than the next one.
     struct Goes {
         targets: Vec<usize>,
         carries_on: bool,
     }
 
-    /// Reads every method of a translated class the way the runtime's verifier
-    /// reads it, and says what it would refuse.
-    ///
-    /// This is not the whole of that check: it says nothing about which class a
-    /// reference is of, or whether a field exists. What it does say is what the
-    /// translator can get wrong on its own -- a register read as the wrong kind
-    /// of thing, a call handed the wrong registers, a long read as one word.
     fn what_the_runtime_would_refuse(class: &crate::dexwrite::Class) -> Vec<String> {
         let mut found = Vec::new();
         for method in class
@@ -39334,8 +36810,6 @@ mod tests {
     }
 
     fn read_registers(method: &crate::dexwrite::Method) -> Vec<String> {
-        // Where each instruction begins, in code units, so a branch can be
-        // followed to the instruction it lands on.
         let mut running = 0usize;
         let mut starts = Vec::with_capacity(method.instructions.len());
         for one in &method.instructions {
@@ -39348,7 +36822,7 @@ mod tests {
             registers: vec![Register::Nothing; usize::from(method.registers)],
             result: Register::Nothing,
         };
-        // The parameters arrive in the registers at the top.
+
         let mut cursor = method.registers.saturating_sub(method.inputs);
         if method.access_flags & 0x0008 == 0 {
             entry.set(cursor, Register::Reference);
@@ -39414,8 +36888,7 @@ mod tests {
             for one in &goes.targets {
                 arrive(*one, &mut coming, &mut queue);
             }
-            // Where a switch goes is written in a payload laid down after the
-            // code, so the roads out of it are read from there.
+
             let unit = method.instructions[index].units[0] & 0xff;
             if unit == 0x2b || unit == 0x2c {
                 for one in switch_targets(&method.instructions, &starts, index) {
@@ -39429,7 +36902,7 @@ mod tests {
                     &mut queue,
                 );
             }
-            // Anything inside a `try` can go to the handler from anywhere in it.
+
             for one in &method.tries {
                 let inside = starts[index] >= one.start as usize
                     && starts[index] < one.start as usize + usize::from(one.units);
@@ -39445,7 +36918,6 @@ mod tests {
         said
     }
 
-    /// One instruction, read the way the runtime reads it.
     fn step(
         one: &crate::dexwrite::Insn,
         held: &mut Held,
@@ -39480,8 +36952,6 @@ mod tests {
         };
 
         match opcode {
-            // move, move/from16, move-object, move-object/from16, and the wide
-            // pair of each. Which one is used is the whole point.
             0x01 | 0x04 | 0x07 => {
                 let (to, from) = (a4, b4);
                 let wanted = match opcode {
@@ -39552,7 +37022,7 @@ mod tests {
                 reads(held, aa, Register::Reference, said);
                 goes.carries_on = false;
             }
-            // The constants.
+
             0x12 => {
                 let value = ((unit >> 12) as i16) << 12 >> 12;
                 held.set(
@@ -39621,9 +37091,6 @@ mod tests {
             }
             0x2b | 0x2c => {
                 reads(held, aa, Register::Number, said);
-                // Where a switch goes is written in its payload, which this
-                // does not walk; every road out of it is reached from the
-                // payload's own landing places instead.
             }
             0x2d..=0x31 => {
                 let (left, right) = ((second & 0xff), (second >> 8));
@@ -39638,9 +37105,6 @@ mod tests {
                 held.set(aa, Register::Number);
             }
             0x32..=0x37 => {
-                // if-eq and if-ne compare two references for identity or two
-                // numbers for equality, and never one of each. The four that
-                // order their operands take numbers only.
                 let left = held.get(a4);
                 let right = held.get(b4);
                 if opcode > 0x33 {
@@ -39662,7 +37126,7 @@ mod tests {
                 goes.targets
                     .push((at as i64 + i64::from(second as i16)) as usize);
             }
-            // Arrays.
+
             0x44..=0x4a => {
                 let (array, index) = ((second & 0xff), (second >> 8));
                 reads(held, array, Register::Reference, said);
@@ -39684,7 +37148,7 @@ mod tests {
                 };
                 reads(held, aa, wanted, said);
             }
-            // Fields.
+
             0x52..=0x58 => {
                 let Operand::Field(field) = &one.operand else {
                     return goes;
@@ -39717,8 +37181,7 @@ mod tests {
                 };
                 reads(held, aa, Register::of(&field.descriptor), said);
             }
-            // Calls, in the form that names each register and the form that
-            // names the first of a row of them.
+
             0x6e..=0x72 | 0x74..=0x78 => {
                 let Operand::Method(call) = &one.operand else {
                     return goes;
@@ -39774,7 +37237,7 @@ mod tests {
                     Register::of(&call.return_type)
                 };
             }
-            // The one-operand arithmetic, then the two-operand kind.
+
             0x7b..=0x8f => {
                 let (from_wide, to_wide) = shape_of(opcode);
                 reads(
@@ -39836,35 +37299,30 @@ mod tests {
         goes
     }
 
-    /// Whether a one-operand instruction reads and writes a pair.
     fn shape_of(opcode: u8) -> (bool, bool) {
         match opcode {
             0x7b | 0x7c | 0x7f => (false, false),
             0x7d | 0x7e | 0x80 => (true, true),
-            0x81 => (false, true),  // int-to-long
-            0x82 => (false, false), // int-to-float
-            0x83 => (false, true),  // int-to-double
-            0x84 => (true, false),  // long-to-int
-            0x85 => (true, false),  // long-to-float
-            0x86 => (true, true),   // long-to-double
-            0x87 => (false, false), // float-to-int
-            0x88 => (false, true),  // float-to-long
-            0x89 => (false, true),  // float-to-double
-            0x8a => (true, false),  // double-to-int
-            0x8b => (true, true),   // double-to-long
-            0x8c => (true, false),  // double-to-float
-            _ => (false, false),    // int-to-byte, -char, -short
+            0x81 => (false, true),
+            0x82 => (false, false),
+            0x83 => (false, true),
+            0x84 => (true, false),
+            0x85 => (true, false),
+            0x86 => (true, true),
+            0x87 => (false, false),
+            0x88 => (false, true),
+            0x89 => (false, true),
+            0x8a => (true, false),
+            0x8b => (true, true),
+            0x8c => (true, false),
+            _ => (false, false),
         }
     }
 
-    /// Whether a two-operand instruction works on pairs.
     fn wide_arithmetic(opcode: u8) -> bool {
         matches!(opcode, 0x9b..=0xa5 | 0xab..=0xaf)
     }
 
-    /// Where one switch instruction can go, read out of the payload it points
-    /// at. The payload holds one thirty-two bit offset per case, counted from
-    /// the switch instruction itself.
     fn switch_targets(
         instructions: &[crate::dexwrite::Insn],
         starts: &[usize],
@@ -40322,13 +37780,6 @@ public class Written {
 }
 "####;
 
-    /// What another compiler writes, translated and read back.
-    ///
-    /// Everything else here goes through this build's own compiler, which
-    /// writes a narrow set of the instructions the format has. A jar does not:
-    /// it holds whatever javac wrote, and that is where `dup_x1`, `dup2_x1`,
-    /// `multianewarray` and a method with more locals than a byte can number
-    /// come from. So javac writes it, and the translator reads it.
     #[test]
     fn what_another_compiler_writes_translates_and_holds_up() {
         let directory = temp_directory("omni-javac");
@@ -40375,10 +37826,7 @@ public class Written {
                 refused.extend(what_the_runtime_would_refuse(one));
             }
             every.extend(translated.iter().cloned());
-            // Strings joined together are written as a dynamic call, and what
-            // it stands for is a builder handed one piece at a time. Which
-            // pieces, and which `append` takes each, is the whole of what the
-            // call meant -- so it is read back out and compared.
+
             for method in translated
                 .iter()
                 .flat_map(|one| one.direct_methods.iter().chain(one.virtual_methods.iter()))
@@ -40428,9 +37876,6 @@ public class Written {
         );
         assert_eq!(joined, 2, "both joined strings were read");
 
-        // A lambda becomes a class of its own, written out beside the one it
-        // came from. Those go into the package like any other, so the package
-        // is written and read back.
         let names: Vec<&str> = every
             .iter()
             .map(|one| one.descriptor.as_str())
@@ -40440,10 +37885,7 @@ public class Written {
             names.len() >= 10,
             "a lambda for each one written: {names:?}"
         );
-        // What each one came to, checked where it says something: a method
-        // reference with nothing captured keeps nothing; a generic interface
-        // is erased, so the value is cast on the way in and boxed on the way
-        // out, and both have to be there.
+
         let by_interface = |wanted: &str| -> &crate::dexwrite::Class {
             every
                 .iter()
@@ -40503,9 +37945,6 @@ public class Written {
             }
         }
 
-        // What was written on the class, its field, its method and its
-        // parameter, read back out of the finished file the way the runtime
-        // reads it.
         let mut told = annotations_in(&dex, "Lcom/my/app/Written;");
         told.sort();
         assert_eq!(
@@ -40536,8 +37975,6 @@ public class Written {
             "the package does not say what was written on the class"
         );
 
-        // The annotation type itself: what it keeps, which class it is written
-        // inside, and what its elements fall back to where they are not given.
         let mut nested = annotations_in(&dex, "Lcom/my/app/Written$Tagged;");
         nested.sort();
         assert_eq!(
@@ -40565,9 +38002,6 @@ public class Written {
             "the annotation type does not say what it is"
         );
 
-        // And every line the class files came from is a line the finished
-        // package says it came from, which is what a stack trace off a device
-        // is made of.
         let mut wanted: Vec<u32> = Vec::new();
         for path in &written {
             let bytes = std::fs::read(path).unwrap();
@@ -40600,7 +38034,6 @@ public class Written {
         );
     }
 
-    /// The text and the appends one method is written from, in order.
     fn pieces_of(method: &crate::dexwrite::Method) -> Vec<String> {
         let mut out = Vec::new();
         for one in &method.instructions {
@@ -40615,13 +38048,6 @@ public class Written {
         out
     }
 
-    /// A package carries as many dex files as it takes.
-    ///
-    /// An instruction names a method, a field, a type or a string by sixteen
-    /// bits, so one file holds sixty-five thousand of each and no more. Every
-    /// application that carries enough of other people's code walks into that
-    /// wall, and until now this stopped there. Now the classes are put in as
-    /// many files as they need, and the platform reads them in order.
     #[test]
     fn a_package_carries_as_many_dex_files_as_it_takes() {
         let classpath = crate::compilers::java::Classpath::new();
@@ -40637,16 +38063,9 @@ public class Written {
         }
         assert!(classes.len() > 4, "there is something to split");
 
-        // One file, because nothing here is anywhere near the wall.
         let whole = crate::dexwrite::write_all(&classes, &[]).expect("one file");
         assert_eq!(whole.len(), 1, "nothing here needs more than one");
 
-        // And the same classes with the wall moved in, which is the only way
-        // to reach it without building an application the size of one that
-        // really does.
-        // The wall moved in far enough that these classes reach it, which is
-        // the only way to reach it without building an application the size of
-        // one that really does.
         let mut parts = None;
         for most in [64usize, 80, 96, 112, 128, 160, 192, 224, 256, 320] {
             let Ok(held) = crate::dexwrite::write_all_holding(&classes, &[], most) else {
@@ -40682,7 +38101,6 @@ public class Written {
         held.sort();
         assert_eq!(held, wanted, "every class is in exactly one of the files");
 
-        // The names the platform looks for, in the order it looks for them.
         assert_eq!(super::dexwrite::dex_named(0), "classes.dex");
         assert_eq!(super::dexwrite::dex_named(1), "classes2.dex");
         assert_eq!(super::dexwrite::dex_named(9), "classes10.dex");
@@ -40697,12 +38115,6 @@ public class Written {
         );
     }
 
-    /// A finished dex, read the way the runtime reads one.
-    ///
-    /// This walks the file on its own: the class definitions, the directory
-    /// each points at, the sets those hold, the annotations in them and the
-    /// values in those. Nothing here went through anything that wrote the
-    /// file, so what comes back can be compared with what the class file said.
     struct Reading<'a> {
         bytes: &'a [u8],
         strings: usize,
@@ -40879,7 +38291,6 @@ public class Written {
         out
     }
 
-    /// What `dexdump` says about a dex, disassembled.
     fn dexdump_text(bytes: &[u8]) -> Option<String> {
         let tool = find_apksigner().and_then(|p| Some(p.parent()?.join("dexdump")))?;
         if !tool.is_file() {
@@ -40913,13 +38324,6 @@ public class Written {
         }
     }
 
-    /// A jar a project depends on ends up in the package.
-    ///
-    /// Compiling against a dependency and shipping it are two different
-    /// things, and only the first was happening: a project that used a library
-    /// built, installed, and then could not find a class it was made of. What
-    /// the platform provides stays out, because the device already has it;
-    /// everything else in `Libraries` goes in.
     #[test]
     fn a_library_a_project_depends_on_is_in_the_package() {
         let directory = temp_directory("omni-library");
@@ -41004,13 +38408,11 @@ public final class Greeting {
         )
         .expect("the project is created");
 
-        // The library, zipped the way a jar is.
         let mut classes = Vec::new();
         gather_class_files(&made, &mut classes);
         classes.sort();
         assert!(!classes.is_empty(), "the library compiled to something");
-        // The greeting goes in a jar and the farewell in an aar, so that
-        // neither could have come from the other.
+
         let mut jar = crate::archive::Builder::new();
         let mut inside = crate::archive::Builder::new();
         for path in &classes {
@@ -41030,9 +38432,6 @@ public final class Greeting {
         std::fs::create_dir_all(&libraries).unwrap();
         std::fs::write(libraries.join("greeting.jar"), jar.finish().unwrap()).unwrap();
 
-        // And the same jar again inside an `aar`, which is how an Android
-        // library is actually published: the classes in `classes.jar`, and
-        // the rest of what a library brings around it.
         let mut aar = crate::archive::Builder::new();
         aar.add("classes.jar", inside.finish().unwrap()).unwrap();
         aar.add(
@@ -41052,9 +38451,7 @@ public final class Greeting {
         )
         .unwrap();
         aar.add("R.txt", Vec::new()).unwrap();
-        // What a library really brings: its own strings and its own layout,
-        // one of which this application overrides and the rest of which it
-        // takes as they are.
+
         aar.add(
             "res/values/values.xml",
             b"<?xml version=\"1.0\" encoding=\"utf-8\"?>
@@ -41078,8 +38475,7 @@ public final class Greeting {
             .to_vec(),
         )
         .unwrap();
-        // And what a library ships beside its code: files for the asset
-        // manager, and machine code for the one machine this builds for.
+
         aar.add("assets/tokens.txt", b"from the library".to_vec())
             .unwrap();
         aar.add("assets/shared.txt", b"the library's own".to_vec())
@@ -41088,16 +38484,12 @@ public final class Greeting {
             .unwrap();
         std::fs::write(libraries.join("greeting.aar"), aar.finish().unwrap()).unwrap();
 
-        // The application's own assets, one of which the library also ships.
         let assets = root.join(super::scaffold::ASSETS_FOLDER);
         std::fs::create_dir_all(assets.join("fonts")).unwrap();
         std::fs::write(assets.join("notes.txt"), b"made here").unwrap();
         std::fs::write(assets.join("shared.txt"), b"the application's own").unwrap();
         std::fs::write(assets.join("fonts/a.ttf"), vec![1, 2, 3]).unwrap();
 
-        // The application says one of the library's strings differently, which
-        // is the whole point of a library's resources being underneath the
-        // application's.
         let values = root
             .join(super::scaffold::RES_FOLDER)
             .join(super::scaffold::values_folder(super::scaffold::BASE_LOCALE));
@@ -41163,8 +38555,7 @@ public final class MainActivity extends Activity {
                 "{wanted} is not in the package: {named:?}"
             );
         }
-        // The library's own strings and layout are in the table, and the one
-        // the application says differently is the application's.
+
         let mut sink = crate::diag::Sink::new();
         let icons = super::builder::compile_resources_for_test(&project, &mut sink)
             .expect("the resources compile")
@@ -41200,8 +38591,6 @@ public final class MainActivity extends Activity {
             refused.join("\n  ")
         );
 
-        // What the library asks the manifest for is in the manifest, with the
-        // application's own name where it asked for one.
         for wanted in [
             "android.permission.INTERNET",
             "android.hardware.camera",
@@ -41232,10 +38621,6 @@ public final class MainActivity extends Activity {
             "the package carries its code"
         );
 
-        // What the project ships as it is, and what its libraries do. A
-        // library's native code is under `lib` in a package however it was
-        // named in the library, and a name the application also uses is the
-        // application's.
         for (name, expected) in [
             ("assets/notes.txt", "made here"),
             ("assets/tokens.txt", "from the library"),
@@ -41261,8 +38646,6 @@ public final class MainActivity extends Activity {
             "and not where the library kept it"
         );
 
-        // And two libraries declaring the same class is refused rather than
-        // decided by which folder was read first.
         std::fs::copy(
             libraries.join("greeting.jar"),
             libraries.join("greeting-again.jar"),
@@ -41288,7 +38671,6 @@ public final class MainActivity extends Activity {
         );
     }
 
-    /// A class with one static method in it, whose body is the bytes given.
     fn a_method_of(
         descriptor: &str,
         max_stack: u16,
@@ -41332,20 +38714,11 @@ public final class MainActivity extends Activity {
         }
     }
 
-    /// Every shuffle the JVM has, in every form it has, translated and then
-    /// read back the way the runtime reads it.
-    ///
-    /// This compiler writes none of these except `dup` and `dup2`; javac writes
-    /// all of them, and so does every jar. Each one is written out here by hand
-    /// rather than coaxed out of a compiler, because what is being checked is
-    /// that every form is handled -- and no one program uses them all.
     #[test]
     fn every_stack_shuffle_the_jvm_has_becomes_registers_that_hold_up() {
-        // The constants that put one word or two on the stack, and what each
-        // one is.
-        const AN_INT: u8 = 0x05; // iconst_2
-        const A_LONG: u8 = 0x09; // lconst_0
-        const A_NULL: u8 = 0x01; // aconst_null
+        const AN_INT: u8 = 0x05;
+        const A_LONG: u8 = 0x09;
+        const A_NULL: u8 = 0x01;
 
         for (what, before, opcode, after) in [
             ("dup", vec![AN_INT], 0x59u8, 2usize),
@@ -41368,15 +38741,12 @@ public final class MainActivity extends Activity {
             ("dup2_x2 of two longs", vec![A_LONG, A_LONG], 0x5e, 6),
             ("swap", vec![AN_INT, A_NULL], 0x5f, 2),
         ] {
-            // Everything the shuffle left is taken off again, one slot at a
-            // time, which says how many it left. Taking off one more than that
-            // has to fail, or the count means nothing.
             let written = |taken: usize| -> Vec<u8> {
                 let mut bytes: Vec<u8> = before.clone();
                 bytes.push(opcode);
-                // pop, one slot at a time
+
                 bytes.extend(std::iter::repeat_n(0x57, taken));
-                bytes.push(0xb1); // return
+                bytes.push(0xb1);
                 bytes
             };
 
@@ -41399,14 +38769,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    /// Every class this build translates is one the runtime would load.
-    ///
-    /// A dex file is typed, and the check the runtime does as it loads a class
-    /// is not a formality: a register read as the wrong kind of thing makes the
-    /// whole class refused, and a package holding one builds, installs and then
-    /// fails the moment it is used. Nothing in a build says so, so it is said
-    /// here -- every method that comes out of the translator is read the way
-    /// the runtime reads it.
     #[test]
     fn every_class_this_translates_is_one_the_runtime_would_load() {
         let classpath = crate::compilers::java::Classpath::new();
@@ -41436,9 +38798,6 @@ public final class MainActivity extends Activity {
             refused.join("\n  ")
         );
 
-        // What this build's own compiler wrote on a class reaches the package
-        // too: an annotation the run time keeps is in the file, read back out
-        // of it the way the run time reads one.
         let dex = crate::dexwrite::write(&written, &[]).expect("the dex is written");
         let mut said = annotations_in(&dex, "Lcom/my/app/Everything;");
         said.sort();
@@ -41451,9 +38810,6 @@ public final class MainActivity extends Activity {
             "what was written on the class is not in the package"
         );
 
-        // And the same reading, on a class where a reference is moved as
-        // though it were a number, says so. A check that cannot fail is not
-        // a check.
         let mut wrong =
             crate::dexwrite::Class::named("Lcom/my/app/Wrong;", "Ljava/lang/Object;", 1);
         wrong.direct_methods.push(crate::dexwrite::Method {
@@ -41467,7 +38823,7 @@ public final class MainActivity extends Activity {
             registers: 2,
             inputs: 1,
             outputs: 0,
-            // move v0, v1 -- where v1 holds a reference.
+
             instructions: vec![
                 crate::dexwrite::Insn::raw(vec![0x0001 | (1 << 12)]),
                 crate::dexwrite::Insn::raw(vec![0x0011]),
@@ -41489,12 +38845,9 @@ public final class MainActivity extends Activity {
         let (_, sink) = values("<resources><public name=\"p\" type=\"string\"/></resources>");
         assert!(sink.entries().iter().any(|d| d.code == "E9002"));
 
-        // And one that is modelled is read rather than reported.
         let (_, sink) = values("<resources><declare-styleable name=\"p\"/></resources>");
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
 
-        // A style is several values, and one written as though it were one is
-        // refused rather than read as the text it holds.
         let (_, sink) = values("<resources><style name=\"Theme\">x</style></resources>");
         let error = sink.entries().iter().find(|d| d.code == "E9047").unwrap();
         assert!(error.message.contains("several values"));
@@ -41554,7 +38907,6 @@ public final class MainActivity extends Activity {
             "a language is a qualifier this build does model"
         );
 
-        // And the ones a folder really can carry, which are now all of them.
         let mut sink = Sink::new();
         assert!(
             table.read_file(
@@ -41567,9 +38919,6 @@ public final class MainActivity extends Activity {
             sink.entries()
         );
 
-        // And an order the platform does not read is refused, because a
-        // folder aapt2 will not take is a project that stops building the
-        // moment it is opened anywhere else.
         for wrong in [
             "drawable-night-land",
             "drawable-v31-xxhdpi",
@@ -41589,7 +38938,7 @@ public final class MainActivity extends Activity {
                 error.message
             );
         }
-        // The same qualifiers, written in the order the platform reads.
+
         for right in [
             "drawable-land-night",
             "drawable-xxhdpi-v31",
@@ -42598,9 +39947,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// The package this build wrote. There is one variant, so there is one
-    /// directory to look in; a signed package is preferred over the unsigned
-    /// one beside it, which is what a build without signing secrets leaves.
     fn built_package() -> Option<std::path::PathBuf> {
         let mut found: Vec<std::path::PathBuf> =
             std::fs::read_dir("Builder/build/outputs/apk/release")
@@ -42653,10 +39999,7 @@ public final class MainActivity extends Activity {
             archive.end_record_offset(),
             &mut sink,
         );
-        // A build given no signing key leaves the package unsigned, and the
-        // reader has to say so rather than find a block that is not there.
-        // Where a key was given, every digest in the block it wrote has to come
-        // back matching.
+
         if !report.has_block {
             assert_eq!(report.digests_verified, 0, "{:?}", sink.entries());
             assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
@@ -42671,10 +40014,7 @@ public final class MainActivity extends Activity {
 
         assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
         assert!(report.digests_verified > 0, "{:?}", sink.entries());
-        // A package the Android Gradle Plugin signed is signed with a key
-        // this build did not choose, so what it verifies against is whatever
-        // that key was. It still has to verify: the whole point of reading a
-        // package this build did not write is that the answer is the same.
+
         assert!(report.signatures_checked, "{:?}", sink.entries());
         assert_eq!(report.signatures_failed, 0, "{:?}", sink.entries());
         assert!(report.signatures_verified > 0, "{:?}", sink.entries());
@@ -42801,9 +40141,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// The report says what was checked, and says it in the same words the
-    /// check would answer in. Every count it carries is one this build
-    /// produced, and the note names what it still does not do.
     #[test]
     fn a_signing_report_says_what_it_checked_and_what_it_did_not() {
         let Some((bytes, directory)) = sign_with_apksigner("v2-report") else {
@@ -42829,18 +40166,12 @@ public final class MainActivity extends Activity {
         assert!(document.contains("\"signaturesVerified\":1"));
         assert!(document.contains("\"signaturesFailed\":0"));
         assert!(document.contains("\"keyMatchesCertificate\":true"));
-        // What it still does not do is said in the same place as what it does.
+
         assert!(document.contains("ECDSA and DSA"));
 
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A signature made by one key, presented beside another key's
-    /// certificate, is refused rather than counted.
-    ///
-    /// This is the attack a digest check alone cannot see: the package is
-    /// exactly what the block says it is, and the block says it was signed by
-    /// somebody who did not sign it.
     #[test]
     fn a_key_that_is_not_the_certificate_s_key_is_refused() {
         let Some((bytes, directory)) = sign_with_apksigner("v2-swap") else {
@@ -42857,7 +40188,6 @@ public final class MainActivity extends Activity {
         );
         let signer = report.signers[0].clone();
 
-        // Somebody else's key, in the place of the one that signed.
         let other = crate::rsa::generate(2048).expect("a key");
         let substituted = signing::Signer {
             public_key: crate::certificate::public_key_info(&other).expect("a public key"),
@@ -42876,15 +40206,12 @@ public final class MainActivity extends Activity {
         assert_eq!(refusal.severity, Severity::Fatal);
         assert_eq!(refusal.class, FailureClass::SecurityFailure);
 
-        // And the untouched one still passes, so the refusal is about the
-        // swap and not about the check being unable to pass anything.
         let mut quiet = Sink::new();
         assert!(signing::verify_signer(&signer, &mut quiet).key_matches_certificate);
 
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A signature changed after the fact stops verifying.
     #[test]
     fn a_signature_that_was_tampered_with_stops_verifying() {
         let Some((bytes, directory)) = sign_with_apksigner("v2-bent") else {
@@ -42901,7 +40228,6 @@ public final class MainActivity extends Activity {
         let mut signer = report.signers[0].clone();
         assert!(!signer.signatures.is_empty());
 
-        // One bit, in the middle of the signature.
         let middle = signer.signatures[0].1.len() / 2;
         signer.signatures[0].1[middle] ^= 0x01;
 
@@ -42920,8 +40246,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// And a package whose contents were changed fails the signature too, not
-    /// only the digest: the digests are inside what the signature covers.
     #[test]
     fn what_the_signature_covers_includes_the_digests() {
         let Some((bytes, directory)) = sign_with_apksigner("v2-covered") else {
@@ -42937,8 +40261,6 @@ public final class MainActivity extends Activity {
         );
         let mut signer = report.signers[0].clone();
 
-        // A digest changed inside the signed data, as somebody swapping the
-        // package's contents would have to do.
         let at = signer.signed_data.len() / 2;
         signer.signed_data[at] ^= 0xff;
 
@@ -42972,10 +40294,7 @@ public final class MainActivity extends Activity {
                     archive.end_record_offset(),
                     &mut sink,
                 );
-                // Whatever the damage was, nothing is ever counted as
-                // verified that was not: a report may say it checked
-                // signatures and found them wanting, and may say it checked
-                // none, but a failure never arrives as a pass.
+
                 assert!(
                     report.signatures_verified == 0
                         || (report.signatures_failed == 0 && report.key_matches_certificate),
@@ -42987,18 +40306,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// One list of words, in two places, saying the same thing.
-    ///
-    /// The editor colours a word because it is a Java keyword, and the
-    /// compiler refuses a name because it is a Java keyword. Those are two
-    /// separate lists in two separate languages, and a word in one and not
-    /// the other is a word the editor shows as an ordinary name right up
-    /// until the build refuses it. So the editor's list has to hold every
-    /// word the compiler reserves. It may hold more -- `record`, `sealed`
-    /// and `yield` are names to the compiler and read as keywords to a person
-    /// -- but never fewer.
-    /// Checking a project says what a build would say, at the line it would
-    /// say it at, and writes nothing.
     #[test]
     fn a_check_refuses_where_a_build_would_and_says_which_line() {
         let directory = temp_directory("omni-check");
@@ -43014,7 +40321,6 @@ public final class MainActivity extends Activity {
         )
         .expect("the project must be made");
 
-        // As written, it is a project that builds.
         let clear = super::builder::check(&root);
         assert!(
             clear.refusal.is_none(),
@@ -43024,7 +40330,6 @@ public final class MainActivity extends Activity {
         assert!(clear.classes > 0, "the activity is a class");
         assert_eq!(clear.package, "com.tr.yt");
 
-        // Nothing is written by checking: the folder holds what it held.
         let before = super::workspace::tree(&root).unwrap();
         super::builder::check(&root);
         let after = super::workspace::tree(&root).unwrap();
@@ -43034,7 +40339,6 @@ public final class MainActivity extends Activity {
             "a check left something behind in the project"
         );
 
-        // A mistake on a line this test chose, found on that line.
         let source = super::workspace::tree(&root)
             .unwrap()
             .into_iter()
@@ -43063,8 +40367,6 @@ public final class MainActivity extends Activity {
             "the refusal names the file by the path the project knows it by"
         );
 
-        // And a build of the same project refuses in the same place, which is
-        // what makes the check worth running.
         let error = super::builder::from_project(&root).expect_err("the build refuses too");
         assert_eq!(error.code, refusal.code);
         assert_eq!(
@@ -43075,7 +40377,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// And the bridge hands the same thing across.
     #[test]
     fn the_bridge_checks_a_project_without_building_it() {
         let directory = temp_directory("omni-check-bridge");
@@ -43119,7 +40420,6 @@ public final class MainActivity extends Activity {
         assert!(refused.contains("\"location\""), "{refused}");
         assert!(refused.contains("\"line\":1"), "{refused}");
 
-        // No package was written by any of it.
         assert!(
             !directory.join("Built").exists(),
             "a check produced a package"
@@ -43128,8 +40428,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// Looking through a project finds what is in it, where it is, and says
-    /// what it did not look at.
     #[test]
     fn a_search_finds_every_place_and_says_what_it_skipped() {
         let directory = temp_directory("omni-search");
@@ -43156,8 +40454,7 @@ public final class MainActivity extends Activity {
             "class Other { String answer = \"answer\"; }\n",
         )
         .unwrap();
-        // Not text: a zero byte inside it, which is what every such tool
-        // decides on.
+
         std::fs::write(directory.join("Icon.png"), [0x89u8, b'P', b'N', 0x00, b'G']).unwrap();
 
         let found = crate::workspace::search(&root, "answer", false, false).unwrap();
@@ -43165,7 +40462,6 @@ public final class MainActivity extends Activity {
         assert_eq!(found.files_searched, 3);
         assert!(!found.stopped_early);
 
-        // Every place, in the order the files are walked and the lines run.
         let places: Vec<(String, u32, u32)> = found
             .matches
             .iter()
@@ -43183,10 +40479,9 @@ public final class MainActivity extends Activity {
             ],
             "the places a search reports are the places the text is"
         );
-        // The line comes back whole, without its newline.
+
         assert_eq!(found.matches[0].text, "// the answer is here");
 
-        // Case, when it is asked for: `Answer` on line five goes.
         let exact = crate::workspace::search(&root, "answer", true, false).unwrap();
         assert!(
             exact.matches.iter().all(|one| one.line != 5),
@@ -43194,17 +40489,14 @@ public final class MainActivity extends Activity {
         );
         assert_eq!(exact.matches.len(), 5);
 
-        // Whole words, when they are asked for: `answered` goes too.
         let words = crate::workspace::search(&root, "answer", true, true).unwrap();
         assert!(
             words.matches.iter().all(|one| one.line != 6),
             "a whole-word search matched inside a longer word"
         );
-        // And a string's quotes do not make a word boundary disappear.
+
         assert_eq!(words.matches.len(), 4);
 
-        // Nothing to look for is a refusal rather than every line in the
-        // project.
         assert_eq!(
             crate::workspace::search(&root, "", false, false)
                 .unwrap_err()
@@ -43215,8 +40507,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A search stops at its limit and says so, rather than carrying a
-    /// project's worth of lines back across the bridge.
     #[test]
     fn a_search_that_would_never_end_stops_and_says_it_did() {
         let directory = temp_directory("omni-search-many");
@@ -43239,7 +40529,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A search does not leave the project it was given, whatever it is asked.
     #[test]
     fn a_search_only_reads_what_is_inside_the_project() {
         let directory = temp_directory("omni-search-inside");
@@ -43262,7 +40551,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// What comes back over the bridge is what the search found.
     #[test]
     fn the_bridge_searches_a_project_and_hands_back_where_it_looked() {
         let directory = temp_directory("omni-search-bridge");
@@ -43300,8 +40588,8 @@ public final class MainActivity extends Activity {
     #[test]
     fn the_editor_colours_every_word_the_compiler_reserves() {
         let editor =
-            std::fs::read_to_string("Builder/Source/Main/Kotlin/com/omni/builder/Editor.kt")
-                .expect("the editor's source must be here");
+            std::fs::read_to_string("Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt")
+                .expect("the interface's source must be here");
 
         let listed = |name: &str| -> Vec<String> {
             let opens = format!("private val {name} = setOf(");
@@ -43362,9 +40650,6 @@ public final class MainActivity extends Activity {
             "the editor does not colour these Java keywords: {missing:?}"
         );
 
-        // And the other lists are real lists rather than a handful of words
-        // somebody typed: a language whose keywords are half there colours
-        // half a file.
         for (name, least) in [("KOTLIN", 60), ("RUST", 35), ("CPP", 80)] {
             let held = listed(name);
             assert!(
@@ -43374,8 +40659,6 @@ public final class MainActivity extends Activity {
             );
         }
 
-        // Every file this application writes into a project opens in an
-        // editor that knows what it is looking at.
         for name in [
             "MainActivity.java",
             "MainActivity.kt",
@@ -44736,22 +42019,16 @@ public final class MainActivity extends Activity {
         );
     }
 
-    /// The shared key's binding is one thing for the whole process, because the
-    /// device is one thing for the whole process. Tests that move it have to
-    /// take turns, or one will pull it out from under another.
     static SHARED_KEY_TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn the_shared_key_is_sealed_to_the_device_as_well_as_to_its_password() {
-        // What a person is shown never changes: the published password is the
-        // published password, and the interface is not lying when it says so.
         assert_eq!(
             super::keystore::shared_password_for(""),
             super::keystore::DEFAULT_PASSWORD,
             "a machine that will not name itself falls back to what it always was"
         );
 
-        // Two devices, two different seals, and each one stable.
         let here = super::keystore::shared_password_for("a1b2c3d4e5f60718");
         let there = super::keystore::shared_password_for("a1b2c3d4e5f60719");
         assert_ne!(here, there, "one byte apart must not seal the same");
@@ -44772,7 +42049,6 @@ public final class MainActivity extends Activity {
         let directory = temp_directory("omni-keys-bound");
         let folder = directory.to_str().unwrap().to_string();
 
-        // Made on one device.
         super::keystore::bind_device("a1b2c3d4e5f60718");
         assert!(super::keystore::device_is_bound());
         let (made, created) = super::keystore::ensure_default(&folder, 1_787_000_000)
@@ -44780,14 +42056,9 @@ public final class MainActivity extends Activity {
         assert!(created);
         assert!(super::keystore::is_default(&made.path));
 
-        // On that device, the published password is all a person needs; the
-        // binding happens underneath and they never see it.
         super::keystore::unlock(&made.path, super::keystore::DEFAULT_PASSWORD)
             .expect("on the device that made it, the shared key opens");
 
-        // Carried to another device, it is worth nothing. This is the whole
-        // point: the password being public stops mattering once the file alone
-        // is not enough.
         super::keystore::bind_device("a1b2c3d4e5f60719");
         let refused = super::keystore::unlock(&made.path, super::keystore::DEFAULT_PASSWORD)
             .expect_err("somewhere else, the same file must not open");
@@ -44798,14 +42069,11 @@ public final class MainActivity extends Activity {
             refused.message
         );
 
-        // And the published password on its own does not open it either, which
-        // is what anybody reading this source would try first.
         super::keystore::bind_device("");
         assert!(!super::keystore::device_is_bound());
         super::keystore::unlock(&made.path, super::keystore::DEFAULT_PASSWORD)
             .expect_err("the published password alone must not open a bound key");
 
-        // Nothing said about the key anywhere gives the binding away.
         let listed = super::keystore::list(&folder);
         let mut said = String::new();
         for record in &listed {
@@ -44835,7 +42103,6 @@ public final class MainActivity extends Activity {
         let parsed = super::keystore::parts(&current).unwrap();
         assert_eq!(parsed.version, super::keystore::CONTAINER_VERSION);
 
-        // The shape version one had: no tag, and the version field to match.
         let mut older = Vec::new();
         older.extend_from_slice(super::keystore::MAGIC);
         older.extend_from_slice(&super::keystore::OLDEST_CONTAINER_VERSION.to_le_bytes());
@@ -44850,14 +42117,10 @@ public final class MainActivity extends Activity {
         assert_eq!(before.version, super::keystore::OLDEST_CONTAINER_VERSION);
         assert!(!before.is_authenticated(), "version one carried no tag");
 
-        // A key somebody already has must keep working, whatever this build
-        // learned to write since.
         let opened = super::keystore::unlock(&made.path, password)
             .expect("a key written before there were tags must still open");
         assert_eq!(opened.record.alias, "older");
 
-        // And having been opened with the password that made it, it is written
-        // back with a tag, so the next read is one that can be checked.
         let after_file = std::fs::read(&made.path).unwrap();
         let after = super::keystore::parts(&after_file).unwrap();
         assert_eq!(after.version, super::keystore::CONTAINER_VERSION);
@@ -44865,7 +42128,6 @@ public final class MainActivity extends Activity {
         assert_eq!(after.sealed, parsed.sealed, "the sealed key is untouched");
         assert_eq!(after.certificate, parsed.certificate);
 
-        // Nothing is left beside it from the upgrade.
         assert!(
             !std::path::Path::new(&format!("{}.upgrading", made.path)).exists(),
             "the file written beside it should have been moved over it"
@@ -44873,8 +42135,6 @@ public final class MainActivity extends Activity {
 
         super::keystore::unlock(&made.path, password).expect("and it opens again after");
 
-        // Altered inside what the file records about itself, which version one
-        // had no way to notice at all.
         let mut altered = after_file.clone();
         altered[12 + after.alias.len() + 8] ^= 0x40;
         std::fs::write(&made.path, &altered).unwrap();
@@ -44885,8 +42145,6 @@ public final class MainActivity extends Activity {
             "EY051"
         );
 
-        // And the tag itself, which the checksum does not cover: the file adds
-        // up, so this is the case that cannot be told from a wrong password.
         let mut untagged = after_file.clone();
         let last = untagged.len() - 1;
         untagged[last] ^= 1;
@@ -44936,9 +42194,6 @@ public final class MainActivity extends Activity {
 
         let borrowed = super::keystore::tag_key_for(mine_sealed, password).unwrap();
 
-        // Edited where it stands, which is what altering a file actually looks
-        // like. It no longer adds up to what it records, and that is caught
-        // without a password being asked for at all.
         let mut edited = mine_file.clone();
         let somewhere_inside = 12 + mine_parts.alias.len() + 8;
         edited[somewhere_inside] ^= 0x40;
@@ -44947,11 +42202,6 @@ public final class MainActivity extends Activity {
             .expect_err("a file edited where it stands must be refused");
         assert_eq!(refused.code, "EY051", "{}", refused.message);
 
-        // Rewritten whole, checksum and all, but tagged with a key nobody could
-        // have derived. Somebody who could do this could also recompute the
-        // checksum, so this is indistinguishable from a password that does not
-        // open the file, and it is reported as one. What matters is that the
-        // tag still refuses and nothing reaches a decryption.
         let wrong_key = [0x11u8; 32];
         let swapped = super::keystore::encode("mine", theirs_certificate, mine_sealed, &wrong_key);
         std::fs::write(&mine_made.path, &swapped).unwrap();
@@ -44967,9 +42217,6 @@ public final class MainActivity extends Activity {
             refused.suggestion
         );
 
-        // The same swap, tagged correctly this time, which is what somebody who
-        // did know the password could write. The certificate still has to
-        // belong to the key, and that check is what catches it.
         let retagged = super::keystore::encode("mine", theirs_certificate, mine_sealed, &borrowed);
         std::fs::write(&mine_made.path, &retagged).unwrap();
         let refused = super::keystore::unlock(&mine_made.path, password)
@@ -44980,9 +42227,6 @@ public final class MainActivity extends Activity {
         std::fs::write(&mine_made.path, &honest).unwrap();
         super::keystore::unlock(&mine_made.path, password).expect("the honest file must open");
 
-        // One bit, anywhere the tag covers, and the file is refused. Stepping
-        // over every byte would mean an unlock each time, so this walks the
-        // file at a stride and flips the lowest bit of each byte it lands on.
         let covered = super::keystore::parts(&honest).unwrap().covered;
         let mut checked = 0usize;
         for at in (0..covered).step_by(covered / 12 + 1) {
@@ -45138,8 +42382,6 @@ public final class MainActivity extends Activity {
                 .expect("the developer's key must sign the package");
         assert_eq!(outcome.certificate_fingerprint, made.fingerprint);
 
-        // The build read back what it wrote before handing it over, and what
-        // it found is carried out with it rather than assumed.
         assert!(outcome.verified.everything_checkable_passed());
         assert!(outcome.verified.signatures_checked);
         assert_eq!(outcome.verified.signatures_failed, 0);
@@ -45288,7 +42530,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn every_rule_the_policy_applies_has_a_code_of_its_own_and_a_way_out() {
-        // A manifest with nothing wrong: every rule runs and none of them fires.
         let manifest = r#"<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.my.app">
     <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="36" />
@@ -45414,9 +42655,6 @@ public final class MainActivity extends Activity {
         }
     }
 
-    /// The same class with what a real one carries: fields on both sides and a
-    /// method dispatched on the object. Until now the writer could hold none of
-    /// these, so a dex it produced could describe a class nobody would write.
     fn furnished_activity_class() -> super::dexwrite::Class {
         let descriptor = "Lcom/omni/made/MainActivity;";
         let mut class = super::dexwrite::Class::named(
@@ -45469,7 +42707,7 @@ public final class MainActivity extends Activity {
             registers: 1,
             inputs: 1,
             outputs: 0,
-            // return-void, which is the whole body.
+
             instructions: vec![super::dexwrite::Insn::raw(vec![0x000e])],
             lines: Vec::new(),
             annotations: Vec::new(),
@@ -45499,9 +42737,6 @@ public final class MainActivity extends Activity {
         assert_eq!(file.class_names(), vec!["com.omni.made.MainActivity"]);
         assert!(dex::integrity(&bytes).unwrap().self_consistent());
 
-        // dexdump is the Android tool, and it knows nothing about the writer
-        // that produced this. If it reads the fields and the virtual method
-        // back, they are really in there.
         let Some((fields, descriptors)) = dexdump(&bytes) else {
             assert!(
                 std::env::var("OMNI_REQUIRE_DEX_CONFORMANCE").is_err(),
@@ -45606,7 +42841,6 @@ public final class MainActivity extends Activity {
         use super::builder::api_level_of;
         use std::path::Path;
 
-        // `android-9` sorts after `android-37` as text. It is not newer.
         let held =
             |name: &str| api_level_of(Path::new("/opt/android-sdk/platforms").join(name).as_path());
         assert_eq!(held("android-9"), Some((9, 0)));
@@ -45616,12 +42850,10 @@ public final class MainActivity extends Activity {
         assert!(held("android-37") > held("android-36"));
         assert!(held("android-36") > held("android-9"));
 
-        // A folder that is not a platform is not sorted, it is left out.
         assert_eq!(held("android-TiramisuPrivacySandbox"), None);
         assert_eq!(held("data"), None);
         assert_eq!(held("android-"), None);
 
-        // And the jar this build actually finds is the newest one installed.
         let Some(jar) = super::builder::platform_jar() else {
             eprintln!("no android.jar on this machine");
             return;
@@ -45635,10 +42867,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_java_somebody_wrote_can_call_into_the_platform_it_was_handed() {
-        // The whole point of a dependency: the person imports what they like
-        // and it compiles. Nothing here is in the compiler's own table -- a
-        // SharedPreferences, a Handler, a generic ArrayAdapter, a date format
-        // -- and all of it comes from the platform jar.
         let Some(platform) = super::builder::platform_jar() else {
             eprintln!("java: no android.jar on this machine to call into");
             return;
@@ -45724,8 +42952,6 @@ public final class MainActivity extends Activity {
             .collect();
         assert!(names.contains(&"Lcom/tr/yt/MainActivity;"), "{names:?}");
 
-        // And the call really is the platform's, with the descriptor the
-        // device will check it against.
         let activity = project
             .code
             .iter()
@@ -45746,8 +42972,6 @@ public final class MainActivity extends Activity {
         for wanted in [
             "Landroid/content/SharedPreferences;.edit",
             "Landroid/os/Handler;.<init>",
-            // Declared on DateFormat and inherited, which is the class the
-            // call names -- the same one `javac` writes.
             "Ljava/text/DateFormat;.format",
             "Landroid/content/SharedPreferences$Editor;.apply",
             "Ljava/util/concurrent/atomic/AtomicInteger;.incrementAndGet",
@@ -45758,18 +42982,12 @@ public final class MainActivity extends Activity {
             );
         }
 
-        // A project with no jar of its own still built, against the platform
-        // this machine has.
         let _ = platform;
         let _ = directory;
     }
 
     #[test]
     fn the_java_somebody_wrote_can_name_the_resources_the_project_holds() {
-        // `R.string.app_name` is the first line of Android anybody writes.
-        // The class behind it is not on disk and never was: it is written from
-        // the identifiers the resource table hands out, and compiled with
-        // everything else.
         let directory = temp_directory("omni-java-resources");
         let root = directory.join("Named");
         let spec =
@@ -45815,9 +43033,6 @@ public final class MainActivity extends Activity {
         assert!(names.contains(&"Lcom/tr/yt/R$string;"), "{names:?}");
         assert!(names.contains(&"Lcom/tr/yt/MainActivity;"), "{names:?}");
 
-        // The number in the class is the number the table gives out, not a
-        // guess -- an `R` that disagrees with the table is an application that
-        // shows the wrong words or crashes looking for them.
         let mut sink = super::diag::Sink::new();
         let mut table =
             super::resources::Table::for_package(super::resources::APPLICATION_PACKAGE_ID);
@@ -45854,9 +43069,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_java_somebody_wrote_is_the_code_the_package_carries() {
-        // The whole way, with nothing hand-built in it: a project on disk, the
-        // Java in its folder, compiled here, translated here, packed here, and
-        // read back by the Android tool.
         let directory = temp_directory("omni-java-end-to-end");
         let root = directory.join("Written");
         let spec =
@@ -45868,7 +43080,6 @@ public final class MainActivity extends Activity {
         .expect("the project must be created");
         assert!(!made.files.is_empty());
 
-        // What the person writes, replacing the starter.
         let source = r#"
 package com.tr.yt;
 
@@ -45929,7 +43140,6 @@ public final class MainActivity extends Activity {
             .join("MainActivity.java");
         std::fs::write(&written, source).unwrap();
 
-        // A second file, so that more than one class reaches the package.
         std::fs::write(
             root.join(super::scaffold::JAVA_FOLDER).join("Counter.java"),
             "package com.tr.yt;\n\npublic final class Counter {\n    private int held;\n\n    public int next() {\n        held = held + 1;\n        return held;\n    }\n}\n",
@@ -45967,7 +43177,6 @@ public final class MainActivity extends Activity {
             assert!(methods.contains(&wanted), "{methods:?}");
         }
 
-        // And the package it comes to is one apksigner and dexdump accept.
         let key = super::rsa::generate(2048).unwrap();
         let mut sink = Sink::new();
         let outcome = super::builder::build(&project, &key, 1_700_000_000, &mut sink)
@@ -45988,8 +43197,6 @@ public final class MainActivity extends Activity {
             inside.class_names()
         );
 
-        // Our own reader will read a dex that a device refuses. Asking dexdump
-        // to disassemble makes it verify first, which is the difference.
         if let Some(tool) = find_build_tool("dexdump") {
             let written = directory.join("classes.dex");
             std::fs::write(&written, &dex).unwrap();
@@ -46027,10 +43234,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_whole_application_written_in_java_25_becomes_a_package_a_device_takes() {
-        // Everything the compiler learned, in one application, taken the whole
-        // way: written to a project on disk, compiled here, translated here,
-        // packed and signed here, and then handed to the Android tools --
-        // which verify before they will say a word about it.
         let directory = temp_directory("omni-whole-application");
         let root = directory.join("Whole");
         let spec =
@@ -46270,8 +43473,7 @@ public final class MainActivity extends Activity {
         ] {
             assert!(names.contains(&wanted), "{names:?}");
         }
-        // The lambda and the class written where it is used each became one
-        // more, numbered after the ones with names.
+
         assert!(
             names.len() >= 8,
             "a lambda and an anonymous class are classes too: {names:?}"
@@ -46287,7 +43489,6 @@ public final class MainActivity extends Activity {
         let written = directory.join("Whole.apk");
         std::fs::write(&written, &outcome.package).unwrap();
 
-        // apksigner verifies the signature over the whole package.
         if let Some(tool) = find_apksigner() {
             let checked = std::process::Command::new(&tool)
                 .args([
@@ -46307,7 +43508,6 @@ public final class MainActivity extends Activity {
             assert!(checked.status.success(), "apksigner refused it:\n{said}");
         }
 
-        // And dexdump verifies the code inside it.
         let read = super::archive::read(&outcome.package, &mut Sink::new()).unwrap();
         let entry = read.entry("classes.dex").expect("there is a classes.dex");
         let dex = read.content(&outcome.package, entry).unwrap();
@@ -46331,8 +43531,6 @@ public final class MainActivity extends Activity {
                 "move-exception",
                 "invoke-interface",
                 "$outer",
-                // Which line each thing came from, or a crash on a device
-                // names a method and stops there.
                 "line=",
                 "MainActivity.java",
             ] {
@@ -46340,9 +43538,7 @@ public final class MainActivity extends Activity {
             }
             let told = said.lines().filter(|line| line.contains("line=")).count();
             assert!(told > 20, "only {told} lines are named");
-            // What a class implements is written down in a list of its own, or
-            // the runtime does not believe it implements it: a cast to the
-            // interface fails, and so does every call made through one.
+
             let mut implemented: Vec<&str> = Vec::new();
             let mut inside = false;
             for line in said.lines() {
@@ -46366,10 +43562,6 @@ public final class MainActivity extends Activity {
             );
         }
 
-        // And every class of it read the way the runtime reads one as it
-        // loads it. A package the tools accept is not the same as one the
-        // device will run: the tools check the shape of the file, and the
-        // runtime checks what every register holds.
         let mut refused = Vec::new();
         for class in &project.code {
             refused.extend(what_the_runtime_would_refuse(class));
@@ -46989,11 +44181,6 @@ public final class MainActivity extends Activity {
             assert_eq!(header.height, made.edge);
             assert!(!header.interlaced);
 
-            // Written as small as it goes, an icon may come out indexed, and an
-            // indexed image carries its transparency in tRNS rather than in a
-            // channel of its own. Android reads either. What has to hold is that
-            // the picture reads back at the size it claims, with its alpha
-            // intact — which the corners below prove for every size.
             let back = super::image::decode(&made.bytes)
                 .expect("a launcher icon this build wrote must read back");
             assert_eq!(back.width, made.edge, "{} {}", made.folder, made.name);
@@ -47102,9 +44289,7 @@ public final class MainActivity extends Activity {
         let directory = temp_directory("omni-workspace");
         let root = directory.join("Edited");
         let text = root.to_str().unwrap().to_string();
-        // A Kotlin folder, because this is about the file manager rather than
-        // about the build: a folder full of files is a folder full of files
-        // whatever the language, and this one is asked for by name.
+
         super::scaffold::create(
             &text,
             &super::scaffold::Spec {
@@ -47726,14 +44911,10 @@ public final class MainActivity extends Activity {
         assert_eq!(encode_dimension(16_000, Unit::Sp).unwrap(), 0x0000_1002);
         assert_eq!(encode_dimension(0, Unit::Px).unwrap(), 0x0000_0000);
 
-        // The radix the platform's own reader picks, which is the one aapt2
-        // writes: not the narrowest that would hold the number, but the first
-        // in the order the runtime tries them.
         assert_eq!(encode_dimension(1_500, Unit::Dp).unwrap(), 0x00c0_0021);
         assert_eq!(encode_dimension(-2_250, Unit::Dp).unwrap(), 0xfee0_0021);
         assert_eq!(encode_dimension(1_234_500, Unit::Sp).unwrap(), 0x0269_4012);
-        // And a number the mantissa cannot hold exactly is rounded, because
-        // twenty-four bits is what the format has and the device rounds it too.
+
         assert_eq!(encode_dimension(100, Unit::Dp).unwrap(), 0x0ccc_cd31);
         assert_eq!(encode_fraction(500, false).unwrap(), 0x4000_0030);
         assert_eq!(encode_fraction(333, true).unwrap(), 0x2a9f_be31);
@@ -48363,11 +45544,6 @@ public final class MainActivity extends Activity {
             return;
         }
 
-        // The one thing this application is allowed that what it builds is not.
-        // Installing the package it has just written is the whole point of the
-        // button that offers to; the permission cannot be avoided, and Android
-        // still asks the person once per source before anything is installed.
-        // Every other rule applies here exactly as it applies to a project.
         const OWN_EXCEPTION: &str = "android.permission.REQUEST_INSTALL_PACKAGES";
 
         for path in &candidates {
@@ -48392,9 +45568,6 @@ public final class MainActivity extends Activity {
             assert!(report.rules_applied >= 7);
         }
 
-        // The exception is this application's alone. A project asking for the
-        // same permission is still refused, so the rule keeps its teeth where
-        // it matters.
         let asking = format!(
             "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
              <manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
@@ -48644,9 +45817,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn every_android_from_eleven_to_seventeen_may_be_named() {
-        // API 30 is Android 11 and API 37 is Android 17, with 12L its own
-        // level in between. A package built here declares a minimum inside
-        // this range and a target inside it, and nothing outside it.
         for (level, release) in [
             (30u32, "11"),
             (31, "12"),
@@ -48665,26 +45835,21 @@ public final class MainActivity extends Activity {
         assert!(!super::compiler::api_is_supported(29));
         assert!(!super::compiler::api_is_supported(38));
 
-        // What a call is checked against is the platform whose classes are
-        // here, which is Android 17 and its own `android.jar`.
         assert_eq!(super::compiler::NEWEST_DESCRIBED_API, 37);
         const {
             assert!(super::compiler::NEWEST_DESCRIBED_API <= super::compiler::NEWEST_API);
         }
 
-        // And a project made here is made against that one.
         let spec = super::scaffold::Spec::default();
         assert_eq!(spec.min_sdk, 30);
         assert_eq!(spec.target_sdk, super::compiler::NEWEST_DESCRIBED_API);
 
-        // Android 17 may be targeted, and is what a project is made against.
         let held = super::scaffold::Spec::parse(
             "package=com.tr.yt;label=X;abis=arm64-v8a;languages=java;targetSdk=37",
         )
         .expect("Android 17 may be targeted");
         assert_eq!(held.target_sdk, 37);
 
-        // A platform nobody has described may not be targeted at all.
         assert!(
             super::scaffold::Spec::parse(
                 "package=com.tr.yt;label=X;abis=arm64-v8a;languages=java;targetSdk=38",
@@ -48827,10 +45992,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_picture_with_more_colours_than_a_palette_holds_is_cut_down_where_it_can_be() {
-        // Flat artwork photographed, or drawn with a soft brush: a few dozen
-        // colours the eye sees, and thousands the file holds because every pixel
-        // is off by a shade or two. The shades are what puts it past a palette,
-        // and they are also what nobody can see.
         let edge = 192u32;
         let mut pixels = Vec::with_capacity((edge * edge * 4) as usize);
         let mut seed = 0x2545_F491_4F6C_DD1Du64;
@@ -48905,8 +46066,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_picture_a_palette_would_spoil_keeps_every_colour_it_came_with() {
-        // A smooth sweep across all three channels: cutting this to 256 colours
-        // bands it visibly, so the encoder must leave it alone.
         let edge = 128u32;
         let mut pixels = Vec::with_capacity((edge * edge * 4) as usize);
         for y in 0..edge {
@@ -48938,9 +46097,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn what_is_clear_in_a_picture_is_still_clear_after_it_is_squeezed() {
-        // A round icon: a busy disc on nothing at all. The corners are what an
-        // eye notices if a squeeze gets it wrong, because a corner that came
-        // back one step short of clear draws a square edge around the icon.
         let edge = 128u32;
         let middle = (edge as f64 - 1.0) / 2.0;
         let radius = middle;
@@ -48966,9 +46122,6 @@ public final class MainActivity extends Activity {
                         255,
                     ]);
                 } else {
-                    // The channels under a clear pixel are whatever a tool left
-                    // there. They must not reach the palette, and they must not
-                    // come back.
                     pixels.extend_from_slice(&[220, 40, 90, 0]);
                 }
             }
@@ -49070,8 +46223,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_build_without_a_password_never_writes_over_a_sealed_key() {
-        // Makes a key at the shared alias, so it has to take its turn with
-        // whatever else is moving the device binding.
         let _turn = SHARED_KEY_TURN
             .lock()
             .unwrap_or_else(|held| held.into_inner());
@@ -49308,11 +46459,9 @@ public final class MainActivity extends Activity {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
-    /// A compiler that does whatever a test needs it to, so that the contract
-    /// can be held to its promises without a real one in the way.
     struct Pretend {
         outputs: Vec<(String, super::compiler::Kind, Vec<u8>)>,
-        /// What it actually offers, when that is meant to differ from the plan.
+
         offers: Option<Vec<(String, super::compiler::Kind, Vec<u8>)>>,
         stop_after: Option<usize>,
         stopper: std::sync::Mutex<Option<super::compiler::Stopper>>,
@@ -49372,9 +46521,6 @@ public final class MainActivity extends Activity {
             let offering = self.offers.as_ref().unwrap_or(&self.outputs);
             for (index, (name, kind, bytes)) in offering.iter().enumerate() {
                 if self.stop_after == Some(index) {
-                    // Taken out and put back, so the guard is gone before the
-                    // stop happens. Holding a lock across anything else is how
-                    // the first version of this test deadlocked against itself.
                     let stopper = self.stopper.lock().unwrap().clone();
                     if let Some(stopper) = stopper {
                         stopper.stop();
@@ -49415,9 +46561,6 @@ public final class MainActivity extends Activity {
             Session::new("omni.plugin.pretend", &store, policy, sink, budget)
         };
 
-        // A compilation that runs to the end publishes everything, and each one
-        // is read back out of the store and checked before it is called an
-        // artifact.
         let good = pretend(vec![
             ("A.class", Kind::JvmClass, b"one"),
             ("B.class", Kind::JvmClass, b"two"),
@@ -49434,9 +46577,6 @@ public final class MainActivity extends Activity {
         let held_after_success = store.list().len();
         assert_eq!(held_after_success, 2);
 
-        // A compilation that produces less than it planned publishes nothing.
-        // The half it did produce looks exactly like the half of a compilation
-        // that worked, and this is the only moment anybody can tell.
         let mut short = pretend(vec![
             ("A.class", Kind::JvmClass, b"one"),
             ("B.class", Kind::JvmClass, b"two"),
@@ -49457,7 +46597,6 @@ public final class MainActivity extends Activity {
             "nothing new may have reached the store"
         );
 
-        // Something it never planned to make is refused too, whatever it is.
         let mut extra = pretend(vec![("A.class", Kind::JvmClass, b"one")]);
         extra.offers = Some(vec![(
             "Surprise.class".to_string(),
@@ -49473,8 +46612,6 @@ public final class MainActivity extends Activity {
             "EX006"
         );
 
-        // And something of the wrong kind, which is how a plan stops being a
-        // promise about what will exist and starts being a wish.
         let mut wrong = pretend(vec![("A.class", Kind::JvmClass, b"one")]);
         wrong.offers = Some(vec![("A.class".to_string(), Kind::Dex, b"one".to_vec())]);
         let plan = wrong.plan(&request).unwrap();
@@ -49486,7 +46623,6 @@ public final class MainActivity extends Activity {
             "EX007"
         );
 
-        // Told to stop, it stops, and nothing it had made is published.
         let mut cancelled = pretend(vec![
             ("A.class", Kind::JvmClass, b"one"),
             ("B.class", Kind::JvmClass, b"two"),
@@ -49501,8 +46637,6 @@ public final class MainActivity extends Activity {
         assert_eq!(stopped.code, "EX001");
         assert_eq!(store.list().len(), held_after_success);
 
-        // Past what it was allowed to produce, it is refused. A build on a
-        // device shares that device with whatever the person is doing.
         let big = pretend(vec![("A.class", Kind::JvmClass, b"more than four bytes")]);
         let plan = big.plan(&request).unwrap();
         assert_eq!(
@@ -49513,8 +46647,6 @@ public final class MainActivity extends Activity {
         );
         assert_eq!(store.list().len(), held_after_success);
 
-        // Two things under one name is a mistake in the compiler, not a choice
-        // about which one to keep.
         let mut twice = pretend(vec![
             ("A.class", Kind::JvmClass, b"one"),
             ("A.class", Kind::JvmClass, b"two"),
@@ -49548,15 +46680,11 @@ public final class MainActivity extends Activity {
             .with_source(Source::of("A.kt", b"fun main() {}"))
             .with_source(Source::of("B.kt", b"fun other() {}"));
 
-        // The invariant, stated: the same canonical source, dependencies,
-        // identity and configuration come to the same key.
         assert_eq!(
             Plan::key_for(&identity, &base),
             Plan::key_for(&identity, &base)
         );
 
-        // Handing the same sources over in another order is the same
-        // compilation, not a different one.
         let reordered = Request::new(Abi::Arm64V8a, 30)
             .with_source(Source::of("B.kt", b"fun other() {}"))
             .with_source(Source::of("A.kt", b"fun main() {}"));
@@ -49566,14 +46694,9 @@ public final class MainActivity extends Activity {
             "the order sources were handed over in must not decide anything"
         );
 
-        // And everything that does change what comes out has to change the key.
         let mut seen = std::collections::BTreeSet::new();
         seen.insert(Plan::key_for(&identity, &base).to_hex());
 
-        // There is one machine, so there is no second value to vary. What
-        // still has to hold is that the machine reaches the key at all, so
-        // that naming a second one later cannot land on the first one's
-        // artifacts.
         let encoded = base.canonical().encode();
         assert!(
             encoded
@@ -49635,9 +46758,6 @@ public final class MainActivity extends Activity {
             "source name"
         );
 
-        // A different compiler is a different compilation, however identical
-        // everything else is. This is what makes upgrading one invalidate what
-        // the old one built instead of quietly serving it.
         for moved in [
             Identity::new("kotlin", "omni.kotlin", "2.4.11", "aarch64-linux-android"),
             Identity::new("kotlin", "other.kotlin", "2.4.10", "aarch64-linux-android"),
@@ -49664,7 +46784,6 @@ public final class MainActivity extends Activity {
         let root_text = root.to_str().unwrap().to_string();
         let store = super::store::Store::at(&root_text);
 
-        // Names come from contents, so the same bytes put twice are one object.
         let one = store.put(b"what the compiler wrote").unwrap();
         let same = store.put(b"what the compiler wrote").unwrap();
         assert_eq!(one, same, "the same bytes must be the same object");
@@ -49676,16 +46795,11 @@ public final class MainActivity extends Activity {
         assert!(store.has(other));
         assert_eq!(store.list().len(), 2);
 
-        // Nothing is left behind from staging: an object arrives whole or not
-        // at all, and the name it waited under is gone either way.
         let staged = std::fs::read_dir(format!("{root_text}/{}", super::store::STAGING))
             .map(|entries| entries.count())
             .unwrap_or(0);
         assert_eq!(staged, 0, "a finished put leaves nothing staged");
 
-        // Storage that hands back different bytes than it was given is rare
-        // and real. An object that no longer hashes to its own name is thrown
-        // away and said so, rather than handed to a build that cannot tell.
         let hex = one.to_hex();
         let path = format!("{root_text}/{}/{}", &hex[..2], &hex[2..]);
         std::fs::write(&path, b"not what the compiler wrote at all").unwrap();
@@ -49698,11 +46812,8 @@ public final class MainActivity extends Activity {
             "and it must be gone, so the next build makes it again"
         );
 
-        // Put back, so the rest has something to work with.
         let one = store.put(b"what the compiler wrote").unwrap();
 
-        // A lease holds an object against a sweep, and lasts exactly as long as
-        // the lease does.
         let budget = 4u64;
         {
             let held = store.lease(one);
@@ -49714,26 +46825,20 @@ public final class MainActivity extends Activity {
         }
         assert!(!store.is_leased(one), "and the hold ends with the lease");
 
-        // Named in `keep`, it survives too.
         let mut keep = std::collections::BTreeSet::new();
         keep.insert(one);
         store.sweep(budget, &keep);
         assert!(store.has(one), "an object asked for must survive a sweep");
 
-        // Nothing holding it, and over budget: it goes.
         let swept = store.sweep(budget, &std::collections::BTreeSet::new());
         assert!(swept.removed >= 1, "{swept:?}");
         assert!(store.total_bytes() <= budget, "{}", store.total_bytes());
 
-        // A store already inside its budget is left entirely alone.
         let before = store.list().len();
         let quiet = store.sweep(u64::MAX, &std::collections::BTreeSet::new());
         assert_eq!(quiet.removed, 0);
         assert_eq!(store.list().len(), before);
 
-        // And now the index across a restart, which is the thing that was
-        // missing: an index that could say a key had been seen and could not
-        // hand back what was made for it.
         let index_path = directory.join("Index").to_str().unwrap().to_string();
         let made = store.put(b"the package this key stands for").unwrap();
         let source = super::hash::sha256(b"source");
@@ -49748,7 +46853,6 @@ public final class MainActivity extends Activity {
             "the file written beside it should have been moved over it"
         );
 
-        // A different process, a fresh index, the same folder.
         let reopened = super::cache::Index::read(&index_path);
         assert_eq!(
             reopened.len(),
@@ -49765,17 +46869,12 @@ public final class MainActivity extends Activity {
             "which is the whole point: the bytes come back"
         );
 
-        // An index that outlives what it indexes is worse than none, because
-        // every lookup says hit and every read then fails.
         store.remove(made).unwrap();
         let mut stale = super::cache::Index::read(&index_path);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale.reconcile(&store), 1, "the dangling entry must go");
         assert_eq!(stale.content_for(key), None);
 
-        // A damaged index is an empty index, not a failure. Refusing to start
-        // because a cache file got damaged would turn something harmless into
-        // something fatal.
         std::fs::write(&index_path, b"this is not an index").unwrap();
         assert!(super::cache::Index::read(&index_path).is_empty());
         std::fs::write(&index_path, []).unwrap();
@@ -49793,10 +46892,6 @@ public final class MainActivity extends Activity {
     fn two_different_projects_never_come_to_one_digest() {
         use super::canonical::Record;
 
-        // The collision that was actually there. Joining a feature name to its
-        // value with `=` means these two are the same string, so they were the
-        // same digest, so a build of one could be served out of the cache for
-        // the other.
         let mut one = super::project::Project::defaults("App", "com.my.app");
         one.features = vec![("a=b".to_string(), true)];
         let mut other = super::project::Project::defaults("App", "com.my.app");
@@ -49807,9 +46902,6 @@ public final class MainActivity extends Activity {
             "a feature called `a=b` and the features `a` and `b` must not share a digest"
         );
 
-        // The other half of the same problem: order carried meaning where it
-        // had none, so listing two features the other way round was a miss and
-        // a rebuild for nothing.
         let mut forwards = super::project::Project::defaults("App", "com.my.app");
         forwards.features = vec![("alpha".to_string(), true), ("beta".to_string(), false)];
         let mut backwards = super::project::Project::defaults("App", "com.my.app");
@@ -49820,7 +46912,6 @@ public final class MainActivity extends Activity {
             "the same features in another order are the same project"
         );
 
-        // The name is what a person calls it and changes nothing that is built.
         let renamed = super::project::Project::defaults("Something Else", "com.my.app");
         assert_eq!(
             super::project::Project::defaults("App", "com.my.app").digest(),
@@ -49828,7 +46919,6 @@ public final class MainActivity extends Activity {
             "renaming a project must not throw its cache away"
         );
 
-        // The edition decides how the source is read, so it must be in there.
         let mut with_edition = super::project::Project::defaults("App", "com.my.app");
         with_edition.edition = Some("2021".to_string());
         let mut other_edition = super::project::Project::defaults("App", "com.my.app");
@@ -49840,8 +46930,6 @@ public final class MainActivity extends Activity {
             "an edition set at all is not the same as none"
         );
 
-        // Every switch has to reach the digest, or a build with it flipped
-        // comes back out of the cache built without it.
         let base = super::project::Project::defaults("App", "com.my.app");
         let mut seen = std::collections::BTreeSet::new();
         seen.insert(base.digest().to_hex());
@@ -49864,8 +46952,6 @@ public final class MainActivity extends Activity {
             );
         }
 
-        // And the encoding is injective because it can be read back, which is
-        // the same claim said in a way that can be tested.
         let mut record = Record::new();
         record
             .text("name", "value")
@@ -49882,8 +46968,6 @@ public final class MainActivity extends Activity {
             "a truncated encoding must not read as a shorter one"
         );
 
-        // `name`=`value` and `nam`=`evalue` join to the same string and must
-        // not come to the same bytes.
         let mut confusable = Record::new();
         confusable.text("name", "value");
         let mut also = Record::new();
@@ -49895,11 +46979,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_signature_is_blinded_and_still_comes_out_the_same_bytes_every_time() {
-        // Blinding draws fresh randomness for every signature. If any of it
-        // reached the answer, two signatures over one digest would differ, and
-        // a build would stop being reproducible -- which is a promise this
-        // project makes and a test elsewhere holds it to. So the first thing to
-        // prove is that none of it does.
         let key = super::rsa::generate(2048).expect("a key must be made");
         let digest = super::hash::sha256(b"the same thing, signed again and again");
 
@@ -49919,8 +46998,6 @@ public final class MainActivity extends Activity {
             );
         }
 
-        // And it verifies, which is what says the blinding divided back out
-        // rather than being lost somewhere.
         super::rsa::verify(
             key.modulus(),
             key.public_exponent(),
@@ -49930,10 +47007,6 @@ public final class MainActivity extends Activity {
         )
         .expect("a blinded signature must verify like any other");
 
-        // The same key without its CRT parts takes the other path through the
-        // exponentiation, where the order is (p-1)(q-1) rather than either
-        // prime's. Getting that wrong gives a different answer, not the same
-        // one by another route, so this is where it would show.
         let plain = key.without_crt();
         let without_crt = super::rsa::sign_digest(
             &plain,
@@ -49946,8 +47019,6 @@ public final class MainActivity extends Activity {
             "the two routes through the exponentiation must agree"
         );
 
-        // A key with no public exponent has nothing to build a blinding on, and
-        // nothing here signs unblinded.
         let blind_less = key.without_public_exponent();
         assert_eq!(
             super::rsa::sign_digest(
@@ -49965,10 +47036,6 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_substitution_is_computed_and_answers_what_the_table_would() {
-        // The table is the one the standard describes. Nothing that touches a
-        // key reads it; it is built here so that every one of the 256 bytes can
-        // be put through both and held to the same answer. If the arithmetic
-        // ever drifts from the standard, this says so before a vector does.
         let (sbox, inverse) = super::cipher::table_substitution();
 
         for value in 0..=255u8 {
@@ -49985,8 +47052,6 @@ public final class MainActivity extends Activity {
             );
         }
 
-        // And the two undo one another, which the tables above cannot prove on
-        // their own because one is built from the other.
         for value in 0..=255u8 {
             let (forward, _) = super::cipher::computed_substitution(value);
             let (_, back) = super::cipher::computed_substitution(forward);
@@ -50004,7 +47069,6 @@ public final class MainActivity extends Activity {
         assert!(!super::cipher::same_bytes(&[1, 2, 3], &[9, 2, 3]));
         assert!(!super::cipher::same_bytes(&[1, 2, 3], &[1, 2, 9]));
 
-        // Every single-byte difference, at every position, has to be found.
         let base = [0x5au8; 32];
         for position in 0..base.len() {
             for flip in 1..=255u8 {
@@ -50182,10 +47246,6 @@ public final class MainActivity extends Activity {
         let wrong = super::rsa::open_pkcs8(&sealed, "not the password").unwrap_err();
         assert_eq!(wrong.code, "EK002");
 
-        // One wrong password in every two hundred and fifty six decrypts to
-        // something whose last byte passes for padding, and what is left is
-        // read rather than rejected. It is still a wrong password: whatever
-        // the reading makes of it, one answer comes back.
         let bad = super::rsa::open_pkcs8(&sealed, "wrong in another way").unwrap_err();
         assert_eq!(bad.code, "EK002");
 
@@ -50257,8 +47317,6 @@ public final class MainActivity extends Activity {
         assert!(error.suggestion.unwrap().contains("only thing between"));
     }
 
-    /// Looking for a name finds the platform's types and the project's own,
-    /// and the one that answers best comes first.
     #[test]
     fn a_name_being_typed_finds_the_types_it_could_be() {
         let directory = temp_directory("omni-symbols");
@@ -50280,7 +47338,6 @@ public final class MainActivity extends Activity {
         )
         .unwrap();
 
-        // A type the platform has, found by its whole name.
         let exact = super::symbols::matching(&root, "TextView").unwrap();
         assert_eq!(
             exact.first().map(|held| held.qualified.as_str()),
@@ -50295,7 +47352,6 @@ public final class MainActivity extends Activity {
         assert_eq!(exact[0].from, super::symbols::From::Platform);
         assert_eq!(exact[0].package, "android.widget");
 
-        // By its beginning, with the shortest name answering first.
         let starting = super::symbols::matching(&root, "Bitmap").unwrap();
         assert_eq!(
             starting.first().map(|held| held.simple.as_str()),
@@ -50314,7 +47370,6 @@ public final class MainActivity extends Activity {
             "a name starting with it must be offered too"
         );
 
-        // By its initials, which is how a person who cannot be bothered types.
         let initials = super::symbols::matching(&root, "TV").unwrap();
         assert!(
             initials
@@ -50328,8 +47383,6 @@ public final class MainActivity extends Activity {
                 .collect::<Vec<_>>()
         );
 
-        // The project's own types, with the file each is written in, and both
-        // types in a file that declares two.
         let mine = super::symbols::matching(&root, "Cabinet").unwrap();
         let first = mine.first().expect("the project's own type");
         assert_eq!(first.qualified, "com.tr.yt.Cabinet");
@@ -50341,20 +47394,16 @@ public final class MainActivity extends Activity {
             "the second type in a file counts as much as the first"
         );
 
-        // Where a type is written, which is what going to it needs.
         let (path, line) =
             super::symbols::where_written(&root, "com.tr.yt.Cabinet").expect("it is written here");
         assert_eq!(path, "Java/com/tr/yt/Cabinet.java");
         assert_eq!(line, 2);
-        // And nothing for a type that is not written on this device.
+
         assert!(super::symbols::where_written(&root, "android.widget.TextView").is_none());
 
-        // Nothing typed is everything, capped rather than the whole platform.
         let everything = super::symbols::matching(&root, "").unwrap();
         assert_eq!(everything.len(), super::symbols::MOST);
 
-        // A name nothing answers to answers with nothing rather than with
-        // whatever was nearest.
         assert!(super::symbols::matching(&root, "Qzzxwv")
             .unwrap()
             .is_empty());
@@ -50362,10 +47411,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// And a name this offers is a name that compiles.
-    ///
-    /// The point of the offer is that importing it works. So one is taken from
-    /// the list, written into a file as an import and a field, and compiled.
     #[test]
     fn a_type_this_offers_is_one_an_import_of_it_compiles() {
         let directory = temp_directory("omni-symbols-compile");
@@ -50405,7 +47450,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// What comes back over the bridge is what was found.
     #[test]
     fn the_bridge_offers_names_and_says_where_one_is_written() {
         let directory = temp_directory("omni-symbols-bridge");
@@ -50463,14 +47507,6 @@ public final class MainActivity extends Activity {
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// Code this build cannot compile stops the build rather than being
-    /// walked past.
-    ///
-    /// This is the one gap worth being loud about. A folder for a language
-    /// nothing here compiles is a folder whose contents do not reach the
-    /// package, and a build that noticed and said nothing would hand somebody
-    /// an application that installs, launches, and holds none of the code
-    /// they wrote. So it refuses, names the files, and says what is compiled.
     #[test]
     fn source_this_build_cannot_compile_stops_it_rather_than_being_dropped() {
         let directory = temp_directory("omni-uncompiled");
@@ -50486,13 +47522,10 @@ public final class MainActivity extends Activity {
         )
         .expect("the project must be made");
 
-        // As made, in a language this compiles, it builds.
         let clear = super::builder::check(&root);
         assert!(clear.refusal.is_none(), "{:?}", clear.refusal);
         assert!(super::builder::uncompiled_source(&root).is_empty());
 
-        // A Kotlin file put beside it is code that would not reach the
-        // package, so it stops the build instead.
         super::workspace::write_text(
             &root,
             "Kotlin/com/tr/yt/Screen.kt",
@@ -50528,7 +47561,6 @@ class Screen
             refusal.context
         );
 
-        // And a real build refuses in the same place, with nothing written.
         assert_eq!(
             super::builder::from_project(&root)
                 .expect_err("the build refuses")
@@ -50536,7 +47568,6 @@ class Screen
             "EB058"
         );
 
-        // Taking it away puts the project back.
         let bin = directory.join("bin").to_str().unwrap().to_string();
         super::workspace::remove(&root, "Kotlin/com/tr/yt/Screen.kt", &bin, 1_800_000_000).unwrap();
         assert!(super::builder::check(&root).refusal.is_none());
@@ -50544,7 +47575,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// What a language folder says about itself is what the build does with it.
     #[test]
     fn a_language_is_offered_as_compiled_only_where_it_is_compiled() {
         let listed = super::scaffold::LANGUAGES;
@@ -50557,14 +47587,12 @@ class Screen
             "a language named as compiled that is not one is the fake this refuses to be"
         );
 
-        // Each entry is a folder that exists and a suffix files really carry.
         for (language, folder, suffix, _) in listed {
             assert!(!language.is_empty());
             assert!(!folder.is_empty());
             assert!(suffix.starts_with('.'), "{suffix}");
         }
 
-        // And a project made in a compiled language is one that finishes.
         let directory = temp_directory("omni-languages");
         let root = directory.to_str().unwrap().to_string();
         super::scaffold::create(&root, &super::scaffold::Spec::default()).unwrap();
@@ -50579,21 +47607,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A game somebody wrote, built by this build.
-    ///
-    /// `Examples/PacMan` is six files and six hundred lines, written to be a
-    /// game rather than to be a test: a maze read out of a table of strings,
-    /// four ghosts each choosing a direction at every junction by distance, a
-    /// player steered by swipes, and a view that draws all of it on a canvas.
-    /// It uses arrays of objects, a two dimensional array, character and
-    /// string handling, static constants, an `Activity`, a `View`, `Paint`,
-    /// `Canvas`, `RectF` and `MotionEvent`.
-    ///
-    /// Nothing in it was shaped to what this compiler happens to do, which is
-    /// the point. It is the shape of a real Android application, and what this
-    /// asserts is that a real Android application comes out the other side: it
-    /// compiles, it becomes Dalvik, it packages, it signs, and the package
-    /// verifies against its own key.
     #[test]
     fn a_game_somebody_wrote_becomes_a_package_that_verifies() {
         let example = std::path::Path::new("Examples/PacMan");
@@ -50604,8 +47617,6 @@ class Screen
         copy_tree(example, &root);
         let folder = root.to_str().unwrap().to_string();
 
-        // Six files, and the size of them, so a test that quietly stopped
-        // reading the project would say so.
         let sources = super::workspace::tree(&folder)
             .unwrap()
             .into_iter()
@@ -50627,7 +47638,6 @@ class Screen
             "{lines} lines is not the game that was written"
         );
 
-        // Through this build's own Java compiler, every one of them.
         let project = super::builder::from_project(&folder)
             .unwrap_or_else(|error| panic!("the game did not compile: {error}"));
         let named: Vec<&str> = project
@@ -50649,7 +47659,6 @@ class Screen
             );
         }
 
-        // And all the way to a package.
         let key = super::rsa::generate(2048).expect("a key");
         let certificate = super::certificate::self_signed(
             &key,
@@ -50682,10 +47691,6 @@ class Screen
             found.activities
         );
 
-        // And the same source through the Java compiler everybody else uses,
-        // at the release this project pins, with every warning turned on. If
-        // `javac` will not take it then what was tested above is a dialect
-        // that happens to look like Java, and the whole exercise is worthless.
         let mut agreed = "not checked";
         if let (Some(javac), Some(jar)) = (find_javac(), android_jar()) {
             let out = directory.join("javac");
@@ -50733,14 +47738,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A Java compiler new enough for the release this project pins.
-    ///
-    /// A machine may carry several, and the one `JAVA_HOME` names is not
-    /// always the newest -- so the version each reports is what decides,
-    /// rather than the order they happen to be found in. One too old is not a
-    /// compiler that disagrees with this build; it is a compiler that has
-    /// never heard of the language, and taking its refusal as a finding would
-    /// be reading the wrong thing.
     fn find_javac() -> Option<std::path::PathBuf> {
         let wanted: u32 = crate::compilers::java::LANGUAGE_RELEASE.parse().ok()?;
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
@@ -50786,7 +47783,6 @@ class Screen
         best.map(|(_, held)| held)
     }
 
-    /// Copies a folder and everything under it.
     fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
         std::fs::create_dir_all(to).unwrap();
         for entry in std::fs::read_dir(from).unwrap().flatten() {
@@ -50799,14 +47795,6 @@ class Screen
         }
     }
 
-    /// The list of rules is the rules, and stays the rules.
-    ///
-    /// A security page that names eleven checks while the build applies ten is
-    /// a page that lies, and it lies quietly, because nothing about a rule
-    /// being deleted makes a list of rules shorter. So the list is checked
-    /// against the code that applies them: every code the inspection can
-    /// produce is on the list, nothing on the list is a code the inspection
-    /// does not have, and the count matches what a report says it applied.
     #[test]
     fn every_rule_the_policy_applies_is_one_it_lists() {
         let source = std::fs::read_to_string("Builder.rs").expect("this file must be here");
@@ -50822,7 +47810,6 @@ class Screen
         let mut applied: Vec<String> = Vec::new();
         let mut rest = body;
         while let Some(found) = rest.find("code: \"") {
-            // Past `code: "`, which leaves the code itself.
             let after = &rest[found + 7..];
             let close = after.find('"').expect("a code is quoted");
             applied.push(after[..close].to_string());
@@ -50849,7 +47836,6 @@ class Screen
             "a rule is listed twice"
         );
 
-        // What a report says it applied is how many there are.
         let mut sink = Sink::new();
         let manifest = super::xml::parse(
             "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
@@ -50868,7 +47854,6 @@ class Screen
             super::guard::RULES.len()
         );
 
-        // And every rule says something a person can act on.
         for (code, rule, says) in super::guard::RULES {
             assert!(code.starts_with("EG"), "{code}");
             assert!(rule.contains('-'), "{rule}");
@@ -50877,7 +47862,6 @@ class Screen
         }
     }
 
-    /// The check says what the policy makes of the project, before a build.
     #[test]
     fn a_check_says_what_the_policy_would_refuse() {
         let directory = temp_directory("omni-check-policy");
@@ -50898,8 +47882,6 @@ class Screen
         assert_eq!(policy.verdict(), super::guard::Verdict::Passed);
         assert_eq!(policy.rules_applied, super::guard::RULES.len());
 
-        // A manifest asking to be debuggable is one the build refuses, and
-        // the check says so without writing a package to find out.
         let manifest = super::workspace::read_text(&root, "AndroidManifest.xml").unwrap();
         let opened = manifest.replace("<application", "<application android:debuggable=\"true\"");
         assert_ne!(opened, manifest, "the manifest must have an application");
@@ -50914,13 +47896,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A resource name that no field can be called gets the name aapt2 gives
-    /// it.
-    ///
-    /// `Theme.App.Light` is the convention for a style rather than an
-    /// exception to it, and `public static final int Theme.App.Light` is not
-    /// Java. Getting this wrong means every real project refuses on its own
-    /// `R`, which is what it did.
     #[test]
     fn a_resource_named_like_a_style_becomes_a_field_that_compiles() {
         assert_eq!(
@@ -50958,11 +47933,9 @@ class Screen
         )
         .unwrap();
 
-        // It builds, which is the whole point: the `R` this writes is Java.
         let project = super::builder::from_project(&root).expect("it must read");
         assert!(project.code.len() > 1, "the R class and the activity");
 
-        // And the field is there under the name a person would write.
         let mut sink = Sink::new();
         let table = super::builder::compile_resources_for_test(&project, &mut sink)
             .unwrap()
@@ -50970,7 +47943,7 @@ class Screen
         let source = super::builder::r_source("com.tr.yt", &table.compiled);
         assert!(source.contains("Theme_App_Light"), "{source}");
         assert!(!source.contains("Theme.App.Light ="), "{source}");
-        // The resource keeps the name it was given; only the field changes.
+
         assert!(table
             .compiled
             .entries()
@@ -50980,14 +47953,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// The resources a real application is made of, against aapt2's own.
-    ///
-    /// Not a chosen easy set: a vector drawable, an adaptive icon, a colour
-    /// state list, a style with a parent, a theme, a dimension file and a
-    /// colour file are what almost every Android application ships, and a
-    /// build that handles strings and not these is a build for one project.
-    /// Every one of them goes through both this and aapt2, and what comes out
-    /// is read back and compared attribute for attribute.
     #[test]
     fn the_resources_a_real_application_ships_come_out_as_aapt2_makes_them() {
         let (Some(aapt2), Some(jar)) = (find_build_tool("aapt2"), android_jar()) else {
@@ -51015,7 +47980,6 @@ class Screen
         )
         .expect("the project must be made");
 
-        // Every file, written into the project and given to aapt2 alike.
         let files: &[(&str, &str)] = &[
             (
                 "drawable/mark.xml",
@@ -51096,7 +48060,6 @@ class Screen
             .unwrap();
         }
 
-        // This build's own package, which is what the whole thing is for.
         let mine = super::builder::from_project(&folder).expect("the project must read");
         let mut sink = Sink::new();
         let table = super::builder::compile_resources_for_test(&mine, &mut sink)
@@ -51104,7 +48067,6 @@ class Screen
             .expect("and there must be some");
         assert!(!sink.has_blocking(), "{:?}", sink.entries());
 
-        // Every one of them is in the table this build wrote, by name.
         let named: Vec<&str> = table
             .compiled
             .entries()
@@ -51132,8 +48094,6 @@ class Screen
             );
         }
 
-        // And the same folder through aapt2, whose answer is the one that
-        // counts. It compiles each file and links them into a package.
         let theirs = directory.join("theirs");
         std::fs::create_dir_all(&theirs).unwrap();
         let compiled = std::process::Command::new(&aapt2)
@@ -51171,8 +48131,6 @@ class Screen
             String::from_utf8_lossy(&linked.stderr)
         );
 
-        // What aapt2 made of the layout, read back by this build's own reader
-        // and compared against what this build made of the same file.
         let package = std::fs::read(theirs.join("theirs.apk")).unwrap();
         let mut reading = Sink::new();
         let archive = super::archive::read(&package, &mut reading).expect("their package reads");
@@ -51198,10 +48156,7 @@ class Screen
             their_layout.children.len(),
             "a different number of views came out"
         );
-        // Every attribute they wrote, this build wrote too, with the same
-        // identifier and the same kind of value. The numbers behind a
-        // reference differ -- two packages hand out their own -- so what is
-        // compared is the identifier and the type.
+
         for (ours, theirs) in our_layout
             .attributes
             .iter()
@@ -51229,7 +48184,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// What is right and wrong about a project is counted rather than guessed.
     #[test]
     fn a_projects_health_is_counted_off_its_own_files() {
         let directory = temp_directory("omni-health");
@@ -51253,13 +48207,10 @@ class Screen
         assert!(whole.resource_files > 0, "and a resource folder");
         assert_eq!(whole.asset_files, 0);
         assert_eq!(whole.library_files, 0);
-        // A new project has no picture of its own yet, which is a thing to
-        // say rather than a thing to hide.
+
         assert!(!whole.has_icon);
         assert!(whole.uncompiled.is_empty());
 
-        // Every language, with the base one first and every other compared
-        // against it.
         assert_eq!(whole.languages[0].folder, super::health::BASE_VALUES);
         assert!(whole.languages[0].strings > 0);
         assert!(whole
@@ -51277,7 +48228,6 @@ class Screen
         }
         assert!(!whole.settled(), "a project with no picture is not settled");
 
-        // One set, and it is.
         let square = super::image::Raster::new(48, 48);
         std::fs::write(
             super::scaffold::icon_path(&root),
@@ -51287,7 +48237,6 @@ class Screen
         assert!(super::health::of(&root).unwrap().has_icon);
         assert!(super::health::of(&root).unwrap().settled());
 
-        // A string taken out of one language is a screen in the wrong one.
         let turkish = "Res/values-tr/strings.xml";
         let text = super::workspace::read_text(&root, turkish).unwrap();
         let short = text
@@ -51308,7 +48257,6 @@ class Screen
         assert!(held.extra.is_empty());
         assert!(!missing.settled());
 
-        // And one nothing can ever ask for is the other way round.
         super::workspace::write_text(
             &root,
             turkish,
@@ -51327,8 +48275,6 @@ class Screen
         assert_eq!(held.extra, vec!["never_asked_for"]);
         assert_eq!(held.missing, vec!["app_name"]);
 
-        // Source nothing compiles is on the list here as well as refused by
-        // the build, because this is where somebody looks first.
         super::workspace::write_text(&root, "Kotlin/Screen.kt", "class Screen\n").unwrap();
         let mixed = super::health::of(&root).unwrap();
         assert_eq!(mixed.uncompiled.len(), 1);
@@ -51338,11 +48284,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// Laying a file out changes the whitespace around lines and nothing else.
-    ///
-    /// The promise is exact, so the test is exact: every character that is not
-    /// whitespace, in the order it was in, is the same afterwards. That is
-    /// what makes a formatter safe on a phone where the file is the only copy.
     #[test]
     fn laying_out_java_moves_nothing_but_the_whitespace_around_lines() {
         let badly = "package com.tr.yt;\n\
@@ -51367,7 +48308,6 @@ class Screen
             "something other than whitespace moved"
         );
 
-        // And it is laid out: braces step in, closers step back out.
         let lines: Vec<&str> = laid.lines().collect();
         let indent = |text: &str| text.len() - text.trim_start().len();
         assert_eq!(indent(lines[0]), 0, "{:?}", lines[0]);
@@ -51376,14 +48316,11 @@ class Screen
         assert_eq!(indent(lines[6]), 12, "{:?}", lines[6]);
         assert_eq!(indent(lines[7]), 8, "{:?}", lines[7]);
         assert_eq!(indent(lines[8]), 4, "{:?}", lines[8]);
-        // A line inside open brackets is a continuation of the one above it.
+
         assert_eq!(indent(lines[10]), 8, "{:?}", lines[10]);
 
-        // Doing it again does nothing, which is what makes it safe to run on
-        // save.
         assert_eq!(super::shape::java(&laid), laid, "it is not settled");
 
-        // Trailing whitespace goes, and a file ends with exactly one newline.
         assert!(!laid.lines().any(|line| line.ends_with(' ')));
         assert!(laid.ends_with("}\n"));
         assert_eq!(super::shape::java("class A {}\n\n\n\n"), "class A {}\n");
@@ -51391,7 +48328,6 @@ class Screen
         assert_eq!(super::shape::java(""), "");
     }
 
-    /// A brace inside a string is a brace inside a string.
     #[test]
     fn laying_out_java_does_not_count_what_is_inside_a_string() {
         let source = "class A {\n\
@@ -51410,8 +48346,6 @@ class Screen
         assert_eq!(indent(laid.lines().last().unwrap()), 0);
     }
 
-    /// Every character inside a text block belongs to the string, so none of
-    /// them move.
     #[test]
     fn laying_out_java_leaves_a_text_block_exactly_as_it_is() {
         let source = "class A {\n\
@@ -51429,8 +48363,6 @@ class Screen
         assert_eq!(super::shape::ink(&laid), super::shape::ink(source));
     }
 
-    /// The strongest thing that can be said about a formatter: what it lays
-    /// out compiles to the same bytes as what it was given.
     #[test]
     fn what_is_laid_out_compiles_to_exactly_what_it_did_before() {
         let sources = [
@@ -51473,7 +48405,6 @@ class Screen
         }
     }
 
-    /// What a project depends on is read out of the files, clashes included.
     #[test]
     fn a_projects_dependencies_are_read_out_of_the_files_themselves() {
         let directory = temp_directory("omni-depends");
@@ -51489,8 +48420,6 @@ class Screen
         )
         .expect("the project must be made");
 
-        // No folder is not a failure: a project without dependencies is one
-        // that compiles against what this build knows on its own.
         let empty = super::depends::held(&root).expect("it must read");
         assert!(empty.each.is_empty());
         assert!(empty.clashes.is_empty());
@@ -51498,7 +48427,6 @@ class Screen
         let folder = directory.join(super::scaffold::LIBRARY_FOLDER);
         std::fs::create_dir_all(&folder).unwrap();
 
-        // A jar, made here so what is asserted about it is what was put in.
         let jar = |classes: &[&str], extra: &[(&str, &[u8])]| -> Vec<u8> {
             let mut writing = super::archive::Builder::new();
             for name in classes {
@@ -51544,14 +48472,11 @@ class Screen
         assert_eq!(found.each[1].name, "two.jar");
         assert_eq!(found.each[1].classes, 2);
 
-        // The one class both of them declare, named with both files.
         assert_eq!(found.clashes.len(), 1, "{:?}", found.clashes);
         assert_eq!(found.clashes[0].class, "com.example.Gamma");
         assert_eq!(found.clashes[0].first, "one.jar");
         assert_eq!(found.clashes[0].second, "two.jar");
 
-        // An Android library keeps its code in a jar of its own, and its
-        // resources and its machine code beside that.
         let inner = jar(&["com/example/lib/Widget"], &[]);
         let mut writing = super::archive::Builder::new();
         writing
@@ -51589,7 +48514,6 @@ class Screen
         assert!(library.manifest);
         assert!(library.note.is_empty());
 
-        // Something that is not an archive is said rather than skipped.
         std::fs::write(folder.join("broken.jar"), b"not a zip at all").unwrap();
         let found = super::depends::held(&root).expect("it must still read");
         let broken = found
@@ -51600,14 +48524,12 @@ class Screen
         assert!(broken.note.contains("archive"), "{}", broken.note);
         assert_eq!(broken.classes, 0);
 
-        // Taking one away takes that one and nothing else.
         super::depends::remove(&root, "two.jar").unwrap();
         let after = super::depends::held(&root).unwrap();
         assert!(after.each.iter().all(|one| one.name != "two.jar"));
         assert!(after.each.iter().any(|one| one.name == "one.jar"));
         assert!(after.clashes.is_empty(), "the clash went with it");
 
-        // And nothing outside the folder can be reached by asking for it.
         for bad in ["../AndroidManifest.xml", "", "a/b.jar"] {
             assert_eq!(
                 super::depends::remove(&root, bad).unwrap_err().code,
@@ -51631,7 +48553,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// Editing a manifest changes what was asked for and nothing else.
     #[test]
     fn a_manifest_edit_changes_what_it_was_asked_to_and_leaves_the_rest() {
         let directory = temp_directory("omni-manifest");
@@ -51647,7 +48568,6 @@ class Screen
         )
         .expect("the project must be made");
 
-        // A comment and an odd layout, to see whether either survives.
         let original = super::workspace::read_text(&root, super::manifest::FILE).unwrap();
         let marked = original.replace(
             "<application",
@@ -51663,7 +48583,7 @@ class Screen
 
         let after = super::manifest::set(&root, "versionName", "2.5.0").expect("it must change");
         assert_eq!(after.version_name, "2.5.0");
-        // Everything else as it was.
+
         assert_eq!(after.package, before.package);
         assert_eq!(after.version_code, before.version_code);
         assert_eq!(after.min_sdk, before.min_sdk);
@@ -51675,21 +48595,19 @@ class Screen
             text.contains("<!-- the application, laid out how somebody laid it out -->"),
             "a comment was lost editing a version number"
         );
-        // The file differs from what it was by exactly the value that changed.
+
         assert_eq!(
             text.replace("2.5.0", "1.0.0"),
             marked,
             "more than the version changed"
         );
 
-        // A field with no attribute yet is added rather than refused.
         let with_label = super::manifest::set(&root, "label", "Renamed").unwrap();
         assert_eq!(with_label.label, "Renamed");
         assert!(super::workspace::read_text(&root, super::manifest::FILE)
             .unwrap()
             .contains("android:label=\"Renamed\""));
 
-        // Something quoted is escaped rather than breaking the file.
         let awkward = super::manifest::set(&root, "label", "Tom \"the\" Builder & Co").unwrap();
         assert_eq!(awkward.label, "Tom \"the\" Builder & Co");
         assert!(
@@ -51697,7 +48615,6 @@ class Screen
             "the file still reads"
         );
 
-        // A field this does not change is refused by name, with the list.
         let refused = super::manifest::set(&root, "theme", "Dark").unwrap_err();
         assert_eq!(refused.code, "EM206");
         assert!(refused
@@ -51708,7 +48625,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// Permissions go in and come out, and the file is still a manifest.
     #[test]
     fn a_permission_can_be_added_and_taken_away_again() {
         let directory = temp_directory("omni-permissions");
@@ -51733,7 +48649,7 @@ class Screen
         let asked =
             super::manifest::permission(&root, "android.permission.INTERNET", true).unwrap();
         assert_eq!(asked.permissions, vec!["android.permission.INTERNET"]);
-        // And it is a manifest a build reads.
+
         assert!(super::builder::from_project(&root).is_ok());
 
         let twice =
@@ -51750,14 +48666,12 @@ class Screen
         let none = super::manifest::permission(&root, "android.permission.CAMERA", false).unwrap();
         assert!(none.permissions.is_empty());
 
-        // Back to what it was, byte for byte, having gone there and back.
         assert_eq!(
             super::workspace::read_text(&root, super::manifest::FILE).unwrap(),
             before,
             "the manifest did not come back to what it was"
         );
 
-        // Something that is not a permission name is refused.
         for bad in ["", "not a permission", "android.permission.<script>"] {
             assert_eq!(
                 super::manifest::permission(&root, bad, true)
@@ -51776,8 +48690,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// An edit that would leave a manifest this build cannot read leaves the
-    /// file exactly as it was.
     #[test]
     fn an_edit_that_would_break_the_manifest_leaves_it_alone() {
         let directory = temp_directory("omni-manifest-safe");
@@ -51794,7 +48706,6 @@ class Screen
         .expect("the project must be made");
         let before = super::workspace::read_text(&root, super::manifest::FILE).unwrap();
 
-        // A value carrying a line of its own is not a value a manifest holds.
         assert_eq!(
             super::manifest::set(&root, "label", "one\ntwo")
                 .unwrap_err()
@@ -51806,8 +48717,6 @@ class Screen
             before
         );
 
-        // And a manifest that was already broken is refused rather than
-        // half-edited into something else.
         super::workspace::write_text(&root, super::manifest::FILE, "<manifest").unwrap();
         assert_eq!(super::manifest::facts(&root).unwrap_err().code, "EM202");
         assert!(super::manifest::set(&root, "label", "Anything").is_err());
@@ -51815,11 +48724,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// A package this build wrote, opened again with nothing but this build.
-    ///
-    /// Everything asserted here is read back out of the file rather than
-    /// remembered from making it, so what this proves is that a package can be
-    /// opened and understood on a phone with no tools on it.
     #[test]
     fn a_package_this_wrote_opens_and_says_what_is_in_it() {
         let directory = temp_directory("omni-inspect");
@@ -51866,7 +48770,6 @@ class Screen
 
         let found = super::inspect::package(path.to_str().unwrap()).expect("it must open");
 
-        // What the manifest says, read out of the binary XML in the package.
         assert_eq!(found.package, "com.tr.yt");
         assert_eq!(found.version_name, "2.4.6");
         assert_eq!(found.version_code, "24");
@@ -51877,7 +48780,6 @@ class Screen
             "a package with an activity in it must list one"
         );
 
-        // What it holds.
         assert_eq!(found.bytes, outcome.package.len() as u64);
         assert_eq!(found.entries, outcome.entries);
         assert!(!found.held.is_empty());
@@ -51889,12 +48791,10 @@ class Screen
             "the largest entries come first"
         );
 
-        // The code, counted out of the Dalvik rather than guessed.
         assert_eq!(found.dex_files, 1);
         assert!(found.classes > 0, "the activity is a class");
         assert!(found.methods >= found.classes);
 
-        // And who signed it, checked rather than described.
         assert!(found.schemes.contains(&"v2"));
         assert!(found.schemes.contains(&"v3"));
         assert!(
@@ -51918,8 +48818,6 @@ class Screen
             found.notes
         );
 
-        // A byte changed anywhere in it stops it verifying, and opening it
-        // says so rather than reporting a package that is fine.
         let mut damaged = outcome.package.clone();
         let entry = *damaged
             .iter()
@@ -51935,7 +48833,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// Something that is not a package is refused rather than half-read.
     #[test]
     fn opening_something_that_is_not_a_package_is_refused() {
         let directory = temp_directory("omni-inspect-not");
@@ -51956,13 +48853,6 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
-    /// What this writer wrote, read back, is what it was given.
-    ///
-    /// A writer with no reader is a writer nobody can check. This walks a
-    /// manifest out to bytes and back, and every element, every attribute and
-    /// every value has to survive the trip -- which is a stronger claim than
-    /// the bytes matching a fixture, because it says the bytes mean what they
-    /// were meant to mean.
     #[test]
     fn a_manifest_written_as_bytes_reads_back_as_itself() {
         let source = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
@@ -52009,7 +48899,7 @@ class Screen
             .next()
             .expect("an application");
         assert_eq!(application.attribute("label"), Some("Omni"));
-        // Booleans come back as booleans rather than as the number behind one.
+
         assert_eq!(application.attribute("debuggable"), Some("false"));
         assert_eq!(application.attribute("hardwareAccelerated"), Some("true"));
 
@@ -52020,15 +48910,12 @@ class Screen
         assert_eq!(activity.attribute("name"), Some(".Main"));
         assert_eq!(activity.attribute("exported"), Some("true"));
 
-        // And the numbers a device reads them by are there, which is what a
-        // package really carries.
         assert_eq!(
             activity.by_id(super::axml::attribute_id("exported").unwrap()),
             Some("true")
         );
     }
 
-    /// A layout survives the same trip, dimensions and colours included.
     #[test]
     fn a_layout_written_as_bytes_reads_back_with_its_units() {
         let source = "<LinearLayout xmlns:android=\"http://schemas.android.com/apk/res/android\" \
@@ -52048,13 +48935,11 @@ class Screen
         assert_eq!(read.attribute("textSize"), Some("14sp"));
         assert_eq!(read.attribute("alpha"), Some("0.5"));
         assert_eq!(read.attribute("background"), Some("#ff102030"));
-        // `match_parent` and `wrap_content` are the two numbers a device
-        // reads, and they come back as those numbers rather than as words.
+
         assert_eq!(read.attribute("layout_width"), Some("-1"));
         assert_eq!(read.attribute("layout_height"), Some("-2"));
     }
 
-    /// The reader does not fall over on anything, however damaged.
     #[test]
     fn the_binary_xml_reader_survives_arbitrary_input() {
         let source = "<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" \
@@ -52072,18 +48957,14 @@ class Screen
                 let position = (xorshift(&mut seed) as usize) % damaged.len();
                 damaged[position] = (xorshift(&mut seed) & 0xff) as u8;
             }
-            // Whatever comes back, it comes back: no panic, no hang.
+
             let _ = super::axml::decode(&damaged);
         }
 
-        // And nothing at all is refused rather than read as an empty document.
         assert!(super::axml::decode(&[]).is_err());
         assert!(super::axml::decode(&[0u8; 8]).is_err());
     }
 
-    /// What `aapt2` wrote, read by this. The other side of the conformance the
-    /// writer already has: this build's bytes match theirs, and this build's
-    /// reader agrees with what theirs made.
     #[test]
     fn what_aapt2_wrote_reads_back_the_same_as_what_this_wrote() {
         let (Some(aapt2), Some(jar)) = (find_build_tool("aapt2"), android_jar()) else {
@@ -52108,8 +48989,6 @@ class Screen
         let written = directory.join("AndroidManifest.xml");
         std::fs::write(&written, source).unwrap();
 
-        // aapt2 compiles a manifest into a package, so one is made and the
-        // manifest taken back out of it.
         let out = directory.join("theirs.apk");
         let made = std::process::Command::new(&aapt2)
             .args([
@@ -53491,8 +50370,7 @@ Viewbinding   = false
         assert_eq!(project.version, "1.0.0");
         assert_eq!(project.edition.as_deref(), Some("01/01/2000"));
         assert_eq!(project.min_sdk, 30);
-        // What the directive's own manifest asks for, which is not the
-        // default: a manifest that names a platform gets the one it names.
+
         assert_eq!(project.target_sdk, 36);
         assert_eq!(project.compile_sdk, 36);
         assert_eq!(project.profile, Profile::Release);

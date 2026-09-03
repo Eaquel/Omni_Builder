@@ -1,35 +1,3 @@
-//! The Android platform, written out as the Java it is.
-//!
-//! A compiler on a device has no `android.jar` to read. What it has is this:
-//! every class the platform exposes, with its type parameters, what it
-//! extends, what it implements, and the shape of every field, constructor and
-//! method -- written as Java because Java is the language that says those
-//! things, and marked `native` because the bodies really are somewhere else,
-//! on the device, in the framework.
-//!
-//! None of it is compiled. It is read the same way a class file handed over is
-//! read, through the same parser and the same `declare`, which is what makes
-//! `import android.widget.TextView;` mean something with nothing on the
-//! classpath at all.
-//!
-//! Two rules hold throughout, the same two the standard library holds to.
-//! Nothing here uses a wildcard: what a signature wrote as `? extends View` is
-//! written `View`, which erases the same and binds better. And nothing here is
-//! guessed: every name, every descriptor and every modifier below was read off
-//! the platform itself, so a method that is not in this list is not a method
-//! this compiler will write a call to, and it says so by name rather than
-//! emitting a call the device would refuse.
-//!
-//! What is written here is the platform's own runtime, which is not the same
-//! set of classes a desktop JVM has. Where the two agree, the standard library
-//! in `Java.rs` says it once and this file leaves it alone; where the platform
-//! carries something the standard library does not -- `javax.crypto.Cipher`,
-//! `java.nio.ByteBuffer`, `org.xmlpull.v1.XmlPullParser` -- it is written
-//! here, because on a device that is where it lives.
-
-/// Every package of the platform, each as one Java source that declares what
-/// it holds. Read once, kept for the life of the process, and handed to every
-/// compilation.
 pub const THE_PLATFORM: &[(&str, &str)] = &[
     (
         "android",
@@ -107306,17 +107274,6 @@ public class Driver implements org.xml.sax.Attributes, org.xml.sax.Locator, org.
     ),
 ];
 
-/// What the framework calls its own resources, and the identifier each one
-/// has.
-///
-/// A binary XML file names an attribute by number, not by name:
-/// `android:layout_width` in a layout is `0x0101_0098`, and a file that
-/// carried the name instead is a file the device cannot read. There is nowhere
-/// on a device to look these up, so they are here -- read off the platform,
-/// the same way everything else in this file was.
-///
-/// One table per kind, because `@android:id/text1` and `android:id` are two
-/// different questions with two different answers.
 pub const THE_FRAMEWORK_IDENTIFIERS: &[(&str, &[(&str, u32)])] = &[
     (
         "anim",
@@ -110573,21 +110530,6 @@ pub const THE_FRAMEWORK_IDENTIFIERS: &[(&str, &[(&str, u32)])] = &[
     ),
 ];
 
-/// Every attribute the framework declares, what it accepts, and the names it
-/// gives its own values.
-///
-/// A binary XML file does not carry `android:orientation="vertical"`; it
-/// carries the number one, typed as an integer, under the identifier
-/// `0x0101_00c4`. `16dp` is not the text `16dp` either -- it is a fixed-point
-/// number with a unit packed into its low bits. Getting either wrong produces
-/// a layout the inflater throws on, which is why what each attribute accepts
-/// is written down here rather than guessed from the value.
-///
-/// Read off the platform's own resource table: the name, the identifier, what
-/// it accepts, and for the ones that name their values, every name and the
-/// number behind it.
-/// One attribute the framework declares: its name, its identifier, what it
-/// accepts, and the names it gives its own values.
 pub type Attribute = (
     &'static str,
     u32,

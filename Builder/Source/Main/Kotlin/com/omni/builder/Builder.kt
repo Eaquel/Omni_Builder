@@ -27,7 +27,10 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PathMeasure
 import android.graphics.RadialGradient
+import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.Drawable
@@ -43,10 +46,13 @@ import android.provider.OpenableColumns
 import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
+import android.text.Spannable
+import android.text.SpannableStringBuilder
 import android.text.TextWatcher
+import android.text.style.ForegroundColorSpan
+import android.text.style.StyleSpan
 import android.util.Log
 import android.util.TypedValue
-import android.view.inputmethod.EditorInfo
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
@@ -56,6 +62,7 @@ import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
+import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
@@ -68,7 +75,10 @@ import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.PI
+import kotlin.math.abs
 import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sin
@@ -188,7 +198,6 @@ object OmniLog {
         }.getOrNull()
     }
 
-    /** Everything this run has recorded, newest last, for the screen that shows it. */
     fun transcript(): String = synchronized(lock) { session.toString() }
 
     fun clearTranscript() {
@@ -211,12 +220,6 @@ object OmniLog {
 
     private fun privateFile(name: String): File? = context?.let { File(it.filesDir, name) }
 
-    /**
-     * The log is written into this application's own storage and nowhere else.
-     * It used to be copied out into shared Documents as well, which put files on
-     * the device that nobody asked for; the screen in Settings shows the same
-     * text and copies it where you want it.
-     */
     private fun write(name: String, text: String, append: Boolean): String =
         writePrivate(name, text, append)
 
@@ -259,24 +262,6 @@ class BuilderApplication : Application() {
         Sentry.arm(this)
     }
 
-    /**
-     * Ties the shared signing key to this installation on this device.
-     *
-     * The password on the shared key is written in this application and shown
-     * to whoever asks, because it is a way to start rather than a secret. What
-     * keeps the key itself worth having is that the file is also sealed with
-     * something that does not travel: the identifier Android gives this
-     * installation, which is different on every device and for every
-     * application signing key, and which is not in this source.
-     *
-     * A key that leaves this device -- in a backup, in a folder somebody
-     * shared, in any of the ways a file ends up somewhere it was not meant to
-     * -- does not open there, published password or not.
-     *
-     * If Android will not say, the Core is told so and falls back to the
-     * published password alone. That is the behaviour every version before
-     * this one had, so nothing stops working; it is simply not bound.
-     */
     private fun bindTheSharedKeyToThisDevice() {
         val identifier = runCatching {
             Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
@@ -517,20 +502,8 @@ object Builder {
         keyPassword: CharArray?,
     ): String
 
-    /**
-     * Where the build running right now has got to.
-     *
-     * Answers at any time and from any thread. A build that is not running
-     * says so; one that is says which stage it is in, how far through it is,
-     * and how long is left. Polled while a build runs, so it does nothing but
-     * read a handful of numbers.
-     */
     external fun nativeBuildProgress(): String
 
-    /**
-     * Hands the timings of the last build back before the next one starts,
-     * which is what turns a guess into this device's own measurement.
-     */
     external fun nativeBuildExpect(timings: String?)
 
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
@@ -551,91 +524,28 @@ object Builder {
 
     external fun nativeProjectTree(root: String): String
 
-    /**
-     * What is right and wrong about a project, counted off its own files.
-     *
-     * Not a second compiler: the class of mistake this finds is the one a
-     * build cannot see -- a language file that lost a string, a picture
-     * nobody set -- which turns into an application that installs and is
-     * wrong rather than a build that refuses.
-     */
     external fun nativeProjectHealth(root: String): String
 
-    /**
-     * Lays out a file, changing nothing but the whitespace around lines.
-     *
-     * Every character that is not whitespace comes back in the order it went
-     * in, so a file that compiled before compiles after, to the same bytes.
-     * The text goes over and comes back: nothing is read from disk and
-     * nothing is written to it.
-     */
     external fun nativeLayOut(name: String, text: String): String
 
-    /**
-     * What a project depends on, read out of the files themselves.
-     *
-     * There is no resolver and no network. What is in the project's library
-     * folder is what it depends on, which is the whole story on a device with
-     * no connection and the only story this build tells.
-     */
     external fun nativeDependencies(root: String): String
 
-    /** Takes one away, by name and out of the library folder alone. */
     external fun nativeDependencyRemove(root: String, name: String): String
 
-    /** What the manifest says, as the things a person changes. */
     external fun nativeManifestFacts(root: String): String
 
-    /**
-     * Changes one of them.
-     *
-     * The edit is made on the text, so the spacing, the attribute order and
-     * the comments in the file stay as somebody left them, and nothing is
-     * written unless the result still reads as a manifest and says what it
-     * was told to say.
-     */
     external fun nativeManifestSet(root: String, field: String, value: String): String
 
-    /** Asks for a permission, or stops asking for one. */
     external fun nativeManifestPermission(root: String, name: String, wanted: Boolean): String
 
-    /**
-     * Every type in this project and on the platform that answers to this.
-     *
-     * The platform's types come out of the same classpath the compiler is
-     * handed, and the project's out of parsing its files with the same
-     * parser, so a name this offers is a name that compiles.
-     */
     external fun nativeSymbols(root: String, needle: String): String
 
-    /** Where a type this project declares is written. */
     external fun nativeWhereWritten(root: String, qualified: String): String
 
-    /**
-     * Opens a finished package and says what is in it.
-     *
-     * Everything it reports comes out of the file itself: the manifest is
-     * decoded from the binary XML a package really carries, the code counted
-     * from the Dalvik's own header, and the signature checked against the key
-     * that presents it.
-     */
     external fun nativeInspectPackage(path: String): String
 
-    /**
-     * Reads a project the way a build reads it, and stops before packaging.
-     *
-     * A refusal is the refusal a build would give, at the line it would give
-     * it at, and nothing is written anywhere. This is the one to run while
-     * typing.
-     */
     external fun nativeCheckProject(root: String): String
 
-    /**
-     * Looks through every text file in a project for a piece of text.
-     *
-     * The search is over the project as it is on disk, so what it finds is
-     * what a build would compile rather than what an editor is showing.
-     */
     external fun nativeSearchProject(
         root: String,
         needle: String,
@@ -806,12 +716,6 @@ data class Refusal(
     }
 }
 
-/**
- * What checking a project came to.
- *
- * A refusal carries where it is, which is what lets the screen offer to open
- * that file at that line rather than only saying which one it is.
- */
 data class CodeCheck(
     val clear: Boolean,
     val classes: Int,
@@ -967,20 +871,9 @@ data class BuildOutcome(
     val bundlePath: String?,
     val bundleBytes: Long,
     val locales: Long,
-    /**
-     * How long each stage took, in microseconds, comma separated.
-     *
-     * Only a build that finished has a full set of these, so only a build
-     * that finished is worth keeping them from.
-     */
+
     val timings: String?,
-    /**
-     * What re-reading the finished package said about its own signature.
-     *
-     * The Core opens what it wrote and checks it the way an installer would,
-     * so these are measurements of the file on disk rather than a note that
-     * the signing code returned without complaining.
-     */
+
     val signatureSchemes: List<String>,
     val signaturesVerified: Long,
     val signatureKeyMatches: Boolean,
@@ -1174,16 +1067,6 @@ data class Palette(
     }
 }
 
-/**
- * The lettering, which is one of the two things that make an application look
- * like itself rather than like the toolkit it was built with.
- *
- * Nothing here is a font file. Android carries a condensed cut of its sans and
- * a monospace, and those two against each other -- narrow capitals with the
- * letters pushed apart for anything that labels, a fixed pitch for anything
- * that is a number or a name the machine chose -- read as an instrument panel.
- * Shipping a typeface to say the same thing would cost two hundred kilobytes.
- */
 object Type {
     val heading: Typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
     val label: Typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
@@ -1191,7 +1074,6 @@ object Type {
     val strong: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     val data: Typeface = Typeface.MONOSPACE
 
-    /** How far apart the letters of a label sit. */
     const val TRACKING = 0.14f
 }
 
@@ -1238,16 +1120,6 @@ object Preferences {
         store(context).edit().putString(SIGNING_KEY, path).apply()
     }
 
-    /**
-     * How long each stage of the last successful build took on this device.
-     *
-     * The Core hands this back at the end of every build it finished, and it
-     * is given straight back to the Core at the start of the next one, which
-     * is what turns the estimate on the build screen from a guess made on
-     * some other machine into a measurement made on this one. It is a
-     * measurement of this phone and nothing else, so it is kept here rather
-     * than anywhere a project could carry it somewhere new.
-     */
     fun timings(context: Context): String = store(context).getString(TIMINGS, "").orEmpty()
 
     fun setTimings(context: Context, measured: String) {
@@ -1346,7 +1218,6 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
     }
 }
 
-/** Lays its children out left to right, starting a new line when one will not fit. */
 class FlowLayout(
     context: Context,
     private val betweenX: Int,
@@ -1464,16 +1335,15 @@ class BuilderActivity : Activity() {
         const val IMAGE_REQUEST = 2
         const val ENTER_MILLIS = 260L
         const val LEAVE_MILLIS = 140L
-        /** How long a refusal is left on a ceremony before it comes down. */
+
         const val REFUSAL_MILLIS = 1_400L
-        /** How often a ceremony is asked whether it is finished. */
+
         const val LOOK_MILLIS = 60L
-        /** How often the Core is asked where the build has got to. */
+
         const val WATCH_MILLIS = 40L
-        /** How long the finished figure is left on screen before it comes down. */
+
         const val SETTLE_MILLIS = 620L
 
-        /** The Core's build stages, in its order, in this application's words. */
         val STAGE_NAMES = listOf(
             R.string.omni_stage_project,
             R.string.omni_stage_resources,
@@ -1498,39 +1368,15 @@ class BuilderActivity : Activity() {
         const val DEFAULT_KEY_YEARS = 10
         const val DEFAULT_KEY_PASSWORD = "My_App_Builder"
 
-        /**
-         * The one machine anything built here runs on.
-         *
-         * There was a chooser with three answers. Two of them produced packages
-         * for devices Google Play has not accepted since 2019 and Android has
-         * shipped without since 2023, and every one of them was a second build
-         * to make and a second thing nobody tested on. Asking a question with
-         * one right answer is not a choice; it is a way to get it wrong.
-         */
         val ONLY_ABI = listOf("arm64-v8a")
 
         val ANDROID_RELEASES = listOf(
             30 to "11", 31 to "12", 32 to "12L", 33 to "13",
             34 to "14", 35 to "15", 36 to "16", 37 to "17",
         )
-        /**
-         * The languages a project may hold, and whether a build compiles one.
-         *
-         * The third of these is not decoration. A folder for a language
-         * nothing compiles is a folder whose contents do not reach the
-         * package, so the build refuses rather than producing an application
-         * with none of that code in it -- and a person choosing here should
-         * know which is which before they write anything.
-         */
+
         val LANGUAGE_CHOICES = listOf(Triple("java", "Java", true))
-        /**
-         * The permissions offered as one press.
-         *
-         * Not every permission Android has -- there are hundreds, and a list
-         * of hundreds is not a list. These are the ones an application asks
-         * for often enough that typing them out is the annoying part; anything
-         * else is typed once and is no worse for it.
-         */
+
         val COMMON_PERMISSIONS = listOf(
             "android.permission.INTERNET",
             "android.permission.ACCESS_NETWORK_STATE",
@@ -1597,16 +1443,15 @@ class BuilderActivity : Activity() {
 
     private var editorText = ""
     private var editor: CodeEditor? = null
-    /** The project and the file the open editor is showing, if one is open. */
+
     private var editorAt: Pair<String, String>? = null
-    /** What the open file held when it was read, so a draft knows it differs. */
+
     private var editorOnDisk = ""
-    /** The line to land on when the editor next opens, from a refusal. */
+
     private var editorLine = 0
 
     override fun attachBaseContext(base: Context) {
-        // Nothing chosen means the language the phone is set to, which is what
-        // the base context already carries.
+
         val tag = Preferences.language(base)
         super.attachBaseContext(if (tag.isEmpty()) base else localised(base, tag))
     }
@@ -1654,9 +1499,6 @@ class BuilderActivity : Activity() {
             addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
 
-        // A ceremony covers the application while it runs, and the veil
-        // covers the ceremony too: both sit above the shell rather than
-        // inside it, so no screen has to know either of them exists.
         ceremony = FrameLayout(this).apply {
             visibility = View.GONE
             isClickable = true
@@ -1789,14 +1631,6 @@ class BuilderActivity : Activity() {
         }.start()
     }
 
-    /**
-     * Puts whatever is in the open editor into its draft, now.
-     *
-     * The editor writes a draft after a pause in typing, which covers a person
-     * who stops to think. It does not cover a person who is closed by Android
-     * a keystroke later, so leaving the screen and leaving the application
-     * both come through here first.
-     */
     private fun keepTheDraft() {
         val open = editor ?: return
         val (root, path) = editorAt ?: return
@@ -1822,15 +1656,6 @@ class BuilderActivity : Activity() {
     private fun examine(): String =
         if (Sentry.refused(this)) "TAMPERED" else Sentry.check(this)
 
-    /**
-     * Goes to another screen, through the field of bits.
-     *
-     * The screen being left fades down while a wipe of 0s and 1s crosses the
-     * display; the swap happens under the brightest part of that wipe, and the
-     * screen being arrived at rises into place behind it. Nothing waits on
-     * anything: the whole thing is over in under half a second, and a second
-     * press during it lands on the screen that is arriving.
-     */
     private fun go(next: Screen) {
         if (next == screen) {
             return
@@ -1848,14 +1673,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /**
-     * Puts a ceremony over the whole application until it is finished.
-     *
-     * What was on screen underneath is left exactly as it was. A ceremony is
-     * something happening on top of the application rather than a screen of
-     * its own, so when it ends the person is looking at what they were looking
-     * at before it started.
-     */
     private fun showCeremony(view: View) {
         ceremony.removeAllViews()
         ceremony.addView(view, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
@@ -1966,15 +1783,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /**
-     * Everything reachable from here, in one list, filtered by typing.
-     *
-     * A phone has no keyboard to hang shortcuts off, and a bar has room for
-     * five things. What it does have is one gesture nothing else uses: the
-     * bar, held down. What opens is not a menu written beside the application
-     * -- every entry runs the same code the screen it belongs to runs, so an
-     * action that changed changed here too.
-     */
     private fun openPalette() {
         val root = openProject
         val actions = mutableListOf<Pair<String, () -> Unit>>()
@@ -2062,7 +1870,7 @@ class BuilderActivity : Activity() {
                             )
                         }
                     }
-                    // Anywhere along the bar, held down, reaches everything.
+
                     setOnLongClickListener {
                         openPalette()
                         true
@@ -2084,7 +1892,7 @@ class BuilderActivity : Activity() {
 
     private fun openHere(root: String) {
         if (openProject != root) {
-            // What was picked up in one project has no place in another.
+
             held = null
         }
         openProject = root
@@ -2145,7 +1953,6 @@ class BuilderActivity : Activity() {
         )
         content.addView(identity)
 
-
         content.addView(label(getString(R.string.omni_form_min_sdk)))
         content.addView(
             chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == formMinSdk }) {
@@ -2161,7 +1968,6 @@ class BuilderActivity : Activity() {
                 if (formMinSdk > formTargetSdk) formMinSdk = formTargetSdk
             }
         )
-
 
         content.addView(label(getString(R.string.omni_form_locales)))
         content.addView(
@@ -2323,15 +2129,6 @@ class BuilderActivity : Activity() {
         content.addView(quiet(getString(R.string.omni_trash_note)))
     }
 
-    /**
-     * What is right and wrong about the project.
-     *
-     * Everything here is a fact about the files rather than an opinion about
-     * them. The one worth the screen is the languages: a string the base
-     * language declares and a translation does not is a screen in the wrong
-     * language on somebody's phone, and nothing about building the
-     * application would ever have said so.
-     */
     private fun renderHealth(root: String) {
         content.addView(heading(getString(R.string.omni_health_title)))
 
@@ -2448,15 +2245,6 @@ class BuilderActivity : Activity() {
         })
     }
 
-    /**
-     * What the project depends on, and what each of them brings.
-     *
-     * A dependency is a file in the project's library folder. Everything shown
-     * comes out of the archive: what classes it declares, what it ships beside
-     * them, and -- the one that matters -- which classes two of them both
-     * declare, because that is the refusal that otherwise turns up three
-     * screens later with no clue which two files caused it.
-     */
     private fun renderDepends(root: String) {
         content.addView(heading(getString(R.string.omni_depends_title)))
 
@@ -2558,15 +2346,6 @@ class BuilderActivity : Activity() {
         })
     }
 
-    /**
-     * The manifest, as the handful of things a person actually changes.
-     *
-     * Not a form that rewrites the file: each change is one attribute, edited
-     * where it stands, so a manifest somebody laid out a particular way is
-     * still laid out that way afterwards. Everything else in it -- the
-     * intent filters, the providers, whatever else is there -- is untouched
-     * and stays editable as text.
-     */
     private fun renderManifest(root: String) {
         content.addView(heading(getString(R.string.omni_manifest_title)))
 
@@ -2725,13 +2504,6 @@ class BuilderActivity : Activity() {
         })
     }
 
-    /**
-     * Opens a package and lays out what is really in it.
-     *
-     * None of this is remembered from building it. A package built on another
-     * device, or downloaded, or built a month ago, reads exactly the same
-     * way -- which is the point: it says what the file says.
-     */
     private fun inspectPackage(path: String) {
         working({ Builder.nativeInspectPackage(path) }) finished@{ answer ->
             val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
@@ -2741,8 +2513,6 @@ class BuilderActivity : Activity() {
             }
             val found = document.optJSONObject("package") ?: return@finished
 
-            // Whether it verifies, first, because it is the one thing that
-            // decides whether anything else here is worth reading.
             val sound = found.optBoolean("sound", false)
             results.addView(
                 notice(
@@ -2820,7 +2590,6 @@ class BuilderActivity : Activity() {
                 results.addView(listed)
             }
 
-            // What is taking up the room, largest first.
             found.optJSONArray("held")?.let { array ->
                 if (array.length() == 0) return@let
                 results.addView(heading(getString(R.string.omni_open_largest)))
@@ -2847,19 +2616,11 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /** A JSON array of strings, as one line of them. */
     private fun joined(holder: JSONObject, key: String): String {
         val array = holder.optJSONArray(key) ?: return ""
         return (0 until array.length()).joinToString(", ") { array.getString(it) }
     }
 
-    /**
-     * Reads the project the way a build reads it, and stops before packaging.
-     *
-     * The point is the wait: this is the front half of a build, so it takes
-     * what that takes and finds what that finds, and a person who runs it
-     * before pressing build knows whether pressing build is worth it.
-     */
     private fun checkProject(root: String) {
         working({ Builder.nativeCheckProject(root) }) finished@{ answer ->
             val checked = runCatching { CodeCheck.parse(answer) }.getOrElse {
@@ -2882,7 +2643,7 @@ class BuilderActivity : Activity() {
                 return@finished
             }
             checked.refusal?.let { showRefusal(it, results) }
-            // Where it is, as a way to get there.
+
             if (checked.file.isNotEmpty()) {
                 results.addView(
                     row(
@@ -2904,15 +2665,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /**
-     * Every rule the security policy applies, and what it made of this one.
-     *
-     * The rules are the Core's own list rather than a copy of them written
-     * here: a rule that stopped being applied would stop being shown, instead
-     * of quietly staying on a page that says it is checked. A project that
-     * fails one is refused at build time, so this is the page that says why
-     * before the wait.
-     */
     private fun showPolicy(answer: String) {
         val rules = runCatching {
             JSONObject(answer).optJSONObject("code")?.optJSONArray("rules")
@@ -2953,7 +2705,6 @@ class BuilderActivity : Activity() {
         }
         results.addView(listed)
 
-        // And what each broken one is, in the Core's own words.
         val findings = runCatching {
             JSONObject(answer).optJSONObject("code")
                 ?.optJSONObject("policy")?.optJSONArray("findings")
@@ -2968,14 +2719,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /**
-     * Every place in a project a piece of text appears.
-     *
-     * The searching is the Core's: it reads the files off disk, which is what
-     * a build reads, so what turns up here is what is really in the project
-     * rather than what some index last saw. What it did not look at -- files
-     * too large, files that are not text -- is said rather than left out.
-     */
     private fun renderSearch(root: String) {
         content.addView(heading(getString(R.string.omni_search_title)))
 
@@ -3058,8 +2801,6 @@ class BuilderActivity : Activity() {
             )
         }
 
-        // One card per file, so twelve hits in one file read as one place to
-        // look rather than as twelve.
         var lastPath = ""
         var card: LinearLayout? = null
         for (index in 0 until count) {
@@ -3101,7 +2842,6 @@ class BuilderActivity : Activity() {
         return PICTURE_SUFFIXES.any { lower.endsWith(it) }
     }
 
-    /** Decodes a picture small enough to sit in a row, or hands back a plain tile. */
     private fun thumbnail(path: String, edge: Int): View {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         runCatching { BitmapFactory.decodeFile(path, bounds) }
@@ -3358,7 +3098,7 @@ class BuilderActivity : Activity() {
         }
         val onDisk = answer.optString("text")
         editorOnDisk = onDisk
-        // Whatever was typed here last time and never saved, offered back.
+
         val draft = Drafts.read(this, root, path)?.takeIf { it != onDisk }
         editorText = draft ?: onDisk
 
@@ -3376,16 +3116,12 @@ class BuilderActivity : Activity() {
             content.addView(notice(getString(R.string.omni_editor_restored), palette.warning))
         }
 
-        // What is on screen and what is on disk, said in one place. The row
-        // under the name is the path when they agree and the count of what is
-        // unsaved when they do not.
         var dirty = draft != null
         if (dirty) {
             where.text = getString(R.string.omni_editor_unsaved)
             where.setTextColor(palette.warning)
         }
-        // Written after a pause rather than after every keystroke: a draft is
-        // insurance, and insurance that runs on the typing thread is a cost.
+
         val keep = Runnable { Drafts.write(this, root, path, editorText) }
         fun mark() {
             editorText = editor.text?.toString().orEmpty()
@@ -3480,14 +3216,6 @@ class BuilderActivity : Activity() {
         })
     }
 
-    /**
-     * The types the word under the caret could be, offered as a list.
-     *
-     * Picking one puts the name in place of what was typed and, where the file
-     * does not already import it and the type is not in the same package,
-     * writes the import after the last one there is. Both edits are the
-     * editor's own, so undo takes them like anything else typed.
-     */
     private fun offerNames(root: String, editor: CodeEditor) {
         val held = editor.text ?: return
         val caret = editor.selectionEnd.coerceIn(0, held.length)
@@ -3538,13 +3266,6 @@ class BuilderActivity : Activity() {
     private fun isNamePart(c: Char): Boolean =
         c.isLetterOrDigit() || c == '_' || c == '$'
 
-    /**
-     * Lays the open file out, in place, as one edit.
-     *
-     * One edit rather than many, so undo takes it back in one press: a
-     * formatter somebody has to undo forty times is a formatter they stop
-     * pressing.
-     */
     private fun layOut(name: String, editor: CodeEditor) {
         results.removeAllViews()
         val held = editor.text ?: return
@@ -3565,7 +3286,6 @@ class BuilderActivity : Activity() {
         results.addView(notice(getString(R.string.omni_editor_shaped), palette.ok))
     }
 
-    /** The word the caret is in, or an empty string when it is not in one. */
     private fun wordAt(editor: CodeEditor): String {
         val held = editor.text ?: return ""
         val caret = editor.selectionEnd.coerceIn(0, held.length)
@@ -3576,13 +3296,6 @@ class BuilderActivity : Activity() {
         return held.subSequence(from, to).toString()
     }
 
-    /**
-     * Opens the file the name under the caret is written in.
-     *
-     * Only for a type this project declares. One on the platform is not
-     * written anywhere on this device, and this says so rather than opening
-     * the description of it and calling that the definition.
-     */
     private fun goToDefinition(root: String, editor: CodeEditor) {
         val word = wordAt(editor)
         results.removeAllViews()
@@ -3634,13 +3347,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /**
-     * Every place in the project the name under the caret appears.
-     *
-     * Whole words only, and case as it was typed: a search for `Ledger` that
-     * turns up `ledgerEntry` is a list nobody reads twice. It is the project's
-     * files as they are on disk, so it finds what a build would compile.
-     */
     private fun findUses(root: String, editor: CodeEditor) {
         val word = wordAt(editor)
         results.removeAllViews()
@@ -3661,13 +3367,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /**
-     * Puts the chosen name where the word was, and imports it if it needs to be.
-     *
-     * The import goes after the last one in the file, or after the package
-     * line where there are none. A file that already imports it, and a type in
-     * the same package as the file, both need nothing.
-     */
     private fun putName(editor: CodeEditor, from: Int, to: Int, chosen: JSONObject) {
         val held = editor.text ?: return
         val simple = chosen.optString("simple")
@@ -3692,7 +3391,6 @@ class BuilderActivity : Activity() {
             return
         }
 
-        // Where the import belongs, worked out on the text as it is now.
         val text = editor.text?.toString().orEmpty()
         var at = -1
         var line = 0
@@ -3709,15 +3407,13 @@ class BuilderActivity : Activity() {
         val statement = "import ${'$'}qualified;\n"
         val put = at.coerceIn(0, editor.text?.length ?: 0)
         editor.text?.insert(put, statement)
-        // The caret follows the word rather than the import, since that is
-        // where the person was.
+
         val moved = if (put <= from) statement.length else 0
         editor.setSelection(
             (from + simple.length + moved).coerceIn(0, editor.text?.length ?: 0)
         )
     }
 
-    /** What is selected, or the whole file when nothing is. */
     private fun selectionOf(editor: CodeEditor): String {
         val held = editor.text?.toString().orEmpty()
         val from = editor.selectionStart
@@ -3733,7 +3429,6 @@ class BuilderActivity : Activity() {
         results.addView(notice(getString(R.string.omni_settings_logs_copied), palette.ok))
     }
 
-    /** Puts the clipboard where the caret is, replacing what is selected. */
     private fun pasteInto(editor: CodeEditor) {
         val clipboard = getSystemService(ClipboardManager::class.java) ?: return
         val held = clipboard.primaryClip?.takeIf { it.itemCount > 0 }
@@ -3749,7 +3444,6 @@ class BuilderActivity : Activity() {
         editor.setSelection((from + held.length).coerceIn(0, editor.text?.length ?: 0))
     }
 
-    /** A small button for a row of them, as against one across the screen. */
     private fun tool(text: String, colour: Int, onPress: () -> Unit) = TextView(this).apply {
         this.text = text
         setTextColor(colour)
@@ -4265,10 +3959,6 @@ class BuilderActivity : Activity() {
         )
         val folder = keysFolder().absolutePath
 
-        // The ceremony runs for exactly as long as the key takes to make.
-        // Nothing here is on a timer: the particles keep circling until the
-        // Core hands back a fingerprint, and the seal at the end is played
-        // because a key exists and not because time has passed.
         val forge = KeyForgeView(this, palette).apply {
             caption = getString(R.string.omni_forge_title)
             detail = getString(R.string.omni_forge_bits, request.bits)
@@ -4292,7 +3982,6 @@ class BuilderActivity : Activity() {
         }.start()
     }
 
-    /** What the Core said about the key, played out on the ceremony. */
     private fun keyForged(forge: KeyForgeView, answer: String) {
         val root = runCatching { JSONObject(answer) }.getOrNull()
         if (root == null || !root.optBoolean("created", false)) {
@@ -4304,8 +3993,7 @@ class BuilderActivity : Activity() {
         Preferences.setSigningKey(this, made.path)
         forge.caption = getString(R.string.omni_forge_sealed)
         forge.seal(made.fingerprint)
-        // The seal is an animation with an end, and the screen underneath is
-        // only changed once it has reached it.
+
         waitFor(forge::sealedThrough) {
             hideCeremony { go(Screen.Keys) }
         }
@@ -4327,13 +4015,6 @@ class BuilderActivity : Activity() {
         }, REFUSAL_MILLIS)
     }
 
-    /**
-     * Runs `then` once `ready` is true, looking again every frame or so.
-     *
-     * A ceremony finishes when its own animation says it has, not when a
-     * duration this code guessed has elapsed, so what is waited on here is the
-     * view's own answer.
-     */
     private fun waitFor(ready: () -> Boolean, then: () -> Unit) {
         val look = object : Runnable {
             override fun run() {
@@ -4363,9 +4044,6 @@ class BuilderActivity : Activity() {
         val password = readSecret(buildPasswordView)
         val started = System.nanoTime()
 
-        // What the Core measured on this device last time is handed back
-        // before the build starts, which is what makes the estimate on screen
-        // this phone's own rather than the one this project shipped with.
         val learned = Preferences.timings(this)
         Builder.nativeBuildExpect(learned.ifEmpty { null })
 
@@ -4408,13 +4086,6 @@ class BuilderActivity : Activity() {
         }.start()
     }
 
-    /**
-     * Reads where the build is, every frame, for as long as it is running.
-     *
-     * The percentage, the stage and the time left are all the Core's: this
-     * asks it what they are and hands them to the view, which is why the
-     * figure on screen cannot say something the build is not doing.
-     */
     private fun watchTheBuild(view: BuildStageView) {
         val look = object : Runnable {
             override fun run() {
@@ -4441,13 +4112,6 @@ class BuilderActivity : Activity() {
         view.post(look)
     }
 
-    /**
-     * Lets the arc finish arriving at what it is showing, then hands over.
-     *
-     * A build that took two seconds should not have its ring snap from 60% to
-     * gone: the ceremony is given long enough to run the number up to where
-     * the Core left it, and only then does the screen underneath come back.
-     */
     private fun settle(view: BuildStageView, then: () -> Unit) {
         view.postDelayed({
             view.rest()
@@ -4473,8 +4137,6 @@ class BuilderActivity : Activity() {
                 return@finished
             }
 
-            // Only a build that got all the way through measured every stage,
-            // so only that one teaches the next build anything.
             outcome.timings?.let { Preferences.setTimings(this, it) }
 
             OmniLog.event(
@@ -4518,9 +4180,7 @@ class BuilderActivity : Activity() {
                     palette.muted,
                 )
             )
-            // What the schemes are is read off the package, not written here:
-            // a row saying "v2 + v3" whatever the file holds is a row that
-            // would keep saying it once it stopped being true.
+
             val schemes = outcome.signatureSchemes.joinToString(" + ")
             val soundly = outcome.signed &&
                 outcome.signatureKeyMatches &&
@@ -4554,10 +4214,6 @@ class BuilderActivity : Activity() {
             )
             results.addView(facts)
 
-            // What the build said on its way through. A package that was
-            // written with something worth saying about it says it here
-            // rather than nowhere: a warning only shown when a build fails is
-            // a warning nobody ever reads.
             if (outcome.findings.isNotEmpty()) {
                 results.addView(
                     heading(getString(R.string.omni_build_said, outcome.findings.size))
@@ -4576,7 +4232,6 @@ class BuilderActivity : Activity() {
         }
     }
 
-    /** The URI the installer and any chooser read the file through. */
     private fun handleFor(file: File): Pair<Uri, String> {
         val uri = PackageProvider.uriFor(this, file)
         val type = contentResolver.getType(uri) ?: PackageProvider.BUNDLE_TYPE
@@ -4598,12 +4253,6 @@ class BuilderActivity : Activity() {
         )
     }
 
-    /**
-     * Hands the package to Android's installer. Android will not let any
-     * application do this until the person has allowed installs from it, so
-     * when that has not happened yet the button opens the screen where it is
-     * allowed rather than doing nothing at all.
-     */
     private fun installPackage(file: File) {
         if (!file.isFile) {
             return
@@ -4630,7 +4279,6 @@ class BuilderActivity : Activity() {
         )
     }
 
-    /** The install and share actions for one built file, stacked under its row. */
     private fun actionsFor(file: File, into: LinearLayout) {
         val installable = file.name.endsWith(".apk")
         if (installable) {
@@ -4672,13 +4320,6 @@ class BuilderActivity : Activity() {
             }
     }
 
-    /**
-     * Reads whatever picture the person picked with Android's own decoders, so a
-     * photograph is as welcome as a drawing, and writes it back out as a square
-     * PNG no larger than the biggest launcher icon any screen asks for. A camera
-     * photograph is tens of megabytes; what the project keeps is a few hundred
-     * kilobytes of exactly the pixels an icon can use.
-     */
     private fun stageImage(uri: Uri): File? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         runCatching {
@@ -5154,4 +4795,1458 @@ class BuilderActivity : Activity() {
     }
 
     private fun View.setPadding(all: Int) = setPadding(all, all, all, all)
+}
+
+internal object Ink {
+
+    const val FRAME_NANOS_60 = 16_666_667L
+
+    fun ease(value: Float, from: Float, to: Float): Float {
+        if (to <= from) return if (value >= to) 1f else 0f
+        val held = ((value - from) / (to - from)).coerceIn(0f, 1f)
+        return held * held * (3f - 2f * held)
+    }
+
+    fun mix(from: Float, to: Float, by: Float): Float = from + (to - from) * by
+
+    fun fade(colour: Int, alpha: Float): Int = Color.argb(
+        (Color.alpha(colour) * alpha.coerceIn(0f, 1f)).toInt(),
+        Color.red(colour),
+        Color.green(colour),
+        Color.blue(colour),
+    )
+
+    fun hot(colour: Int, by: Float): Int {
+        val held = by.coerceIn(0f, 1f)
+        return Color.rgb(
+            mix(Color.red(colour).toFloat(), 255f, held).toInt(),
+            mix(Color.green(colour).toFloat(), 255f, held).toInt(),
+            mix(Color.blue(colour).toFloat(), 255f, held).toInt(),
+        )
+    }
+
+    fun tube(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        val spacing = max(3f, h / 300f)
+        val drift = (life * 22f) % spacing
+        paint.style = Paint.Style.FILL
+        paint.color = fade(0xFF000000.toInt(), 0.26f * strength)
+        paint.strokeWidth = spacing * 0.42f
+        var y = -spacing + drift
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, paint)
+            y += spacing
+        }
+
+        val band = ((life * 0.22f) % 1.4f) * h - h * 0.2f
+        val tall = h * 0.10f
+        paint.color = fade(0xFFFFFFFF.toInt(), 0.035f * strength)
+        canvas.drawRect(0f, band, w, band + tall, paint)
+    }
+
+    fun vignette(canvas: Canvas, paint: Paint, w: Float, h: Float, strength: Float) {
+        val radius = hypot(w, h) * 0.62f
+        paint.shader = RadialGradient(
+            w * 0.5f,
+            h * 0.5f,
+            radius,
+            intArrayOf(0x00000000, fade(0xFF000000.toInt(), 0.55f * strength)),
+            floatArrayOf(0.55f, 1f),
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, w, h, paint)
+        paint.shader = null
+    }
+
+    fun scatter(seed: Int, salt: Int): Float {
+        var held = seed * 374_761_393 + salt * 668_265_263
+        held = (held xor (held shr 13)) * 1_274_126_177
+        return ((held xor (held shr 16)) and 0x00FF_FFFF) / 16_777_216f
+    }
+}
+
+class BinaryVeil(context: Context) : View(context) {
+
+    private companion object {
+        const val COLUMNS = 26
+        const val ROWS = 44
+        const val SWEEP_MILLIS = 420f
+
+        const val EDGE = 0.22f
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.MONOSPACE
+        textAlign = Paint.Align.CENTER
+    }
+    private val line = Paint()
+    private var accent = Color.WHITE
+    private var began = 0L
+    private var running = false
+    private var swapped = false
+    private var whenDone: (() -> Unit)? = null
+    private val glyph = CharArray(1)
+
+    private val step = object : Runnable {
+        override fun run() {
+            if (!running) return
+            invalidate()
+            postOnAnimation(this)
+        }
+    }
+
+    fun sweep(colour: Int, swap: () -> Unit) {
+        accent = colour
+        whenDone = swap
+        began = SystemClock.uptimeMillis()
+        running = true
+        swapped = false
+        visibility = VISIBLE
+        alpha = 1f
+        postOnAnimation(step)
+    }
+
+    private fun swapNow() {
+        if (swapped) return
+        swapped = true
+        val work = whenDone
+        whenDone = null
+        work?.invoke()
+    }
+
+    override fun onDetachedFromWindow() {
+        running = false
+        removeCallbacks(step)
+        super.onDetachedFromWindow()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        if (!running) return
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        val t = (SystemClock.uptimeMillis() - began) / SWEEP_MILLIS
+        if (t >= 1f) {
+            running = false
+            visibility = GONE
+            swapNow()
+            return
+        }
+        if (t >= 0.5f) swapNow()
+
+        val front = t * (1f + EDGE * 2f) - EDGE
+        val columnWidth = w / COLUMNS
+        val rowHeight = h / ROWS
+        paint.textSize = min(columnWidth * 0.72f, rowHeight * 0.86f)
+
+        val tracking = 1f - abs(t - 0.5f) * 2f
+        val life = (SystemClock.uptimeMillis() - began) / 1000f
+
+        for (row in 0 until ROWS) {
+            val y = (row + 0.5f) / ROWS
+            val distance = abs(y - front)
+            if (distance > EDGE) continue
+            val near = 1f - distance / EDGE
+            val lit = near * near
+
+            val slip = (Ink.scatter(row, (life * 12f).toInt()) - 0.5f) *
+                columnWidth * 3.2f * tracking
+            val bend = sin((y * 9f + life * 3.4f).toDouble()).toFloat() *
+                columnWidth * 0.5f * tracking
+            val shift = slip + bend
+
+            val split = columnWidth * (0.10f + 0.30f * tracking) * (0.4f + lit)
+
+            for (column in 0 until COLUMNS) {
+                val roll = Ink.scatter(row * 131 + column, 7)
+                if (roll > 0.55f + near * 0.4f) continue
+                glyph[0] = if (Ink.scatter(row * 977 + column, 13) > 0.5f) '1' else '0'
+                val x = (column + 0.5f) * columnWidth + shift
+                val baseline = (row + 0.72f) * rowHeight
+
+                paint.color = Ink.fade(0xFFFF3B30.toInt(), 0.22f + lit * 0.30f)
+                canvas.drawText(glyph, 0, 1, x - split, baseline, paint)
+                paint.color = Ink.fade(0xFF2BD6FF.toInt(), 0.22f + lit * 0.30f)
+                canvas.drawText(glyph, 0, 1, x + split, baseline, paint)
+                paint.color = Ink.fade(Ink.hot(accent, lit * 0.85f), 0.20f + lit * 0.80f)
+                canvas.drawText(glyph, 0, 1, x, baseline, paint)
+            }
+        }
+
+        drawScanlines(canvas, w, h, life)
+        drawHeadSwitch(canvas, w, h, front, tracking)
+    }
+
+    private fun drawScanlines(canvas: Canvas, w: Float, h: Float, life: Float) {
+        val spacing = max(3f, h / 260f)
+        val drift = (life * 26f) % spacing
+        line.color = Ink.fade(0xFF000000.toInt(), 0.30f)
+        line.strokeWidth = spacing * 0.45f
+        var y = -spacing + drift
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, line)
+            y += spacing
+        }
+    }
+
+    private fun drawHeadSwitch(canvas: Canvas, w: Float, h: Float, front: Float, tracking: Float) {
+        if (tracking <= 0f) return
+        val band = h * 0.018f
+        val at = (front * h).coerceIn(-band, h + band)
+        line.strokeWidth = 1f
+        var y = at
+        var index = 0
+        while (y < at + band) {
+            val torn = (Ink.scatter(index, (front * 400f).toInt()) - 0.5f) * w * 0.5f
+            line.color = Ink.fade(Ink.hot(accent, 0.85f), 0.10f + 0.28f * tracking)
+            canvas.drawLine(torn, y, w + torn, y, line)
+            y += 1.5f
+            index += 1
+        }
+        line.color = Ink.fade(Ink.hot(accent, 1f), 0.35f * tracking)
+        line.strokeWidth = 1.4f
+        canvas.drawLine(0f, at, w, at, line)
+    }
+}
+
+class KeyForgeView(context: Context, private var palette: Palette) : View(context) {
+
+    private companion object {
+        const val DOTS = 520
+        const val GLYPHS = 130
+        const val LOOP_MILLIS = 4_200f
+        const val SEAL_MILLIS = 1_150f
+
+        const val GATHERED = 0.44f
+    }
+
+    private enum class Phase { FORGING, SEALING, SEALED, REFUSED }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.MONOSPACE
+        textAlign = Paint.Align.CENTER
+    }
+    private val glass = Paint()
+    private val key = Path()
+    private val trace = Path()
+    private val measure = PathMeasure()
+    private val bounds = RectF()
+    private val position = FloatArray(2)
+    private val glyph = CharArray(1)
+
+    private val dotX = FloatArray(DOTS)
+    private val dotY = FloatArray(DOTS)
+    private val dotPoints = FloatArray(DOTS * 2)
+    private val glyphTargetX = FloatArray(GLYPHS)
+    private val glyphTargetY = FloatArray(GLYPHS)
+
+    private var began = SystemClock.uptimeMillis()
+    private var sealedAt = 0L
+    private var phase = Phase.FORGING
+    private var laidOut = 0
+    private var running = false
+
+    var caption: String = ""
+    var detail: String = ""
+    private var fingerprint: String = ""
+
+    private val step = object : Runnable {
+        override fun run() {
+            if (!running) return
+            invalidate()
+            postOnAnimation(this)
+        }
+    }
+
+    fun begin() {
+        began = SystemClock.uptimeMillis()
+        phase = Phase.FORGING
+        running = true
+        postOnAnimation(step)
+    }
+
+    fun seal(shown: String) {
+        if (phase != Phase.FORGING) return
+        fingerprint = shown
+        sealedAt = SystemClock.uptimeMillis()
+        phase = Phase.SEALING
+    }
+
+    fun refuse() {
+        phase = Phase.REFUSED
+        running = false
+        removeCallbacks(step)
+        invalidate()
+    }
+
+    fun sealedThrough(): Boolean =
+        phase == Phase.SEALED ||
+            (phase == Phase.SEALING &&
+                SystemClock.uptimeMillis() - sealedAt >= SEAL_MILLIS)
+
+    fun repaint(next: Palette) {
+        palette = next
+        invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        running = false
+        removeCallbacks(step)
+        super.onDetachedFromWindow()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        layOut(w.toFloat(), h.toFloat())
+    }
+
+    private fun layOut(w: Float, h: Float) {
+        if (w <= 0f || h <= 0f) return
+        buildKey(w, h)
+        measure.setPath(key, false)
+        var length = measure.length
+
+        val lengths = ArrayList<Float>()
+        do {
+            lengths.add(measure.length)
+        } while (measure.nextContour())
+        length = lengths.sum()
+        if (length <= 0f) return
+
+        val everything = DOTS + GLYPHS
+        for (index in 0 until everything) {
+
+            val onOutline = index % 3 != 2
+            var x: Float
+            var y: Float
+            if (onOutline) {
+                val along = (Ink.scatter(index, 3) * length)
+                var walked = 0f
+                var contour = 0
+                measure.setPath(key, false)
+                while (contour < lengths.size - 1 && walked + lengths[contour] < along) {
+                    walked += lengths[contour]
+                    measure.nextContour()
+                    contour++
+                }
+                measure.getPosTan(along - walked, position, null)
+                x = position[0]
+                y = position[1]
+            } else {
+                val turn = Ink.scatter(index, 5) * (PI * 2f).toFloat()
+                val reach = bounds.width() * 0.5f * 0.62f * Ink.scatter(index, 9)
+                x = bounds.centerX() + cos(turn) * reach
+                y = bowCentreY + sin(turn) * reach
+            }
+            if (index < DOTS) {
+                dotX[index] = x
+                dotY[index] = y
+            } else {
+                glyphTargetX[index - DOTS] = x
+                glyphTargetY[index - DOTS] = y
+            }
+        }
+        laidOut = everything
+    }
+
+    private var bowCentreY = 0f
+    private var bowRadius = 0f
+
+    private fun buildKey(w: Float, h: Float) {
+        key.reset()
+        trace.reset()
+        val span = min(w, h)
+        val r = span * 0.155f
+        val cx = w * 0.5f
+        val cy = h * 0.34f
+        bowCentreY = cy
+        bowRadius = r
+        bounds.set(cx - r, cy - r, cx + r, cy + r)
+
+        key.addCircle(cx, cy, r, Path.Direction.CW)
+        key.addCircle(cx, cy - r * 0.30f, r * 0.30f, Path.Direction.CCW)
+
+        val half = span * 0.036f
+        val top = cy + r * 0.92f
+        val foot = h * 0.80f
+        key.moveTo(cx - half, top)
+        key.lineTo(cx - half, foot)
+
+        val tooth = span * 0.052f
+        key.lineTo(cx + half, foot)
+        key.lineTo(cx + half, foot - tooth * 0.55f)
+        key.lineTo(cx + half + tooth, foot - tooth * 0.55f)
+        key.lineTo(cx + half + tooth, foot - tooth * 1.15f)
+        key.lineTo(cx + half, foot - tooth * 1.15f)
+        key.lineTo(cx + half, foot - tooth * 2.0f)
+        key.lineTo(cx + half + tooth * 0.72f, foot - tooth * 2.0f)
+        key.lineTo(cx + half + tooth * 0.72f, foot - tooth * 2.6f)
+        key.lineTo(cx + half, foot - tooth * 2.6f)
+        key.lineTo(cx + half, top)
+        key.close()
+
+        trace.moveTo(cx, foot - tooth * 3.4f)
+        trace.lineTo(cx, cy + r * 0.55f)
+        trace.moveTo(cx - r * 0.62f, cy + r * 0.10f)
+        trace.lineTo(cx - r * 0.30f, cy + r * 0.10f)
+        trace.lineTo(cx - r * 0.12f, cy + r * 0.38f)
+        trace.moveTo(cx + r * 0.62f, cy - r * 0.02f)
+        trace.lineTo(cx + r * 0.32f, cy - r * 0.02f)
+        trace.lineTo(cx + r * 0.14f, cy + r * 0.28f)
+        trace.moveTo(cx - r * 0.50f, cy - r * 0.52f)
+        trace.lineTo(cx - r * 0.22f, cy - r * 0.52f)
+        trace.moveTo(cx + r * 0.50f, cy + r * 0.56f)
+        trace.lineTo(cx + r * 0.24f, cy + r * 0.56f)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+        if (laidOut == 0) layOut(w, h)
+
+        val now = SystemClock.uptimeMillis()
+        val life = (now - began) / 1000f
+
+        val gather = Ink.ease(life, 0.30f, 2.10f)
+        val reveal = Ink.ease(life, 1.05f, 2.35f)
+        val sealing = if (phase == Phase.FORGING) 0f else
+            ((now - sealedAt) / SEAL_MILLIS).coerceIn(0f, 1f)
+        if (phase == Phase.SEALING && sealing >= 1f) phase = Phase.SEALED
+
+        drawGround(canvas, w, h, life)
+        drawParticles(canvas, w, h, life, gather, sealing)
+        if (reveal > 0f) drawKey(canvas, life, reveal, sealing)
+        drawWords(canvas, w, h, life, sealing)
+        Ink.tube(canvas, glass, w, h, life, 1f)
+        Ink.vignette(canvas, glass, w, h, 1f)
+    }
+
+    private fun drawGround(canvas: Canvas, w: Float, h: Float, life: Float) {
+        canvas.drawColor(palette.background)
+        paint.shader = RadialGradient(
+            w * 0.5f, bowCentreY, max(w, h) * 0.75f,
+            Ink.fade(palette.glowFirst, 0.55f),
+            Ink.fade(palette.background, 0f),
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, w, h, paint)
+        paint.shader = null
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        paint.color = Ink.fade(palette.accent, 0.07f)
+        val spacing = h / 22f
+        val drift = (life * 9f) % spacing
+        var y = -spacing + drift
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, paint)
+            y += spacing
+        }
+        var x = 0f
+        val across = w / 9f
+        while (x <= w) {
+            canvas.drawLine(x, 0f, x, h, paint)
+            x += across
+        }
+        paint.style = Paint.Style.FILL
+    }
+
+    private fun drawParticles(
+        canvas: Canvas,
+        w: Float,
+        h: Float,
+        life: Float,
+        gather: Float,
+        sealing: Float,
+    ) {
+        val cx = w * 0.5f
+        val far = max(w, h) * 0.62f
+
+        val thrown = 1f + sealing * sealing * 2.4f
+        val faded = 1f - sealing
+
+        var at = 0
+        for (index in 0 until DOTS) {
+            val turn = Ink.scatter(index, 1) * (PI * 2f).toFloat() +
+                life * (0.35f + Ink.scatter(index, 2) * 0.9f)
+            val reach = (far * (0.12f + Ink.scatter(index, 4) * 0.88f)) * (1f - gather * 0.78f)
+            val fromX = cx + cos(turn) * reach
+            val fromY = bowCentreY + sin(turn) * reach * 0.92f
+            val toX = dotX[index]
+            val toY = dotY[index]
+            var x = Ink.mix(fromX, toX, gather)
+            var y = Ink.mix(fromY, toY, gather)
+            if (sealing > 0f) {
+                x = cx + (x - cx) * thrown
+                y = bowCentreY + (y - bowCentreY) * thrown
+            }
+            dotPoints[at++] = x
+            dotPoints[at++] = y
+        }
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.strokeWidth = min(w, h) * 0.0055f
+        paint.color = Ink.fade(Ink.hot(palette.accent, 0.25f), (0.30f + gather * 0.45f) * faded)
+        canvas.drawPoints(dotPoints, 0, at, paint)
+        paint.strokeCap = Paint.Cap.BUTT
+
+        text.textSize = min(w, h) * 0.026f
+        for (index in 0 until GLYPHS) {
+            val seed = DOTS + index
+            val turn = Ink.scatter(seed, 1) * (PI * 2f).toFloat() +
+                life * (0.30f + Ink.scatter(seed, 2) * 0.8f)
+            val reach = (far * (0.14f + Ink.scatter(seed, 4) * 0.86f)) * (1f - gather * 0.80f)
+            var x = Ink.mix(cx + cos(turn) * reach, glyphTargetX[index], gather)
+            var y = Ink.mix(bowCentreY + sin(turn) * reach * 0.92f, glyphTargetY[index], gather)
+            if (sealing > 0f) {
+                x = cx + (x - cx) * thrown
+                y = bowCentreY + (y - bowCentreY) * thrown
+            }
+            glyph[0] = if (((life * 3f).toInt() + index) % 2 == 0) '1' else '0'
+            val lit = 0.35f + 0.65f * Ink.scatter(seed, 6)
+            text.color = Ink.fade(Ink.hot(palette.accent, gather * 0.5f), lit * faded)
+            canvas.drawText(glyph, 0, 1, x, y, text)
+        }
+    }
+
+    private fun split(canvas: Canvas, path: Path, width: Float, alpha: Float, by: Float) {
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = width
+        paint.color = Ink.fade(0xFFFF3B30.toInt(), alpha * 0.55f)
+        canvas.save()
+        canvas.translate(-by, 0f)
+        canvas.drawPath(path, paint)
+        canvas.restore()
+        paint.color = Ink.fade(0xFF2BD6FF.toInt(), alpha * 0.55f)
+        canvas.save()
+        canvas.translate(by, 0f)
+        canvas.drawPath(path, paint)
+        canvas.restore()
+    }
+
+    private fun drawKey(canvas: Canvas, life: Float, reveal: Float, sealing: Float) {
+        val breath = 0.82f + 0.18f * sin(life * 2.1f)
+        paint.style = Paint.Style.STROKE
+        paint.strokeJoin = Paint.Join.ROUND
+
+        paint.strokeWidth = bowRadius * 0.34f
+        paint.color = Ink.fade(palette.accent, 0.13f * reveal * breath)
+        canvas.drawPath(key, paint)
+
+        paint.strokeWidth = bowRadius * 0.11f
+        paint.color = Ink.fade(Ink.hot(palette.accent, 0.35f), 0.42f * reveal)
+        canvas.drawPath(key, paint)
+
+        split(canvas, key, max(1.4f, bowRadius * 0.028f), reveal, bowRadius * 0.030f)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = max(1.4f, bowRadius * 0.028f)
+        paint.color = Ink.fade(Ink.hot(palette.accent, 0.85f + sealing * 0.15f), reveal)
+        canvas.drawPath(key, paint)
+
+        val filled = Ink.ease(life, 1.7f, 3.0f)
+        if (filled > 0f) {
+            paint.strokeWidth = max(1f, bowRadius * 0.020f)
+            paint.color = Ink.fade(Ink.hot(palette.accent, 0.55f), 0.75f * filled)
+            canvas.drawPath(trace, paint)
+        }
+
+        val turning = Ink.ease(life, 1.9f, 2.8f)
+        if (turning > 0f) {
+            paint.strokeWidth = max(1f, bowRadius * 0.022f)
+            paint.color = Ink.fade(palette.accent, 0.55f * turning)
+            val inner = RectF(
+                bounds.centerX() - bowRadius * 0.66f,
+                bowCentreY - bowRadius * 0.66f,
+                bounds.centerX() + bowRadius * 0.66f,
+                bowCentreY + bowRadius * 0.66f,
+            )
+            val spin = (life * 62f) % 360f
+            canvas.drawArc(inner, spin, 96f, false, paint)
+            canvas.drawArc(inner, spin + 180f, 96f, false, paint)
+            inner.inset(bowRadius * 0.14f, bowRadius * 0.14f)
+            canvas.drawArc(inner, -spin * 1.4f, 62f, false, paint)
+        }
+
+        if (sealing > 0f) {
+            val shut = Ink.ease(sealing, 0f, 0.55f)
+            val body = bowRadius * 0.46f
+            val cx = bounds.centerX()
+            val cy = bowCentreY + bowRadius * 0.18f
+            paint.strokeWidth = max(1.6f, bowRadius * 0.05f)
+            paint.color = Ink.fade(Ink.hot(palette.ok, 0.4f), shut)
+            val shackle = RectF(
+                cx - body * 0.42f,
+                cy - body * 1.02f,
+                cx + body * 0.42f,
+                cy - body * 0.18f,
+            )
+            canvas.drawArc(shackle, 180f, 180f * shut, false, paint)
+            paint.style = Paint.Style.FILL
+            canvas.drawRoundRect(
+                cx - body * 0.62f, cy - body * 0.30f,
+                cx + body * 0.62f, cy + body * 0.58f,
+                body * 0.16f, body * 0.16f, paint,
+            )
+            paint.style = Paint.Style.STROKE
+
+            val ring = Ink.ease(sealing, 0.10f, 1f)
+            paint.strokeWidth = max(1f, bowRadius * 0.06f * (1f - ring))
+            paint.color = Ink.fade(Ink.hot(palette.ok, 0.6f), (1f - ring) * 0.9f)
+            canvas.drawCircle(cx, bowCentreY, bowRadius * (1f + ring * 3.2f), paint)
+        }
+        paint.style = Paint.Style.FILL
+    }
+
+    private fun drawWords(canvas: Canvas, w: Float, h: Float, life: Float, sealing: Float) {
+        text.textSize = min(w, h) * 0.038f
+        text.color = Ink.fade(palette.foreground, Ink.ease(life, 0.2f, 0.9f))
+        canvas.drawText(caption, w * 0.5f, h * 0.90f, text)
+
+        text.textSize = min(w, h) * 0.028f
+        val said = if (sealing > 0f && fingerprint.isNotEmpty()) fingerprint else detail
+        text.color = Ink.fade(
+            if (sealing > 0f) palette.ok else palette.muted,
+            Ink.ease(life, 0.5f, 1.2f),
+        )
+        canvas.drawText(said, w * 0.5f, h * 0.945f, text)
+    }
+}
+
+class BuildStageView(context: Context, private var palette: Palette) : View(context) {
+
+    private companion object {
+        const val RAIN = 90
+
+        const val CATCH_UP = 3.4f
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.MONOSPACE
+    }
+    private val glass = Paint()
+    private val ring = RectF()
+    private val glyph = CharArray(1)
+
+    private var running = false
+    private var lastFrame = 0L
+    private var began = SystemClock.uptimeMillis()
+
+    private var reported = 0f
+    private var drawn = 0f
+    private var stageAt = 0
+    private var stageCount = 1
+    private var refusedAt = -1
+    private var done = false
+
+    var title: String = ""
+    var stages: List<String> = emptyList()
+    var remaining: String = ""
+    var note: String = ""
+
+    private val step = object : Runnable {
+        override fun run() {
+            if (!running) return
+            invalidate()
+            postOnAnimation(this)
+        }
+    }
+
+    fun begin() {
+        began = SystemClock.uptimeMillis()
+        lastFrame = began
+        reported = 0f
+        drawn = 0f
+        stageAt = 0
+        refusedAt = -1
+        done = false
+        running = true
+        postOnAnimation(step)
+    }
+
+    fun observe(percent: Int, stage: Int, count: Int, finished: Boolean, refused: Boolean) {
+        reported = percent.coerceIn(0, 100).toFloat()
+        stageAt = stage.coerceAtLeast(0)
+        stageCount = count.coerceAtLeast(1)
+        done = finished
+        if (refused) refusedAt = stageAt
+    }
+
+    fun rest() {
+        running = false
+        removeCallbacks(step)
+    }
+
+    fun repaint(next: Palette) {
+        palette = next
+        invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        rest()
+        super.onDetachedFromWindow()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        val now = SystemClock.uptimeMillis()
+        val since = ((now - lastFrame).coerceIn(0L, 100L)) / 1000f
+        lastFrame = now
+        drawn += (reported - drawn) * (since * CATCH_UP).coerceIn(0f, 1f)
+        if (done && reported >= 100f && drawn > 99.4f) drawn = 100f
+        val life = (now - began) / 1000f
+
+        canvas.drawColor(palette.background)
+        drawRain(canvas, w, h, life)
+        val centre = h * 0.30f
+        drawRing(canvas, w, centre, min(w, h) * 0.19f, life)
+        drawStages(canvas, w, h)
+
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = min(w, h) * 0.034f
+        text.color = palette.foreground
+        canvas.drawText(title, w * 0.5f, h * 0.075f, text)
+        text.textSize = min(w, h) * 0.026f
+        text.color = palette.muted
+        canvas.drawText(remaining, w * 0.5f, h * 0.925f, text)
+        canvas.drawText(note, w * 0.5f, h * 0.962f, text)
+
+        Ink.tube(canvas, glass, w, h, life, 0.75f)
+        Ink.vignette(canvas, glass, w, h, 0.8f)
+    }
+
+    private fun drawRain(canvas: Canvas, w: Float, h: Float, life: Float) {
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = min(w, h) * 0.022f
+        for (index in 0 until RAIN) {
+            val column = Ink.scatter(index, 21) * w
+            val speed = 26f + Ink.scatter(index, 22) * 70f
+            val y = ((Ink.scatter(index, 23) * h + life * speed) % (h + 40f)) - 20f
+            glyph[0] = if (((life * 2.4f).toInt() + index) % 2 == 0) '1' else '0'
+            text.color = Ink.fade(palette.accent, 0.05f + 0.10f * Ink.scatter(index, 24))
+            canvas.drawText(glyph, 0, 1, column, y, text)
+        }
+    }
+
+    private fun drawRing(canvas: Canvas, w: Float, cy: Float, radius: Float, life: Float) {
+        val cx = w * 0.5f
+        ring.set(cx - radius, cy - radius, cx + radius, cy + radius)
+        val width = radius * 0.13f
+
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = width
+        paint.strokeCap = Paint.Cap.ROUND
+        paint.color = Ink.fade(palette.foreground, 0.10f)
+        canvas.drawCircle(cx, cy, radius, paint)
+
+        val colour = when {
+            refusedAt >= 0 -> palette.error
+            done -> palette.ok
+            else -> palette.accent
+        }
+        val sweep = 360f * (drawn / 100f)
+        paint.strokeWidth = width * 2.1f
+        paint.color = Ink.fade(colour, 0.16f)
+        canvas.drawArc(ring, -90f, sweep, false, paint)
+        paint.strokeWidth = width
+        paint.color = Ink.hot(colour, 0.2f)
+        canvas.drawArc(ring, -90f, sweep, false, paint)
+
+        if (!done && refusedAt < 0) {
+            paint.strokeWidth = width * 0.55f
+            paint.color = Ink.fade(Ink.hot(colour, 0.7f), 0.85f)
+            canvas.drawArc(ring, -90f + (life * 220f) % 360f, 26f, false, paint)
+        }
+        paint.style = Paint.Style.FILL
+        paint.strokeCap = Paint.Cap.BUTT
+
+        text.textAlign = Paint.Align.CENTER
+        text.textSize = radius * 0.62f
+        text.color = palette.foreground
+        canvas.drawText("${drawn.toInt()}", cx, cy + radius * 0.18f, text)
+        text.textSize = radius * 0.22f
+        text.color = palette.muted
+        canvas.drawText("%", cx, cy + radius * 0.52f, text)
+    }
+
+    private fun drawStages(canvas: Canvas, w: Float, h: Float) {
+        if (stages.isEmpty()) return
+        val top = h * 0.545f
+        val room = h * 0.33f
+        val line = room / stages.size
+        text.textAlign = Paint.Align.LEFT
+        text.textSize = min(line * 0.52f, min(w, h) * 0.030f)
+        val left = w * 0.16f
+
+        for ((index, name) in stages.withIndex()) {
+            val y = top + line * (index + 0.5f)
+            val state = when {
+                index == refusedAt -> 2
+                done || index < stageAt -> 0
+                index == stageAt -> 1
+                else -> 3
+            }
+            val colour = when (state) {
+                0 -> palette.ok
+                1 -> palette.accent
+                2 -> palette.error
+                else -> palette.muted
+            }
+            paint.color = Ink.fade(colour, if (state == 3) 0.35f else 1f)
+            val dot = line * 0.16f
+            when (state) {
+                1 -> {
+                    paint.style = Paint.Style.STROKE
+                    paint.strokeWidth = max(1.5f, dot * 0.45f)
+                    canvas.drawCircle(left - dot * 2.4f, y - line * 0.16f, dot, paint)
+                    paint.style = Paint.Style.FILL
+                }
+                else -> canvas.drawCircle(left - dot * 2.4f, y - line * 0.16f, dot, paint)
+            }
+            text.color = Ink.fade(
+                if (state == 3) palette.muted else palette.foreground,
+                if (state == 3) 0.55f else 1f,
+            )
+            canvas.drawText(name, left, y, text)
+        }
+    }
+}
+
+internal enum class Kind {
+    COMMENT,
+    TEXT,
+    NUMBER,
+    KEYWORD,
+    TYPE,
+    ANNOTATION,
+    TAG,
+    ATTRIBUTE,
+}
+
+internal class Token(val from: Int, val to: Int, val kind: Kind)
+
+internal class Grammar(
+    val keywords: Set<String>,
+    val lineComment: String?,
+    val blockComment: Pair<String, String>?,
+
+    val characters: Boolean,
+
+    val annotations: Boolean,
+
+    val markup: Boolean,
+) {
+    companion object {
+
+        private val JAVA = setOf(
+            "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
+            "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
+            "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int",
+            "interface", "long", "native", "new", "package", "private", "protected", "public",
+            "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this",
+            "throw", "throws", "transient", "try", "void", "volatile", "while",
+
+            "exports", "module", "non-sealed", "open", "opens", "permits", "provides", "record",
+            "requires", "sealed", "to", "transitive", "uses", "var", "when", "with", "yield",
+            "true", "false", "null",
+        )
+
+        private val KOTLIN = setOf(
+            "as", "break", "class", "continue", "do", "else", "false", "for", "fun", "if", "in",
+            "interface", "is", "null", "object", "package", "return", "super", "this", "throw",
+            "true", "try", "typealias", "typeof", "val", "var", "when", "while",
+            "by", "catch", "constructor", "delegate", "dynamic", "field", "file", "finally",
+            "get", "import", "init", "param", "property", "receiver", "set", "setparam", "value",
+            "where", "actual", "abstract", "annotation", "companion", "const", "crossinline",
+            "data", "enum", "expect", "external", "final", "infix", "inline", "inner", "internal",
+            "lateinit", "noinline", "open", "operator", "out", "override", "private", "protected",
+            "public", "reified", "sealed", "suspend", "tailrec", "vararg",
+        )
+
+        private val RUST = setOf(
+            "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+            "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
+            "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super",
+            "trait", "true", "type", "union", "unsafe", "use", "where", "while",
+        )
+
+        private val CPP = setOf(
+            "alignas", "alignof", "and", "asm", "auto", "bool", "break", "case", "catch", "char",
+            "class", "const", "consteval", "constexpr", "constinit", "const_cast", "continue",
+            "co_await", "co_return", "co_yield", "decltype", "default", "delete", "do", "double",
+            "dynamic_cast", "else", "enum", "explicit", "export", "extern", "false", "float",
+            "for", "friend", "goto", "if", "inline", "int", "long", "mutable", "namespace", "new",
+            "noexcept", "not", "nullptr", "operator", "or", "private", "protected", "public",
+            "register", "reinterpret_cast", "requires", "return", "short", "signed", "sizeof",
+            "static", "static_assert", "static_cast", "struct", "switch", "template", "this",
+            "thread_local", "throw", "true", "try", "typedef", "typeid", "typename", "union",
+            "unsigned", "using", "virtual", "void", "volatile", "wchar_t", "while", "xor",
+        )
+
+        val PLAIN = Grammar(emptySet(), null, null, false, false, false)
+
+        fun of(name: String): Grammar {
+            val lower = name.lowercase()
+            return when {
+                lower.endsWith(".java") ->
+                    Grammar(JAVA, "//", "/*" to "*/", true, true, false)
+                lower.endsWith(".kt") || lower.endsWith(".kts") ->
+                    Grammar(KOTLIN, "//", "/*" to "*/", true, true, false)
+                lower.endsWith(".rs") ->
+                    Grammar(RUST, "//", "/*" to "*/", true, true, false)
+                lower.endsWith(".c") || lower.endsWith(".h") ||
+                    lower.endsWith(".cc") || lower.endsWith(".cpp") ||
+                    lower.endsWith(".hpp") || lower.endsWith(".cxx") ->
+                    Grammar(CPP, "//", "/*" to "*/", true, false, false)
+                lower.endsWith(".xml") || lower.endsWith(".svg") || lower.endsWith(".html") ->
+                    Grammar(emptySet(), null, "<!--" to "-->", false, false, true)
+                lower.endsWith(".json") ->
+                    Grammar(setOf("true", "false", "null"), null, null, false, false, false)
+                lower.endsWith(".omni") || lower.endsWith(".toml") ||
+                    lower.endsWith(".properties") || lower.endsWith(".gradle") ->
+                    Grammar(emptySet(), "#", null, false, false, false)
+                else -> PLAIN
+            }
+        }
+    }
+}
+
+internal object Reader {
+
+    const val LIMIT = 2_000_000
+
+    fun read(text: CharSequence, grammar: Grammar): List<Token> {
+        val out = ArrayList<Token>(min(text.length / 6 + 16, 200_000))
+        if (grammar.markup) {
+            readMarkup(text, grammar, out)
+        } else {
+            readCode(text, grammar, out)
+        }
+        return out
+    }
+
+    private fun readCode(text: CharSequence, grammar: Grammar, out: MutableList<Token>) {
+        val end = min(text.length, LIMIT)
+        val line = grammar.lineComment
+        val block = grammar.blockComment
+        var at = 0
+        while (at < end) {
+            val here = text[at]
+
+            if (line != null && starts(text, at, line)) {
+                var to = at
+                while (to < end && text[to] != '\n') to++
+                out.add(Token(at, to, Kind.COMMENT))
+                at = to
+                continue
+            }
+
+            if (block != null && starts(text, at, block.first)) {
+                var to = at + block.first.length
+                while (to < end && !starts(text, to, block.second)) to++
+                to = min(end, to + block.second.length)
+                out.add(Token(at, to, Kind.COMMENT))
+                at = to
+                continue
+            }
+
+            if (here == '"') {
+                at = quoted(text, at, end, '"', out)
+                continue
+            }
+            if (grammar.characters && here == '\'') {
+                at = quoted(text, at, end, '\'', out)
+                continue
+            }
+
+            if (grammar.annotations && here == '@' && at + 1 < end && isWordStart(text[at + 1])) {
+                var to = at + 1
+                while (to < end && isWord(text[to])) to++
+                out.add(Token(at, to, Kind.ANNOTATION))
+                at = to
+                continue
+            }
+
+            if (here.isDigit()) {
+                var to = at
+                while (to < end && (text[to].isLetterOrDigit() || text[to] == '.' ||
+                        text[to] == '_' || text[to] == 'x' || text[to] == 'X')
+                ) {
+                    to++
+                }
+                out.add(Token(at, to, Kind.NUMBER))
+                at = to
+                continue
+            }
+
+            if (isWordStart(here)) {
+                var to = at
+                while (to < end && isWord(text[to])) to++
+                val word = text.subSequence(at, to).toString()
+                when {
+                    grammar.keywords.contains(word) -> out.add(Token(at, to, Kind.KEYWORD))
+
+                    here.isUpperCase() -> out.add(Token(at, to, Kind.TYPE))
+                }
+                at = to
+                continue
+            }
+
+            at++
+        }
+    }
+
+    private fun quoted(
+        text: CharSequence,
+        from: Int,
+        end: Int,
+        quote: Char,
+        out: MutableList<Token>,
+    ): Int {
+        var to = from + 1
+        while (to < end) {
+            val c = text[to]
+            if (c == '\\') {
+                to += 2
+                continue
+            }
+
+            if (c == '\n') break
+            to++
+            if (c == quote) break
+        }
+        to = min(to, end)
+        out.add(Token(from, to, Kind.TEXT))
+        return max(to, from + 1)
+    }
+
+    private fun readMarkup(text: CharSequence, grammar: Grammar, out: MutableList<Token>) {
+        val end = min(text.length, LIMIT)
+        val block = grammar.blockComment
+        var at = 0
+        while (at < end) {
+            if (block != null && starts(text, at, block.first)) {
+                var to = at + block.first.length
+                while (to < end && !starts(text, to, block.second)) to++
+                to = min(end, to + block.second.length)
+                out.add(Token(at, to, Kind.COMMENT))
+                at = to
+                continue
+            }
+            if (text[at] != '<') {
+                at++
+                continue
+            }
+
+            var to = at + 1
+            if (to < end && (text[to] == '/' || text[to] == '?' || text[to] == '!')) to++
+            val nameFrom = to
+            while (to < end && (isWord(text[to]) || text[to] == ':' || text[to] == '-')) to++
+            if (to > nameFrom) out.add(Token(at, to, Kind.TAG))
+
+            while (to < end && text[to] != '>') {
+                when {
+                    text[to] == '"' || text[to] == '\'' -> {
+                        to = quoted(text, to, end, text[to], out)
+                    }
+                    isWordStart(text[to]) -> {
+                        val from = to
+                        while (to < end && (isWord(text[to]) || text[to] == ':' ||
+                                text[to] == '-' || text[to] == '.')
+                        ) {
+                            to++
+                        }
+                        out.add(Token(from, to, Kind.ATTRIBUTE))
+                    }
+                    else -> to++
+                }
+            }
+            if (to < end) {
+                out.add(Token(to, to + 1, Kind.TAG))
+                to++
+            }
+            at = max(to, at + 1)
+        }
+    }
+
+    private fun starts(text: CharSequence, at: Int, what: String): Boolean {
+        if (at + what.length > text.length) return false
+        for (index in what.indices) {
+            if (text[at + index] != what[index]) return false
+        }
+        return true
+    }
+
+    private fun isWordStart(c: Char): Boolean = c.isLetter() || c == '_' || c == '$'
+
+    private fun isWord(c: Char): Boolean = c.isLetterOrDigit() || c == '_' || c == '$'
+}
+
+internal class History(private val limit: Int = 400) {
+
+    class Change(
+        val at: Int,
+        val removed: CharSequence,
+        val added: CharSequence,
+        val whenMade: Long,
+    )
+
+    private val done = ArrayList<Change>()
+    private val undone = ArrayList<Change>()
+
+    companion object {
+
+        const val BREAK_MILLIS = 700L
+    }
+
+    fun canUndo(): Boolean = done.isNotEmpty()
+
+    fun canRedo(): Boolean = undone.isNotEmpty()
+
+    fun forget() {
+        done.clear()
+        undone.clear()
+    }
+
+    fun record(change: Change) {
+        undone.clear()
+        val last = done.lastOrNull()
+        val merges = last != null &&
+            last.removed.isEmpty() &&
+            change.removed.isEmpty() &&
+            change.added.length == 1 &&
+            change.added[0] != '\n' &&
+            change.at == last.at + last.added.length &&
+            change.whenMade - last.whenMade < BREAK_MILLIS
+        if (merges) {
+            done[done.size - 1] = Change(
+                last.at,
+                last.removed,
+                SpannableStringBuilder(last.added).append(change.added),
+                change.whenMade,
+            )
+            return
+        }
+        done.add(change)
+        while (done.size > limit) done.removeAt(0)
+    }
+
+    fun undo(into: Editable): Int? {
+        val change = done.removeLastOrNull() ?: return null
+        undone.add(change)
+        into.replace(change.at, change.at + change.added.length, change.removed)
+        return change.at + change.removed.length
+    }
+
+    fun redo(into: Editable): Int? {
+        val change = undone.removeLastOrNull() ?: return null
+        done.add(change)
+        into.replace(change.at, change.at + change.removed.length, change.added)
+        return change.at + change.added.length
+    }
+}
+
+class CodeEditor(context: Context, private var palette: Palette) : EditText(context) {
+
+    private companion object {
+
+        const val MARGIN_LINES = 40
+
+        const val REST_MILLIS = 140L
+    }
+
+    private val gutter = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        typeface = Typeface.MONOSPACE
+        textAlign = Paint.Align.RIGHT
+    }
+    private val rule = Paint()
+
+    private var grammar: Grammar = Grammar.PLAIN
+    private var tokens: List<Token> = emptyList()
+    private var painted = -1 to -1
+    private var reading = false
+    private var generation = 0
+
+    private var replaying = false
+
+    private val history = History()
+
+    fun canUndo(): Boolean = history.canUndo()
+
+    fun canRedo(): Boolean = history.canRedo()
+
+    var onChanged: (() -> Unit)? = null
+
+    private val readAgain = Runnable { read() }
+
+    init {
+        setTextColor(palette.foreground)
+        setBackgroundColor(Color.TRANSPARENT)
+        typeface = Typeface.MONOSPACE
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        gravity = Gravity.TOP or Gravity.START
+        setHorizontallyScrolling(true)
+        isHorizontalScrollBarEnabled = true
+        includeFontPadding = false
+        setLineSpacing(0f, 1.15f)
+        rule.strokeWidth = 1f
+
+        addTextChangedListener(object : TextWatcher {
+            private var removed: CharSequence = ""
+
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {
+                removed = s?.subSequence(start, start + count)?.toString().orEmpty()
+            }
+
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                if (replaying || s == null) return
+                history.record(
+                    History.Change(
+                        start,
+                        removed,
+                        s.subSequence(start, start + count).toString(),
+                        android.os.SystemClock.uptimeMillis(),
+                    )
+                )
+            }
+
+            override fun afterTextChanged(s: Editable?) {
+                onChanged?.invoke()
+                removeCallbacks(readAgain)
+                postDelayed(readAgain, REST_MILLIS)
+            }
+        })
+    }
+
+    fun open(name: String, text: String) {
+        grammar = Grammar.of(name)
+        replaying = true
+        setText(text)
+        replaying = false
+        history.forget()
+        setSelection(0)
+        read()
+    }
+
+    fun repaint(next: Palette) {
+        palette = next
+        setTextColor(palette.foreground)
+        painted = -1 to -1
+        colour()
+        invalidate()
+    }
+
+    fun showLine(line: Int) {
+        post {
+            val held = text ?: return@post
+            var at = 0
+            var seen = 1
+            while (seen < line && at < held.length) {
+                if (held[at] == '\n') seen += 1
+                at += 1
+            }
+            setSelection(at.coerceIn(0, held.length))
+            val layout = layout ?: return@post
+            val row = layout.getLineForOffset(at)
+
+            scrollTo(0, (layout.getLineTop(row) - height / 3).coerceAtLeast(0))
+            invalidate()
+        }
+    }
+
+    fun undo() = move { history.undo(it) }
+
+    fun redo() = move { history.redo(it) }
+
+    private fun move(what: (Editable) -> Int?) {
+        val editable = text ?: return
+        replaying = true
+        val caret = what(editable)
+        replaying = false
+        if (caret != null) {
+            setSelection(caret.coerceIn(0, editable.length))
+            onChanged?.invoke()
+            read()
+        }
+    }
+
+    private fun read() {
+        if (grammar === Grammar.PLAIN) {
+            tokens = emptyList()
+            return
+        }
+        if (reading) return
+        reading = true
+        generation += 1
+        val mine = generation
+        val snapshot = text?.toString().orEmpty()
+        Thread {
+            val found = runCatching { Reader.read(snapshot, grammar) }.getOrDefault(emptyList())
+            post {
+                reading = false
+                if (mine == generation) {
+                    tokens = found
+                    painted = -1 to -1
+                    colour()
+                    invalidate()
+                }
+            }
+        }.start()
+    }
+
+    override fun onScrollChanged(l: Int, t: Int, oldl: Int, oldt: Int) {
+        super.onScrollChanged(l, t, oldl, oldt)
+        colour()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        colour()
+    }
+
+    private fun colour() {
+        val layout = layout ?: return
+        val editable = text ?: return
+        if (tokens.isEmpty()) return
+
+        val first = layout.getLineForVertical(scrollY)
+        val last = layout.getLineForVertical(scrollY + height)
+        val from = layout.getLineStart(max(0, first - MARGIN_LINES))
+        val to = layout.getLineEnd(min(layout.lineCount - 1, last + MARGIN_LINES))
+        if (from >= painted.first && to <= painted.second) return
+        painted = from to to
+
+        for (span in editable.getSpans(0, editable.length, ForegroundColorSpan::class.java)) {
+            editable.removeSpan(span)
+        }
+        for (span in editable.getSpans(0, editable.length, StyleSpan::class.java)) {
+            editable.removeSpan(span)
+        }
+
+        for (token in tokens) {
+            if (token.to <= from) continue
+            if (token.from >= to) break
+            val start = max(token.from, 0)
+            val end = min(token.to, editable.length)
+            if (start >= end) continue
+            editable.setSpan(
+                ForegroundColorSpan(colourOf(token.kind)),
+                start,
+                end,
+                Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+            )
+            if (token.kind == Kind.KEYWORD || token.kind == Kind.TAG) {
+                editable.setSpan(
+                    StyleSpan(Typeface.BOLD),
+                    start,
+                    end,
+                    Spannable.SPAN_EXCLUSIVE_EXCLUSIVE,
+                )
+            }
+        }
+    }
+
+    private fun colourOf(kind: Kind): Int = when (kind) {
+        Kind.COMMENT -> Ink.fade(palette.muted, 0.85f)
+        Kind.TEXT -> palette.ok
+        Kind.NUMBER -> palette.warning
+        Kind.KEYWORD -> palette.accent
+        Kind.TYPE -> Ink.hot(palette.accent, 0.45f)
+        Kind.ANNOTATION -> palette.glowThird.let { Ink.hot(it, 0.55f) }
+        Kind.TAG -> palette.accent
+        Kind.ATTRIBUTE -> Ink.hot(palette.warning, 0.25f)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val layout = layout
+        if (layout != null && paddingLeft > 0) {
+            gutter.textSize = textSize * 0.78f
+            val caretLine = layout.getLineForOffset(selectionStart.coerceIn(0, text?.length ?: 0))
+            val first = layout.getLineForVertical(scrollY)
+            val last = layout.getLineForVertical(scrollY + height)
+            val edge = (paddingLeft - gutter.textSize * 0.9f) + scrollX
+
+            rule.color = Ink.fade(palette.accent, 0.06f)
+            canvas.drawRect(
+                scrollX.toFloat(),
+                layout.getLineTop(caretLine).toFloat(),
+                (scrollX + width).toFloat(),
+                layout.getLineBottom(caretLine).toFloat(),
+                rule,
+            )
+
+            for (line in first..min(last, layout.lineCount - 1)) {
+                gutter.color = if (line == caretLine) {
+                    palette.accent
+                } else {
+                    Ink.fade(palette.muted, 0.55f)
+                }
+                canvas.drawText(
+                    (line + 1).toString(),
+                    edge,
+                    layout.getLineBaseline(line).toFloat(),
+                    gutter,
+                )
+            }
+
+            rule.color = Ink.fade(palette.divider, 0.9f)
+            val at = (paddingLeft - gutter.textSize * 0.35f) + scrollX
+            canvas.drawLine(
+                at,
+                scrollY.toFloat(),
+                at,
+                (scrollY + height).toFloat(),
+                rule,
+            )
+        }
+        super.onDraw(canvas)
+    }
+
+    override fun onSelectionChanged(start: Int, end: Int) {
+        super.onSelectionChanged(start, end)
+        invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(readAgain)
+        super.onDetachedFromWindow()
+    }
+}
+
+internal object Drafts {
+
+    private const val FOLDER = "Drafts"
+
+    const val REST_MILLIS = 1_500L
+
+    private fun folder(context: Context): File =
+        File(context.filesDir, FOLDER).also { it.mkdirs() }
+
+    private fun named(root: String, path: String): String {
+        var held = 0xcbf2_9ce4_8422_2325uL
+        for (character in "$root $path") {
+            held = held xor character.code.toULong()
+            held *= 0x100_0000_01b3uL
+        }
+        val stem = path.substringAfterLast('/').filter { it.isLetterOrDigit() || it == '.' }
+        return "${stem.takeLast(40)}.${held.toString(16)}.draft"
+    }
+
+    fun read(context: Context, root: String, path: String): String? {
+        val file = File(folder(context), named(root, path))
+        if (!file.isFile) return null
+        return runCatching { file.readText() }.getOrNull()
+    }
+
+    fun write(context: Context, root: String, path: String, text: String) {
+        runCatching { File(folder(context), named(root, path)).writeText(text) }
+    }
+
+    fun forget(context: Context, root: String, path: String) {
+        runCatching { File(folder(context), named(root, path)).delete() }
+    }
 }

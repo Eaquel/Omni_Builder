@@ -18,10 +18,6 @@ val omniCompileSdk = 36
 val omniMinSdk = 30
 val omniTargetSdk = 36
 
-// One machine. See the note on `compiler::Abi` in Builder.rs for why the other
-// three were taken out rather than left in unused: every one of them is a
-// second build to produce, a second thing to test on, and a second thing nobody
-// tests on.
 val omniAbis = mapOf(
     "arm64-v8a" to "aarch64-linux-android",
 )
@@ -74,19 +70,6 @@ val omniSigningKeyAlias = omniSetting("omni.signing.keyAlias", "OMNI_SIGNING_KEY
 val omniSigningKeyPasswordEarly =
     omniSetting("omni.signing.keyPassword", "OMNI_SIGNING_KEY_PASSWORD")
 
-// The fingerprint the application checks itself against, taken out of the
-// keystore that is about to sign it.
-//
-// It used to be a second secret, set by hand beside the four that configure
-// signing. A second secret that has to agree with the first four is a second
-// secret that will one day not, and the way it fails is silent: the package is
-// signed correctly, the check finds a certificate it was told nothing about,
-// and every copy in the world reports itself unverified. Reading it off the
-// keystore doing the signing cannot drift, because there is nothing left for
-// it to drift from.
-//
-// It can still be set by hand, for a build signed somewhere else by something
-// this has no keystore for.
 val omniExpectedCertificate: String = run {
     val given = omniSetting("omni.signing.certificateSha256", "OMNI_SIGNING_CERT_SHA256")
     if (given != null) {
@@ -284,11 +267,6 @@ android {
     }
 }
 
-// This project ships one variant. Android Gradle always creates a debug one
-// as well, and building it means a second CMake configure and build for each
-// of the three ABIs, a second Kotlin compile and a second package, none of
-// which anything here reads. Turning it off leaves `release` as the only
-// thing `assemble` builds.
 androidComponents {
     beforeVariants(selector().withBuildType("debug")) { variant ->
         variant.enable = false

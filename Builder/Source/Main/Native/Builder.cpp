@@ -299,9 +299,7 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBindDevice(
     return nullptr;
   }
   jstring answer = HandBack(env, omni_bind_device(secret_text.c_str()));
-  // What was handed over is not wanted after this call. The Core has mixed it
-  // into what it needs; this copy is wiped rather than left in the heap for
-  // whatever reads it next.
+
   Wipe(&secret_text);
   return answer;
 }

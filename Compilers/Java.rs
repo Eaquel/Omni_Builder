@@ -1,141 +1,3 @@
-//! Java, compiled here rather than somewhere else.
-//!
-//! There is no `javac` on a phone, and there never will be. A build that needs
-//! one is a build that does not happen on the device it is for, which is the
-//! one thing this project exists to make possible. So this reads Java source
-//! and writes class files itself.
-//!
-//! # What it compiles
-//!
-//! Enough Java to write an Android application, and it says plainly where that
-//! ends. A compiler that quietly mis-handles what it does not understand is
-//! worse than one that refuses, because the refusal happens at build time and
-//! the mis-handling happens on somebody's phone.
-//!
-//! Handled: a package and its imports; the classes and interfaces a
-//! compilation declares, across as many files as it likes, which may name each
-//! other whichever order they arrive in, with a superclass and interfaces;
-//! fields with values on them, initialiser blocks -- static and not -- methods,
-//! varargs, and constructors that hand off to `this(...)` or up to
-//! `super(...)`; the primitive types, `String`, arrays and declared types;
-//! blocks, local declarations -- several to a line, and `var` where the value
-//! already says the type -- `if`/`else`, `while`, `do`/`while`, `for` in both
-//! the counted and the enhanced form, `switch` as a statement and as an
-//! expression, in both the colon and the arrow form, over integers, strings,
-//! enums or type patterns with `when` guards; `try`/`catch`/`finally` including
-//! multi-catch and the form that closes what it opened, `synchronized` on a
-//! method and as a block, `assert`, `throw`, `return`, `yield`, `break` and
-//! `continue` -- plain and labelled -- and expression statements; literals
-//! including text blocks and underscored numbers; names, field access, method
-//! invocation with the overload chosen by what is handed over, `new` -- and
-//! `held.new Inner()` -- the arithmetic, comparison, logical and bitwise
-//! operators with Java's precedence, assignment and compound assignment,
-//! `++`/`--`, casts, array indexing, `this`, `super`, `Outer.this`, class
-//! literals, the conditional operator, `instanceof` with a pattern that names
-//! what it matched, boxing and unboxing wherever Java does them, and string
-//! concatenation with `+`.
-//!
-//! Generic types are read and erased, which is what the JVM does with them:
-//! `List<String>` and `List` are the same class at run time, and the only
-//! thing lost is the checking `javac` does before erasing them itself. A type
-//! variable erases to its bound, so `<T extends Number> T pick()` is a method
-//! returning `Number` and `<T> T pick()` is one returning `Object`. Where that
-//! makes an override differ from what it overrides, the bridge method the JVM
-//! needs to find it is written.
-//!
-//! What a type was written holding is kept as far as the call that reads it,
-//! because that is the one thing erasure leaves behind: `List<Piece>.get`
-//! gives back a Piece, and the cast that says so is written here the same as
-//! `javac` writes it. The same knowledge says what a method takes --
-//! `Map<String, Named>.put` takes a Named, which is what lets a lambda handed
-//! to it know what it stands for. A class written here is no different: a
-//! `Box<T>` records which of its parameters each method was written as, so a
-//! call on a `Box<String>` hands back a String.
-//!
-//! A method's own `<T>` is another matter. `javac` works out what T was from
-//! the call and casts to it; this does not infer, so it casts to wherever the
-//! value is going instead -- the same instruction, arrived at from the other
-//! end. Which means `String s = first(list)` is right, and `first(list)` on
-//! its own is an Object until something says otherwise.
-//!
-//! A `switch` over an enum that names every constant, or over a `sealed` type
-//! that names every subtype, answers for everything and needs no `default` --
-//! and gets, where nothing can reach, the same throw `javac` puts there.
-//!
-//! Enums and records are read and turned into the classes they stand for --
-//! a final class extending `java.lang.Enum` with its constants, its class
-//! initialiser, `values` and `valueOf`; a final class with a field and an
-//! accessor per component and a `toString`. A `switch` over an enum compares
-//! its constants, which are the only instances of their class there are. A
-//! `try` that holds things closes them in the reverse of the order it opened
-//! them.
-//!
-//! What it may call into is what it was handed. A jar is a zip of class
-//! files, and reading one is reading every class in it -- names, superclasses,
-//! interfaces, and the descriptors a call will be checked against. Hand over
-//! `android.jar` and the whole platform is there: import what you like. The
-//! builder does that on its own, from the project's `Libraries` folder and
-//! from the SDK where there is one.
-//!
-//! Behind that there is a small fixed table of runtime signatures -- the
-//! exceptions, printing, string work, boxing, arithmetic, the collections --
-//! so that code which has been handed nothing still compiles. Anything handed
-//! over wins over it.
-//!
-//! A class written where it is used -- `new Iface() { ... }` -- and a lambda
-//! both become a class of their own, named after the one they were written
-//! inside. What they read from around them is what they are built with: the
-//! enclosing instance, and every local of the method they were written in that
-//! their body names. `javac` writes an `invokedynamic` for a lambda and lets
-//! the runtime assemble the class; Android rewrites that back into a class
-//! anyway, so it is written out here.
-//!
-//! A method reference is the same lambda written shorter, so it is written as
-//! one. A class, an interface, an enum or a record declared inside another is
-//! a class of its own, named for where it was written; one written without
-//! `static` belongs to an instance and keeps it in a field, which is what lets
-//! it read what that instance holds.
-//!
-//! An interface may have `default`, `static` and `private` methods, and each
-//! gets the flags and the invoke instruction the JVM expects for it. A
-//! `sealed` type writes down what it permits, a record writes down its
-//! components, and a class written inside another says which nest it is in --
-//! all three are attributes rather than instructions, and all three are what
-//! reflection and the runtime read to answer questions about the shape.
-//!
-//! An annotation type of one's own is declared with `@interface`, with defaults
-//! on its elements. Whether an annotation reaches the class file is what
-//! `@Retention` on it says: one kept at runtime is written down so that
-//! reflection can read it back, and one kept only for the compiler is read and
-//! dropped -- which is why `@Override` costs nothing.
-//!
-//! `import static` puts a name from another class in scope without the class
-//! in front of it, for a method or for a constant, one name or all of them.
-//!
-//! `native` is refused by name, with the line it happened on, and so is a
-//! module declaration -- the runtime on a device has no module system, and a
-//! `module-info.class` is a file nothing there would read. `strictfp` is read
-//! and ignored, which is what it means since Java 17.
-//!
-//! # What it targets
-//!
-//! Class file major version 69, which is Java 25.
-//!
-//! That number is not a label. From version 50 the JVM verifies with the
-//! type-checking verifier, which wants a StackMapTable attribute on every
-//! method that branches, and from 51 a missing one is a hard failure rather
-//! than a fallback. Writing 69 without frames would produce class files that
-//! read fine, that `javap` prints happily, that pass through `d8` -- and that a
-//! real JVM refuses the moment a method contains an `if`. So this writes
-//! frames.
-//!
-//! What that costs is a second thing to be right about. The verifier does not
-//! infer the state of the stack and locals at a branch target; it is told, and
-//! it checks that every path arriving there agrees with what it was told. A
-//! frame that is wrong is worse than no frame, because it is a claim. The
-//! emitter therefore tracks what type is in every local and every stack slot as
-//! it goes, and records that state wherever a branch can land.
-
 use crate::caps::Capability;
 use crate::compiler::{
     Compiled, Compiler, Expected, Identity, Kind, Plan, Probe, Reproducibility, Request, Session,
@@ -147,15 +9,9 @@ use crate::Status;
 
 pub const ORIGIN: &str = "omni.plugin.java";
 
-/// Java 25 class files. Verified by the type-checking verifier, which means
-/// every method that branches carries a StackMapTable and every one of those
-/// has to be right. See the note at the top of this file.
 pub const CLASS_MAJOR: u16 = 69;
 pub const CLASS_MINOR: u16 = 0;
 
-/// The Java this accepts is a subset of every release from 8 onward. The
-/// version named here is the one the project pins, and it reaches the compiler
-/// identity so that changing it invalidates what the old one built.
 pub const LANGUAGE_RELEASE: &str = "25";
 
 fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
@@ -168,13 +24,6 @@ fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
     )
 }
 
-/// A refusal about one place in one file.
-///
-/// The line and the column go into the diagnostic's own location as well as
-/// into the words a person reads, because an editor that means to put a mark
-/// on that line cannot get one out of a sentence. The file is not known here
-/// -- the lexer and the parser see text, not paths -- so it is left empty and
-/// filled in by whoever handed the text over.
 fn at(code: &str, line: u32, column: u32, message: impl Into<String>) -> Diagnostic {
     fail(code, message)
         .with_context(format!("Line {line}, column {column}"))
@@ -198,8 +47,6 @@ fn unsupported(line: u32, column: u32, what: &str) -> Diagnostic {
          Compilers/Java.rs.",
     )
 }
-
-// ------------------------------------------------------------------ lexer
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Token {
@@ -245,9 +92,6 @@ pub struct Spelled {
     pub column: u32,
 }
 
-/// Every word Java reserves. All of them are recognised, including the ones
-/// this compiler goes on to refuse: a keyword read as a name would turn a
-/// clear refusal into a confusing one.
 const KEYWORDS: &[&str] = &[
     "abstract",
     "assert",
@@ -301,7 +145,6 @@ const KEYWORDS: &[&str] = &[
     "while",
 ];
 
-/// Longest first, so that `>>>=` is never read as `>>` and `>=`.
 const MARKS: &[&str] = &[
     ">>>=", "<<=", ">>=", ">>>", "...", "->", "::", "++", "--", "&&", "||", "==", "!=", "<=", ">=",
     "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "{", "}", "(", ")", "[", "]", ";",
@@ -378,7 +221,6 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// Every token in the source, with the line and column each was found at.
     pub fn tokens(mut self) -> Result<Vec<Spelled>, Diagnostic> {
         let mut out = Vec::new();
         loop {
@@ -458,10 +300,8 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    /// A backslash escape, as Java writes them. The value is a UTF-16 code
-    /// unit, because that is what a Java `char` is.
     fn escape(&mut self, line: u32, column: u32) -> Result<u16, Diagnostic> {
-        self.bump(); // the backslash
+        self.bump();
         let byte = self.bump();
         Ok(match byte {
             b'n' => 10,
@@ -505,7 +345,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn text(&mut self, line: u32, column: u32) -> Result<Token, Diagnostic> {
-        self.bump(); // the opening quote
+        self.bump();
         let mut units: Vec<u16> = Vec::new();
         loop {
             match self.peek(0) {
@@ -519,9 +359,6 @@ impl<'a> Lexer<'a> {
                 }
                 b'\\' => units.push(self.escape(line, column)?),
                 _ => {
-                    // Kept as it is written, which for anything outside ASCII
-                    // means gathering the whole character rather than a byte of
-                    // it.
                     let start = self.at;
                     self.bump();
                     while self.peek(0) >= 0x80 && self.peek(0) < 0xc0 {
@@ -535,21 +372,11 @@ impl<'a> Lexer<'a> {
         Ok(Token::Str(String::from_utf16_lossy(&units)))
     }
 
-    /// A text block: `"""`, a line terminator, the content, and `"""` again.
-    ///
-    /// The rule that makes these worth having is the one about indentation.
-    /// A block written inside a method is indented to sit with the code around
-    /// it, and none of that indentation is part of the string. Java decides
-    /// how much to remove by taking the smallest indentation of any non-blank
-    /// line -- and of the closing delimiter's line, whether it is blank or
-    /// not, which is what lets the closing `"""` choose the margin on its own.
     fn text_block(&mut self, line: u32, column: u32) -> Result<Token, Diagnostic> {
         self.bump();
         self.bump();
         self.bump();
 
-        // Only whitespace may follow the opening delimiter, and then the line
-        // has to end. Anything else is not a text block at all.
         while matches!(self.peek(0), b' ' | b'\t' | b'\x0c') {
             self.bump();
         }
@@ -567,9 +394,6 @@ impl<'a> Lexer<'a> {
         }
         self.bump();
 
-        // The raw content, with escapes left alone: an escaped quote must not
-        // be able to end the block, and `\\n` must not become a line the
-        // indentation rule then measures.
         let mut raw = String::new();
         loop {
             if self.at >= self.source.len() {
@@ -607,7 +431,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn character(&mut self, line: u32, column: u32) -> Result<Token, Diagnostic> {
-        self.bump(); // the opening quote
+        self.bump();
         let value = if self.peek(0) == b'\\' {
             self.escape(line, column)?
         } else {
@@ -677,10 +501,6 @@ impl<'a> Lexer<'a> {
             .filter(|c| *c != '_')
             .collect();
 
-        // A leading zero on a whole number is octal in Java. It is a trap
-        // rather than a feature, and it is also what the language says, so it
-        // is read as octal rather than refused -- and a digit that is not one
-        // is the mistake it looks like.
         let (digits, radix) = if radix == 10
             && !floating
             && digits.len() > 1
@@ -747,14 +567,6 @@ impl<'a> Lexer<'a> {
     }
 }
 
-/// Removes the indentation that is there to make the source readable rather
-/// than to be part of the string.
-///
-/// The measure is the smallest indentation of any non-blank line, and of the
-/// closing delimiter's own line when it has one -- so moving the closing
-/// `"""` left or right moves the margin without touching the content. Trailing
-/// whitespace goes from every line, because it is invisible and therefore
-/// cannot have been meant.
 fn strip_incidental_whitespace(raw: &str) -> String {
     let normalised = raw.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<&str> = normalised.split('\n').collect();
@@ -789,20 +601,12 @@ fn strip_incidental_whitespace(raw: &str) -> String {
         })
         .collect();
     if closing_is_alone && kept.len() > 1 {
-        // The delimiter's own line is the margin, not content. What it leaves
-        // behind is the line break before it.
         kept.pop();
         kept.push(String::new());
     }
     kept.join("\n")
 }
 
-/// The escapes a text block takes, which are the ordinary ones and two more.
-///
-/// `\s` is a space that survives the trailing-whitespace rule, and a backslash
-/// at the end of a line joins it to the next one. Both exist because the rule
-/// that removes invisible whitespace would otherwise make some strings
-/// impossible to write.
 fn text_block_escapes(text: &str, line: u32, column: u32) -> Result<String, Diagnostic> {
     let source: Vec<char> = text.chars().collect();
     let mut units: Vec<u16> = Vec::new();
@@ -827,8 +631,6 @@ fn text_block_escapes(text: &str, line: u32, column: u32) -> Result<String, Diag
             'f' => units.push(12),
             's' => units.push(u16::from(b' ')),
             '0'..='7' => {
-                // An octal escape is one to three digits, and no more than
-                // 0377.
                 let mut value = u32::from(marker) - u32::from('0');
                 let mut taken = 1;
                 while taken < 3 {
@@ -847,7 +649,7 @@ fn text_block_escapes(text: &str, line: u32, column: u32) -> Result<String, Diag
                 let mut buffer = [0u16; 2];
                 units.extend_from_slice(marker.encode_utf16(&mut buffer));
             }
-            // A backslash cursor the end of a line joins the two lines.
+
             '\n' => {}
             'u' => {
                 while source.get(cursor) == Some(&'u') {
@@ -890,18 +692,12 @@ fn at_end_of_escape(line: u32, column: u32) -> Diagnostic {
     )
 }
 
-/// Java's integer literals are unsigned in the source and signed in the value:
-/// `0x80000000` is a legal `int` and it is negative. Parsing has to allow the
-/// whole unsigned range and then reinterpret.
 fn parse_integer(digits: &str, radix: u32, long: bool) -> Option<i64> {
     let value = u64::from_str_radix(digits, radix).ok()?;
     if long {
         return Some(value as i64);
     }
     if radix == 10 {
-        // The one decimal literal allowed to exceed the range is 2147483648,
-        // and only directly under a unary minus. Allowing it everywhere is a
-        // small looseness against a large amount of machinery.
         if value > 2_147_483_648 {
             return None;
         }
@@ -913,14 +709,8 @@ fn parse_integer(digits: &str, radix: u32, long: bool) -> Option<i64> {
     Some(value as u32 as i32 as i64)
 }
 
-// -------------------------------------------------------------------- ast
-
-/// A type as it was written. Nothing is resolved yet: `Activity` is a name
-/// here and becomes a class later, or fails to.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Written {
-    /// `var`. The type is whatever the value turns out to be, so there is
-    /// nothing to resolve until there is a value to resolve it from.
     Inferred,
     Void,
     Boolean,
@@ -931,17 +721,11 @@ pub enum Written {
     Long,
     Float,
     Double,
-    /// A class, with the type arguments it was written with. Erasure throws
-    /// those away before the class file is written; they are kept this far
-    /// because they say what a call on the thing gives back.
+
     Named(String, Vec<Written>),
-    /// A type parameter of the class this was written in, and what it erases
-    /// to. The number is which one, counting from the left, so that a call on
-    /// a `Box<String>` can put the String back where the `T` was.
+
     Variable(usize, Box<Written>),
-    /// A type parameter of the method itself. There is no receiver to take an
-    /// argument from, so this is worked out from what the call hands over --
-    /// which is why it is kept by name rather than by number.
+
     OwnVariable(String, Box<Written>),
     Array(Box<Written>),
 }
@@ -1020,7 +804,6 @@ impl Binary {
         })
     }
 
-    /// Java's own table. Higher binds tighter.
     fn precedence(self) -> u8 {
         match self {
             Binary::Multiply | Binary::Divide | Binary::Remainder => 12,
@@ -1048,56 +831,48 @@ pub enum Expression {
     Boolean(bool),
     Null,
     This,
-    /// `super`, which is `this` read as the class above it: `super.kept` is
-    /// the field that class declares, whatever this one declares beside it.
+
     Super,
-    /// A bare name: a local, a parameter, a field of this class, or the start
-    /// of a qualified name. Which one it is is decided by the checker.
+
     Name(String),
     Field {
         of: Box<Expression>,
         name: String,
     },
     Call {
-        /// Absent for a bare `name(...)`, which is a call on `this` or a static
-        /// call on this class.
         on: Option<Box<Expression>>,
-        /// Whether it was written `super.name(...)`.
+
         super_call: bool,
         name: String,
         arguments: Vec<Expression>,
-        /// `Box.<String>empty()`: the method's own type arguments, written out
-        /// where the call has no other way of saying them. Empty everywhere
-        /// else, which is almost every call.
+
         held: Vec<Written>,
     },
     New {
         what: Written,
         arguments: Vec<Expression>,
-        /// `held.new Inner()`: which instance the new one belongs to, where
-        /// that was written rather than left to be whichever one is here.
+
         outer: Option<Box<Expression>>,
     },
     NewArray {
         of: Written,
-        /// One per dimension written with a length in it. `new int[3][4]` has
-        /// two; `new int[3][]` has one and is still two-dimensional.
+
         lengths: Vec<Expression>,
-        /// How many empty pairs of brackets follow the ones with lengths.
+
         empty: usize,
     },
-    /// `{ 1, 2, 3 }`, with or without `new int[]` in front of it.
+
     ArrayOf {
         of: Option<Written>,
         values: Vec<Expression>,
         line: u32,
     },
-    /// `Foo.class`.
+
     ClassLiteral {
         of: Written,
         line: u32,
     },
-    /// `Outer.this`, inside a class that belongs to an instance of `Outer`.
+
     OuterThis {
         of: Written,
         line: u32,
@@ -1117,11 +892,11 @@ pub enum Expression {
     },
     Assign {
         target: Box<Expression>,
-        /// `None` for `=`, otherwise the operator of a compound assignment.
+
         operator: Option<Binary>,
         value: Box<Expression>,
     },
-    /// `++x`, `x++`, and the two decrements.
+
     Step {
         target: Box<Expression>,
         by: i32,
@@ -1140,39 +915,33 @@ pub enum Expression {
         of: Box<Expression>,
         pattern: Box<Pattern>,
     },
-    /// Not written by anybody: what a pattern that takes a record apart comes
-    /// to. It puts a value in a name and stands for `true`, so that a whole
-    /// pattern can be one `&&` chain and the frames come out of the machinery
-    /// that already knows how to write one.
+
     Bind {
         name: String,
         what: Written,
         value: Box<Expression>,
     },
-    /// A `switch` used for its value rather than its effect.
+
     Switch {
         subject: Box<Expression>,
         arms: Vec<Arm>,
     },
-    /// `Type::method`, `value::method`, `Type::new`: a lambda whose body is
-    /// one call, and whose parameters are whatever the interface hands over.
+
     MethodRef {
         on: Box<Expression>,
         name: String,
         line: u32,
     },
-    /// `x -> ...`: the one method of an interface, written where it is
-    /// wanted. Which interface is decided by what it is being handed to.
+
     Lambda {
         parameters: Vec<(Option<Written>, String)>,
-        /// The body, as a block. An expression body is wrapped in one.
+
         body: Vec<Positioned<Statement>>,
-        /// True when it was written as an expression, which means its value is
-        /// what the method returns -- unless the method returns nothing.
+
         expression: bool,
         line: u32,
     },
-    /// A class with no name of its own, written where it is used.
+
     Anonymous {
         what: Written,
         arguments: Vec<Expression>,
@@ -1182,14 +951,12 @@ pub enum Expression {
     },
 }
 
-/// The members of a class body written without a name around it.
 #[derive(Clone, Debug)]
 pub struct Body {
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
     pub instance_setup: Vec<Positioned<Statement>>,
-    /// A `static` block, which a class written where it is used has been
-    /// allowed to hold since Java 16.
+
     pub static_setup: Vec<Positioned<Statement>>,
 }
 
@@ -1228,7 +995,7 @@ pub enum Statement {
         body: Box<Positioned<Statement>>,
         condition: Expression,
     },
-    /// `for (T name : over)`, over an array.
+
     ForEach {
         what: Written,
         name: String,
@@ -1245,24 +1012,19 @@ pub enum Statement {
         finally: Option<Vec<Positioned<Statement>>>,
     },
     Throw(Expression),
-    /// A name in front of a statement, which `break` and `continue` can then
-    /// say by name.
+
     Labelled {
         label: String,
         body: Box<Positioned<Statement>>,
     },
-    /// `synchronized (x) { ... }`: the lock is taken before the block and
-    /// given back after it, however the block is left.
+
     Synchronized {
         on: Expression,
         body: Vec<Positioned<Statement>>,
     },
-    /// A class written inside a method. It has a name and it is used by name,
-    /// and what it reads from around it is copied in the same way a class
-    /// written where it is used has its copied in.
+
     Locally(Vec<Unit>),
-    /// `assert x;` and `assert x : said;`, which run only where the runtime
-    /// was asked for them.
+
     Assert {
         condition: Expression,
         said: Option<Expression>,
@@ -1270,65 +1032,43 @@ pub enum Statement {
     Return(Option<Expression>),
     Break(Option<String>),
     Continue(Option<String>),
-    /// `yield`, which is how a `switch` written with `:` says what its value
-    /// is.
+
     Yield(Expression),
-    /// `super(...)` or `this(...)`, which may only be the first statement of a
-    /// constructor.
+
     Chain {
         to_super: bool,
         arguments: Vec<Expression>,
     },
-    /// Several declarations written as one, which share a scope with what is
-    /// around them rather than opening one of their own.
+
     Several(Vec<Positioned<Statement>>),
     Nothing,
 }
 
-/// One arm of a `switch`.
 #[derive(Clone, Debug)]
 pub struct Arm {
-    /// The values this arm answers to. Empty means `default`.
     pub labels: Vec<Expression>,
-    /// `case String s ->`: the type this arm answers to and the name it gives
-    /// what it matched. An arm has a pattern or labels, never both.
+
     pub pattern: Option<Pattern>,
-    /// `when ...` after a pattern, which has to hold as well as the type.
+
     pub guard: Option<Expression>,
-    /// Written `->` rather than `:`, which means it does not fall through.
+
     pub arrow: bool,
     pub body: Vec<Positioned<Statement>>,
     pub line: u32,
     pub column: u32,
 }
 
-/// A pattern: a type, and either a name for whatever matched it or the parts
-/// it is taken apart into.
-///
-/// `String s` is a type and a name. `Point(int x, int y)` is a type and two
-/// patterns, one per component, and it matches when the type does and every
-/// one of those does. They nest: `Circle(Point(var cx, var cy), double r)`.
 #[derive(Clone, Debug)]
 pub struct Pattern {
     pub what: Written,
-    /// The name it gives what it matched, empty where it gives none.
+
     pub name: String,
-    /// The components, for a pattern written with parentheses.
+
     pub parts: Vec<Pattern>,
-    /// Whether it was written with parentheses at all, which is the difference
-    /// between naming a record and taking one apart.
+
     pub taken: bool,
 }
 
-/// Turns an enum into the class it stands for.
-///
-/// There is no enum in a class file. There is a final class extending
-/// `java.lang.Enum` with one static field per constant, a class initialiser
-/// that makes them, a private constructor that hands the name and the position
-/// upwards, and the two static methods every enum has. `javac` writes all of
-/// that too; the difference is only that this writes it as source-shaped
-/// members before anything else looks, so nothing downstream needs to know an
-/// enum was ever involved.
 fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
     let answering = constants.iter().any(|held| held.body.is_some());
     let named = Written::Named(unit.name.clone(), Vec::new());
@@ -1355,9 +1095,6 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         )
     };
 
-    // Every constant is a field of the enum's own type, and the class
-    // initialiser is what fills them in -- in the order they were written,
-    // because that order is what `ordinal` means.
     let mut setup = Vec::new();
     for (position, constant) in constants.iter().enumerate() {
         unit.fields.push(Field {
@@ -1373,9 +1110,7 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             Expression::Int(position as i64),
         ];
         arguments.extend(constant.arguments.iter().cloned());
-        // A constant that answers differently from the rest is one instance
-        // of a class of its own, which is exactly what a class written where
-        // it is used already is.
+
         let made = match &constant.body {
             Some(body) => Expression::Anonymous {
                 what: named.clone(),
@@ -1397,8 +1132,6 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         ));
     }
 
-    // The array `values()` hands out a copy of. It is private so that nothing
-    // outside can reach in and change what the enum's constants are.
     const HELD: &str = "$VALUES";
     unit.fields.push(Field {
         modifiers: Modifiers {
@@ -1432,14 +1165,10 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
             Expression::Name(constant.name.clone()),
         ));
     }
-    // Before anything the person wrote in a `static` block, because that block
-    // may name the constants.
+
     setup.extend(std::mem::take(&mut unit.static_setup));
     unit.static_setup = setup;
 
-    // Every constructor gains the name and the position in front of what was
-    // written, and hands them up. A constructor nobody wrote is the one taking
-    // nothing else.
     if !unit.methods.iter().any(|held| held.constructor) {
         unit.methods.push(Method {
             modifiers: Modifiers {
@@ -1491,8 +1220,6 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         method.body = Some(body);
     }
 
-    // `values()` hands out a new array every time, which is what a copy is
-    // for: nothing a caller does to it can reach the enum.
     let mut values = vec![at(
         1,
         Statement::Declare {
@@ -1543,8 +1270,6 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
         throws: Vec::new(),
     });
 
-    // `valueOf` is written out rather than handed to `Enum.valueOf`, which
-    // would need a class literal this compiler has no way to write.
     let mut value_of = Vec::new();
     for constant in constants {
         value_of.push(at(
@@ -1598,25 +1323,11 @@ fn as_the_class_it_is(mut unit: Unit, constants: &[Constant]) -> Unit {
     });
 
     unit.extends = Some("java.lang.Enum".to_string());
-    // An enum is final -- unless one of its constants answers for itself, in
-    // which case that constant is a class extending this one and a final
-    // class cannot be extended. That is what `javac` writes too.
+
     unit.modifiers.final_ = !answering;
     unit
 }
 
-/// Turns a record into the class it stands for.
-///
-/// A record is a final class extending `java.lang.Record` with a private final
-/// field per component, a constructor that fills them in, an accessor per
-/// component, and `equals`, `hashCode` and `toString`. `javac` writes those
-/// three with `invokedynamic` and a bootstrap that builds them at run time;
-/// they are written out here instead, because an `invokedynamic` is a call
-/// into a class this compiler would then have to know about and Android
-/// rewrites it anyway.
-/// What a record's compact constructor is called until the record becomes a
-/// class. It is not a name anybody can write, which is the point: nothing else
-/// can collide with it and nothing downstream ever sees it.
 const COMPACT: &str = "<compact>";
 
 fn as_the_class_a_record_is(
@@ -1656,18 +1367,12 @@ fn as_the_class_a_record_is(
         });
     }
 
-    // `Circle { ... }` -- the canonical constructor written without saying
-    // again what it takes. What was written runs first, against the component
-    // names as ordinary parameters, and the fields are filled in from whatever
-    // those names hold at the end of it.
     let compact = unit
         .methods
         .iter()
         .position(|held| held.name == COMPACT)
         .map(|at| unit.methods.remove(at));
 
-    // The canonical constructor, unless the person wrote one taking exactly
-    // the components.
     let written_canonical = unit
         .methods
         .iter()
@@ -1688,9 +1393,6 @@ fn as_the_class_a_record_is(
             }))
         }));
         unit.methods.push(Method {
-            // A compact constructor written with no visibility at all is
-            // still the record's canonical one, and that has to be reachable
-            // wherever the record is.
             modifiers: match &compact {
                 Some(held)
                     if held.modifiers.public
@@ -1717,7 +1419,6 @@ fn as_the_class_a_record_is(
         });
     }
 
-    // An accessor per component, unless one was written.
     for (what, name) in components {
         if unit
             .methods
@@ -1746,16 +1447,11 @@ fn as_the_class_a_record_is(
         });
     }
 
-    // `toString`, as `Name[x=1, y=2]`, which is the shape the language
-    // specifies.
     if !unit
         .methods
         .iter()
         .any(|held| held.name == "toString" && held.parameters.is_empty())
     {
-        // The simple name, not the one a record written inside a class is
-        // filed under: `Wide.Square` says `Square[side=1.0]`, which is what
-        // the language specifies and what `javac` writes.
         let simple = unit.name.rsplit('$').next().unwrap_or(&unit.name);
         let mut text = Expression::Str(format!("{simple}["));
         for (index, (_, name)) in components.iter().enumerate() {
@@ -1798,9 +1494,6 @@ fn as_the_class_a_record_is(
         });
     }
 
-    // `equals`, component by component. Written as a pattern, so there is no
-    // cast to write and no second test: `other instanceof Name it` is the
-    // check and the name for what passed it.
     const IT: &str = "$it";
     const OTHER: &str = "$other";
     if !unit
@@ -1865,9 +1558,6 @@ fn as_the_class_a_record_is(
         });
     }
 
-    // And `hashCode`, which multiplies by 31 and adds, one component at a
-    // time -- the same walk `javac` builds at run time, so two records that
-    // are equal hash the same and usually to the same number.
     if !unit
         .methods
         .iter()
@@ -1909,21 +1599,11 @@ fn as_the_class_a_record_is(
         });
     }
 
-    // A record *extends* `java.lang.Record`. Written as an interface it would
-    // still verify and `Class.isRecord` would answer no, which is the whole
-    // point of the shape.
     unit.extends = Some("java.lang.Record".to_string());
     unit.modifiers.final_ = true;
     Ok(unit)
 }
 
-/// Whether two of a record's components are the same, which depends on what
-/// the component is.
-///
-/// A number is compared with `==`, except a floating-point one: `Float.compare`
-/// says that two NaNs are the same and that `0.0` and `-0.0` are not, which is
-/// what a record means by equal and what `==` does not say. A reference is
-/// compared with its own `equals`, and null is only the same as null.
 fn the_same_component(what: &Written, mine: Expression, theirs: Expression) -> Expression {
     let compared_by = |class: &str| Expression::Binary {
         operator: Binary::Equal,
@@ -1971,9 +1651,6 @@ fn the_same_component(what: &Written, mine: Expression, theirs: Expression) -> E
     }
 }
 
-/// What one component of a record contributes to its hash. Every box class
-/// knows how to hash the primitive it holds, and a reference hashes itself --
-/// or to nothing at all, where it is null.
 fn what_one_component_hashes_to(what: &Written, mine: Expression) -> Expression {
     let hashed_by = |class: &str| Expression::Call {
         on: Some(Box::new(Expression::Name(class.to_string()))),
@@ -2009,12 +1686,6 @@ fn what_one_component_hashes_to(what: &Written, mine: Expression) -> Expression 
     }
 }
 
-/// Gives a class written inside another the instance it belongs to.
-///
-/// A nested class written without `static` can read what the instance around
-/// it holds, so it keeps that instance in a field and every constructor takes
-/// it. `Outer.this` is that field; `new Inner()` written inside `Outer` hands
-/// `this` over without anybody writing it down.
 fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<String>) -> Unit {
     let enclosing = match package {
         Some(package) => format!("{}/{holder}", package.replace('.', "/")),
@@ -2067,7 +1738,6 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
         parameters.append(&mut method.parameters);
         method.parameters = parameters;
 
-        // After the call up into the superclass, which has to be first.
         let mut body = method.body.take().unwrap_or_default();
         let filling = Positioned {
             node: Statement::Express(Expression::Assign {
@@ -2093,8 +1763,6 @@ fn belonging_to_an_instance(mut unit: Unit, holder: &str, package: &Option<Strin
     unit
 }
 
-/// The same type with the flag its assertions are guarded by, and the line
-/// that works it out.
 fn with_the_assertion_flag(unit: &Unit) -> Unit {
     let mut held = unit.clone();
     held.fields.push(Field {
@@ -2136,7 +1804,6 @@ fn with_the_assertion_flag(unit: &Unit) -> Unit {
     held
 }
 
-/// Whether anything in this type writes an `assert`.
 fn holds_an_assert(unit: &Unit) -> bool {
     fn inside(statement: &Statement) -> bool {
         let mut found = matches!(statement, Statement::Assert { .. });
@@ -2192,19 +1859,12 @@ fn holds_an_assert(unit: &Unit) -> bool {
         .any(|one| inside(&one.node))
 }
 
-/// The field an `assert` is guarded by, which the class initialiser works out
-/// once from what the runtime was asked for.
 const ASSERTIONS_OFF: &str = "$assertionsDisabled";
 
-/// Where a `switch` with patterns in it keeps what it is choosing on, so that
-/// every arm can test it and bind it without working it out again.
 const PATTERN_SUBJECT: &str = "$shape";
 
-/// The field a class written where it is used holds its enclosing instance in.
 const OUTER: &str = "$outer";
 
-/// A type as it would have been written, so that a synthesised member can name
-/// it. Only what a name can stand for: a primitive, an array, or a class.
 fn written_for(what: &Type) -> Option<Written> {
     Some(match what {
         Type::Void => return None,
@@ -2217,9 +1877,7 @@ fn written_for(what: &Type) -> Option<Written> {
         Type::Float => Written::Float,
         Type::Double => Written::Double,
         Type::Array(of) => Written::Array(Box::new(written_for(of)?)),
-        // With whatever it was written holding, so that a lambda handed back
-        // by a lambda -- `a -> b -> a * b` -- still knows what its own
-        // parameters are.
+
         Type::Object(name, held) => Written::Named(
             name.replace('/', "."),
             held.iter().filter_map(written_for).collect(),
@@ -2227,12 +1885,6 @@ fn written_for(what: &Type) -> Option<Written> {
     })
 }
 
-/// Every bare name a class body reads.
-///
-/// More than it needs: a name a method of the body declares itself is counted
-/// too. That costs an unused field at worst, because a local always wins over
-/// a field where both are visible -- and missing one would be a name that
-/// resolves to nothing.
 fn names_read(body: &Body, out: &mut Vec<String>) {
     for field in &body.fields {
         if let Some(value) = &field.value {
@@ -2249,7 +1901,6 @@ fn names_read(body: &Body, out: &mut Vec<String>) {
     }
 }
 
-/// Every bare name a class body writes to.
 fn names_assigned(body: &Body, out: &mut Vec<String>) {
     fn assigned_in_expression(expression: &Expression, out: &mut Vec<String>) {
         match expression {
@@ -2299,13 +1950,6 @@ fn names_in_expression(expression: &Expression, out: &mut Vec<String>) {
     walk_expression(expression, &mut |inside| names_in_expression(inside, out));
 }
 
-/// Every class written inside a method of this one, with the name it is filed
-/// under.
-///
-/// The classpath needs these before the method that uses them is compiled: a
-/// local class is used by name, and a name that stands for nothing is a call
-/// this compiler refuses. What they take to build is worked out where they are
-/// written; what is needed here is only their shape.
 fn classes_written_inside(unit: &Unit) -> Vec<Unit> {
     let mut found = Vec::new();
     let mut visit = |statement: &Statement| {
@@ -2334,7 +1978,6 @@ fn classes_written_inside(unit: &Unit) -> Vec<Unit> {
     found
 }
 
-/// Hands this statement and every statement inside it to `visit`.
 fn every_statement(statement: &Statement, visit: &mut impl FnMut(&Statement)) {
     visit(statement);
     let mut inside = |held: &Positioned<Statement>| every_statement(&held.node, visit);
@@ -2379,13 +2022,10 @@ fn every_statement(statement: &Statement, visit: &mut impl FnMut(&Statement)) {
     }
 }
 
-/// Hands every expression written directly in a statement to `visit`, and
-/// walks into the statements inside it.
 fn walk_statement(statement: &Statement, visit: &mut impl FnMut(&Expression)) {
     match statement {
         Statement::Nothing | Statement::Break(_) | Statement::Continue(_) => {}
-        // A class written inside a method reads what is around it, and what it
-        // reads has to be copied in -- so it counts here too.
+
         Statement::Locally(units) => {
             for unit in units {
                 for field in &unit.fields {
@@ -2506,7 +2146,6 @@ fn walk_statement(statement: &Statement, visit: &mut impl FnMut(&Expression)) {
     }
 }
 
-/// Hands every expression written directly inside this one to `visit`.
 fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression)) {
     match expression {
         Expression::Int(_)
@@ -2584,8 +2223,7 @@ fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression))
             arguments, body, ..
         } => {
             arguments.iter().for_each(&mut *visit);
-            // A class inside a class reads from further out too, and what it
-            // reads has to reach the one holding it.
+
             for field in &body.fields {
                 if let Some(value) = &field.value {
                     visit(value);
@@ -2603,23 +2241,18 @@ fn walk_expression(expression: &Expression, visit: &mut impl FnMut(&Expression))
     }
 }
 
-/// One constant of an enum, as it was written.
 #[derive(Clone, Debug)]
 pub struct Constant {
     pub name: String,
     pub arguments: Vec<Expression>,
-    /// `PLUS { int apply(int a, int b) { return a + b; } }`: one constant that
-    /// answers differently from the rest. It becomes a class of its own,
-    /// extending the enum, and the constant is the one instance of it.
+
     pub body: Option<Body>,
     pub line: u32,
     pub column: u32,
 }
 
-/// One `catch` clause.
 #[derive(Clone, Debug)]
 pub struct Catch {
-    /// More than one for `catch (A | B name)`.
     pub types: Vec<Written>,
     pub name: String,
     pub body: Vec<Positioned<Statement>>,
@@ -2638,19 +2271,13 @@ pub struct Modifiers {
     pub synchronized: bool,
     pub volatile: bool,
     pub transient: bool,
-    /// `native`: the body is somewhere else, in a library loaded at run time.
-    /// There is nothing to compile and nothing to check -- only the flag, and
-    /// no `Code` attribute, which is what tells the runtime to go looking.
+
     pub native_: bool,
-    /// `sealed`, which is not an access flag. What it comes to in the class
-    /// file is the list of classes allowed to extend this one, and that list
-    /// is an attribute rather than a bit.
+
     pub sealed: bool,
 }
 
 impl Modifiers {
-    /// What the class file records. The values are the ones the JVM
-    /// specification gives, and nothing here invents any.
     pub fn access_flags(self, and: u16) -> u16 {
         let mut flags = and;
         if self.public {
@@ -2687,18 +2314,10 @@ impl Modifiers {
     }
 }
 
-/// One `@Something(...)` as it was written.
-///
-/// What it comes to in the class file depends on how long the annotation was
-/// meant to last: one kept for the runtime is written into the class file so
-/// that reflection can read it back, and one meant only for the compiler is
-/// read and dropped. Which is which is what `@Retention` on the annotation
-/// says.
 #[derive(Clone, Debug)]
 pub struct Annotated {
     pub name: String,
-    /// `@Marked("x")` is the value called `value`; `@Marked(a = 1, b = 2)` is
-    /// two named ones.
+
     pub values: Vec<(String, Expression)>,
     pub line: u32,
 }
@@ -2708,10 +2327,9 @@ pub struct Field {
     pub modifiers: Modifiers,
     pub what: Written,
     pub name: String,
-    /// What was written on it, which runs in a constructor for an instance
-    /// field and in the class initialiser for a static one.
+
     pub value: Option<Expression>,
-    /// What was written above it.
+
     pub annotations: Vec<Annotated>,
     pub line: u32,
 }
@@ -2724,46 +2342,30 @@ pub struct Method {
     pub parameters: Vec<(Written, String)>,
     pub body: Option<Vec<Positioned<Statement>>>,
     pub constructor: bool,
-    /// Written with `...` on the last parameter, so a call may leave the array
-    /// unwritten and hand over the elements instead.
+
     pub variadic: bool,
-    /// Nobody wrote this one. A method that overrides one whose parameters or
-    /// return were generic has a second copy with the erased shape, so that a
-    /// call through the supertype reaches the override rather than the
-    /// original. It carries no code of its own beyond handing over.
+
     pub bridge: bool,
-    /// What was written above it.
+
     pub annotations: Vec<Annotated>,
-    /// `int order() default 0;` inside an `@interface`: what this element is
-    /// when nobody says otherwise.
+
     pub default_value: Option<Expression>,
-    /// The method's own type parameters, in the order they were written.
-    /// `<K, V> Map<K, V> of(K key, V value)` records `["K", "V"]`.
+
     pub own_variables: Vec<String>,
-    /// What each of them was bounded by, in the same order. `<T extends
-    /// Comparable<T>>` records the `Comparable<T>`, which is what a class
-    /// file's `Signature` says and what a compilation against it reads back.
+
     pub own_bounds: Vec<Written>,
-    /// What it was written as throwing. A class file records these, and a
-    /// class compiled against this one reads them back.
+
     pub throws: Vec<String>,
     pub line: u32,
 }
 
-/// What kind of type a declaration is.
-///
-/// The JVM has one shape for all of these -- a class file -- and the
-/// differences are access flags, a superclass, and members written by the
-/// compiler rather than by the person.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Shape {
     Class,
     Interface,
-    /// Read as an enum and turned into the class it stands for before anything
-    /// else sees it. See [`as_the_class_it_is`].
+
     Enum,
-    /// Read as a record and turned into the class it stands for the same way.
-    /// See [`as_the_class_a_record_is`].
+
     Record,
 }
 
@@ -2778,56 +2380,31 @@ pub struct Unit {
     pub implements: Vec<String>,
     pub fields: Vec<Field>,
     pub methods: Vec<Method>,
-    /// `{ ... }` written directly in the class body, which runs at the top of
-    /// every constructor.
+
     pub instance_setup: Vec<Positioned<Statement>>,
-    /// `static { ... }`, which runs once when the class is loaded.
+
     pub static_setup: Vec<Positioned<Statement>>,
-    /// The class this one was written inside, when it has no name of its own.
-    /// Its instance is held in a field, and a name this class cannot find is
-    /// looked for there before it is refused.
+
     pub outer: Option<String>,
-    /// What this class was written extending and implementing, with the type
-    /// arguments still on them. `class People extends Store<String, Person>`
-    /// is the only place a call on a `People` can learn that `Store`'s second
-    /// type parameter is a Person.
+
     pub above: Vec<Written>,
-    /// Whether this is the class a lambda came to.
-    ///
-    /// A lambda's body belongs to the method it was written in: `holds(one)`
-    /// inside a `default Rule<T> and(...)` means the interface's `holds`, not
-    /// the one this class is being written to hold. `javac` keeps the body in
-    /// the enclosing class and hands it a method handle; this writes a class,
-    /// so the difference has to be written down.
+
     pub stands_for_a_lambda: bool,
-    /// What a `sealed` type permits to extend it. Empty for everything else.
-    /// This is what `sealed` comes to in a class file: a list, checked by the
-    /// runtime rather than by the compiler alone.
+
     pub permits: Vec<String>,
-    /// Written `@interface`. An annotation is an interface that extends
-    /// `java.lang.annotation.Annotation` and sets one more flag; the shape is
-    /// otherwise the same, which is why it is a flag here rather than a shape.
+
     pub annotation: bool,
-    /// `import static java.lang.Math.max;` and `import static
-    /// java.lang.Math.*;`, which put a name from another class in scope here
-    /// without the class in front of it.
+
     pub static_imports: Vec<String>,
-    /// What was written above it.
+
     pub annotations: Vec<Annotated>,
-    /// The file it was written in, where the compilation knows. A class file
-    /// says so, and a stack trace off the device reads it back: without it
-    /// every line of every trace says `Unknown Source`.
+
     pub source: Option<String>,
-    /// What the class called its own type parameters, in the order they were
-    /// written, and what each was bounded by. `class Store<K, V extends
-    /// Number>` records both, which is what a class file's `Signature` says
-    /// and what a compilation against this class reads back.
+
     pub own_variables: Vec<(String, Written)>,
 }
 
 impl Unit {
-    /// The name the class file records: the package and the class, separated
-    /// by slashes.
     pub fn internal_name(&self) -> String {
         match &self.package {
             Some(package) => format!("{}/{}", package.replace('.', "/"), self.name),
@@ -2836,42 +2413,23 @@ impl Unit {
     }
 }
 
-// ----------------------------------------------------------------- parser
-
-/// One `<...>` worth of type variables, and whether they belong to a class.
 struct TypeFrame {
     held: Vec<(String, Written)>,
-    /// A class's are numbered and can be put back at a call site; a method's
-    /// are only ever erased.
+
     of_a_class: bool,
 }
 
 pub struct Parser {
     tokens: Vec<Spelled>,
     at: usize,
-    /// The annotations read but not yet given to what they were written
-    /// above. `modifiers()` reads them because they may be written among the
-    /// modifiers, and what they belong to is only known afterwards.
+
     held_annotations: Vec<Annotated>,
-    /// Whether an `->` after a bare name here opens a lambda.
-    ///
-    /// In `case Integer i when i > n -> ...` it does not: the arrow belongs to
-    /// the arm, and `n -> ...` would swallow it. Inside brackets it does
-    /// again, because `when rows.stream().anyMatch(one -> one > 0)` is a
-    /// guard with a lambda in it.
+
     bare_lambda: bool,
-    /// What the file said it was in, kept so that a class written inside a
-    /// method is in the same package as the one written around it.
+
     package: Option<String>,
     imports: Vec<String>,
-    /// The type variables in scope, innermost frame last.
-    ///
-    /// Erasure happens here, where the name is read, rather than being carried
-    /// through the rest of the compiler. `<T extends Number> T pick()` is a
-    /// method returning `Number`, and `<T> T pick()` is one returning `Object`
-    /// -- that is all a type variable ever is once the class file is written,
-    /// and saying it once at the point the name is read means nothing further
-    /// in has to know type variables exist.
+
     type_variables: Vec<TypeFrame>,
 }
 
@@ -2888,15 +2446,11 @@ impl Parser {
         }
     }
 
-    /// What a name stands for, where it is a type variable in scope.
     fn erased(&self, name: &str) -> Option<Written> {
         self.type_variables.iter().rev().find_map(|frame| {
             let at = frame.held.iter().position(|(one, _)| one == name)?;
             let bound = frame.held[at].1.clone();
-            // A class's is numbered, because a `Box<String>` says what its
-            // is. A method's is kept by name, because what it stands for is
-            // worked out from the arguments and the same name has to be
-            // recognised in each of them.
+
             if frame.of_a_class {
                 Some(Written::Variable(at, Box::new(bound)))
             } else {
@@ -2905,19 +2459,11 @@ impl Parser {
         })
     }
 
-    /// `<T>`, `<T extends Number>`, `<K, V extends Comparable<V> & Cloneable>`.
-    ///
-    /// Reads a declaration of type variables and puts them in scope. The bound
-    /// is read before the frame is pushed, so a variable cannot stand for
-    /// itself. Only the first bound counts: the class file records the erasure,
-    /// and the erasure of `A & B` is `A`.
     fn push_type_parameters(&mut self, of_a_class: bool) -> Result<bool, Diagnostic> {
         if !self.is_mark("<") {
             return Ok(false);
         }
-        // A `<` here could still open type *arguments* rather than parameters
-        // in code the parser reaches by another road, so anything that is not
-        // a plain name gives up and skips, as before.
+
         self.want_mark("<")?;
         let mut frame = Vec::new();
         loop {
@@ -2945,8 +2491,6 @@ impl Parser {
         Ok(true)
     }
 
-    /// The `>` at the end of a type parameter list, which the lexer may have
-    /// read as part of a shift.
     fn close_type_parameters(&mut self) -> Result<(), Diagnostic> {
         match self.here().token {
             Token::Punctuation(">") => {
@@ -2976,7 +2520,6 @@ impl Parser {
         }
     }
 
-    /// The type a written one erases to, where it names a type variable.
     fn erasing(&self, written: Written) -> Written {
         match &written {
             Written::Named(name, _) => match self.erased(name) {
@@ -3062,7 +2605,6 @@ impl Parser {
         }
     }
 
-    /// A dotted name, as a package or an import writes one.
     fn qualified(&mut self) -> Result<String, Diagnostic> {
         let mut out = self.want_name()?;
         while self.is_mark(".") && matches!(self.ahead(1), Token::Identifier(_)) {
@@ -3073,11 +2615,7 @@ impl Parser {
         Ok(out)
     }
 
-    /// Annotations are read and thrown away. They are metadata, nothing here
-    /// reads them, and refusing `@Override` would refuse most real Java for no
-    /// reason at all.
     fn skip_annotations(&mut self) -> Result<(), Diagnostic> {
-        // `@interface` declares an annotation; it is not one.
         while self.is_mark("@") && !matches!(self.ahead(1), Token::Keyword("interface")) {
             let line = self.line();
             self.take();
@@ -3087,8 +2625,6 @@ impl Parser {
                 self.take();
                 if !self.is_mark(")") {
                     loop {
-                        // `@Marked("x")` is the one called `value`;
-                        // `@Marked(a = 1)` says which.
                         let named = match (&self.here().token, self.ahead(1)) {
                             (Token::Identifier(word), Token::Punctuation("=")) => {
                                 let held = word.clone();
@@ -3111,11 +2647,6 @@ impl Parser {
         Ok(())
     }
 
-    /// What one element of an annotation was given.
-    ///
-    /// Constants, a class literal, the name of an enum constant, an
-    /// annotation, or an array of any of those -- which is everything an
-    /// annotation element can hold.
     fn annotation_value(&mut self) -> Result<Expression, Diagnostic> {
         if self.is_mark("{") {
             let line = self.line();
@@ -3137,19 +2668,15 @@ impl Parser {
         self.expression()
     }
 
-    /// The annotations read since the last time they were taken.
     fn take_annotations(&mut self) -> Vec<Annotated> {
         std::mem::take(&mut self.held_annotations)
     }
 
-    /// Whether the name here is the `sealed` of a sealed declaration rather
-    /// than something called `sealed`.
     fn looks_like_sealed(&self) -> bool {
         if !matches!(&self.here().token, Token::Identifier(word) if word == "sealed") {
             return false;
         }
-        // What follows a modifier is another modifier or the declaration
-        // itself. What follows a variable called `sealed` is a name.
+
         matches!(self.ahead(1), Token::Keyword(_))
             || matches!(self.ahead(1), Token::Identifier(word) if word == "record")
     }
@@ -3164,10 +2691,7 @@ impl Parser {
         let mut found = Modifiers::default();
         loop {
             self.skip_annotations()?;
-            // `sealed` and `non-sealed` are not keywords: Java kept them
-            // names so that code already using them still compiles, which
-            // means telling them apart from a type called `sealed` is a matter
-            // of what follows.
+
             if self.looks_like_sealed() {
                 self.take();
                 found.sealed = true;
@@ -3190,28 +2714,17 @@ impl Parser {
                 "static" => found.static_ = true,
                 "final" => found.final_ = true,
                 "abstract" => found.abstract_ = true,
-                // `default` in front of a member is an interface method with a
-                // body. The flag it needs is the absence of ACC_ABSTRACT, so
-                // there is nothing to record beyond having read it.
+
                 "default" if !matches!(self.ahead(1), Token::Punctuation(":")) => {}
-                // `synchronized` on a method takes the object's own lock
-                // around the whole of it, which is a flag rather than an
-                // instruction. `volatile` and `transient` are flags too.
+
                 "synchronized" if !matches!(self.ahead(1), Token::Punctuation("(")) => {
                     found.synchronized = true
                 }
                 "volatile" => found.volatile = true,
                 "transient" => found.transient = true,
-                // `strictfp` said that floating point had to be exactly the
-                // same everywhere. Since Java 17 it always is, so the word is
-                // read and nothing is recorded -- which is what a class file
-                // of this version says either way.
+
                 "strictfp" => {}
-                // `native` says the body is in a library the application
-                // loads, which is a flag and the absence of a `Code`
-                // attribute. There is nothing else for a compiler to do with
-                // it, and refusing it would refuse every class that reaches
-                // one.
+
                 "native" => found.native_ = true,
                 _ => break,
             }
@@ -3220,7 +2733,6 @@ impl Parser {
         Ok(found)
     }
 
-    /// A type, with however many `[]` follow it.
     fn written_type(&mut self) -> Result<Written, Diagnostic> {
         let base = match self.here().token.clone() {
             Token::Keyword(word) => match Written::of_keyword(word) {
@@ -3250,10 +2762,7 @@ impl Parser {
             Token::Identifier(_) => {
                 let mut named = self.qualified()?;
                 let mut arguments = self.type_arguments()?;
-                // `Memory<String, Integer>.Window`: a class written inside a
-                // class that holds something, named through what it holds.
-                // What the outer one holds is written in the middle of the
-                // name, and the name it comes to is the whole of it.
+
                 while self.is_mark(".") && matches!(self.ahead(1), Token::Identifier(_)) {
                     self.take();
                     named.push('.');
@@ -3275,8 +2784,6 @@ impl Parser {
             }
         };
 
-        // A primitive written with arguments is not Java; anything else read
-        // them above.
         self.skip_type_arguments()?;
 
         let mut found = self.erasing(base);
@@ -3288,14 +2795,6 @@ impl Parser {
         Ok(found)
     }
 
-    /// Where a type argument list written at `ahead` ends, or `ahead` itself
-    /// where none is written.
-    ///
-    /// `List<String> words` is a declaration and `a < b > c` is not, and
-    /// nothing but what follows tells them apart. The arguments are stepped
-    /// over, balanced, and what is on the other side decides. `>>` closes two
-    /// at once, which is what makes `Map<String, List<Integer>>` one token
-    /// short of what it looks like.
     fn past_type_arguments(&self, ahead: usize) -> Option<usize> {
         if !matches!(self.ahead(ahead), Token::Punctuation("<")) {
             return Some(ahead);
@@ -3318,8 +2817,7 @@ impl Parser {
                     }
                     depth -= 3;
                 }
-                // Nothing a type argument list holds, so this was a
-                // comparison after all.
+
                 Token::Identifier(_)
                 | Token::Punctuation(".")
                 | Token::Punctuation(",")
@@ -3336,14 +2834,12 @@ impl Parser {
         }
     }
 
-    /// Whether what follows starts a local variable declaration rather than an
-    /// expression. `Foo bar` is a declaration; `foo.bar()` is not.
     fn looks_like_declaration(&self) -> bool {
         match &self.here().token {
             Token::Keyword(word) => Written::of_keyword(word).is_some(),
             Token::Identifier(_) => {
                 let mut ahead = 0usize;
-                // Walk a dotted name.
+
                 loop {
                     if !matches!(self.ahead(ahead), Token::Identifier(_)) {
                         return false;
@@ -3355,17 +2851,12 @@ impl Parser {
                     }
                     break;
                 }
-                // `List<String> words` is a declaration and `a < b > c` is
-                // not, and nothing but what follows tells them apart. The
-                // arguments are stepped over, balanced, and what is on the
-                // other side decides.
+
                 match self.past_type_arguments(ahead) {
                     Some(past) => ahead = past,
                     None => return false,
                 }
-                // `Memory<String, Integer>.Window window` names a class
-                // written inside one that holds something, and the rest of
-                // the name comes after what it holds.
+
                 while matches!(self.ahead(ahead), Token::Punctuation("."))
                     && matches!(self.ahead(ahead + 1), Token::Identifier(_))
                 {
@@ -3375,7 +2866,7 @@ impl Parser {
                         None => return false,
                     }
                 }
-                // Then any number of `[]`.
+
                 while matches!(self.ahead(ahead), Token::Punctuation("["))
                     && matches!(self.ahead(ahead + 1), Token::Punctuation("]"))
                 {
@@ -3387,7 +2878,6 @@ impl Parser {
         }
     }
 
-    /// Every type a file declares, in the order they were written.
     pub fn file(&mut self) -> Result<Vec<Unit>, Diagnostic> {
         self.skip_annotations()?;
         let package = if self.eat_word("package") {
@@ -3446,10 +2936,6 @@ impl Parser {
         Ok(declared)
     }
 
-    /// One `class` or `interface` in a file, which may hold more than one.
-    ///
-    /// `beside` collects the types declared inside this one, which are classes
-    /// in their own right with a name saying where they were written.
     fn declaration_of_a_type(
         &mut self,
         package: &Option<String>,
@@ -3460,21 +2946,15 @@ impl Parser {
     ) -> Result<Unit, Diagnostic> {
         self.skip_annotations()?;
         let mut modifiers = self.modifiers()?;
-        // Everything written inside an interface is public whether or not
-        // anybody wrote the word, and that includes a type. Left as it was
-        // written, a class in one package could not reach a record declared in
-        // an interface in another.
+
         if inside_an_interface {
             modifiers.public = true;
         }
         let annotations = self.take_annotations();
-        // `record` is not a keyword: Java kept it a name so that code already
-        // using it still compiles. It is a declaration only when a name and a
-        // parameter list follow it.
+
         let is_record = matches!(&self.here().token, Token::Identifier(word) if word == "record")
             && matches!(self.ahead(1), Token::Identifier(_));
-        // `@interface Marked { ... }`: an interface that extends
-        // `java.lang.annotation.Annotation`, with one more flag on it.
+
         let annotation = self.is_mark("@") && matches!(self.ahead(1), Token::Keyword("interface"));
         if annotation {
             self.take();
@@ -3489,9 +2969,6 @@ impl Parser {
             self.take();
             Shape::Record
         } else {
-            // `module-info.java` is a real Java file and there is nothing on
-            // Android that reads what it says. Refusing it by name beats
-            // writing a class file the device will never look at.
             if matches!(&self.here().token, Token::Identifier(word) if word == "module")
                 || matches!(&self.here().token, Token::Identifier(word) if word == "open")
             {
@@ -3524,16 +3001,12 @@ impl Parser {
         };
 
         let name = match inside {
-            // A class inside a class is named for where it was written, which
-            // is what the JVM has always called them.
             Some(holder) => format!("{holder}${}", self.want_name()?),
             None => self.want_name()?,
         };
-        // `class Box<T>`: the type variables stay in scope for the whole body,
-        // which is what makes `T get()` inside it mean `Object get()` -- and
-        // what lets a call on a `Box<String>` put the String back.
+
         let pushed = self.push_type_parameters(true)?;
-        // What it called them, kept for the class file's own `Signature`.
+
         let own_variables: Vec<(String, Written)> = if pushed {
             self.type_variables
                 .last()
@@ -3543,7 +3016,6 @@ impl Parser {
             Vec::new()
         };
 
-        // A record says what it holds in front of everything else.
         let mut permits: Vec<String> = Vec::new();
         let components = if shape == Shape::Record {
             self.parameters_and_shape()?.0
@@ -3551,13 +3023,9 @@ impl Parser {
             Vec::new()
         };
 
-        // An interface's `extends` lists interfaces, which is what a class
-        // calls `implements`. In the class file they are the same list.
         let mut extends = None;
         let mut implements = Vec::new();
-        // What each supertype was written holding: `class People extends
-        // Store<String, Person>` is where a call on a People learns that
-        // Store's V is a Person, and there is nowhere else it can be learned.
+
         let mut above: Vec<Written> = Vec::new();
         if self.eat_word("extends") {
             loop {
@@ -3566,8 +3034,7 @@ impl Parser {
                 self.skip_type_arguments()?;
                 match shape {
                     Shape::Class | Shape::Enum => extends = Some(named),
-                    // A record's superclass is always `java.lang.Record`, so
-                    // `extends` on one is not Java at all.
+
                     Shape::Interface | Shape::Record => implements.push(named),
                 }
                 if !self.eat_mark(",") {
@@ -3587,8 +3054,6 @@ impl Parser {
             }
         }
 
-        // `permits A, B`: who is allowed to extend a sealed type. Like
-        // `sealed` itself this is a name rather than a keyword.
         if matches!(&self.here().token, Token::Identifier(word) if word == "permits") {
             self.take();
             loop {
@@ -3602,7 +3067,6 @@ impl Parser {
 
         self.want_mark("{")?;
 
-        // An enum's constants come first, before anything else it declares.
         let mut constants: Vec<Constant> = Vec::new();
         if shape == Shape::Enum {
             while matches!(self.here().token, Token::Identifier(_)) {
@@ -3630,7 +3094,7 @@ impl Parser {
                     break;
                 }
             }
-            // The semicolon is only needed when something follows.
+
             self.eat_mark(";");
         }
 
@@ -3694,13 +3158,8 @@ impl Parser {
         if shape == Shape::Record {
             return as_the_class_a_record_is(unit, &components);
         }
-        // A class written inside another without `static` belongs to an
-        // instance of it. An enum, a record and an interface never do, which
-        // is why they are settled above.
+
         if let Some(holder) = inside {
-            // A class written inside an interface is static whether or not
-            // anybody wrote the word: an interface has no instance for it to
-            // belong to.
             if !modifiers.static_ && shape == Shape::Class && !inside_an_interface {
                 return Ok(belonging_to_an_instance(unit, holder, package));
             }
@@ -3722,29 +3181,18 @@ impl Parser {
         beside: &mut Vec<Unit>,
     ) -> Result<(), Diagnostic> {
         let line = self.line();
-        // Where this member began, so that a type declared here can be read
-        // from the start by the reader that knows how.
+
         let began = self.at;
         self.skip_annotations()?;
         let mut modifiers = self.modifiers()?;
         let annotations = self.take_annotations();
         if shape == Shape::Interface && !modifiers.private {
-            // Every member of an interface is public unless it says otherwise;
-            // a field of one is a constant. Java lets all of that go unwritten,
-            // and most code does. A `private` method of an interface -- which
-            // exists so a `default` one has somewhere to put its working -- is
-            // the exception, and a class file naming a method both public and
-            // private is one the JVM refuses to load.
             modifiers.public = true;
         }
 
-        // A type written inside another is a class of its own, named for
-        // where it was written.
         let nested = self.is_word("class")
             || self.is_word("interface")
             || self.is_word("enum")
-            // `@interface` written inside a class: an annotation type of its
-            // own, which is a type like any other and not a member.
             || (self.is_mark("@") && matches!(self.ahead(1), Token::Keyword("interface")))
             || (matches!(&self.here().token, Token::Identifier(word) if word == "record")
                 && matches!(self.ahead(1), Token::Identifier(_)));
@@ -3762,8 +3210,7 @@ impl Parser {
             beside.append(&mut theirs);
             return Ok(());
         }
-        // `static { ... }` runs once when the class loads; a bare `{ ... }`
-        // runs at the top of every constructor.
+
         if self.is_mark("{") {
             let block = self.braced_block()?;
             if modifiers.static_ {
@@ -3774,15 +3221,8 @@ impl Parser {
             return Ok(());
         }
 
-        // A constructor is the class's own name followed by a parameter list.
-        // The name written is the simple one, whatever the class is called in
-        // a file that holds it.
         let simple = class.rsplit('$').next().unwrap_or(class);
-        // A record's canonical constructor may be written without its
-        // parameter list: `Circle { ... }` takes the components, runs what was
-        // written, and then fills the fields in from whatever the names hold
-        // by the end of it. The parameters and the filling are put back where
-        // the record becomes a class.
+
         if shape == Shape::Record
             && matches!(&self.here().token, Token::Identifier(found) if found == simple)
             && matches!(self.ahead(1), Token::Punctuation("{"))
@@ -3807,10 +3247,7 @@ impl Parser {
             });
             return Ok(());
         }
-        // `<T> void f(...)` and `<U> Held(U one)`: the method's own type
-        // parameters, erased like every other one, and in scope until the body
-        // ends. A constructor may be written with them too, which is why they
-        // are read before the class's own name is looked for.
+
         let pushed = self.push_type_parameters(false)?;
 
         if matches!(&self.here().token, Token::Identifier(found) if found == simple)
@@ -3859,7 +3296,7 @@ impl Parser {
         if self.is_mark("(") {
             let (parameters, variadic) = self.parameters_and_shape()?;
             let throws = self.throws()?;
-            // `int order() default 0;` inside an `@interface`.
+
             let default_value = if self.eat_word("default") {
                 let held = self.annotation_value()?;
                 self.want_mark(";")?;
@@ -3872,9 +3309,7 @@ impl Parser {
             } else {
                 self.method_body()?
             };
-            // A method of an interface with no body is abstract, and a
-            // `native` one has its body in a library; anywhere else, a method
-            // with no body is a mistake.
+
             if body.is_none()
                 && !modifiers.abstract_
                 && !modifiers.native_
@@ -3887,9 +3322,7 @@ impl Parser {
                     format!("`{name}` has no body and is not abstract."),
                 ));
             }
-            // What it called its own type parameters, read before they go
-            // out of scope. A call writing them out in front of the name is
-            // writing these, in this order.
+
             let (own_variables, own_bounds) = if pushed {
                 self.type_variables
                     .last()
@@ -3924,14 +3357,11 @@ impl Parser {
         }
         self.pop_type_parameters(pushed);
 
-        // One or more fields, each possibly with a value, separated by commas.
         let mut declared = Vec::new();
         let mut name = name;
         loop {
             let mut what = what.clone();
             while self.is_mark("[") && matches!(self.ahead(1), Token::Punctuation("]")) {
-                // `int a[]` is the older way of writing `int[] a`, and it is
-                // still Java.
                 self.take();
                 self.take();
                 what = Written::Array(Box::new(what));
@@ -3966,20 +3396,6 @@ impl Parser {
         Ok(())
     }
 
-    /// Reads `<...>` and discards it, balanced, so that a `>>` closing two
-    /// levels at once does not leave one of them open.
-    ///
-    /// Type arguments do not survive compilation: the JVM has never seen one.
-    /// Reading them and throwing them away loses only the checking `javac`
-    /// does before it erases them itself.
-    /// `<String>`, `<K, V>`, `<? extends Number>`: what a type was written
-    /// with, read and kept.
-    ///
-    /// The JVM never sees these. They are kept because they say what a call on
-    /// the thing gives back: `List<String>.get` is a String, and the cast that
-    /// says so is the one thing erasure does not throw away. A wildcard is not
-    /// a type this compiler can name, so a list holding one is read as a list
-    /// holding nothing in particular -- which is exactly what it is.
     fn type_arguments(&mut self) -> Result<Vec<Written>, Diagnostic> {
         if !self.is_mark("<") {
             return Ok(Vec::new());
@@ -3987,19 +3403,12 @@ impl Parser {
         let began = self.at;
         let mut found = Vec::new();
         self.want_mark("<")?;
-        // `<>` on a `new` says "the same as where it is going", which is a
-        // thing the place it is going already knows.
+
         if self.is_mark(">") {
             self.take();
             return Ok(Vec::new());
         }
         loop {
-            // A wildcard is read as what it erases to: `? extends Number` is a
-            // Number, and `?` and `? super T` are an Object. Reading the rest
-            // of the list and keeping none of it was the other way to do this,
-            // and it lost the key of a `Map<String, ? extends List<?>>` for no
-            // reason -- and read the list twice, which the lexer's one `>>`
-            // token cannot survive.
             if self.is_mark("?") {
                 self.take();
                 if self.eat_word("extends") {
@@ -4056,9 +3465,7 @@ impl Parser {
                     0
                 }
                 Token::Punctuation(">") => 1,
-                // The lexer reads `>>` as one shift, and in a type it is two
-                // closing brackets -- or, in `Map<String, List<T>> held`, one
-                // closing bracket and the start of whatever follows.
+
                 Token::Punctuation(">>") => 2,
                 Token::Punctuation(">>>") => 3,
                 Token::End => {
@@ -4072,8 +3479,6 @@ impl Parser {
                 _ => 0,
             };
             if closes > depth {
-                // More `>` than there are lists open: the rest of the token
-                // belongs to what comes next, so it is left there.
                 self.tokens[self.at].token = match closes - depth {
                     1 => Token::Punctuation(">"),
                     _ => Token::Punctuation(">>"),
@@ -4088,7 +3493,6 @@ impl Parser {
         }
     }
 
-    /// The parameters, and whether the last one was written with `...`.
     fn parameters_and_shape(&mut self) -> Result<(Vec<(Written, String)>, bool), Diagnostic> {
         let mut variadic = false;
         self.want_mark("(")?;
@@ -4099,8 +3503,6 @@ impl Parser {
                 self.eat_word("final");
                 let mut what = self.written_type()?;
                 if self.eat_mark("...") {
-                    // `int... v` is `int[] v`, with a note on the method saying
-                    // it may be called without the array being written out.
                     what = Written::Array(Box::new(what));
                     variadic = true;
                 }
@@ -4115,8 +3517,6 @@ impl Parser {
         Ok((found, variadic))
     }
 
-    /// A `throws` clause is read and thrown away: nothing here checks what a
-    /// method may throw, and recording the list would suggest otherwise.
     fn throws(&mut self) -> Result<Vec<String>, Diagnostic> {
         let mut named = Vec::new();
         if self.eat_word("throws") {
@@ -4158,9 +3558,6 @@ impl Parser {
     }
 
     fn statement_node(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
-        // A class written inside a method. `final` and `abstract` may be in
-        // front of it, and `record Name(` is one too -- but `record` is not a
-        // keyword, so it is only one where a name and a bracket follow.
         {
             let mut at = 0usize;
             while matches!(self.ahead(at), Token::Keyword(word) if
@@ -4205,9 +3602,6 @@ impl Parser {
             return Ok(Statement::Assert { condition, said });
         }
 
-        // A name and a colon in front of a statement is a label. A colon after
-        // anything else at the start of a statement is not, so one token of
-        // lookahead settles it.
         if matches!(self.here().token, Token::Identifier(_))
             && matches!(self.ahead(1), Token::Punctuation(":"))
         {
@@ -4306,9 +3700,6 @@ impl Parser {
             return Ok(Statement::Throw(what));
         }
 
-        // `yield` is a name everywhere except at the head of a statement
-        // followed by something that is not a call or an assignment, which is
-        // how Java kept it usable as an identifier.
         if matches!(&self.here().token, Token::Identifier(word) if word == "yield")
             && !matches!(
                 self.ahead(1),
@@ -4400,12 +3791,6 @@ impl Parser {
         Ok(None)
     }
 
-    /// A `switch`, in either the colon form or the arrow form.
-    ///
-    /// The two are not mixed, because Java does not allow it and because they
-    /// mean different things about falling through: an arm written with `:`
-    /// runs into the next one unless something stops it, and an arm written
-    /// with `->` never does.
     fn switch_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
         self.want_mark("(")?;
         let subject = self.expression()?;
@@ -4424,14 +3809,12 @@ impl Parser {
             let mut pattern = None;
             let mut guard = None;
             if self.eat_word("default") {
-                // `default` takes no value, and `case a, b:` takes several.
             } else if self.eat_word("case") {
                 if self.looks_like_a_type_pattern() {
                     pattern = Some(self.pattern()?);
                     if matches!(&self.here().token, Token::Identifier(word) if word == "when") {
                         self.take();
-                        // The arrow after the guard belongs to the arm, not to
-                        // a lambda: `when i > n -> ...` is not `n -> ...`.
+
                         let outside = std::mem::replace(&mut self.bare_lambda, false);
                         guard = Some(self.expression()?);
                         self.bare_lambda = outside;
@@ -4477,8 +3860,6 @@ impl Parser {
 
             let mut body = Vec::new();
             if arrow {
-                // One statement, or a block, and nothing runs on into the
-                // next arm.
                 if self.eat_word("throw") {
                     let what = self.expression()?;
                     self.want_mark(";")?;
@@ -4529,15 +3910,9 @@ impl Parser {
         Ok(Statement::Switch { subject, arms })
     }
 
-    /// Whether what follows `case` is a type and a name rather than a
-    /// constant.
-    ///
-    /// `case String s` and `case Integer i` are patterns; `case RED` is a
-    /// constant. Told apart by what comes after: a pattern is a type followed
-    /// by a name, and a constant is a name followed by the end of the label.
     fn looks_like_a_type_pattern(&self) -> bool {
         let mut at;
-        // A primitive type is a pattern in Java 25 too, and it is one token.
+
         if matches!(self.ahead(0), Token::Keyword(word) if Written::of_keyword(word).is_some()) {
             at = 1;
         } else {
@@ -4550,8 +3925,7 @@ impl Parser {
             {
                 at += 2;
             }
-            // A type argument list, balanced, which changes nothing but has to
-            // be stepped over to see what follows.
+
             if matches!(self.ahead(at), Token::Punctuation("<")) {
                 let mut depth = 0usize;
                 loop {
@@ -4574,16 +3948,13 @@ impl Parser {
         {
             at += 2;
         }
-        // A name after the type is a type pattern; a bracket after it is a
-        // record taken apart.
+
         matches!(
             self.ahead(at),
             Token::Identifier(_) | Token::Punctuation("(")
         )
     }
 
-    /// One pattern: `String s`, `var x`, or `Point(int x, int y)` with a
-    /// pattern of its own for each component.
     fn pattern(&mut self) -> Result<Pattern, Diagnostic> {
         self.eat_word("final");
         let what = self.written_type()?;
@@ -4618,12 +3989,6 @@ impl Parser {
         })
     }
 
-    /// What a `case` answers to: a number, a character, a string, or the name
-    /// of a constant.
-    ///
-    /// Not an expression. `case EARTH ->` reads as a lambda if it is handed to
-    /// the expression parser, because a name followed by an arrow is exactly
-    /// what a lambda looks like.
     fn case_label(&mut self) -> Result<Expression, Diagnostic> {
         let (line, column) = (self.line(), self.column());
         let negated = self.eat_mark("-");
@@ -4635,8 +4000,7 @@ impl Parser {
             Token::True => Expression::Boolean(true),
             Token::False => Expression::Boolean(false),
             Token::Identifier(name) => Expression::Name(name),
-            // `case null` is the one value no type test matches, and the only
-            // way a `switch` over patterns can answer for it.
+
             Token::Null => Expression::Null,
             other => {
                 return Err(at(
@@ -4660,8 +4024,6 @@ impl Parser {
     }
 
     fn try_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
-        // `try (a; b) { ... }` holds what has to be closed afterwards. Each
-        // one is a declaration, and the last may leave off its semicolon.
         let mut resources: Vec<Positioned<Statement>> = Vec::new();
         if self.eat_mark("(") {
             loop {
@@ -4670,9 +4032,7 @@ impl Parser {
                 }
                 let (line, column) = (self.line(), self.column());
                 self.eat_word("final");
-                // `try (one; ...)`: something already made and already named,
-                // which Java has allowed since 9. It is the same thing as a
-                // resource written out, with a name nobody can collide with.
+
                 if matches!(self.here().token, Token::Identifier(_))
                     && matches!(self.ahead(1), Token::Punctuation(";" | ")"))
                 {
@@ -4763,9 +4123,6 @@ impl Parser {
             });
         }
 
-        // Each resource becomes its own `try`, innermost last, so that they
-        // are closed in the reverse of the order they were opened -- which is
-        // what the language says and what anything holding a lock depends on.
         let mut inner = Statement::Block(body);
         for resource in resources.into_iter().rev() {
             let Statement::Declare { name, .. } = &resource.node else {
@@ -4800,10 +4157,7 @@ impl Parser {
                 },
             ]);
         }
-        // And what was written to catch goes around the whole of that, closes
-        // included. A `close` that throws is caught by the `catch` written
-        // beside it: the resources belong to the `try`, and so does the
-        // closing of them.
+
         if catches.is_empty() && finally.is_none() {
             return Ok(inner);
         }
@@ -4835,9 +4189,6 @@ impl Parser {
     fn for_statement(&mut self, line: u32, column: u32) -> Result<Statement, Diagnostic> {
         self.want_mark("(")?;
 
-        // `for (Type name : thing)` is the enhanced form. Which form this is
-        // cannot be told from the first token, so the header is scanned for a
-        // colon that is not inside anything.
         let enhanced = {
             let mut ahead = 0usize;
             let mut depth = 0usize;
@@ -4961,12 +4312,6 @@ impl Parser {
         Ok(left)
     }
 
-    /// The `{ ... }` of a class written where it is used: an anonymous class,
-    /// or an enum constant that answers differently from the rest.
-    ///
-    /// It is read exactly the way any class body is read, because it is one.
-    /// What it does not have is a name or a shape of its own, and those are
-    /// settled where it is compiled rather than here.
     fn written_out_body(&mut self, line: u32, column: u32, what: &str) -> Result<Body, Diagnostic> {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
@@ -5014,9 +4359,7 @@ impl Parser {
                     break;
                 }
                 self.take();
-                // `o instanceof String s` names the value once the check has
-                // passed, so the cast nobody wants to write is not written --
-                // and `o instanceof Point(int x, int y)` names the parts.
+
                 let pattern = self.pattern()?;
                 left = Expression::InstanceOf {
                     of: Box::new(left),
@@ -5065,8 +4408,7 @@ impl Parser {
             if self.is_mark(mark) {
                 self.take();
                 let of = self.unary()?;
-                // `-5` is the literal, not a negation of it, so that
-                // -2147483648 can be written at all.
+
                 if operator == Unary::Negate {
                     if let Expression::Int(value) = of {
                         return Ok(Expression::Int(-value));
@@ -5082,9 +4424,6 @@ impl Parser {
             }
         }
 
-        // A cast is `(Type) expression`, and telling it from a parenthesised
-        // expression takes a look ahead: `(a)` alone is a name, `(a) b` is a
-        // cast, and `(int) x` is always a cast.
         if self.is_mark("(") && self.looks_like_cast() {
             self.take();
             let to = self.written_type()?;
@@ -5114,8 +4453,7 @@ impl Parser {
                 return false;
             }
             ahead += 1;
-            // `(List<String>[]) held` and `(Map<String, Integer>) held` are
-            // casts, and what they are cast to is written with its arguments.
+
             match self.past_type_arguments(ahead) {
                 Some(past) => ahead = past,
                 None => return false,
@@ -5134,7 +4472,7 @@ impl Parser {
         if !matches!(self.ahead(ahead), Token::Punctuation(")")) {
             return false;
         }
-        // `(Name) something` is a cast; `(name) + 1` is arithmetic on a name.
+
         matches!(
             self.ahead(ahead + 1),
             Token::Identifier(_)
@@ -5162,8 +4500,7 @@ impl Parser {
             }
             if self.is_mark(".") {
                 self.take();
-                // `Foo.class` and `Outer.this` name what is in front of the
-                // dot rather than reading something out of it.
+
                 if self.is_word("class") || self.is_word("this") {
                     let Some(named) = as_a_written_type(&found) else {
                         return Err(at(
@@ -5182,8 +4519,7 @@ impl Parser {
                     };
                     continue;
                 }
-                // `super.name(...)` is a call on the class above; `super.name`
-                // is the field that class declares.
+
                 if matches!(found, Expression::Super) {
                     let name = self.want_name()?;
                     found = if self.is_mark("(") {
@@ -5202,9 +4538,7 @@ impl Parser {
                     };
                     continue;
                 }
-                // `Left.super.who()`: the `default` method of one named
-                // interface, which is how a class implementing two of them
-                // says which one it means.
+
                 if self.is_word("super") {
                     self.take();
                     self.want_mark(".")?;
@@ -5219,8 +4553,7 @@ impl Parser {
                     };
                     continue;
                 }
-                // `held.new Inner()`: the instance the new one belongs to,
-                // written rather than left to be whichever one is here.
+
                 if self.is_word("new") {
                     self.take();
                     let what = self.type_name_only()?;
@@ -5232,11 +4565,7 @@ impl Parser {
                     };
                     continue;
                 }
-                // `Optional.<String>empty()`: the method's own type
-                // arguments, written where the call cannot work them out.
-                // Erasure throws them away in the class file, and they are
-                // kept here because nothing else in such a call says what the
-                // answer holds.
+
                 let witness = self.type_arguments()?;
                 let name = self.want_name()?;
                 if self.is_mark("(") {
@@ -5256,8 +4585,7 @@ impl Parser {
                 }
                 continue;
             }
-            // `String[].class`: an array type written where an expression
-            // could be, which only `.class` can follow.
+
             if self.is_mark("[") && matches!(self.ahead(1), Token::Punctuation("]")) {
                 let Some(mut named) = as_a_written_type(&found) else {
                     return Err(at(
@@ -5309,7 +4637,6 @@ impl Parser {
         Ok(found)
     }
 
-    /// A type's name, with any brackets after it left where they are.
     fn type_name_only(&mut self) -> Result<Written, Diagnostic> {
         let base = match self.here().token.clone() {
             Token::Keyword(word) => match Written::of_keyword(word) {
@@ -5335,7 +4662,6 @@ impl Parser {
         Ok(self.erasing(base))
     }
 
-    /// `{ a, b, c }`, with a trailing comma allowed because Java allows one.
     fn array_values(&mut self) -> Result<Vec<Expression>, Diagnostic> {
         self.want_mark("{")?;
         let mut found = Vec::new();
@@ -5349,8 +4675,6 @@ impl Parser {
         Ok(found)
     }
 
-    /// A value, or the values of an array written without `new` in front,
-    /// which takes what it holds from wherever it is going.
     fn value_or_array(&mut self) -> Result<Expression, Diagnostic> {
         if self.is_mark("{") {
             let line = self.line();
@@ -5367,8 +4691,7 @@ impl Parser {
     fn arguments(&mut self) -> Result<Vec<Expression>, Diagnostic> {
         self.want_mark("(")?;
         let mut found = Vec::new();
-        // Inside brackets an arrow opens a lambda again, whatever it does
-        // outside them.
+
         let outside = std::mem::replace(&mut self.bare_lambda, true);
         if !self.is_mark(")") {
             loop {
@@ -5385,11 +4708,6 @@ impl Parser {
         Ok(found)
     }
 
-    /// Whether the bracket here opens a lambda's parameter list.
-    ///
-    /// Without this, `() -> {}` is read as an empty pair of brackets and
-    /// refused for the bracket rather than for the lambda, which tells the
-    /// person nothing about what is actually not supported.
     fn looks_like_lambda(&self) -> bool {
         let mut ahead = 1usize;
         let mut depth = 1usize;
@@ -5412,15 +4730,12 @@ impl Parser {
         }
     }
 
-    /// `x -> ...`, `(x, y) -> ...`, `() -> ...`, with or without written
-    /// types on the parameters.
     fn lambda(&mut self, line: u32) -> Result<Expression, Diagnostic> {
         let mut parameters: Vec<(Option<Written>, String)> = Vec::new();
         if self.eat_mark("(") {
             while !self.is_mark(")") {
                 self.eat_word("final");
-                // `(String a)` names the type; `(a)` leaves it to the
-                // interface. One token of lookahead tells them apart.
+
                 let written = if matches!(self.here().token, Token::Identifier(_))
                     && matches!(
                         self.ahead(1),
@@ -5464,8 +4779,6 @@ impl Parser {
         })
     }
 
-    /// `Type::method`, `value::method` and `Type::new`, which are a lambda
-    /// with the parameters left to the interface.
     fn method_reference(&mut self, on: Expression, line: u32) -> Result<Expression, Diagnostic> {
         let name = if self.eat_word("new") {
             "<init>".to_string()
@@ -5482,8 +4795,6 @@ impl Parser {
     fn primary(&mut self) -> Result<Expression, Diagnostic> {
         let (line, column) = (self.line(), self.column());
 
-        // `int.class` and `int[].class`. A primitive is the one type that can
-        // start an expression, and only in front of these.
         if let Token::Keyword(word) = self.here().token {
             if Written::of_keyword(word).is_some() {
                 let mut at = 1usize;
@@ -5521,7 +4832,6 @@ impl Parser {
             return Ok(inner);
         }
 
-        // `x -> ...`: one parameter, with no brackets and no type.
         if self.bare_lambda
             && matches!(self.here().token, Token::Identifier(_))
             && matches!(self.ahead(1), Token::Punctuation("->"))
@@ -5533,16 +4843,11 @@ impl Parser {
             return Ok(Expression::This);
         }
 
-        // `super.name(...)` and `super.name`, which the postfix loop tells
-        // apart by what follows.
         if self.eat_word("super") {
             return Ok(Expression::Super);
         }
 
         if self.eat_word("new") {
-            // The type without the brackets that may follow it, because what
-            // comes after them decides whether they are a size or a list of
-            // values.
             let held = self.at;
             let mut what = self.written_type()?;
             if matches!(what, Written::Array(_)) {
@@ -5550,8 +4855,6 @@ impl Parser {
                 what = self.type_name_only()?;
             }
             if self.is_mark("[") {
-                // `new int[3]`, `new int[3][4]`, `new int[3][]`, and
-                // `new int[]{ ... }`, which says the values instead of a size.
                 let mut lengths = Vec::new();
                 let mut empty = 0usize;
                 while self.is_mark("[") {
@@ -5594,9 +4897,6 @@ impl Parser {
             }
             let arguments = self.arguments()?;
             if self.is_mark("{") {
-                // A class with no name of its own, written where it is used.
-                // What it holds is read the same way any class body is; the
-                // name and the shape are settled when it is compiled.
                 let body = self.written_out_body(line, column, "An anonymous class")?;
                 return Ok(Expression::Anonymous {
                     what,
@@ -5661,7 +4961,6 @@ impl Parser {
     }
 }
 
-/// Reads one Java file into the shape the rest of this compiler works on.
 pub fn parse(source: &str) -> Result<Vec<Unit>, Diagnostic> {
     let tokens = Lexer::new(source).tokens()?;
     let mut parser = Parser::new(tokens);
@@ -5680,13 +4979,6 @@ pub fn parse(source: &str) -> Result<Vec<Unit>, Diagnostic> {
     Ok(declared)
 }
 
-// ------------------------------------------------------------------ types
-
-/// A type once it is known what it is.
-///
-/// The written form says `String`; this says `java/lang/String`. Getting from
-/// one to the other is what resolution does, and everything after resolution
-/// works on this.
 #[derive(Clone, Eq, Debug)]
 pub enum Type {
     Void,
@@ -5698,19 +4990,11 @@ pub enum Type {
     Long,
     Float,
     Double,
-    /// A class, and the type arguments it was written with.
-    ///
-    /// The JVM has never seen a type argument: `List<String>` and `List` are
-    /// the same class at run time. They are carried here anyway, because they
-    /// are what says a `get` on that list gives back a String -- and the cast
-    /// that says so is the one thing erasure does not throw away.
+
     Object(String, Vec<Type>),
     Array(Box<Type>),
 }
 
-/// Two types are the same when the JVM would say so, which is to say with the
-/// arguments left out. `List<String>` and `List<Integer>` are one class, and a
-/// method taking one takes the other.
 impl PartialEq for Type {
     fn eq(&self, other: &Type) -> bool {
         match (self, other) {
@@ -5750,7 +5034,7 @@ impl Type {
                     .join(", ")
             ),
             Type::Array(of) => format!("{}[]", of.readable()),
-            // A refusal is read by a person, and `B` is not what they wrote.
+
             Type::Void => "void".to_string(),
             Type::Boolean => "boolean".to_string(),
             Type::Byte => "byte".to_string(),
@@ -5763,9 +5047,6 @@ impl Type {
         }
     }
 
-    /// How many local slots and how much stack a value of this takes. Long and
-    /// double take two, everything else takes one, and forgetting that is how
-    /// a class file stops verifying.
     pub fn width(&self) -> u16 {
         match self {
             Type::Long | Type::Double => 2,
@@ -5778,8 +5059,6 @@ impl Type {
         matches!(self, Type::Object(..) | Type::Array(_))
     }
 
-    /// Whether this is one of the types the JVM actually computes on as an
-    /// int. Byte, short, char and boolean are all int on the stack.
     pub fn is_int_like(&self) -> bool {
         matches!(
             self,
@@ -5792,13 +5071,6 @@ impl Type {
             || matches!(self, Type::Long | Type::Float | Type::Double)
     }
 
-    /// Whether a value of this may be given where that is wanted.
-    ///
-    /// The primitive half is Java's widening conversion, exactly. The reference
-    /// half is not: without every class on the classpath there is no way to
-    /// know whether one extends another, so any reference is accepted where a
-    /// reference is wanted and the verifier on the device has the last word.
-    /// That is written into the contract as a gap rather than hidden.
     pub fn may_be_given_to(&self, wanted: &Type) -> bool {
         if self == wanted {
             return true;
@@ -5820,7 +5092,6 @@ impl Type {
         )
     }
 
-    /// The type two operands of an arithmetic operator are both promoted to.
     pub fn promoted_with(&self, other: &Type) -> Option<Type> {
         for wide in [Type::Double, Type::Float, Type::Long] {
             if *self == wide || *other == wide {
@@ -5831,7 +5102,6 @@ impl Type {
     }
 }
 
-/// What a method is, as far as a call site needs to know.
 #[derive(Clone, Debug)]
 pub struct Signature {
     pub owner: String,
@@ -5839,36 +5109,24 @@ pub struct Signature {
     pub parameters: Vec<Type>,
     pub returns: Type,
     pub static_: bool,
-    /// Whether the owner is an interface, which decides the invoke opcode.
+
     pub interface: bool,
-    /// Whether the last parameter was written with `...`, which means a call
-    /// may hand over the elements instead of the array.
+
     pub variadic: bool,
-    /// Whether it has no body. An interface with a `default` method and a
-    /// `private` one still has exactly one method a lambda can be, and this is
-    /// what tells them apart.
+
     pub abstract_: bool,
-    /// Which of the owner's type parameters the return really is, where it is
-    /// one. `T get()` on a `Box<T>` erased to `Object get()`, and this is what
-    /// says a call on a `Box<String>` gives back a String.
+
     pub returns_variable: Option<usize>,
-    /// The same, one per parameter.
+
     pub parameter_variables: Vec<Option<usize>>,
-    /// What each parameter and the return were written as, with the type
-    /// variables still in them. Empty where there were none, which is almost
-    /// every method.
+
     pub taken_stands_for: Vec<Standing>,
     pub returns_stands_for: Standing,
-    /// The method's own type parameters, in the order they were written.
-    /// `<K, V> Map<K, V> of(K key, V value)` records `["K", "V"]`, which is
-    /// what a call writing them out is writing out.
+
     pub own_variables: Vec<String>,
-    /// What a call wrote in front of the name: `Box.<String>empty()` says U is
-    /// a String where nothing else in the call says anything at all. Empty
-    /// everywhere else, which is almost every call.
+
     pub witnessed: Vec<(String, Type)>,
-    /// What it says it throws, as internal names. This is what makes a call to
-    /// it a call that has to be caught or declared.
+
     pub throws: Vec<String>,
 }
 
@@ -5884,13 +5142,6 @@ impl Signature {
     }
 }
 
-/// What this compiler knows about the classes a file mentions.
-///
-/// A Java compiler cannot check a call to `super.onCreate` without knowing what
-/// `Activity` is. That knowledge comes from class files handed over as
-/// dependencies, read with this project's own class reader. Nothing is guessed:
-/// a call to something not on the classpath is refused, by name, rather than
-/// emitted and left for the device to reject.
 #[derive(Clone, Debug, Default)]
 pub struct Classpath {
     known: std::collections::BTreeMap<String, KnownClass>,
@@ -5900,98 +5151,62 @@ pub struct Classpath {
 pub struct KnownClass {
     pub name: String,
     pub superclass: Option<String>,
-    /// What it implements, which is as much a road to a method as what it
-    /// extends: `ArrayAdapter` answers `ListAdapter`'s methods, and a call
-    /// handing one where the other is wanted has to know that.
+
     pub interfaces: Vec<String>,
     pub methods: Vec<Signature>,
     pub fields: Vec<(String, Type, bool)>,
     pub interface: bool,
-    /// The class an instance of this one belongs to, for a class written
-    /// inside another without `static`.
+
     pub outer: Option<String>,
-    /// Written `@interface` and marked `@Retention(RUNTIME)`, which is what
-    /// decides whether an annotation of this type is written into the class
-    /// files that carry it or read and dropped.
+
     pub kept_at_runtime: bool,
-    /// What a `sealed` type permits to extend it, as internal names. Empty for
-    /// everything else -- which is also what "anything may extend this" looks
-    /// like, and the difference is what makes a `switch` over one exhaustive.
+
     pub permits: Vec<String>,
-    /// Each supertype, and what this class hands it in place of its own type
-    /// parameters. `People extends Store<String, Person>` records
-    /// `("com/my/lib/Store", [Fixed(String), Fixed(Person)])`, and a `Box<T>
-    /// extends Holder<T>` records the T by position -- which is what lets a
-    /// call on a `Box<String>` reach a method Holder declares and still know
-    /// what it gives back.
+
     pub above: Vec<(String, Vec<(Type, Standing)>)>,
 }
 
 impl Classpath {
-    /// A classpath that already knows the standard library.
-    ///
-    /// This is what a compiler with nothing handed to it should still be able
-    /// to answer for: `String`, `List`, `Map`, a stream, a `Path`, a
-    /// `BigDecimal`. Reading it costs one parse, kept for the life of the
-    /// process, and every caller after that gets a copy.
     pub fn new() -> Classpath {
         Classpath::the_library().clone()
     }
 
-    /// Nothing at all: no library, no jars. What the library itself is built
-    /// on, and what a test wanting to prove something is not being assumed
-    /// asks for.
     pub fn nothing() -> Classpath {
         Classpath::default()
     }
 
-    /// Everything a compilation starts out knowing, borrowed.
-    ///
-    /// `new` hands back a copy, because a compilation adds the project's own
-    /// types to what it was given. Anything that only wants to look -- an
-    /// editor asking what types exist -- wants the one that is already there
-    /// rather than four thousand classes copied to answer one question.
     pub fn everything() -> &'static Classpath {
         Classpath::the_library()
     }
 
-    /// Every type this classpath knows, by the name a class file calls it.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.known.keys().map(|held| held.as_str())
     }
 
-    /// The standard library, read once and kept.
     fn the_library() -> &'static Classpath {
         static HELD: std::sync::OnceLock<Classpath> = std::sync::OnceLock::new();
         HELD.get_or_init(|| {
             let mut found = Classpath::default();
             let mut units = Vec::new();
             for (_, text) in THE_LIBRARY {
-                // Written here and read here: what it holds is checked by the
-                // tests below, which name every class in it.
                 if let Ok(held) = parse(text) {
                     units.extend(held);
                 }
             }
-            // And the platform, which is the rest of what a device has. The
-            // two do not overlap: where the standard library says a class, the
-            // platform leaves it alone.
+
             for (_, text) in crate::compilers::android::THE_PLATFORM {
                 if let Ok(held) = parse(text) {
                     units.extend(held);
                 }
             }
-            // Every one of them first, so that a class can name one written
-            // after it -- `String` implements `CharSequence`, and `Collection`
-            // hands back an `Iterator`.
+
             for unit in &units {
                 found.shell(unit);
             }
             for unit in &units {
                 found.declare(unit);
             }
-            // `Object` extends nothing, and a shell gives everything the same
-            // parent. Left alone it would be its own.
+
             if let Some(held) = found.known.get_mut("java/lang/Object") {
                 held.superclass = None;
             }
@@ -5999,14 +5214,6 @@ impl Classpath {
         })
     }
 
-    /// Adds what a type declared in this compilation says about itself,
-    /// before it has been compiled.
-    ///
-    /// Two types written in one file can name each other, and neither exists
-    /// as a class file yet. What is recorded here is only what the other one
-    /// needs: the name, the shape, the fields and the signatures. Types inside
-    /// them that do not resolve are found when that type is compiled in its
-    /// own right, so nothing is waved through.
     pub fn shell(&mut self, unit: &Unit) {
         let internal = unit.internal_name();
         self.known.insert(
@@ -6025,13 +5232,6 @@ impl Classpath {
         );
     }
 
-    /// Fills in what a declared type's members look like.
-    ///
-    /// Every type in the file has a shell first, so that this can resolve a
-    /// name pointing at one of the others whichever order they were written
-    /// in. A member whose type does not resolve is left out rather than
-    /// recorded as a guess: a descriptor built from a name that stands for
-    /// nothing is a field the device cannot find.
     pub fn declare(&mut self, unit: &Unit) {
         let internal = unit.internal_name();
         let mut known = match self.known.get(&internal) {
@@ -6046,11 +5246,6 @@ impl Classpath {
             },
         };
 
-        // The shell wrote down what the superclass was called; here, with
-        // every type in the compilation already on the classpath, the name it
-        // stands for can be worked out. Leaving it as written is what made
-        // `class TooBig extends Exception` a class whose parent nothing could
-        // find, and `getMessage` on one a method nobody had heard of.
         if let Some(named) = &unit.extends {
             if let Some(found) = resolve_named(self, unit, named) {
                 known.superclass = Some(found);
@@ -6066,16 +5261,13 @@ impl Classpath {
             .iter()
             .filter_map(|named| resolve_named(self, unit, named))
             .collect();
-        // An `@interface` extends `java.lang.annotation.Annotation`, whether
-        // or not it says so -- the class file this writes says so, and code
-        // that reads one back has to be able to see it.
+
         if unit.annotation {
             known
                 .interfaces
                 .push("java/lang/annotation/Annotation".to_string());
         }
-        // And what each of them was handed: `Store<String, Person>` says which
-        // of its own type parameters a `People` fills in with what.
+
         known.above = unit
             .above
             .iter()
@@ -6129,18 +5321,14 @@ impl Classpath {
                 interface: unit.shape == Shape::Interface,
                 variadic: method.variadic,
                 abstract_: method.body.is_none() && !method.modifiers.native_,
-                // Which of the class's type parameters this was written as,
-                // before it was erased. `T get()` on a `Box<T>` is the first
-                // one, and that is what a call on a `Box<String>` needs.
+
                 returns_variable: which_variable(&method.returns),
                 parameter_variables: method
                     .parameters
                     .iter()
                     .map(|(what, _)| which_variable(what))
                     .collect(),
-                // And the whole of what was written, for a method with type
-                // parameters of its own: `<T> T first(List<T> of)` gives back
-                // whatever the list it was handed holds.
+
                 taken_stands_for: method
                     .parameters
                     .iter()
@@ -6149,9 +5337,7 @@ impl Classpath {
                 returns_stands_for: standing_of(&method.returns),
                 own_variables: method.own_variables.clone(),
                 witnessed: Vec::new(),
-                // What it says it throws, as the names the classpath knows
-                // them by. One this compilation cannot resolve is left out
-                // rather than guessed at.
+
                 throws: method
                     .throws
                     .iter()
@@ -6162,16 +5348,6 @@ impl Classpath {
         self.known.insert(internal, known);
     }
 
-    /// Adds everything a jar says about itself.
-    ///
-    /// A jar is a zip of class files, and `android.jar` is the whole platform
-    /// in one. Reading it is what turns "import what you like" from a promise
-    /// into a fact: every class, every method, every field, with the
-    /// descriptors the device will check the call against.
-    ///
-    /// A member this compiler cannot read is left out rather than guessed at,
-    /// and an entry that is not a class file is skipped -- a jar carries a
-    /// manifest and whatever else somebody put in it.
     pub fn learn_jar(&mut self, bytes: &[u8]) -> Result<usize, Diagnostic> {
         let mut sink = crate::diag::Sink::new();
         let Some(archive) = crate::archive::read(bytes, &mut sink) else {
@@ -6196,8 +5372,7 @@ impl Classpath {
                 },
                 crate::archive::Compression::Other(_) => continue,
             };
-            // A class file this cannot read is one class fewer to call into,
-            // not a reason to refuse the whole jar.
+
             let Ok(class) = crate::jvm::read(&held) else {
                 continue;
             };
@@ -6212,13 +5387,6 @@ impl Classpath {
         Ok(learned)
     }
 
-    /// Adds everything one class file says about itself.
-    ///
-    /// The reader hands names back the way a person writes them, with dots.
-    /// Everything from here down works in the form a class file holds, with
-    /// slashes. Converting once, here, is what stops every lookup below from
-    /// having to remember which of the two it is holding -- and forgetting
-    /// that is exactly what made the first version of this find nothing.
     pub fn learn(&mut self, class: &crate::jvm::Class) -> Result<(), Diagnostic> {
         let interface = class.access_flags & 0x0200 != 0;
         let internal = class.name.replace('.', "/");
@@ -6233,8 +5401,7 @@ impl Classpath {
             interface,
             ..KnownClass::default()
         };
-        // What the class called its type parameters, which is the only place a
-        // class file says so and what a method's `TT;` has to be read against.
+
         let named = class
             .signature
             .as_deref()
@@ -6248,16 +5415,13 @@ impl Classpath {
                 Some(held) if !named.is_empty() => variables_of(held, &named),
                 _ => (None, Vec::new()),
             };
-            // And the whole of what was written, which is what says
-            // `Arrays.asList("a", "b")` is a list of strings.
+
             let (taken_stands_for, returns_stands_for) = method
                 .signature
                 .as_deref()
                 .and_then(|held| standings_of(held, &named))
                 .unwrap_or_default();
-            // A method's own type parameters are written in front of its
-            // signature the same way a class's are, and a call that writes
-            // them out is writing these.
+
             let own_variables = method
                 .signature
                 .as_deref()
@@ -6270,8 +5434,7 @@ impl Classpath {
                 returns,
                 static_: method.access_flags & 0x0008 != 0,
                 interface,
-                // ACC_VARARGS, which is the only record a class file keeps of
-                // the `...` somebody wrote.
+
                 variadic: method.access_flags & 0x0080 != 0,
                 abstract_: method.access_flags & 0x0400 != 0,
                 returns_variable,
@@ -6299,8 +5462,6 @@ impl Classpath {
         Ok(())
     }
 
-    /// How many classes it knows, which is what a report about a classpath
-    /// says and what a test about the platform checks.
     pub fn how_many(&self) -> usize {
         self.known.len()
     }
@@ -6313,14 +5474,6 @@ impl Classpath {
         self.known.get(name)
     }
 
-    /// What a class further up was written holding, seen from one further
-    /// down that was written holding these.
-    ///
-    /// `People extends Store<String, Person>`: a call on a `People` that
-    /// reaches a method `Store` declares needs Store's own arguments, and the
-    /// only place they are written down is the `extends`. A `Box<T> extends
-    /// Holder<T>` passes its own along, which is why each one is a shape
-    /// rather than a type.
     pub fn seen_from(&self, from: &str, held: &[Type], owner: &str) -> Vec<Type> {
         self.seen_from_within(from, held, owner, 0)
             .unwrap_or_else(|| held.to_vec())
@@ -6360,9 +5513,6 @@ impl Classpath {
         self.known.is_empty()
     }
 
-    /// A method on a class or anything above it.
-    /// Every method of this name and shape the classpath knows, nearest
-    /// first: what the class itself declares, then what it inherits.
     pub fn find_methods(&self, owner: &str, name: &str, arity: usize) -> Vec<Signature> {
         let mut found: Vec<Signature> = Vec::new();
         for one in self.ancestors(owner) {
@@ -6373,8 +5523,7 @@ impl Classpath {
                 if held.name != name || held.parameters.len() != arity {
                     continue;
                 }
-                // A method an interface declares and a class implements is one
-                // method, and the class's is the one that answers.
+
                 if found
                     .iter()
                     .any(|before| before.parameters == held.parameters)
@@ -6408,16 +5557,7 @@ impl Classpath {
         None
     }
 
-    /// A class and everything it inherits from, as far as this can see.
-    ///
-    /// The walk stops where the classpath does, and `java.lang.Object` is
-    /// always last, because everything answers its methods whether or not
-    /// anybody handed its class file over.
     pub fn ancestors(&self, owner: &str) -> Vec<String> {
-        // Both roads up: what it extends and what it implements. A class may
-        // have several, so this is a walk over a graph and not up a chain --
-        // and the order is what it was written in, so a superclass answers
-        // before an interface does.
         let mut out = vec![owner.to_string()];
         let mut at = 0usize;
         while at < out.len() {
@@ -6468,7 +5608,6 @@ impl Classpath {
     }
 }
 
-/// One type out of a descriptor, from `at` onward.
 pub fn read_type(descriptor: &str, at: &mut usize) -> Option<Type> {
     let bytes = descriptor.as_bytes();
     let byte = *bytes.get(*at)?;
@@ -6494,7 +5633,6 @@ pub fn read_type(descriptor: &str, at: &mut usize) -> Option<Type> {
     })
 }
 
-/// A whole method descriptor, as its parameters and what it returns.
 pub fn read_descriptor(descriptor: &str) -> Option<(Vec<Type>, Type)> {
     let bytes = descriptor.as_bytes();
     if bytes.first() != Some(&b'(') {
@@ -6510,13 +5648,6 @@ pub fn read_descriptor(descriptor: &str) -> Option<(Vec<Type>, Type)> {
     Some((parameters, returns))
 }
 
-// --------------------------------------------------------- constant pool
-
-/// The pool a class file keeps its names, types and constants in.
-///
-/// Everything is deduplicated, which is not an optimisation: a pool that holds
-/// the same string twice is a pool whose entries mean nothing, and a class file
-/// is mostly pool.
 #[derive(Clone, Debug, Default)]
 pub struct Pool {
     entries: Vec<PoolEntry>,
@@ -6535,8 +5666,7 @@ enum PoolEntry {
     Field(u16, u16),
     Method(u16, u16),
     InterfaceMethod(u16, u16),
-    /// The slot after a long or a double, which the format wastes and every
-    /// reader has to know about.
+
     Unusable,
 }
 
@@ -6677,9 +5807,6 @@ impl Pool {
     }
 }
 
-// --------------------------------------------------------------- emitter
-
-/// Where a local lives and what is in it.
 #[derive(Clone, Debug)]
 struct Local {
     name: String,
@@ -6687,10 +5814,6 @@ struct Local {
     what: Type,
 }
 
-/// A class written inside a method: the name it was written with, the name it
-/// is filed under, and what has to be handed to its constructor in front of
-/// whatever the person wrote -- the instance around it, and a copy of every
-/// local it reads.
 #[derive(Clone)]
 struct Locally {
     written: String,
@@ -6700,21 +5823,13 @@ struct Locally {
     captured: Vec<Local>,
 }
 
-/// A jump whose destination is not known yet.
 struct Pending {
     at: usize,
     from: usize,
-    /// What the slots held where the jump was written. Where it lands, that
-    /// is one of the roads arriving, and the frame there may claim only what
-    /// every road agrees on.
+
     slots: Vec<Verified>,
 }
 
-/// What the verifier is told is in a slot.
-///
-/// Not the same as [`Type`]: the verifier does not distinguish a boolean from
-/// an int, because the machine does not. It does distinguish the second half of
-/// a long from anything else, which is what `Top` is for here.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Verified {
     Top,
@@ -6723,13 +5838,9 @@ pub enum Verified {
     Double,
     Long,
     Null,
-    /// `this`, inside a constructor, before the superclass constructor has run.
+
     UninitializedThis,
-    /// What `new` leaves behind: an object whose constructor has not run yet,
-    /// named by where the `new` is rather than by its class. Until the
-    /// constructor runs it is assignable to nothing, so a frame written
-    /// between the two -- `new Foo(c ? a : b)` -- has to say this and not the
-    /// class.
+
     Uninitialized(u16),
     Object(String),
 }
@@ -6773,52 +5884,38 @@ impl Verified {
     }
 }
 
-/// Something that has to run before control leaves where it is.
-///
-/// A `finally` is the obvious one. A `synchronized` block is the other: the
-/// lock has to be given back on every road out, and the JVM refuses a method
-/// that returns while still holding one.
 #[derive(Clone, Debug)]
 enum Cleanup {
     Block(Vec<Positioned<Statement>>),
     Unlock(u16, Type),
 }
 
-/// One loop or switch, and where the jumps out of it are waiting to be told
-/// where they land.
 struct Level {
-    /// The name in front of it, when it was written with one.
     label: Option<String>,
-    /// True for a loop, which is the only thing `continue` can reach.
+
     loops: bool,
     breaks: Vec<Pending>,
     continues: Vec<Pending>,
-    /// How many `finally` bodies were pending when this was entered, so that
-    /// a jump out of it knows how many of them to run.
+
     finallys: usize,
 }
 
-/// One `switch` expression being written.
 struct Yielding {
-    /// The jumps out of each arm, waiting for the end of the switch.
     pending: Vec<Pending>,
-    /// What the first arm produced, which is what all of them must produce.
+
     produced: Option<Type>,
-    /// How many `finally` bodies were pending when the switch was entered.
+
     finallys: usize,
 }
 
-/// One row of a method's exception table.
 struct Handler {
     start: usize,
     end: usize,
     target: usize,
-    /// The class caught, or `None` for the handler that catches everything so
-    /// that a `finally` runs on the way past.
+
     class: Option<String>,
 }
 
-/// What the verifier has to be told at one place a branch can land.
 #[derive(Clone, Debug)]
 struct Frame {
     at: usize,
@@ -6826,13 +5923,6 @@ struct Frame {
     stack: Vec<Verified>,
 }
 
-/// Turns one method body into bytecode.
-///
-/// There is no separate checking pass. Every expression is typed as it is
-/// emitted and the type comes back out, which is enough for this subset and
-/// keeps one truth instead of two that can disagree. A type error is therefore
-/// found at the moment the code for it would have been written, and nothing is
-/// written after one.
 struct Emitter<'a> {
     pool: &'a mut Pool,
     classpath: &'a Classpath,
@@ -6845,82 +5935,46 @@ struct Emitter<'a> {
     max_slot: u16,
     depth: i32,
     max_depth: i32,
-    /// Whether anything can reach the next instruction written.
-    ///
-    /// A `return`, a `throw` and a `switch` that answers for everything all
-    /// end a road; a branch landing starts one. What this is at the end of a
-    /// method body is what decides whether the method can fall off its end --
-    /// which the shape of the source alone cannot always say.
+
     reachable: bool,
-    /// Where each statement began and the line it was written on, which
-    /// becomes the `LineNumberTable` the runtime prints traces from.
+
     lines: Vec<(u16, u16)>,
-    /// What the `catch` clauses around here take, innermost last. A checked
-    /// exception thrown inside one of these is answered for.
+
     caught: Vec<Vec<String>>,
-    /// What the method being written says it throws. Everything checked that
-    /// can happen in it has to be in here or in a `catch` around it.
+
     said_to_throw: Vec<String>,
-    /// The loops and switches this is inside, innermost last.
+
     levels: Vec<Level>,
-    /// The `finally` bodies that have to run before control leaves where it
-    /// is, innermost last. A `return`, a `break` or a `continue` that jumps
-    /// past one of these runs it on the way out.
+
     finallys: Vec<Cleanup>,
-    /// The exception table this method comes to.
+
     handlers: Vec<Handler>,
-    /// Every stretch of code that is an inlined `finally`, and the outermost
-    /// `finally` that stretch ran.
-    ///
-    /// A handler that protects a `try` must not protect the copy of that
-    /// `try`'s own `finally` that a `return` inside it left behind, or a throw
-    /// from the `finally` would run the `finally` a second time and swallow
-    /// the exception in its own cleanup. It must still protect a copy of some
-    /// *inner* `try`'s `finally`, because that one really is inside it -- which
-    /// is why the depth is recorded alongside the range.
+
     inlined: Vec<(usize, usize, usize)>,
-    /// A label read but not yet handed to the loop or switch it belongs to.
+
     pending_label: Option<String>,
-    /// The `switch` expressions being written, innermost last, and where each
-    /// one's arms jump to once they have their value.
+
     yields: Vec<Yielding>,
-    /// The classes this method's body turned out to need, which are compiled
-    /// after it. A class written where it is used has no name until here.
+
     made: &'a mut Vec<Unit>,
-    /// Whether anything in this method wrote an `assert`, which is what
-    /// decides whether the class needs the flag they are guarded by.
+
     wants_assertions: bool,
-    /// The type the expression about to be written is being handed to, when
-    /// that is known. A lambda has no type of its own: which interface it is
-    /// depends entirely on where it is going.
+
     expecting: Option<Type>,
-    /// How many records this method has taken apart, so that each pattern gets
-    /// a name for the whole that nothing else can be called.
+
     taken_apart: usize,
-    /// The classes written inside this method, and what has to be handed to
-    /// each of them to make one.
+
     locally: Vec<Locally>,
-    /// Whether the method being written is a bridge nobody wrote.
+
     writing_a_bridge: bool,
     static_: bool,
-    /// What this method said it returns. A `return` is checked against it, and
-    /// the first version of this did not do that -- so `int f() { return
-    /// "text"; }` compiled, and produced a class file whose verifier would
-    /// have thrown it out on the device.
+
     returns: Type,
-    /// What is in each local slot, as the verifier would say it.
-    ///
-    /// A local that has been declared but never given a value is `Top`, which
-    /// is the verifier's word for "nothing you may read".
+
     slots: Vec<Verified>,
-    /// Everywhere a branch can land, and what is true there.
+
     frames: Vec<Frame>,
-    /// What is on the operand stack, as the verifier would say it.
-    ///
-    /// Counting it was not enough. A branch inside an expression -- a `?:` in
-    /// the middle of a call's arguments, say -- lands somewhere that already
-    /// has the earlier arguments on the stack, and a frame that says the stack
-    /// is empty there is a claim the verifier checks and rejects.
+
     stack: Vec<Verified>,
 }
 
@@ -6969,14 +6023,7 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    // -- the stack, tracked as it goes, because a class file has to declare
-    // -- how deep it gets and getting that wrong is a class that will not load.
-
-    /// Puts a value of this type on the stack.
     fn pushes(&mut self, what: &Type) {
-        // A method that returns nothing leaves nothing. Writing a `top` for it
-        // would describe a stack one slot deeper than the one that is there,
-        // and every frame after the call would say so.
         if *what == Type::Void {
             return;
         }
@@ -6990,8 +6037,6 @@ impl<'a> Emitter<'a> {
         self.deepest();
     }
 
-    /// Puts something on the stack whose type the verifier knows by name
-    /// rather than by the language: `null`, or a `this` not yet constructed.
     fn pushes_raw(&mut self, what: Verified) {
         let wide = what.is_wide();
         self.stack.push(what);
@@ -7001,7 +6046,6 @@ impl<'a> Emitter<'a> {
         self.deepest();
     }
 
-    /// `dup`, which is whatever is on top a second time.
     fn duplicates(&mut self) {
         self.op(0x59);
         if let Some(top) = self.stack.last().cloned() {
@@ -7010,7 +6054,6 @@ impl<'a> Emitter<'a> {
         self.deepest();
     }
 
-    /// `dup2`, which is the top two slots again.
     fn duplicates_two(&mut self) {
         self.op(0x5c);
         let held = self.stack.len();
@@ -7021,15 +6064,12 @@ impl<'a> Emitter<'a> {
         self.deepest();
     }
 
-    /// Takes this many slots off.
     fn pops(&mut self, slots: i32) {
         for _ in 0..slots.max(0) {
             self.stack.pop();
         }
     }
 
-    /// Says the stack is exactly this, which is what entering an exception
-    /// handler does however deep it was before.
     fn stack_is(&mut self, what: Vec<Verified>) {
         self.stack = what;
         self.deepest();
@@ -7042,18 +6082,12 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Writes `null` into every slot the other road declared, so that both
-    /// agree on what is set when they meet.
     fn give_them_null(&mut self, outside: &[Verified], inside: &[Verified]) {
         for (at, held) in inside.iter().enumerate() {
             if outside.get(at) == Some(held) {
                 continue;
             }
-            // Whatever nothing looks like for what the slot holds: null for a
-            // name a pattern binds, zero for a number one takes out of a
-            // record. The slot is only in scope where the test passed, so
-            // nothing reads it -- but both roads have to agree on what is in
-            // it, which is what the frame says.
+
             let (push, store) = match held {
                 Verified::Object(_) | Verified::Null => (0x01u8, 0x3au8),
                 Verified::Integer => (0x03, 0x36),
@@ -7065,7 +6099,6 @@ impl<'a> Emitter<'a> {
             self.op(push);
             self.pushes_raw(held.clone());
             if at <= 3 {
-                // The short forms: astore_0..3, istore_0..3, and so on.
                 let base = match store {
                     0x3a => 0x4b,
                     0x36 => 0x3b,
@@ -7084,7 +6117,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Records what is in a local slot, for the frames to report.
     fn slot_holds(&mut self, slot: u16, what: &Type) {
         let verified = Verified::of(what);
         let wide = verified.is_wide();
@@ -7098,22 +6130,7 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Notes that a branch can land at the current position, and what is on the
-    /// stack when it does.
-    ///
-    /// Every one of these becomes a frame. The verifier does not work out what
-    /// is true at a branch target; it is told, and it checks that every path
-    /// arriving agrees with what it was told. So a frame that is wrong is worse
-    /// than no frame at all, because it is a claim rather than a gap.
-    ///
-    /// The locals are read from what has been declared. The stack is passed in,
-    /// because every place a branch lands here is a place this compiler wrote
-    /// the branch and therefore knows exactly what is left on it -- and that is
-    /// a shorter road to being right than threading a type through every
-    /// arithmetic instruction and hoping the two counts never drift apart.
     fn a_branch_lands_here(&mut self) {
-        // Something jumps here, so whatever came before it does not decide
-        // whether this instruction is reached.
         self.reachable = true;
         let at = self.code.len();
         let mut locals = Self::as_a_frame_says_it(&self.slots);
@@ -7126,22 +6143,11 @@ impl<'a> Emitter<'a> {
             stack: Self::as_a_frame_says_it(&self.stack),
         };
         match self.frames.iter().position(|held| held.at == at) {
-            // Two branches landing on one instruction have to agree, and where
-            // this compiler writes them they do: one is the jump over an else
-            // and the other is the end of the then. Keeping the wider of the
-            // two stacks would be inventing something neither said.
             Some(index) => self.frames[index] = frame,
             None => self.frames.push(frame),
         }
     }
 
-    /// The same slots, written the way a frame writes them.
-    ///
-    /// This compiler keeps a long or a double as the two slots it really
-    /// occupies, because that is what `max_stack` and the local numbering are
-    /// counted in. A frame says it once: one `verification_type_info` covers
-    /// both halves, and writing the second half as a `top` of its own would
-    /// describe a stack one slot deeper than the one that is there.
     fn as_a_frame_says_it(held: &[Verified]) -> Vec<Verified> {
         let mut said = Vec::with_capacity(held.len());
         let mut at = 0;
@@ -7184,8 +6190,6 @@ impl<'a> Emitter<'a> {
     }
 
     fn land(&mut self, pending: Pending) {
-        // The jump arrives here, so this is reachable and what it carried is
-        // one of the things the frame here has to be true of.
         if self.reachable {
             self.only_what_every_road_agrees_on(&pending.slots);
         } else {
@@ -7196,12 +6200,6 @@ impl<'a> Emitter<'a> {
         self.land_at(pending, to);
     }
 
-    /// Narrows the slots to what this road and the one already here both say.
-    ///
-    /// A local one road filled in and the other did not holds nothing a frame
-    /// may name: `String said;` before a `switch` is a String on the arm that
-    /// assigned it and nothing at all on the arm that has not run yet, and the
-    /// frame where those two meet has to say the second.
     fn only_what_every_road_agrees_on(&mut self, other: &[Verified]) {
         let wide = self.slots.len().max(other.len());
         self.slots.resize(wide, Verified::Top);
@@ -7212,7 +6210,6 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// Where a jump goes, when that is somewhere other than here.
     fn land_at(&mut self, pending: Pending, to: usize) {
         let offset = (to as i64 - pending.from as i64) as i16;
         self.code[pending.at..pending.at + 2].copy_from_slice(&offset.to_be_bytes());
@@ -7224,8 +6221,6 @@ impl<'a> Emitter<'a> {
         self.code.push(opcode);
         self.code.extend_from_slice(&offset.to_be_bytes());
     }
-
-    // -- scopes
 
     fn open(&mut self) {
         self.scopes.push(self.locals.len());
@@ -7239,19 +6234,10 @@ impl<'a> Emitter<'a> {
                 }
             }
         }
-        // A local that has gone out of scope is nothing the verifier may read,
-        // and a frame written after this must not claim otherwise.
+
         self.slots.truncate(usize::from(self.next_slot));
     }
 
-    /// A slot for a local nothing has been put in yet.
-    ///
-    /// The name is known and the slot is reserved, but the verifier is told
-    /// nothing about what is in it. `String said;` in front of a `switch` that
-    /// fills it in on every arm is exactly this: a frame at one of those arms
-    /// that claimed a String would be claiming something no path arriving
-    /// there can honour, and the verifier refuses the class rather than the
-    /// path.
     fn declare_with_nothing_in_it(&mut self, name: &str, what: Type) -> u16 {
         let slot = self.declare(name, what);
         let at = usize::from(slot);
@@ -7284,8 +6270,6 @@ impl<'a> Emitter<'a> {
             .cloned()
     }
 
-    // -- resolving what was written into what it is
-
     fn resolve(&self, written: &Written, line: u32) -> Result<Type, Diagnostic> {
         Ok(match written {
             Written::Inferred => {
@@ -7307,17 +6291,13 @@ impl<'a> Emitter<'a> {
             Written::Float => Type::Float,
             Written::Double => Type::Double,
             Written::Array(of) => Type::Array(Box::new(self.resolve(of, line)?)),
-            // A type variable is what it erases to; which one it was is
-            // written down separately, for the call sites that can put an
-            // argument back where it stood.
+
             Written::Variable(_, bound) | Written::OwnVariable(_, bound) => {
                 self.resolve(bound, line)?
             }
             Written::Named(name, held) => {
                 let mut arguments = Vec::new();
                 for one in held {
-                    // A `?` or a bound this cannot name is no argument at all,
-                    // and a call on the thing gives back what it says it does.
                     match self.resolve(one, line) {
                         Ok(found) => arguments.push(found),
                         Err(_) => {
@@ -7331,15 +6311,7 @@ impl<'a> Emitter<'a> {
         })
     }
 
-    /// A written class name as the internal name it stands for.
-    ///
-    /// In order: the class being compiled, an import that ends in it, a
-    /// wildcard import, `java.lang`, and finally the name as written if it is
-    /// already qualified. A name that resolves to nothing is refused here
-    /// rather than written into a class file for a device to reject.
     fn resolve_class(&self, name: &str, line: u32) -> Result<String, Diagnostic> {
-        // A class written inside a method is known by the name it was written
-        // with and filed under one nobody wrote.
         if let Some(held) = self.locally.iter().rev().find(|held| held.written == name) {
             return Ok(held.internal.clone());
         }
@@ -7359,22 +6331,7 @@ impl<'a> Emitter<'a> {
     }
 }
 
-/// Signatures from the runtime library that this compiler knows without being
-/// handed a class file.
-///
-/// This is not a model of the JDK, and it is not trying to become one. It is
-/// the handful of things ordinary Java touches in almost every method -- the
-/// exceptions people throw, printing, string work, boxing, arithmetic -- and
-/// without them a compiler that has never been given `android.jar` cannot
-/// compile `throw new IllegalStateException("...")`. The implementation comes
-/// from the device at run time; what is wanted here is only the descriptor,
-/// because the descriptor is what the constant pool records.
-///
-/// Anything not here still works the moment the class file that declares it is
-/// handed over as a dependency, which is the way anything outside this list is
-/// meant to arrive.
 const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
-    // -- Object
     ("java/lang/Object", "<init>", "()V", false),
     (
         "java/lang/Object",
@@ -7393,8 +6350,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "()Ljava/lang/String;",
         false,
     ),
-    // What a class file says about itself, read back by the runtime. These
-    // are what the attributes this compiler writes are for.
     ("java/lang/Class", "isRecord", "()Z", false),
     ("java/lang/Class", "isSealed", "()Z", false),
     ("java/lang/Class", "isEnum", "()Z", false),
@@ -7438,14 +6393,12 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "()[Ljava/lang/Class;",
         false,
     ),
-    // -- Enum, which every enum extends
     ("java/lang/Enum", "<init>", "(Ljava/lang/String;I)V", false),
     ("java/lang/Enum", "name", "()Ljava/lang/String;", false),
     ("java/lang/Enum", "ordinal", "()I", false),
     ("java/lang/Enum", "toString", "()Ljava/lang/String;", false),
     ("java/lang/Enum", "equals", "(Ljava/lang/Object;)Z", false),
     ("java/lang/Enum", "hashCode", "()I", false),
-    // -- Throwable, and the exceptions that get thrown by hand
     (
         "java/lang/Throwable",
         "getMessage",
@@ -7471,7 +6424,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "()Ljava/lang/String;",
         false,
     ),
-    // -- String
     ("java/lang/String", "length", "()I", false),
     ("java/lang/String", "isEmpty", "()Z", false),
     ("java/lang/String", "isBlank", "()Z", false),
@@ -7605,7 +6557,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "(Ljava/lang/Object;)Ljava/lang/String;",
         true,
     ),
-    // -- StringBuilder, which is also what `+` on strings comes to
     ("java/lang/StringBuilder", "<init>", "()V", false),
     (
         "java/lang/StringBuilder",
@@ -7695,7 +6646,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     ("java/lang/StringBuilder", "isEmpty", "()Z", false),
-    // -- boxing, and reading numbers out of text
     (
         "java/lang/Integer",
         "parseInt",
@@ -7760,8 +6710,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Character", "isWhitespace", "(C)Z", true),
     ("java/lang/Character", "toUpperCase", "(C)C", true),
     ("java/lang/Character", "toLowerCase", "(C)C", true),
-    // Every box is a Number, and asking a Number for a number is what code
-    // written against `? extends Number` does.
     ("java/lang/Number", "intValue", "()I", false),
     ("java/lang/Number", "longValue", "()J", false),
     ("java/lang/Number", "floatValue", "()F", false),
@@ -7782,8 +6730,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Long", "doubleValue", "()D", false),
     ("java/lang/Double", "compare", "(DD)I", true),
     ("java/lang/Float", "compare", "(FF)I", true),
-    // Every box class hashes the primitive it holds, which is what a record
-    // leans on to hash itself without a bootstrap method.
     ("java/lang/Boolean", "hashCode", "(Z)I", true),
     ("java/lang/Byte", "hashCode", "(B)I", true),
     ("java/lang/Short", "hashCode", "(S)I", true),
@@ -7807,7 +6753,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "(C)Ljava/lang/String;",
         true,
     ),
-    // -- arithmetic
     ("java/lang/Math", "abs", "(I)I", true),
     ("java/lang/Math", "abs", "(J)J", true),
     ("java/lang/Math", "abs", "(F)F", true),
@@ -7824,9 +6769,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/lang/Math", "ceil", "(D)D", true),
     ("java/lang/Math", "round", "(D)J", true),
     ("java/lang/Math", "random", "()D", true),
-    // -- the collections, which is what most Java holds things in. Every one
-    // of these is an interface at run time except the two classes named, and
-    // the erased signatures are what `javac` writes after erasure too.
     (
         "java/lang/Iterable",
         "iterator",
@@ -7967,7 +6909,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         false,
     ),
     ("java/util/Iterator", "remove", "()V", false),
-    // The collections a person actually writes `new` in front of.
     ("java/util/ArrayList", "<init>", "()V", false),
     ("java/util/ArrayList", "<init>", "(I)V", false),
     (
@@ -8005,7 +6946,6 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/util/LinkedHashMap", "<init>", "()V", false),
     ("java/util/TreeMap", "<init>", "()V", false),
     ("java/util/TreeMap", "<init>", "(Ljava/util/Map;)V", false),
-    // The static helpers beside them.
     ("java/util/Collections", "sort", "(Ljava/util/List;)V", true),
     (
         "java/util/Collections",
@@ -8118,16 +7058,7 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
         "(Ljava/lang/Object;)V",
         false,
     ),
-    // -- Android, as far as an application's own code touches it.
-    //
-    // There is no `android.jar` on a phone and there never will be, so the
-    // signatures an application needs to name the platform are here. The
-    // platform provides the implementation; what is wanted at build time is
-    // only the descriptor, because the descriptor is what the dex records and
-    // what the runtime resolves against.
     ("java/lang/Runnable", "run", "()V", false),
-    // More of the platform an application touches on its first screen.
-    // -- the clock, and somewhere to print
     ("java/lang/System", "currentTimeMillis", "()J", true),
     ("java/lang/System", "nanoTime", "()J", true),
     ("java/io/PrintStream", "println", "()V", false),
@@ -8157,18 +7088,10 @@ const BUILT_IN_METHODS: &[(&str, &str, &str, bool)] = &[
     ("java/io/PrintStream", "print", "(I)V", false),
 ];
 
-/// What each built-in class inherits from, where the classpath cannot say.
-///
-/// A `List` answers `Collection`'s methods and a `Collection` answers
-/// `Iterable`'s, and none of those class files has been handed over. Without
-/// this, walking a list with a `for` is refused for want of an `iterator()`
-/// that is two steps up.
 const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ("java/lang/String", "java/lang/CharSequence"),
     ("java/lang/String", "java/lang/Comparable"),
     ("java/lang/StringBuilder", "java/lang/CharSequence"),
-    // The exceptions, which are a tree like anything else and are asked about
-    // as one: a `catch` of a parent has to accept a child.
     ("java/lang/Exception", "java/lang/Throwable"),
     ("java/lang/Error", "java/lang/Throwable"),
     ("java/lang/RuntimeException", "java/lang/Exception"),
@@ -8233,8 +7156,6 @@ const BUILT_IN_ABOVE: &[(&str, &str)] = &[
     ("java/lang/Byte", "java/lang/Number"),
 ];
 
-/// The built-in methods whose last parameter was written with `...`, so that a
-/// call may hand over the elements instead of the array.
 const BUILT_IN_VARIADIC: &[(&str, &str)] = &[
     ("java/lang/String", "format"),
     ("java/lang/String", "join"),
@@ -8242,9 +7163,6 @@ const BUILT_IN_VARIADIC: &[(&str, &str)] = &[
     ("java/util/Arrays", "toString"),
 ];
 
-/// Which of the built-in classes are interfaces, which decides whether a call
-/// on one is `invokevirtual` or `invokeinterface`. Getting it wrong produces a
-/// class file that verifies and then fails to link on the device.
 const BUILT_IN_INTERFACES: &[&str] = &[
     "java/lang/annotation/Annotation",
     "java/lang/Runnable",
@@ -8261,9 +7179,6 @@ const BUILT_IN_INTERFACES: &[&str] = &[
     "java/lang/Comparable",
 ];
 
-/// The exceptions this compiler knows how to construct without being handed
-/// their class files. Each takes nothing or a message, which is how they are
-/// almost always thrown.
 const BUILT_IN_THROWABLES: &[&str] = &[
     "java/lang/AssertionError",
     "java/lang/Throwable",
@@ -8283,13 +7198,10 @@ const BUILT_IN_THROWABLES: &[&str] = &[
     "java/lang/UnsupportedOperationException",
     "java/lang/AssertionError",
     "java/io/IOException",
-    // What an exhaustive `switch` throws where nothing was supposed to reach.
     "java/lang/IncompatibleClassChangeError",
     "java/lang/MatchException",
 ];
 
-/// The fields of the runtime library this compiler knows, which is `System.out`
-/// and `System.err` and the limits of the number types.
 const BUILT_IN_FIELDS: &[(&str, &str, &str)] = &[
     ("java/lang/System", "out", "Ljava/io/PrintStream;"),
     ("java/lang/System", "err", "Ljava/io/PrintStream;"),
@@ -8307,17 +7219,12 @@ const BUILT_IN_FIELDS: &[(&str, &str, &str)] = &[
     ("java/lang/Byte", "MIN_VALUE", "B"),
     ("java/lang/Character", "MAX_VALUE", "C"),
     ("java/lang/Character", "MIN_VALUE", "C"),
-    // The constants an Android application names, which are `static final
-    // int` on the platform's own classes and nothing a compiler can work out.
 ];
 
-/// A signature from [`BUILT_IN_METHODS`], if one of them is what was asked
-/// about.
 fn built_in_method(owner: &str, name: &str, count: usize) -> Option<Signature> {
     built_in_overloads(owner, name, count).into_iter().next()
 }
 
-/// Every built-in signature of this name that takes this many arguments.
 fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
     if name == "<init>" && count <= 1 && BUILT_IN_THROWABLES.contains(&owner) {
         let parameters = if count == 1 {
@@ -8343,8 +7250,7 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             throws: Vec::new(),
         }];
     }
-    // Everything that can be thrown answers Throwable's methods, everything
-    // answers what it inherits from, and every class answers Object's.
+
     let mut owners = vec![owner.to_string()];
     if BUILT_IN_THROWABLES.contains(&owner) {
         owners.push("java/lang/Throwable".to_string());
@@ -8390,14 +7296,12 @@ fn built_in_overloads(owner: &str, name: &str, count: usize) -> Vec<Signature> {
             });
         }
         if !found.is_empty() {
-            // A class answers with its own before anything it inherits.
             break;
         }
     }
     found
 }
 
-/// The type of one of the fields in [`BUILT_IN_FIELDS`].
 fn built_in_field(owner: &str, name: &str) -> Option<Type> {
     let (_, _, descriptor) = BUILT_IN_FIELDS
         .iter()
@@ -8406,21 +7310,6 @@ fn built_in_field(owner: &str, name: &str) -> Option<Type> {
     read_type(descriptor, &mut at)
 }
 
-/// The classes that can be named without anything on the classpath, because a
-/// compiler that cannot say `String` cannot compile anything at all.
-/// The internal name a written one stands for, as seen from one unit.
-///
-/// In order: the type being compiled, a name already written out in full, a
-/// type in the same package, a type an import names, a wildcard import, and
-/// `java.lang`. An import says where a class would live if it exists; it is not
-/// proof that it does, which is why every step also asks whether the class is
-/// actually there. Taking an import as proof is how a call to a class nobody
-/// handed over got as far as being written into a class file.
-/// The dotted name an expression is written as, where it is written as one.
-///
-/// `R.string` is a chain of `Field`s over a `Name`, and so is `a.b` where `a`
-/// is a variable. This says what was written; whether it names anything is a
-/// separate question.
 fn written_as_a_path(expression: &Expression) -> Option<String> {
     match expression {
         Expression::Name(name) => Some(name.clone()),
@@ -8429,29 +7318,21 @@ fn written_as_a_path(expression: &Expression) -> Option<String> {
     }
 }
 
-/// A type as it was written, with whatever type variables were in it.
-///
-/// Erasure threw these away and left a descriptor. What is left of them is
-/// enough to say two things: what a call on a `List<String>` gives back, and
-/// what `Arrays.asList("a", "b")` is a list of.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub enum Standing {
-    /// Nothing in it stands for anything: the descriptor is the whole story.
     #[default]
     Fixed,
-    /// A type parameter of the class, by position.
+
     OfTheClass(usize),
-    /// A type parameter of the method, by name.
+
     OfTheMethod(String),
-    /// A class with arguments, some of which may stand for something.
+
     Holding(Vec<Standing>),
-    /// An array of one of these.
+
     ArrayOf(Box<Standing>),
 }
 
 impl Standing {
-    /// Whether any of this stands for one of the class's own type parameters,
-    /// which is what the receiver can answer and nothing else can.
     fn mentions_the_class(&self) -> bool {
         match self {
             Standing::OfTheClass(_) => true,
@@ -8470,31 +7351,19 @@ impl Standing {
         }
     }
 
-    /// Works out what each of the method's own type variables stands for, by
-    /// laying the shape over the type actually handed across.
     fn bind(&self, actual: &Type, out: &mut Vec<(String, Type)>) {
         match self {
             Standing::OfTheMethod(name) => {
-                // A type variable never stands for a primitive: erasure has
-                // nowhere to put one. `listOf(1, 2)` is a list of Integer, and
-                // the ints go into their boxes on the way.
                 let actual = match boxed_name(actual) {
                     Some(boxed) => Type::Object(boxed.to_string(), Vec::new()),
                     None => actual.clone(),
                 };
                 let nothing = Type::Object("java/lang/Object".to_string(), Vec::new());
-                // Object is what a variable erased to in the first place, so
-                // being handed one says nothing about what it stands for:
-                // `mapped(names, String::length)` learns what B is from the
-                // reference and leaves A to the list, which does know.
+
                 if actual == nothing {
                     return;
                 }
                 match out.iter_mut().find(|(held, _)| held == name) {
-                    // Bound twice to two different things, which is what
-                    // `asList(1, 2.5, 3L)` does. What they have in common is
-                    // more than Object and less than either; Object is the
-                    // part of it this can say without inventing anything.
                     Some((_, before)) if *before != actual => {
                         *before = nothing;
                     }
@@ -8518,7 +7387,6 @@ impl Standing {
         }
     }
 
-    /// The type this shape comes to, once the variables are known.
     fn filled(
         &self,
         erased: &Type,
@@ -8536,11 +7404,7 @@ impl Standing {
                 let Type::Object(named, arguments) = erased else {
                     return erased.clone();
                 };
-                // Each argument is filled against the argument the declared
-                // type had in that place, not against Object: `Collector<T, ?,
-                // Map<K, V>>` is a Collector holding a Map, and filling the
-                // Map against Object would leave a call on it with nothing to
-                // resolve against.
+
                 let object = Type::Object("java/lang/Object".to_string(), Vec::new());
                 let filled = inside
                     .iter()
@@ -8566,7 +7430,6 @@ impl Standing {
     }
 }
 
-/// What a written type stands for, for a member of a class being compiled here.
 fn standing_of(written: &Written) -> Standing {
     match written {
         Written::Variable(at, _) => Standing::OfTheClass(*at),
@@ -8591,7 +7454,6 @@ fn standing_of(written: &Written) -> Standing {
     }
 }
 
-/// What one type in a generic signature stands for, stepping over it as it goes.
 fn standing_in(bytes: &[u8], at: &mut usize, of_the_class: &[String]) -> Option<Standing> {
     match *bytes.get(*at)? {
         b'T' => {
@@ -8617,16 +7479,12 @@ fn standing_in(bytes: &[u8], at: &mut usize, of_the_class: &[String]) -> Option<
             })
         }
         b'L' => {
-            // The class name, then its arguments if it has any, then whatever
-            // `.Inner` parts follow, to the `;` that closes it.
             let mut inside: Vec<Standing> = Vec::new();
             loop {
                 match *bytes.get(*at)? {
                     b'<' => {
                         *at += 1;
                         while *bytes.get(*at)? != b'>' {
-                            // `? extends T` and `? super T` still say which
-                            // variable is meant; `?` on its own says nothing.
                             if matches!(*bytes.get(*at)?, b'+' | b'-') {
                                 *at += 1;
                                 inside.push(standing_in(bytes, at, of_the_class)?);
@@ -8661,12 +7519,10 @@ fn standing_in(bytes: &[u8], at: &mut usize, of_the_class: &[String]) -> Option<
     }
 }
 
-/// What a method's generic signature says its parameters and return stand for.
 fn standings_of(signature: &str, of_the_class: &[String]) -> Option<(Vec<Standing>, Standing)> {
     let bytes = signature.as_bytes();
     let mut at = 0usize;
-    // A method's own type parameters are declared in front. Their names come
-    // out of the types themselves, so the declaration is only stepped over.
+
     if bytes.first() == Some(&b'<') {
         let mut depth = 0usize;
         loop {
@@ -8697,12 +7553,6 @@ fn standings_of(signature: &str, of_the_class: &[String]) -> Option<(Vec<Standin
     Some((taken, returns))
 }
 
-/// The names of a class's type parameters, in order, out of its generic
-/// signature.
-///
-/// `<K:Ljava/lang/Object;V:Ljava/lang/Object;>Ljava/lang/Object;` is a `Map`,
-/// and the answer is `["K", "V"]`. Nothing else in a class file says what they
-/// were called.
 fn type_parameters_of(signature: &str) -> Vec<String> {
     let bytes = signature.as_bytes();
     if bytes.first() != Some(&b'<') {
@@ -8719,8 +7569,7 @@ fn type_parameters_of(signature: &str) -> Vec<String> {
             return Vec::new();
         }
         found.push(signature[began..at].to_string());
-        // The bounds: a class bound that may be empty, then any number of
-        // interface bounds, each behind its own colon.
+
         while at < bytes.len() && bytes[at] == b':' {
             at += 1;
             if at < bytes.len()
@@ -8735,11 +7584,6 @@ fn type_parameters_of(signature: &str) -> Vec<String> {
     found
 }
 
-/// Steps over one type in a generic signature, and says which type variable it
-/// was where it was exactly one.
-///
-/// `TT;` is; `Ljava/util/List<TT;>;` is not, because putting an argument back
-/// inside it needs more than a cast.
 fn read_generic_type(bytes: &[u8], at: &mut usize) -> Option<Option<String>> {
     let began = *at;
     let held = *bytes.get(*at)?;
@@ -8758,7 +7602,6 @@ fn read_generic_type(bytes: &[u8], at: &mut usize) -> Option<Option<String>> {
     Some(None)
 }
 
-/// Steps over one type in a generic signature without asking what it was.
 fn skip_generic_type(bytes: &[u8], at: &mut usize) -> Option<()> {
     match *bytes.get(*at)? {
         b'[' => {
@@ -8773,8 +7616,6 @@ fn skip_generic_type(bytes: &[u8], at: &mut usize) -> Option<()> {
             Some(())
         }
         b'L' => {
-            // A class name, its arguments, and any number of `.Inner` parts,
-            // to the `;` that closes the outermost of them.
             let mut depth = 0usize;
             loop {
                 let held = *bytes.get(*at)?;
@@ -8791,7 +7632,7 @@ fn skip_generic_type(bytes: &[u8], at: &mut usize) -> Option<()> {
             *at += 1;
             Some(())
         }
-        // `*`, `+` and `-` are wildcards, which stand for no one type.
+
         b'*' => {
             *at += 1;
             Some(())
@@ -8804,13 +7645,10 @@ fn skip_generic_type(bytes: &[u8], at: &mut usize) -> Option<()> {
     }
 }
 
-/// What a method's generic signature says its parameters and return really
-/// are, as indices into the class's type parameters.
 fn variables_of(signature: &str, parameters: &[String]) -> (Option<usize>, Vec<Option<usize>>) {
     let bytes = signature.as_bytes();
     let mut at = 0usize;
-    // A method may have type parameters of its own. They are skipped: there is
-    // no receiver to take an argument from, so nothing can be put back.
+
     if bytes.first() == Some(&b'<') {
         let mut depth = 0usize;
         loop {
@@ -8853,11 +7691,6 @@ fn variables_of(signature: &str, parameters: &[String]) -> (Option<usize>, Vec<O
     (returns, taken)
 }
 
-/// Which of the enclosing class's type parameters a written type is, where it
-/// is one of them and nothing else.
-///
-/// `T` is; `List<T>` is not, because putting an argument back inside it would
-/// need more than a cast, and this compiler does not pretend otherwise.
 fn which_variable(written: &Written) -> Option<usize> {
     match written {
         Written::Variable(at, _) => Some(*at),
@@ -8865,13 +7698,6 @@ fn which_variable(written: &Written) -> Option<usize> {
     }
 }
 
-/// A written type as the type it stands for, keeping the arguments it was
-/// written with.
-///
-/// The four places that used to drop them each dropped them for the same
-/// reason -- the JVM never sees one -- and each was wrong for the same reason:
-/// a `List<Node>` that forgot what it holds gives back an `Object`, and the
-/// cast that says otherwise is the whole of what erasure leaves behind.
 fn resolve_written(classpath: &Classpath, unit: &Unit, written: &Written) -> Option<Type> {
     Some(match written {
         Written::Void => Type::Void,
@@ -8892,8 +7718,7 @@ fn resolve_written(classpath: &Classpath, unit: &Unit, written: &Written) -> Opt
             for one in held {
                 match resolve_written(classpath, unit, one) {
                     Some(found) => arguments.push(found),
-                    // One argument this cannot name means none of them can be
-                    // relied on, so none of them is kept.
+
                     None => {
                         arguments.clear();
                         break;
@@ -8910,14 +7735,6 @@ fn resolve_named(classpath: &Classpath, unit: &Unit, name: &str) -> Option<Strin
     resolve_named_within(classpath, unit, name, true)
 }
 
-/// The same, with a say in whether the classes this one inherits from are
-/// looked through.
-///
-/// Working out what a class extends is itself a name to resolve, and looking
-/// through what it extends while doing so would ask the same question again:
-/// `class Integer extends Number implements Comparable<Integer>` would resolve
-/// `Comparable` by way of `Number` by way of `Comparable`. So the supertypes
-/// of the class being compiled are resolved without this step.
 fn resolve_named_within(
     classpath: &Classpath,
     unit: &Unit,
@@ -8929,9 +7746,7 @@ fn resolve_named_within(
     if name == unit.name {
         return Some(unit.internal_name());
     }
-    // A type declared inside this one, or beside it inside the same holder:
-    // `Inner` written in `Outer` is `Outer$Inner`, and written in
-    // `Outer$Other` it is still `Outer$Inner`.
+
     let mut holder = Some(unit.internal_name());
     while let Some(current) = holder {
         let nested = format!("{current}${name}");
@@ -8942,17 +7757,11 @@ fn resolve_named_within(
             .rsplit_once('$')
             .map(|(before, _)| before.to_string());
     }
-    // A type the class above declares is a type here too: `Inner` written in a
-    // class that extends `Root` is `Root$Inner`, with nothing in front of it.
-    // The classes this one is written inside inherit theirs the same way.
+
     let mut holder = through_what_it_extends.then(|| unit.internal_name());
     while let Some(current) = holder {
         let mut walking = Vec::new();
         if current == unit.internal_name() {
-            // The class being compiled is not on the classpath the way the
-            // ones handed over are, so what it extends is read from what was
-            // written. A class whose own name is what it extends -- there is
-            // no such class -- would ask this question again for ever.
             if let Some(parent) = unit.extends.clone() {
                 walking.extend(resolve_named_within(classpath, unit, &parent, false));
             }
@@ -8988,14 +7797,8 @@ fn resolve_named_within(
             return Some(internal);
         }
     }
-    // A nested class is written with a dot and named with a dollar, and what
-    // comes before the dot is itself a name to resolve: `View.OnClickListener`
-    // where `View` was imported is `android/view/View$OnClickListener`.
+
     if let Some((before, last)) = name.rsplit_once('.') {
-        // Carrying the same answer inwards, because what is in front of the
-        // dot is being resolved for the same reason: a supertype written
-        // `Animator.AnimatorListener` would otherwise ask what this class
-        // extends in order to work out what it extends.
         if let Some(holder) = resolve_named_within(classpath, unit, before, through_what_it_extends)
         {
             let nested = format!("{holder}${last}");
@@ -9010,7 +7813,6 @@ fn resolve_named_within(
             return Some(beside);
         }
     } else if exists(name) {
-        // No package, so a bare name and an internal name are the same thing.
         return Some(name.to_string());
     }
     for import in &unit.imports {
@@ -9033,22 +7835,6 @@ fn resolve_named_within(
     exists(&in_lang).then_some(in_lang)
 }
 
-/// The standard library, written out as the Java it is.
-///
-/// A compiler on a device has no jar to read. What it has is this: every class
-/// a person reaches for, with its type parameters, what it extends, and the
-/// shape of every method -- written as Java because Java is the language that
-/// says those things, and marked `native` because the bodies really are
-/// somewhere else. None of it is compiled. It is read the same way a class
-/// file handed over is read, through the same parser and the same `declare`,
-/// which is what makes `import java.util.List;` mean something with nothing
-/// on the classpath at all.
-///
-/// Two rules hold throughout. Nothing here uses a wildcard: `Comparator<? super
-/// T>` is written `Comparator<T>`, which erases the same and binds better. And
-/// nothing here is guessed: a method that is not in this list is not a method
-/// this compiler will write a call to, and it says so by name rather than
-/// emitting a call the device would refuse.
 const THE_LIBRARY: &[(&str, &str)] = &[
     (
         "java.lang",
@@ -11841,10 +10627,6 @@ const WELL_KNOWN: &[&str] = &[
     "java/lang/Object",
     "java/lang/String",
     "java/lang/annotation/Annotation",
-    // The annotations an annotation is written with. `@Retention` is not
-    // decoration: the runtime reads it off the annotation's own class file to
-    // decide whether to hand the annotation back, so an annotation type whose
-    // `@Retention` was dropped is one reflection cannot see.
     "java/lang/annotation/Retention",
     "java/lang/annotation/RetentionPolicy",
     "java/lang/annotation/Target",
@@ -11911,15 +10693,8 @@ const WELL_KNOWN: &[&str] = &[
 ];
 
 impl Emitter<'_> {
-    /// Puts a constant on the stack, using the narrowest instruction that
-    /// holds it. `iconst_1` is one byte where `ldc` is two and a pool entry.
     fn push_int(&mut self, value: i64) {
         match value {
-            // iconst_m1 is 0x02 and iconst_0 is 0x03, so the opcode for n is
-            // 0x03 + n. The first version of this added one too many and every
-            // small constant came out as the next one up: `value * 2` compiled
-            // to `value * 3`. Nothing that checked the shape of a class file
-            // could see it; reading the bytes back is what found it.
             -1..=5 => self.op((0x03 + value) as u8),
             -128..=127 => self.op1(0x10, value as i8 as u8),
             -32768..=32767 => self.op2(0x11, value as i16 as u16),
@@ -11954,8 +10729,6 @@ impl Emitter<'_> {
             _ => 0x15,
         };
         if slot <= 3 {
-            // The compact forms: iload_0 is 0x1a, and each type follows four
-            // slots later.
             let compact = match base {
                 0x15 => 0x1a,
                 0x16 => 0x1e,
@@ -11973,14 +10746,6 @@ impl Emitter<'_> {
         self.pushes(what);
     }
 
-    /// Writes a value out of the stack and into a slot.
-    ///
-    /// The first version of this had every opcode one too high -- `istore` as
-    /// 0x37, which is `lstore` -- and the compact forms were derived from
-    /// those, which put them back where they belonged. So a method using four
-    /// slots or fewer was correct and a method using five was not, and nothing
-    /// short of a real verifier could tell: our own reader and `javap` both
-    /// print what the bytes say without asking whether it makes sense.
     fn store(&mut self, slot: u16, what: &Type) {
         let (base, compact) = match what {
             Type::Long => (0x37u8, 0x3fu8),
@@ -11998,29 +10763,16 @@ impl Emitter<'_> {
             self.op2(base, slot);
         }
         self.pops(i32::from(what.width()));
-        // And from here on the verifier may be told what is in it. A local
-        // declared with nothing in it holds nothing until this happens.
+
         self.slot_holds(slot, what);
     }
 
-    /// Widens what is on the stack, when Java says it happens on its own.
-    /// Makes what is on the stack fit where it is going.
-    ///
-    /// Widening, boxing and unboxing all happen here, and all of them are
-    /// instructions. What comes back is whether it fits at all; the place that
-    /// asked says what is wrong when it does not, because it is the one that
-    /// knows what it was doing.
     fn fit(&mut self, found: &Type, wanted: &Type, line: u32) -> Result<bool, Diagnostic> {
         if self.may_be_given(found, wanted) {
             if !found.is_reference() && !wanted.is_reference() {
                 self.convert(found, wanted, line)?;
             }
-            // Anything going somewhere further down the hierarchy gets the
-            // cast erasure implies. A method's own `<T>` is erased to its
-            // bound with nothing to put back -- `javac` infers what T was
-            // from the call and casts here; this cannot infer, so it casts to
-            // where the value is going, which is the same instruction for the
-            // same reason.
+
             if found.is_reference() && *wanted != *found && !self.reaches(found, wanted) {
                 if let Type::Object(named, _) = wanted {
                     let index = self.pool.class(named);
@@ -12040,57 +10792,21 @@ impl Emitter<'_> {
         Ok(true)
     }
 
-    /// Whether a value of one type may be handed to somewhere wanting
-    /// another, without a cast being written.
-    ///
-    /// For everything that is not a reference this is what the language says
-    /// about widening. For references it is subtyping, with two things
-    /// allowed on top: anything may be handed where an `Object` is wanted,
-    /// and an `Object` may be handed anywhere, because that is what erasure
-    /// leaves of a type variable and `fit` writes the cast `javac` would have
-    /// written. What is not allowed is handing a String where an Integer is
-    /// wanted -- which compiles to a package whose first call on it is one
-    /// the runtime refuses.
     fn may_be_given(&self, found: &Type, wanted: &Type) -> bool {
         if !found.is_reference() || !wanted.is_reference() {
             return found.may_be_given_to(wanted);
         }
         if !self.reaches(found, wanted) {
-            // Down the hierarchy rather than up. `javac` wants a cast written
-            // for that and this does not, because erasure leaves a type
-            // variable as its bound rather than as itself: what
-            // `getAnnotation` gives back is written `Annotation` however it
-            // was called, and the developer's own type is underneath it. The
-            // cast is written into the class file all the same, so what runs
-            // is what `javac` would have run.
             return self.reaches(wanted, found);
         }
-        // What each of them was written holding is deliberately not asked
-        // about. `List<String>` and `List<Integer>` really are two unrelated
-        // types, and refusing one where the other is wanted would be right --
-        // but a wildcard is read here as what it erases to, so
-        // `List<? extends Number>` arrives as `List<Number>`, and refusing a
-        // `List<Integer>` there would refuse code the language allows. Until
-        // wildcards are carried through the type system, letting a little too
-        // much through is the side to be wrong on.
+
         true
     }
 
-    /// Puts a primitive in its box, or takes one out, when that is what the
-    /// place it is going wants.
-    ///
-    /// Java calls this autoboxing and does it silently. Doing it silently is
-    /// the whole point: `list.add(1)` is what people write, and `1` is not an
-    /// object. The instruction is a call -- `Integer.valueOf` one way,
-    /// `intValue` the other -- so it costs what it costs, and nothing here
-    /// pretends otherwise.
     fn box_or_unbox(&mut self, from: &Type, to: &Type) -> Option<Type> {
-        // A primitive going where an object is wanted.
         if !from.is_reference() && *from != Type::Void && to.is_reference() {
             let boxed = boxed_name(from)?;
-            // The box has to be one the place will take: an Integer fits
-            // where an Object or a Number or an Integer is wanted, and
-            // nowhere else.
+
             if let Type::Object(named, _) = to {
                 let fits = named == boxed
                     || named == "java/lang/Object"
@@ -12115,14 +10831,11 @@ impl Emitter<'_> {
             return Some(Type::Object(boxed.to_string(), Vec::new()));
         }
 
-        // An object going where a primitive is wanted.
         if from.is_reference() && !to.is_reference() && *to != Type::Void {
             let Type::Object(named, _) = from else {
                 return None;
             };
-            // What comes out is decided by the box, not by what is wanted:
-            // an Integer unboxes to an int, and the int is then widened the
-            // ordinary way.
+
             let (holder, inner) = match named.as_str() {
                 "java/lang/Boolean" => ("booleanValue", Type::Boolean),
                 "java/lang/Byte" => ("byteValue", Type::Byte),
@@ -12144,23 +10857,12 @@ impl Emitter<'_> {
         None
     }
 
-    /// What the two sides of `?:` both come to.
-    ///
-    /// Java works this out before either side runs, and so does this: a number
-    /// and its box come to the number, two numbers come to the wider of them,
-    /// a `null` comes to whatever it is written beside, and two classes come
-    /// to whichever of them the other reaches -- or to Object, where neither
-    /// does.
     fn what_both_sides_come_to(
         &mut self,
         then: &Expression,
         otherwise: &Expression,
         line: u32,
     ) -> Result<Type, Diagnostic> {
-        // `null` has no type of its own; it is whatever it stands beside --
-        // and where that is a number, it is the box that number goes in,
-        // because `null` cannot be an int and `had == null ? null : had * 10`
-        // is an Integer.
         let beside = |what: Type| match boxed_name(&what) {
             Some(boxed) => Type::Object(boxed.to_string(), Vec::new()),
             None => what,
@@ -12183,8 +10885,7 @@ impl Emitter<'_> {
             true => primitive_inside(what),
             false => Some(what.clone()),
         };
-        // A number on at least one side, and something a number can be got
-        // out of on the other: both come out of their boxes and are promoted.
+
         if !here.is_reference() || !there.is_reference() {
             if let (Some(one), Some(two)) = (inside(&here), inside(&there)) {
                 if one == two {
@@ -12195,8 +10896,7 @@ impl Emitter<'_> {
                 }
                 return Ok(one.promoted_with(&two).unwrap_or(Type::Int));
             }
-            // A number beside something that is not one at all: the number
-            // goes in its box and both are objects.
+
             return Ok(object);
         }
         if self.reaches(&there, &here) {
@@ -12208,12 +10908,6 @@ impl Emitter<'_> {
         Ok(object)
     }
 
-    /// The cast a compound assignment has hiding inside it.
-    ///
-    /// `c += 1` on a char is `c = (char) (c + 1)`, and that cast is the whole
-    /// reason a char may be stepped at all: `+` promoted it to an int and the
-    /// int has to come back. Every compound assignment has one, which is also
-    /// what makes `b += 200` legal on a byte and `l += 1.5` legal on a long.
     fn narrowed_by_the_operator(
         &mut self,
         found: &Type,
@@ -12223,9 +10917,7 @@ impl Emitter<'_> {
         if found == wanted || found.is_reference() || wanted.is_reference() {
             return Ok(found.clone());
         }
-        // `convert` leaves two int-like types alone, because storing an int in
-        // a byte local needs no instruction. Here it does: the value came out
-        // of an operator and may not fit.
+
         let narrowing = match (found, wanted) {
             (from, Type::Byte) if from.is_int_like() => Some(0x91u8),
             (from, Type::Char) if from.is_int_like() => Some(0x92),
@@ -12278,7 +10970,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Emits an expression and says what type it left on the stack.
     fn value(&mut self, expression: &Expression, line: u32) -> Result<Type, Diagnostic> {
         match expression {
             Expression::Int(value) => {
@@ -12337,11 +11028,7 @@ impl Emitter<'_> {
                         "`this` has no meaning in a static method.",
                     ));
                 }
-                // Inside a lambda, `this` is the object the lambda was written
-                // in and not the object the lambda came to. `javac` keeps the
-                // body in the enclosing class and so has nothing to do here;
-                // this writes a class, so the enclosing instance -- which that
-                // class was handed and holds -- is what `this` reads.
+
                 if self.unit.stands_for_a_lambda {
                     if let Some(field) = self.unit.fields.iter().find(|held| held.name == OUTER) {
                         let what = self.resolve(&field.what.clone(), line)?;
@@ -12358,11 +11045,7 @@ impl Emitter<'_> {
                 self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
                 Ok(Type::Object(self.this_class.clone(), Vec::new()))
             }
-            // `super` is `this` read as the class above it. Nothing else is
-            // loaded: the field a `getfield` names is resolved from the class
-            // written on it upwards, so naming the superclass is what makes
-            // `super.kept` the one that class declares rather than the one
-            // beside it here.
+
             Expression::Super => {
                 if self.static_ {
                     return Err(at(
@@ -12382,20 +11065,13 @@ impl Emitter<'_> {
             }
             Expression::Name(name) => self.name_value(name, line),
             Expression::Field { of, name } => {
-                // `System.out` is a static field of a class, not a field of a
-                // value called `System`. Reading the left side as a value first
-                // would report that `System` is not visible, which is true and
-                // tells nobody anything.
                 if let Expression::Name(maybe_class) = of.as_ref() {
                     if self.meant_as_a_class(maybe_class) {
                         let owner = self.resolve_class(maybe_class, line)?;
                         return self.read_static_field(&owner, name, line);
                     }
                 }
-                // `R.string.app_name` is a field of a class written inside a
-                // class, and the dots between them look exactly like fields of
-                // fields. What is in front of the last dot is tried as a class
-                // before it is tried as a value.
+
                 if let Some(path) = written_as_a_path(of) {
                     let head = path.split('.').next().unwrap_or_default();
                     if self.meant_as_a_class(head) {
@@ -12437,9 +11113,7 @@ impl Emitter<'_> {
                     self.pushes(&target);
                     return Ok(target);
                 }
-                // `(int) held` where `held` is an Integer: the box is opened
-                // first, and whatever comes out is then narrowed like any
-                // other number. `(char) held` on a Character is the same.
+
                 let found = if found.is_reference() && !target.is_reference() {
                     match self.box_or_unbox(&found, &target) {
                         Some(opened) => opened,
@@ -12459,8 +11133,7 @@ impl Emitter<'_> {
                 } else {
                     found
                 };
-                // A narrowing cast is written out, unlike a widening one which
-                // Java does on its own.
+
                 let opcode = match (&found, &target) {
                     (f, t) if f == t => None,
                     (f, Type::Byte) if f.is_int_like() => Some(0x91u8),
@@ -12503,8 +11176,6 @@ impl Emitter<'_> {
                         })
                     }
                     Unary::Complement => {
-                        // There is no `not` instruction: it is xor with all
-                        // ones, which is what the language means anyway.
                         if found == Type::Long {
                             let index = self.pool.long(-1);
                             self.op2(0x14, index);
@@ -12538,8 +11209,7 @@ impl Emitter<'_> {
                                 ),
                             ));
                         }
-                        // Turned into a branch, because a boolean on the stack
-                        // is an int and there is no instruction that flips one.
+
                         self.pops(1);
                         let jump = self.jump(0x99);
                         let beneath = self.stack.clone();
@@ -12581,17 +11251,10 @@ impl Emitter<'_> {
                     ));
                 }
                 self.pops(1);
-                // Both sides have to leave the same thing behind, because the
-                // frame where they meet says one thing and the verifier
-                // believes it. `held > 3 ? boxed : 0` is an int on one side
-                // and an Integer on the other, and Java's answer is the int --
-                // so the box is opened on the way, not claimed away.
+
                 let landed = self.what_both_sides_come_to(then, otherwise, line)?;
                 let to_else = self.jump(0x99);
-                // What is under the two sides. A `?:` written among a call's
-                // arguments has those arguments beneath it, and a frame that
-                // says otherwise is a claim the verifier throws the class out
-                // for.
+
                 let beneath = self.stack.clone();
                 let taken = self.value_for(then, &landed, line)?;
                 if !self.fit(&taken, &landed, line)? {
@@ -12636,8 +11299,6 @@ impl Emitter<'_> {
                 Ok(landed)
             }
             Expression::InstanceOf { of, pattern } => {
-                // A pattern that takes a record apart is a chain of tests and
-                // bindings, and `&&` already knows how to write one.
                 if pattern.taken {
                     let held = self.the_whole_pattern(of, pattern, line)?;
                     return self.value(&held, line);
@@ -12662,19 +11323,10 @@ impl Emitter<'_> {
                     other => other.descriptor(),
                 };
                 if let Some(binding) = binds {
-                    // The value is wanted twice: once to test and once to keep
-                    // if the test passed. It goes into a slot of its own first,
-                    // because working the expression out a second time would
-                    // be wrong the moment it had an effect.
                     let object = Type::Object("java/lang/Object".to_string(), Vec::new());
                     let held = self.declare("$tested", object.clone());
                     self.store(held, &object);
 
-                    // The name is given `null` before the test, so that both
-                    // ways out of the test agree on what is in its slot. Null
-                    // fits anywhere, which is what lets the verifier accept
-                    // one frame for both paths -- and the name is only in
-                    // scope where the test passed, so nothing reads it.
                     self.op(0x01);
                     self.pushes_raw(Verified::Null);
                     let slot = self.declare(binding, target.clone());
@@ -12683,8 +11335,7 @@ impl Emitter<'_> {
                     self.load(held, &object);
                     let index = self.pool.class(&named);
                     self.op2(0xc1, index);
-                    // `instanceof` takes the object and leaves an int, so what
-                    // the frames say is on the stack has to change with it.
+
                     self.pops(1);
                     self.pushes(&Type::Boolean);
                     self.duplicates();
@@ -12709,9 +11360,6 @@ impl Emitter<'_> {
                 Ok(Type::Boolean)
             }
             Expression::Bind { name, what, value } => {
-                // Nobody wrote this: it is one part of a pattern, and it is
-                // true because it always matches -- an `int x` out of a record
-                // has nothing to test.
                 let wanted = self.resolve(what, line)?;
                 let found = self.value_for(value, &wanted, line)?;
                 if !self.fit(&found, &wanted, line)? {
@@ -12778,8 +11426,7 @@ impl Emitter<'_> {
                 let named = match &what {
                     Type::Object(name, _) => name.clone(),
                     Type::Array(_) => what.descriptor(),
-                    // A primitive's class is a static field of its box, which
-                    // is what `int.class` means.
+
                     other => {
                         let boxed = boxed_name(other).ok_or_else(|| {
                             at("EJ122", *written, 1, "That has no class to name.")
@@ -12823,8 +11470,6 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
-    /// A bare name: a local first, then a field of the class being compiled,
-    /// then a field of anything above it.
     fn name_value(&mut self, name: &str, line: u32) -> Result<Type, Diagnostic> {
         if let Some(local) = self.local(name) {
             self.load(local.slot, &local.what);
@@ -12883,8 +11528,7 @@ impl Emitter<'_> {
                 return Ok(what);
             }
         }
-        // A class written inside another can read what that one holds. Its
-        // instance is in a field, so the road is one field access longer.
+
         for enclosing in self.the_classes_around() {
             if let Some((holder, (_, what, static_))) = self.classpath.find_field(&enclosing, name)
             {
@@ -12904,15 +11548,11 @@ impl Emitter<'_> {
                 return Ok(what);
             }
         }
-        // A class written inside another with `static` holds no instance of it
-        // and can still read what it holds statically -- which is what makes
-        // `private static` a thing the whole file shares. The classes it is
-        // written inside are what its own name says, from the innermost out.
+
         if let Some(what) = self.read_from_a_holder(name, line)? {
             return Ok(what);
         }
-        // `import static java.lang.Integer.MAX_VALUE;` puts a constant here
-        // without the class in front of it.
+
         for owner in self.imported_statically(name) {
             let held = match self.classpath.find_field(&owner, name) {
                 Some((holder, (_, what, true))) => Some((holder.name.clone(), what.clone())),
@@ -12942,15 +11582,6 @@ impl Emitter<'_> {
         ))
     }
 
-    /// Whether a bare name in front of a dot is meant as a class rather than
-    /// as something holding a value.
-    ///
-    /// A local, a parameter or a field wins: Java lets a variable shadow a
-    /// class name, and code that does it means the variable. Everything else
-    /// is meant as a class -- whether or not it turns out to be one, because
-    /// saying what is wrong with it as a class is the useful thing. Falling
-    /// through to read it as a value would report that a name is not visible,
-    /// which is true and tells nobody anything.
     fn meant_as_a_class(&self, name: &str) -> bool {
         if self.local(name).is_some() {
             return false;
@@ -12967,16 +11598,13 @@ impl Emitter<'_> {
         if inherited.is_some() {
             return false;
         }
-        // A class written inside another reads what that one holds, so a name
-        // it holds is a value here even though nothing here declares it.
+
         for enclosing in self.the_classes_around() {
             if self.classpath.find_field(&enclosing, name).is_some() {
                 return false;
             }
         }
-        // And one written inside another with `static` keeps no instance of
-        // it and still reads what it holds statically, which is what makes a
-        // `private static` a thing the whole file shares.
+
         for holder in self.holders() {
             if self
                 .classpath
@@ -12989,7 +11617,6 @@ impl Emitter<'_> {
         true
     }
 
-    /// Writes a value into a field of the class this one was written inside.
     fn assign_through_the_enclosing_instance(
         &mut self,
         enclosing: &str,
@@ -13008,17 +11635,13 @@ impl Emitter<'_> {
             ));
         };
         let (holder, what, static_) = (holder.name.clone(), what.clone(), *static_);
-        // The object the field belongs to goes on first, because that is the
-        // order `putfield` wants. Working the value out may reach the same
-        // instance again for its own reasons; that is a second road to the
-        // same object and costs one field read.
+
         if !static_ {
             self.reach_the_enclosing_instance(enclosing)?;
         }
         let found = match operator {
             None => self.value_for(value, &what, line)?,
-            // `x += 1` is `x = x + 1`, and reading `x` here is the same road
-            // as reading it anywhere else in this class.
+
             Some(operator) => {
                 self.binary(operator, &Expression::Name(name.to_string()), value, line)?
             }
@@ -13035,10 +11658,7 @@ impl Emitter<'_> {
                 ),
             ));
         }
-        // `c = (a = b)` keeps the value. It is put in a slot and read back
-        // rather than shuffled under the object on the stack: `dup_x1` says
-        // it in one instruction and Dalvik, which is a register machine, has
-        // no instruction for it at all.
+
         self.open();
         let held = wanted.then(|| {
             let slot = self.declare("$assigned", what.clone());
@@ -13062,18 +11682,6 @@ impl Emitter<'_> {
         Ok(what)
     }
 
-    /// A static field of one of the classes this one is written inside.
-    ///
-    /// `class Outer { private static int held; static class Inner { int f() {
-    /// return held; } } }` is ordinary Java: what a class holds privately is
-    /// held privately from the outside, not from the classes written in it.
-    /// Which classes those are is what this one's own name says -- `A$B$C` is
-    /// written inside `A$B`, which is written inside `A`.
-    /// The classes a `import static` brought a name here from.
-    ///
-    /// `import static java.lang.Math.max` names one thing; `import static
-    /// java.lang.Math.*` names everything the class holds, so both come to the
-    /// same question -- which class to ask.
     fn imported_statically(&self, name: &str) -> Vec<String> {
         let mut found = Vec::new();
         for held in &self.unit.static_imports {
@@ -13092,10 +11700,6 @@ impl Emitter<'_> {
         found
     }
 
-    /// The classes this one is written inside, innermost first.
-    ///
-    /// `A$B$C` is written inside `A$B`, which is written inside `A`. The name
-    /// says it, so nothing has to be carried alongside.
     fn holders(&self) -> Vec<String> {
         let mut found = Vec::new();
         let mut holder = self.this_class.as_str();
@@ -13125,14 +11729,10 @@ impl Emitter<'_> {
         Ok(None)
     }
 
-    /// Puts the instance of the class this one was written inside on the
-    /// stack.
     fn reach_the_enclosing_instance(&mut self, enclosing: &str) -> Result<(), Diagnostic> {
         let this = Type::Object(self.this_class.clone(), Vec::new());
         self.load(0, &this);
-        // A class written inside a class written inside a class is two links
-        // away from the outermost one, and each link is a field read. Nobody
-        // writes any of them down.
+
         let mut from = self.this_class.clone();
         for named in self.the_classes_around() {
             let held = Type::Object(named.clone(), Vec::new());
@@ -13157,19 +11757,12 @@ impl Emitter<'_> {
         ))
     }
 
-    /// Whether an exception is one the language makes a person answer for.
-    ///
-    /// Everything under `RuntimeException` and everything under `Error` may
-    /// happen anywhere and is nobody's to declare. What is left -- a plain
-    /// `Exception`, an `IOException`, a class somebody wrote extending either
-    /// -- has to be caught or declared, and this is what says which is which.
     fn is_answered_for(&self, named: &str) -> bool {
         if named == "java/lang/RuntimeException" || named == "java/lang/Error" {
             return false;
         }
         let mut walking = named.to_string();
-        // Deeper than anybody's exception hierarchy, and it stops a class that
-        // extends itself from going round for ever.
+
         for _ in 0..64 {
             if walking == "java/lang/RuntimeException" || walking == "java/lang/Error" {
                 return false;
@@ -13183,15 +11776,13 @@ impl Emitter<'_> {
                 .and_then(|known| known.superclass.clone())
             {
                 Some(above) => walking = above,
-                // A class nobody handed over: `Throwable` is what a `throw`
-                // needs it to be, and answering for it is the careful answer.
+
                 None => return true,
             }
         }
         true
     }
 
-    /// Whether one of these classes catches that one.
     fn covers(&self, held: &[String], thrown: &str) -> bool {
         held.iter().any(|one| {
             one == thrown
@@ -13202,13 +11793,6 @@ impl Emitter<'_> {
         })
     }
 
-    /// Notes that what is being written here can throw this, and refuses it
-    /// where nothing catches it and the method does not say it throws.
-    ///
-    /// This is the one check in this compiler that refuses code the device
-    /// would happily run. It is here because `javac` refuses it too, and a
-    /// compiler that does not is a compiler a person finds out about at run
-    /// time.
     fn it_can_throw(&mut self, named: &str, line: u32) -> Result<(), Diagnostic> {
         if !self.is_answered_for(named) {
             return Ok(());
@@ -13234,14 +11818,10 @@ impl Emitter<'_> {
         ))
     }
 
-    /// The classes this one is written inside, from the one directly around it
-    /// outwards. A name written here that this class does not hold is looked
-    /// for along this road, in that order, which is the order Java reads it in.
     fn the_classes_around(&self) -> Vec<String> {
         let mut around = Vec::new();
         let mut outer = self.unit.outer.clone();
-        // Deeper than anybody nests, and it stops a link that points back at
-        // itself from going round for ever.
+
         while around.len() < 16 {
             let Some(named) = outer else { break };
             if around.contains(&named) {
@@ -13256,7 +11836,6 @@ impl Emitter<'_> {
         around
     }
 
-    /// A static field named through its class.
     fn read_static_field(
         &mut self,
         owner: &str,
@@ -13324,9 +11903,6 @@ impl Emitter<'_> {
             ));
         };
         let Some((holder, (_, what, static_))) = self.classpath.find_field(class, name) else {
-            // A field nobody handed a class file for may still be one of the
-            // few this compiler knows on its own, and every one of those is
-            // static.
             if let Some(what) = built_in_field(class, name) {
                 let descriptor = what.descriptor();
                 let index = self.pool.field(class, name, &descriptor);
@@ -13354,7 +11930,6 @@ impl Emitter<'_> {
         let descriptor = what.descriptor();
         let index = self.pool.field(&holder, name, &descriptor);
         if static_ {
-            // The object it was read off is not wanted after all.
             self.op(0x57);
             self.pops(1);
             self.op2(0xb2, index);
@@ -13374,12 +11949,7 @@ impl Emitter<'_> {
         right: &Expression,
         line: u32,
     ) -> Result<Type, Diagnostic> {
-        // `&&` and `||` do not evaluate their right side unless they have to,
-        // which makes them control flow rather than arithmetic.
         if matches!(operator, Binary::AndAlso | Binary::OrElse) {
-            // What the locals are before either side runs. A short circuit
-            // jumps past the right side, and the left side may itself be a
-            // short circuit, so the floor is here and not after it.
             let outside = self.slots.clone();
             let first = self.value(left, line)?;
             if first != Type::Boolean {
@@ -13402,11 +11972,7 @@ impl Emitter<'_> {
             self.slots = outside.clone();
             self.stack_is(beneath.clone());
             self.a_branch_lands_here();
-            // The right side did not run, so anything it declared is not set
-            // -- and `if (a && o instanceof B b) { use(b); }` reads it after
-            // the join. Giving it null here is what makes it set on both
-            // roads, which is the same trick the pattern itself uses and the
-            // only thing a frame can honestly claim.
+
             self.give_them_null(&outside, &inside);
             self.push_int(i64::from(operator == Binary::OrElse));
             self.land(over);
@@ -13418,9 +11984,6 @@ impl Emitter<'_> {
             return Ok(Type::Boolean);
         }
 
-        // String concatenation is not arithmetic either: it is a StringBuilder,
-        // which is what every Java compiler did before invokedynamic and what
-        // this target still wants.
         if operator == Binary::Add {
             let is_string =
                 |what: &Type| *what == Type::Object("java/lang/String".to_string(), Vec::new());
@@ -13435,13 +11998,6 @@ impl Emitter<'_> {
         self.binary_with(operator, &left_type, right, line)
     }
 
-    /// The arithmetic half of a binary operator, with the left side already on
-    /// the stack.
-    ///
-    /// `a[i] += x` works the element out once and writes it back, so the left
-    /// side is read before this is reached and cannot be read again. The
-    /// short-circuit operators and string concatenation never get here,
-    /// because neither of them is arithmetic.
     fn binary_with(
         &mut self,
         operator: Binary,
@@ -13451,12 +12007,6 @@ impl Emitter<'_> {
     ) -> Result<Type, Diagnostic> {
         let left_type = left_type.clone();
 
-        // `o.name += x` and `a[i] += x` on strings do reach here, and they are
-        // the one case where the left side cannot be read a second time: the
-        // field or the element was read to get here, and reading it again
-        // would read it after the write. It goes into a slot instead, and the
-        // builder is written the ordinary way on top of whatever the write is
-        // still holding underneath.
         if operator == Binary::Add
             && left_type == Type::Object("java/lang/String".to_string(), Vec::new())
         {
@@ -13488,13 +12038,8 @@ impl Emitter<'_> {
             return Ok(if long { Type::Long } else { Type::Int });
         }
 
-        // Both sides are promoted to one type before the operator sees them.
         let right_peeked = self.peek_type(right, line)?;
 
-        // A box where a number is wanted comes out of its box first. Java does
-        // this for every operator that is about numbers, which is all of them
-        // except `==` and `!=` between two references -- where the question
-        // really is whether they are the same object.
         let wants_numbers = !matches!(operator, Binary::Equal | Binary::NotEqual)
             || !(left_type.is_reference() && right_peeked.is_reference());
         let left_type = match primitive_inside(&left_type) {
@@ -13512,9 +12057,6 @@ impl Emitter<'_> {
         let common = if left_type.is_reference() || right_peeked.is_reference() {
             left_type.clone()
         } else if left_type == Type::Boolean && right_peeked == Type::Boolean {
-            // Two booleans have `==`, `!=`, `&`, `|` and `^` between them, and
-            // none of those is arithmetic -- so there is nothing to promote
-            // them to and the JVM compares them as the ints they are.
             Type::Boolean
         } else {
             left_type.promoted_with(&right_peeked).ok_or_else(|| {
@@ -13608,8 +12150,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Turns a comparison into the branch it is. There is no instruction that
-    /// leaves a boolean; there are instructions that jump.
     fn compare(&mut self, operator: Binary, common: &Type, line: u32) -> Result<Type, Diagnostic> {
         let reference = common.is_reference();
         let opcode = match (common, operator) {
@@ -13656,7 +12196,6 @@ impl Emitter<'_> {
                 self.jump(code)
             }
             None => {
-                // The compare left an int; branch on it against zero.
                 let code = match operator {
                     Binary::Equal => 0x99u8,
                     Binary::NotEqual => 0x9a,
@@ -13669,8 +12208,7 @@ impl Emitter<'_> {
                 self.jump(code)
             }
         };
-        // Both ways out of the comparison start from the same stack and end
-        // with one more thing on it.
+
         let beneath = self.stack.clone();
         self.push_int(0);
         let over = self.jump(0xa7);
@@ -13686,13 +12224,6 @@ impl Emitter<'_> {
         Ok(Type::Boolean)
     }
 
-    /// What an expression would leave, worked out without emitting anything.
-    ///
-    /// Needed in two places: deciding whether `+` is arithmetic or
-    /// concatenation, and promoting both sides of an operator before either is
-    /// on the stack. It runs the emitter on a copy and throws the code away,
-    /// which is slower than a separate typing pass and cannot disagree with
-    /// one.
     fn peek_type(&mut self, expression: &Expression, line: u32) -> Result<Type, Diagnostic> {
         self.type_of(expression, line)
     }
@@ -13751,8 +12282,6 @@ impl Emitter<'_> {
         outer: Option<&Expression>,
         line: u32,
     ) -> Result<Type, Diagnostic> {
-        // A class written inside this method is made with what it was written
-        // needing in front of what was written here.
         if let Written::Named(named, _) = what {
             if let Some(held) = self
                 .locally
@@ -13764,9 +12293,7 @@ impl Emitter<'_> {
                 return self.new_local_object(&held, arguments, line);
             }
         }
-        // `inner.new Deeper()` names a class written inside whatever `inner`
-        // is, and nothing here has to have heard of `Deeper` otherwise. What
-        // is in front of the `new` says where to look.
+
         let target = match (outer, what) {
             (Some(written), Written::Named(named, held)) if !named.contains('.') => {
                 let held = held.clone();
@@ -13824,22 +12351,17 @@ impl Emitter<'_> {
             ));
         };
         let index = self.pool.class(&class);
-        // Where the `new` is, because that is the name the verifier knows the
-        // object by until its constructor has run.
+
         let made_at = self.code.len() as u16;
         self.op2(0xbb, index);
         self.pushes_raw(Verified::Uninitialized(made_at));
         self.duplicates();
 
-        // A class that belongs to an instance is made from one, and the one it
-        // is made from is whichever is here. Nobody writes that down.
         let belongs = self
             .classpath
             .get(&class)
             .and_then(|known| known.outer.clone());
         if let Some(enclosing) = &belongs {
-            // `held.new Inner()` says which instance it belongs to, so nothing
-            // has to be worked out.
             if let Some(written) = outer {
                 let found = self.value(written, line)?;
                 if !found.is_reference() {
@@ -13854,8 +12376,6 @@ impl Emitter<'_> {
                     ));
                 }
             } else if self.this_class == *enclosing && !self.static_ {
-                // In a static method there is no instance here, and slot zero
-                // holds the first parameter rather than `this`.
                 self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
             } else if !self.static_ && self.the_classes_around().contains(enclosing) {
                 self.reach_the_enclosing_instance(enclosing)?;
@@ -13878,20 +12398,14 @@ impl Emitter<'_> {
         }
 
         let signature = if belongs.is_some() {
-            // The instance it belongs to is a parameter nobody wrote, so the
-            // constructor being looked for takes one more than was handed
-            // over.
             self.constructor_taking(&class, arguments.len() + 1)
         } else {
             self.signature_for(&class, "<init>", arguments, line)?
         };
         let descriptor = match signature {
             Some(found) => {
-                // A constructor that says it throws is a `new` that has to be
-                // caught or declared, the same as any other call.
                 self.what_the_call_can_throw(&found, line)?;
-                // The instance it belongs to is already on the stack, so the
-                // parameter that holds it is not one of the arguments.
+
                 let wanted = if belongs.is_some() && !found.parameters.is_empty() {
                     &found.parameters[1..]
                 } else {
@@ -13923,14 +12437,11 @@ impl Emitter<'_> {
             .map(|(parameters, _)| parameters.iter().map(|p| i32::from(p.width())).sum())
             .unwrap_or(0);
         self.pops(taken + 1);
-        // The constructor has run, so every copy of that object -- the one
-        // left on the stack, and any that was stored away -- is the class it
-        // was made as rather than something waiting to become it.
+
         self.now_initialized(made_at, &class);
         Ok(target)
     }
 
-    /// `new Name(...)` where `Name` was written inside this method.
     fn new_local_object(
         &mut self,
         held: &Locally,
@@ -13958,14 +12469,10 @@ impl Emitter<'_> {
             self.load(local.slot, &local.what);
             descriptor.push_str(&local.what.descriptor());
         }
-        // What the person wrote, against the constructor they wrote. What was
-        // written is at the end of it: the instance around this one and every
-        // local it carries were put in front, and nobody wrote those.
+
         let unwritten = usize::from(held.outer.is_some()) + held.captured.len();
         let all = arguments.len() + unwritten;
-        // A class written inside a method is not on the classpath: it was
-        // written here and is emitted beside this one, so its constructors are
-        // read from what was written rather than from a class file.
+
         let written_here = self
             .made
             .iter()
@@ -14042,7 +12549,6 @@ impl Emitter<'_> {
         Ok(target)
     }
 
-    /// Says the object `new` left at this offset has had its constructor run.
     fn now_initialized(&mut self, made_at: u16, class: &str) {
         let settled = Verified::Object(class.to_string());
         for held in self.stack.iter_mut().chain(self.slots.iter_mut()) {
@@ -14052,18 +12558,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Puts arguments on the stack, each converted to what the method wants.
-    /// Writes the arguments a call takes, packing the trailing ones into an
-    /// array where the method was written with `...`.
-    ///
-    /// `String.format("%d", n)` hands over two things and the method takes
-    /// two: a String and an array. Making that array is the whole of what
-    /// varargs is, and it happens here rather than at run time.
-    /// What a call can throw, checked where the call is written.
-    ///
-    /// Every call goes through here on its way to having its arguments
-    /// written, which makes it the one place that sees every signature this
-    /// method reaches.
     fn what_the_call_can_throw(
         &mut self,
         signature: &Signature,
@@ -14081,8 +12575,6 @@ impl Emitter<'_> {
         given: &[Expression],
         line: u32,
     ) -> Result<(), Diagnostic> {
-        // Every call comes through here, which makes it the one place that
-        // sees every signature this method reaches.
         self.what_the_call_can_throw(signature, line)?;
         let wanted = &signature.parameters;
         if !signature.variadic || wanted.is_empty() {
@@ -14093,15 +12585,10 @@ impl Emitter<'_> {
             return self.arguments_for(wanted, given, line);
         };
 
-        // Handing over the array itself is still allowed, and is what a call
-        // passing exactly one thing of the right shape means.
         if given.len() == wanted.len() {
             if let Some(last) = given.last() {
                 let peeked = self.type_of(last, line)?;
-                // Really an array of the right shape, and not merely a
-                // reference: `Type::may_be_given_to` waves any reference
-                // through to any other, and `asList("a")` handed one string
-                // straight into a call wanting the array.
+
                 if self.reaches(&peeked, &Type::Array(element.clone())) {
                     return self.arguments_for(wanted, given, line);
                 }
@@ -14169,12 +12656,8 @@ impl Emitter<'_> {
         held: &[Written],
         line: u32,
     ) -> Result<Type, Diagnostic> {
-        // Where this call's answer is going, before writing the arguments
-        // takes that over. A generic method whose arguments say nothing about
-        // its own type variables -- `Collectors.groupingBy(Person::age)` --
-        // has only this to go on, and it is what `javac` uses too.
         let going = self.expecting.clone();
-        // `super.name(...)`: an exact call on the superclass, not a virtual one.
+
         if super_call {
             if self.static_ {
                 return Err(at(
@@ -14184,8 +12667,7 @@ impl Emitter<'_> {
                     "`super` has no meaning in a static method.",
                 ));
             }
-            // `Left.super.who()` names which one; a bare `super.who()` means
-            // the class above.
+
             let owner = match on.and_then(written_as_a_path) {
                 Some(named) => self.resolve_class(&named, line)?,
                 None => {
@@ -14211,12 +12693,7 @@ impl Emitter<'_> {
             let shaped = with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
             self.arguments_for_signature(&shaped, arguments, line)?;
             let descriptor = signature.descriptor();
-            // Written against the superclass, whichever class above it
-            // declared the method. `super.shout()` where `shout` is a
-            // `default` method two steps up is still a call on the
-            // superclass: an `invokespecial` naming the interface is only
-            // legal where that interface is one this class implements
-            // directly, and the JVM refuses the rest.
+
             let through = self
                 .classpath
                 .get(&owner)
@@ -14233,17 +12710,11 @@ impl Emitter<'_> {
             return Ok(signature.returns);
         }
 
-        // A bare `name(...)`, or `this.name(...)`: a method of the class being
-        // compiled. The two mean the same thing and used to take different
-        // roads, only one of which arrived.
         let on = match on {
             Some(Expression::This) => None,
             other => other,
         };
         let Some(on) = on else {
-            // A lambda's body belongs to the method it was written in, so a
-            // bare call in one means the enclosing class's method -- never the
-            // one this class was written to hold, which is the lambda itself.
             let mine: &[Method] = if self.unit.stands_for_a_lambda && !self.writing_a_bridge {
                 &[]
             } else {
@@ -14254,9 +12725,7 @@ impl Emitter<'_> {
                 .filter(|held| held.name == name && held.parameters.len() == arguments.len())
                 .cloned()
                 .collect();
-            // A method written with `...` answers to any number of arguments
-            // from its fixed ones upwards, so counting is not enough to find
-            // one.
+
             if theirs.is_empty() {
                 theirs = mine
                     .iter()
@@ -14271,10 +12740,6 @@ impl Emitter<'_> {
             }
             let own = self.which_one_of_ours(&theirs, arguments, line)?;
             let Some(own) = own else {
-                // Not written here, so it comes from above: `setContentView`
-                // inside an activity is the activity's. Looking only at what
-                // this class declares is what made a bare call to an inherited
-                // method a mistake rather than a call.
                 if let Some(parent) = self.unit.extends.clone() {
                     let owner = self.resolve_class(&parent, line)?;
                     if let Some(signature) =
@@ -14300,9 +12765,7 @@ impl Emitter<'_> {
                         let shaped =
                             with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
                         self.arguments_for_signature(&shaped, arguments, line)?;
-                        // The call is written against this class, not the one
-                        // that declares it, which is what `javac` does and
-                        // what lets a subclass override it.
+
                         let owner = if signature.static_ {
                             signature.owner.clone()
                         } else {
@@ -14353,10 +12816,7 @@ impl Emitter<'_> {
                             &descriptor,
                             signature.interface,
                         );
-                        // A method of an interface is reached with
-                        // `invokeinterface`, whatever it is being reached
-                        // from: the enclosing class of a lambda written in a
-                        // `default` method is that interface.
+
                         match (signature.static_, signature.interface) {
                             (true, _) => self.op2(0xb8, index),
                             (false, false) => self.op2(0xb6, index),
@@ -14379,8 +12839,7 @@ impl Emitter<'_> {
                         );
                     }
                 }
-                // `import static java.lang.Math.max;` puts `max` here without
-                // the class in front of it.
+
                 for owner in self.imported_statically(name) {
                     let Some(signature) =
                         self.signature_written_out(&owner, name, arguments, held, line)?
@@ -14415,11 +12874,7 @@ impl Emitter<'_> {
                         line,
                     );
                 }
-                // Nothing here declares it and nothing above it was named, so
-                // it comes from somewhere this class did not have to write
-                // down: an interface it implements with a `default` body, or
-                // `java.lang.Object`, which is behind every class whether or
-                // not anybody wrote `extends`.
+
                 let mine = self.this_class.clone();
                 if let Some(signature) =
                     self.signature_written_out(&mine, name, arguments, held, line)?
@@ -14449,10 +12904,7 @@ impl Emitter<'_> {
                         .map(|one| i32::from(one.width()))
                         .sum();
                     let descriptor = signature.descriptor();
-                    // Written against this class, whichever class or interface
-                    // above it declares the method -- which is what lets the
-                    // JVM find a `default` body without this having to say
-                    // where it came from.
+
                     let through = self.unit.shape == Shape::Interface;
                     let owner = if signature.static_ {
                         signature.owner.clone()
@@ -14480,9 +12932,7 @@ impl Emitter<'_> {
                         line,
                     );
                 }
-                // And a class written inside another -- including one this
-                // compiler wrote for a lambda -- can call what that one holds
-                // statically, whether or not it kept an instance of it.
+
                 for holder in self.holders() {
                     let Some(signature) =
                         self.signature_written_out(&holder, name, arguments, held, line)?
@@ -14546,10 +12996,7 @@ impl Emitter<'_> {
                 interface: false,
                 variadic: own.variadic,
                 abstract_: false,
-                // What was written before erasure. A method of this class is
-                // no less generic for being written here: `mapped(rows, one ->
-                // one.name())` has to hand the lambda the row type, and this
-                // is the only place that knows it.
+
                 returns_variable: which_variable(&own.returns),
                 parameter_variables: own
                     .parameters
@@ -14564,9 +13011,7 @@ impl Emitter<'_> {
                 returns_stands_for: standing_of(&own.returns),
                 own_variables: own.own_variables.clone(),
                 witnessed: Vec::new(),
-                // What it says it throws, so a call to a method written in
-                // this very class is answered for the same way a call to one
-                // anywhere else is.
+
                 throws: own
                     .throws
                     .iter()
@@ -14586,9 +13031,7 @@ impl Emitter<'_> {
                 }
                 self.load(0, &Type::Object(self.this_class.clone(), Vec::new()));
             }
-            // Through the signature rather than the parameter list, because a
-            // method of this class written with `...` packs its trailing
-            // arguments into an array the same as any other.
+
             let first = with_what_the_arguments_say(&signature, &[], &[], going.as_ref());
             let given = self.what_was_handed_over(&first, arguments, line)?;
             let shaped = with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
@@ -14598,9 +13041,7 @@ impl Emitter<'_> {
             let index = self
                 .pool
                 .method(&owner, name, &descriptor, inside_an_interface);
-            // A method of an interface is not `invokevirtual`. A `private` one
-            // is `invokespecial`, because it cannot be overridden and there is
-            // nothing to look up; everything else is `invokeinterface`.
+
             let opcode = match (
                 own.modifiers.static_,
                 inside_an_interface,
@@ -14626,8 +13067,6 @@ impl Emitter<'_> {
             return self.what_it_really_gives_back(&signature, &[], &given, going.as_ref(), line);
         };
 
-        // `java.util.Collections.sort(...)`: a class written out in full is a
-        // chain of field reads until the call arrives and says otherwise.
         if !matches!(on, Expression::Name(_)) {
             if let Some(path) = written_as_a_path(on) {
                 let head = path.split('.').next().unwrap_or_default();
@@ -14680,14 +13119,8 @@ impl Emitter<'_> {
             }
         }
 
-        // `something.name(...)`. If `something` is a bare name that is a class
-        // rather than a value, this is a static call.
         if let Expression::Name(maybe_class) = on {
             if self.meant_as_a_class(maybe_class) {
-                // It is not a value, so it is meant to be a class, and saying
-                // what is wrong with it as a class is the useful thing. Falling
-                // through to read it as a value would report that a name is not
-                // visible, which is true and tells nobody anything.
                 let owner = self.resolve_class(maybe_class, line)?;
                 let Some(signature) =
                     self.signature_written_out(&owner, name, arguments, held, line)?
@@ -14710,9 +13143,7 @@ impl Emitter<'_> {
                 let shaped = with_what_the_arguments_say(&signature, &[], &given, going.as_ref());
                 self.arguments_for_signature(&shaped, arguments, line)?;
                 let descriptor = signature.descriptor();
-                // A `static` method of an interface is still a method of an
-                // interface, and the constant pool has a different entry for
-                // those. The JVM checks, and says so by name.
+
                 let index =
                     self.pool
                         .method(&signature.owner, name, &descriptor, signature.interface);
@@ -14750,31 +13181,19 @@ impl Emitter<'_> {
         else {
             return Err(self.no_such_method(&owner, name, arguments.len(), line));
         };
-        // What the receiver was written as says what its methods take, which
-        // is not what their erased descriptors say: `Map<String, Named>.put`
-        // takes a Named, and a lambda handed to it has to know that or it has
-        // nothing to be.
-        //
-        // Where the method belongs to a class further up, what that class was
-        // written holding is what counts: a `People extends Store<String,
-        // Person>` reaches `Store.sorted(Comparator<V>)` and the V there is a
-        // Person, which only the `extends` says.
+
         let held = self
             .classpath
             .seen_from(&owner, &on_the_receiver, &signature.owner);
         let mut shaped = as_written(&signature, &held);
-        // `as_written` builds a fresh signature from what the receiver holds,
-        // and what the call wrote out is not the receiver's to say.
+
         shaped.witnessed = signature.witnessed.clone();
-        // What each argument really is, for a method with type parameters of
-        // its own. Worked out only where there are any, because working it out
-        // means writing the code for each argument and throwing it away.
+
         let first = with_what_the_arguments_say(&shaped, &held, &[], going.as_ref());
         let given = self.what_was_handed_over(&first, arguments, line)?;
         let shaped = with_what_the_arguments_say(&shaped, &held, &given, going.as_ref());
         self.arguments_for_signature(&shaped, arguments, line)?;
-        // The descriptor is the erased one either way, because that is the
-        // method the class file names.
+
         let descriptor = signature.descriptor();
         let index = self
             .pool
@@ -14801,23 +13220,16 @@ impl Emitter<'_> {
             self.pops(taken + 1);
             self.pushes(&signature.returns);
         }
-        // `List<Piece>.get` is declared to give back an Object, because that is
-        // what erasure left of it. What the list was written as says otherwise,
-        // and the cast that says so is what `javac` writes here too.
+
         self.what_it_really_gives_back(&signature, &held, &given, going.as_ref(), line)
     }
 
-    /// Writes an expression that is going somewhere known.
-    ///
-    /// A lambda has no type until it has a target, so the target has to reach
-    /// it. Everything else ignores this.
     fn value_for(
         &mut self,
         expression: &Expression,
         wanted: &Type,
         line: u32,
     ) -> Result<Type, Diagnostic> {
-        // `{1, 2}` is a list of values until something says what it holds.
         if let Expression::ArrayOf {
             of: None,
             values,
@@ -14827,11 +13239,7 @@ impl Emitter<'_> {
             let values = values.clone();
             return self.array_of(wanted, &values, *written);
         }
-        // `byte small = 1;` and `char c = 65;`. Java narrows a constant on the
-        // way into a smaller type, without a cast, as long as it fits -- which
-        // is why nobody writes `(byte) 1`. Whether it fits is known here and
-        // nowhere later, because by the time the value is on the stack it is
-        // an int like any other.
+
         if matches!(wanted, Type::Byte | Type::Short | Type::Char) {
             if let Some(value) = constant_int(expression) {
                 let fits = match wanted {
@@ -14851,15 +13259,6 @@ impl Emitter<'_> {
         found
     }
 
-    /// What an expression's type is, without keeping the code that works it
-    /// out.
-    ///
-    /// Choosing between `println(String)` and `println(int)` needs to know
-    /// what is being printed, and what is being printed is only known by
-    /// working it out -- which writes instructions. So it is written, read,
-    /// and then unwritten. Everything the emitter tracks is put back; the
-    /// constant pool is not, because entries there are shared and the real
-    /// emission that follows would have interned the same ones anyway.
     fn type_of(&mut self, expression: &Expression, line: u32) -> Result<Type, Diagnostic> {
         let code = self.code.len();
         let depth = self.depth;
@@ -14869,9 +13268,7 @@ impl Emitter<'_> {
         let locals = self.locals.len();
         let next_slot = self.next_slot;
         let max_slot = self.max_slot;
-        // Cloned rather than counted: working the type out may have declared a
-        // local in a slot an outer one already held, and putting the length
-        // back would leave the wrong type named there.
+
         let slots = self.slots.clone();
         let handlers = self.handlers.len();
         let inlined = self.inlined.len();
@@ -14892,12 +13289,6 @@ impl Emitter<'_> {
         found
     }
 
-    /// The signature of a method, from a class file handed over if there is
-    /// one and from the built-in table if there is not.
-    ///
-    /// A dependency wins, always. What is handed over is the truth about the
-    /// version being built against; the table is what to fall back on when
-    /// nothing was handed over at all.
     fn find_signature(&self, owner: &str, name: &str, count: usize) -> Option<Signature> {
         if let Some(found) = self.classpath.find_method(owner, name, count) {
             return Some(found.clone());
@@ -14905,18 +13296,6 @@ impl Emitter<'_> {
         built_in_method(owner, name, count)
     }
 
-    /// The signature of a method, chosen by what it is being handed.
-    ///
-    /// `println` is nine methods with one argument each. Picking by the count
-    /// alone gets the first of them, which is the String one, and then
-    /// printing a number is refused. So the arguments are typed first and the
-    /// candidate that accepts them is the one written.
-    /// The same, with what the call wrote out in front of the name put back
-    /// into the signature it chose.
-    ///
-    /// `Box.<String>empty()` is the only thing in that call that says what U
-    /// is: there are no arguments to say it and, where it is written in the
-    /// middle of a chain, nothing it is going to either.
     fn signature_written_out(
         &mut self,
         owner: &str,
@@ -14951,9 +13330,6 @@ impl Emitter<'_> {
             return Ok(candidates.into_iter().next());
         }
 
-        // What the arguments say, and which of them say nothing:
-        // `setPositiveButton("yes", (dialog, at) -> ...)` is decided entirely
-        // by the first of them.
         let anything = self.how_loosely_here(arguments);
         let mut given = Vec::with_capacity(arguments.len());
         for (at, expression) in arguments.iter().enumerate() {
@@ -14964,16 +13340,6 @@ impl Emitter<'_> {
             given.push(self.type_of(expression, line)?);
         }
 
-        // An exact match first, because `println(1)` means the int one even
-        // though an int can be widened to a long. Then one that fits without
-        // boxing, and only then one that fits at all -- `append(Integer)` is
-        // `append(Object)` and not `append(String)`, and picking the wrong one
-        // is a class file the verifier throws out.
-        // Within a round, the nearest one: `append((byte) 200)` is
-        // `append(int)` and not `append(double)`, because a byte reaches both
-        // and one of them is two steps away and the other five. Java calls
-        // this the most specific applicable method; here it is the cheapest
-        // walk from what was handed over to what is wanted.
         for round in 0..3 {
             let mut best: Option<(u32, &Signature)> = None;
             for candidate in &candidates {
@@ -14992,13 +13358,6 @@ impl Emitter<'_> {
         Ok(candidates.into_iter().next())
     }
 
-    /// The type a call really gives back, once what the receiver was written
-    /// as is taken into account -- with the cast erasure implies.
-    ///
-    /// Only the collections, and only where this compiler knows which argument
-    /// a method hands back. A generic class written here has already been
-    /// erased by the time it gets to this compiler's own tables, so there is
-    /// nothing to substitute and nothing is claimed.
     fn what_it_really_gives_back(
         &mut self,
         signature: &Signature,
@@ -15008,26 +13367,19 @@ impl Emitter<'_> {
         line: u32,
     ) -> Result<Type, Diagnostic> {
         let declared = signature.returns.clone();
-        // A method with type parameters of its own: what they stand for comes
-        // from what was handed over, and from where the answer is going.
+
         if !signature.returns_stands_for.says_nothing() {
             let bound = what_the_call_says(signature, given, going);
             if !bound.is_empty() {
                 let found = signature.returns_stands_for.filled(&declared, held, &bound);
-                // The same class with its arguments filled in needs no cast --
-                // it already is one. A different class does: that is where the
-                // descriptor said Object and the call says otherwise.
+
                 if found == declared {
                     return Ok(found);
                 }
                 return self.cast_to(found, declared);
             }
         }
-        // What the receiver was written as, put back into a return that was
-        // written with the class's own type parameters. `List<String>.stream()`
-        // is a `Stream<String>` and `Map<K, V>.entrySet()` is a
-        // `Set<Map.Entry<K, V>>`; the erased descriptor says neither, and the
-        // generic signature the class file carries says both.
+
         if !held.is_empty() && signature.returns_stands_for.mentions_the_class() {
             let found = signature.returns_stands_for.filled(&declared, held, &[]);
             if found == declared {
@@ -15035,8 +13387,7 @@ impl Emitter<'_> {
             }
             return self.cast_to(found, declared);
         }
-        // `entrySet` hands back a set of entries, and each entry holds both of
-        // the map's arguments.
+
         if !held.is_empty() {
             if let Some((_, _, around, inside)) = ELEMENT_ENTRIES
                 .iter()
@@ -15048,8 +13399,7 @@ impl Emitter<'_> {
                 ));
             }
         }
-        // What the class itself said, where this compilation read it, and what
-        // the built-in table says otherwise.
+
         let (which, wrap) = match signature.returns_variable {
             Some(at) => (at, None),
             None => match ELEMENT_RETURN
@@ -15063,7 +13413,7 @@ impl Emitter<'_> {
         let Some(argument) = held.get(which) else {
             return Ok(declared);
         };
-        // `keySet` gives back a Set of the keys, not a key.
+
         if let Some(around) = wrap {
             return Ok(Type::Object(around.to_string(), vec![argument.clone()]));
         }
@@ -15071,19 +13421,12 @@ impl Emitter<'_> {
         self.cast_to(argument.clone(), declared)
     }
 
-    /// What each argument is, where the method has type parameters whose
-    /// meaning depends on it. An empty answer everywhere else, because working
-    /// this out costs writing the code for every argument and throwing it
-    /// away.
     fn what_was_handed_over(
         &mut self,
         signature: &Signature,
         arguments: &[Expression],
         line: u32,
     ) -> Result<Vec<Type>, Diagnostic> {
-        // Worth working out where either end of the signature stands for
-        // something: the return, so the caller is handed the right type, or a
-        // parameter, so a lambda written for it knows what it compares.
         if signature.returns_stands_for.says_nothing()
             && signature
                 .taken_stands_for
@@ -15093,17 +13436,10 @@ impl Emitter<'_> {
             return Ok(Vec::new());
         }
         let mut given = Vec::with_capacity(arguments.len());
-        // Where this call's own answer was going, kept so it can be put back:
-        // each argument is worked out against where *it* is going, which is
-        // what the parameter says.
+
         let outside = self.expecting.take();
         let last = signature.parameters.len().saturating_sub(1);
         for (at, one) in arguments.iter().enumerate() {
-            // A lambda has no type until it has a target, and the target is
-            // what is being worked out. What it gives back is not waiting on
-            // that, though: `map(p -> p.name())` on a `Stream<Person>` knows
-            // its parameter is a Person and so knows the answer is a String,
-            // and that is the whole of what `Stream<R>` was waiting to hear.
             if matches!(
                 one,
                 Expression::Lambda { .. } | Expression::MethodRef { .. }
@@ -15119,11 +13455,7 @@ impl Emitter<'_> {
                 );
                 continue;
             }
-            // A call written as an argument works its own type variables out
-            // against where it is going, and where it is going is this
-            // parameter -- not this call's own answer, which is one step
-            // further out. Anything past the last of a variadic one is going
-            // into the array, so it is going where the elements go.
+
             self.expecting = match signature.parameters.get(at.min(last)) {
                 Some(Type::Array(element)) if signature.variadic && at >= last => {
                     Some((**element).clone())
@@ -15140,15 +13472,6 @@ impl Emitter<'_> {
         Ok(given)
     }
 
-    /// What interface a lambda or a method reference written here stands for,
-    /// with what it gives back put back into it.
-    ///
-    /// The parameter says which interface and what it takes; only what comes
-    /// out is left to work out, and working it out is what tells the call what
-    /// its own answer holds. Nothing where the parameter is not an interface
-    /// with one method, or where the body cannot be typed without a target of
-    /// its own -- and nothing is what was said before this existed, so a case
-    /// this cannot answer is no worse off.
     fn what_it_would_come_to(
         &mut self,
         written: &Expression,
@@ -15159,9 +13482,7 @@ impl Emitter<'_> {
             return None;
         };
         let sam = self.the_one_method_of(named, line).ok()?;
-        // Which of the interface's own type parameters its one method gives
-        // back. Anything else -- a method that gives back a fixed type, or an
-        // array of one -- was never waiting on the body.
+
         let Standing::OfTheClass(which) = sam.returns_stands_for else {
             return None;
         };
@@ -15176,10 +13497,7 @@ impl Emitter<'_> {
                 if parameters.len() != shaped.parameters.len() {
                     return None;
                 }
-                // `x -> x.name()` is the one written as an expression, and its
-                // value is what it gives back. A braced one says so with a
-                // `return`, and the first one found is what it comes to --
-                // every other one has to come to the same thing anyway.
+
                 let returns = if *expression {
                     match body.first().map(|held| &held.node) {
                         Some(Statement::Express(value)) => value.clone(),
@@ -15224,8 +13542,6 @@ impl Emitter<'_> {
                 if name == "new" {
                     Type::Object(owner, Vec::new())
                 } else {
-                    // Written with the object it is called on in front, or
-                    // without it. Either way what comes back is the same.
                     let takes = shaped.parameters.len();
                     let found = self
                         .find_signature(&owner, name, takes)
@@ -15248,16 +13564,9 @@ impl Emitter<'_> {
         Some(Type::Object(named.clone(), filled))
     }
 
-    /// Puts the cast erasure implies in front of a value the descriptor called
-    /// an Object.
     fn cast_to(&mut self, found: Type, declared: Type) -> Result<Type, Diagnostic> {
-        // An array is a class too, and the pool names it by its descriptor:
-        // `List<int[]>.get(0)[1]` needs the `checkcast [I` before it can be
-        // indexed at all.
         let named = match &found {
             Type::Object(named, _) if named == "java/lang/Object" => {
-                // Casting to Object is what it already is, and writing the
-                // instruction would only make the class file longer.
                 return Ok(declared);
             }
             Type::Object(named, _) => named.clone(),
@@ -15271,20 +13580,7 @@ impl Emitter<'_> {
         Ok(found)
     }
 
-    /// Whether a value of one type may be handed where another is wanted,
-    /// asking the classpath about classes rather than waving every reference
-    /// through.
-    ///
-    /// `Type::may_be_given_to` says any reference fits any reference, because a
-    /// `Type` on its own has no way to know better. Here there is one: the
-    /// classpath knows what a class extends. Where it does not know a class at
-    /// all -- one of the built-in names, say -- the old answer stands, because
-    /// refusing what cannot be checked would refuse working code.
     fn reaches(&self, have: &Type, want: &Type) -> bool {
-        // An array is reached by an array of something that reaches its
-        // element, and by nothing else. `Type::may_be_given_to` says any
-        // reference reaches any reference, and that is how a `Comparable`
-        // handed to `StringBuilder.append` came to pick `append(char[])`.
         if let Type::Array(to) = want {
             return match have {
                 Type::Array(from) => from == to || self.reaches(from, to),
@@ -15300,10 +13596,7 @@ impl Emitter<'_> {
         if from == to || to == "java/lang/Object" {
             return true;
         }
-        // Everything above it, as far as anything here can see: what the
-        // classpath was told, and what the built-in table says. A class may
-        // have more than one thing above it -- a superclass and its interfaces
-        // -- so this walks all of them rather than one chain.
+
         let mut seen = vec![from.clone()];
         let mut waiting = vec![from.clone()];
         while let Some(current) = waiting.pop() {
@@ -15332,13 +13625,10 @@ impl Emitter<'_> {
                 }
             }
         }
-        // Neither side is anything this compilation was told about, so the
-        // question cannot be answered and the older, looser answer stands.
+
         !self.a_class_this_knows(from) || !self.a_class_this_knows(to)
     }
 
-    /// Whether this compilation has been told anything about a class, either
-    /// as a dependency or by the built-in tables.
     fn a_class_this_knows(&self, name: &str) -> bool {
         self.classpath.get(name).is_some()
             || WELL_KNOWN.contains(&name)
@@ -15349,16 +13639,9 @@ impl Emitter<'_> {
                 .any(|(below, above)| *below == name || *above == name)
     }
 
-    /// Every signature of this name and shape that could be meant.
-    ///
-    /// A method written with `...` answers to any number of arguments from its
-    /// fixed ones upwards, so counting is not enough to find it.
     fn candidates(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
         let mut found = self.candidates_taking(owner, name, count);
-        // A variadic one belongs here even where a fixed one takes the same
-        // number: `String.format` has a three-parameter form whose first is a
-        // Locale, and `format("%s:%d", a, b)` is not that one. Which it is is
-        // settled by what the arguments are, not by how many there are.
+
         for one in self.variadic_taking(owner, name, count) {
             if !found.iter().any(|held| held.parameters == one.parameters) {
                 found.push(one);
@@ -15367,12 +13650,6 @@ impl Emitter<'_> {
         found
     }
 
-    /// Which of this class's own methods of that name a call means.
-    ///
-    /// `say(String)`, `say(Integer)` and `say(Object)` all take one argument,
-    /// and taking whichever was written first would answer `object` to all
-    /// three. It is the same question the classpath answers for any other
-    /// class, asked here because a class being compiled answers for itself.
     fn which_one_of_ours(
         &mut self,
         theirs: &[Method],
@@ -15382,8 +13659,7 @@ impl Emitter<'_> {
         if theirs.len() <= 1 {
             return Ok(theirs.first().cloned());
         }
-        // What each argument says about which of these is meant, and which of
-        // them say nothing at all.
+
         let anything = self.how_loosely_here(arguments);
         let mut given = Vec::with_capacity(arguments.len());
         for (at, one) in arguments.iter().enumerate() {
@@ -15435,11 +13711,7 @@ impl Emitter<'_> {
             if able.len() == 1 {
                 return Ok(theirs.get(able[0].1).cloned());
             }
-            // Two that cost the same are told apart by which is the more
-            // specific: one whose every parameter the other's would accept.
-            // Where neither is, the language says the call is ambiguous, and
-            // picking one would be this compiler deciding what the developer
-            // meant.
+
             let mut narrowest: Option<usize> = None;
             for (_, at) in &able {
                 let mine = &shapes[*at];
@@ -15487,12 +13759,6 @@ impl Emitter<'_> {
         Ok(theirs.first().cloned())
     }
 
-    /// Whether one signature is at least as specific as another: every
-    /// argument it takes is one the other would take too.
-    ///
-    /// This is what decides between two methods that a call fits equally well,
-    /// and it is a question about the types alone rather than about the values
-    /// handed over.
     fn at_least_as_specific(&self, mine: &Signature, other: &Signature) -> bool {
         if mine.parameters.len() != other.parameters.len() {
             return false;
@@ -15503,8 +13769,6 @@ impl Emitter<'_> {
             .all(|(held, wanted)| held == wanted || self.reaches(held, wanted))
     }
 
-    /// How far the values handed over are from what a signature wants, added
-    /// up. Nothing at all where every one of them is already the right type.
     fn what_it_costs(&self, candidate: &Signature, given: &[Type], anything: &[Loosely]) -> u32 {
         let mut total = 0u32;
         let last = candidate.parameters.len().saturating_sub(1);
@@ -15519,27 +13783,17 @@ impl Emitter<'_> {
                     _ => continue,
                 },
             };
-            // Past the fixed parameters of a variadic one, each argument is
-            // going into the array rather than into the array's place.
+
             let want = match want {
                 Type::Array(element) if candidate.variadic && at >= last => element.as_ref(),
                 other => other,
             };
             total = total.saturating_add(how_far(have, want));
         }
-        // A variadic one is chosen only where nothing else fits, which is what
-        // Java says too: the array has to be built, and building it is work a
-        // fixed signature does not do.
+
         total.saturating_add(u32::from(candidate.variadic))
     }
 
-    /// Whether a call handing over these types could be this signature, at one
-    /// of three strictnesses: exactly, without boxing, or at all.
-    ///
-    /// A variadic one is checked as it is written rather than as its
-    /// descriptor: the fixed parameters against the first arguments, and the
-    /// rest against the element type -- or the array itself, where somebody
-    /// handed one over whole.
     fn could_take(
         &self,
         candidate: &Signature,
@@ -15547,11 +13801,7 @@ impl Emitter<'_> {
         anything: &[Loosely],
         round: u8,
     ) -> bool {
-        // What says nothing here still fits, and everything else still
-        // decides: `setNegativeButton("no", null)` is settled by the "no".
         let matched = |at: usize, have: &Type, want: &Type| match anything.get(at) {
-            // What is written can only stand for an interface whose one
-            // method takes as many arguments as it was written with.
             Some(Loosely::Anywhere(counts)) => {
                 counts.is_empty()
                     || match self.how_many_the_one_method_takes(want) {
@@ -15610,7 +13860,6 @@ impl Emitter<'_> {
             .all(|(at, have)| matched(fixed + at, have, element))
     }
 
-    /// Every variadic signature of this name that could take this many.
     fn variadic_taking(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
         let mut found = Vec::new();
         for ancestor in self.classpath.ancestors(owner) {
@@ -15655,24 +13904,17 @@ impl Emitter<'_> {
                 break;
             }
         }
-        // The fixed ones have to be handed over; the rest go in the array.
+
         found.retain(|one| !one.parameters.is_empty() && one.parameters.len() - 1 <= count);
         found
     }
 
     fn candidates_taking(&self, owner: &str, name: &str, count: usize) -> Vec<Signature> {
-        // A class file handed over is the truth. Every one of them that takes
-        // this many, not the first: `new ArrayAdapter(context, id, list)` and
-        // `new ArrayAdapter(context, id, position)` both take three, and
-        // picking whichever came first in the file is picking at random.
         let found = self.classpath.find_methods(owner, name, count);
         if !found.is_empty() {
             return found;
         }
-        // Where the classpath runs out, the built-in table takes over -- for
-        // the class and for everything it inherits from. An enum handed over
-        // as a class file stops at `java.lang.Enum`, which is not on the
-        // classpath and is where `name()` and `ordinal()` live.
+
         for ancestor in self.classpath.ancestors(owner) {
             let found = built_in_overloads(&ancestor, name, count);
             if !found.is_empty() {
@@ -15699,11 +13941,6 @@ impl Emitter<'_> {
         )
     }
 
-    /// Writes into a field of the class being compiled.
-    ///
-    /// `read` is how the field is read back for a compound assignment, which
-    /// is not always its name: `this.x += 1` where a parameter is also called
-    /// `x` has to read the field.
     #[allow(clippy::too_many_arguments)]
     fn assign_to_own_field(
         &mut self,
@@ -15747,10 +13984,7 @@ impl Emitter<'_> {
                 ),
             ));
         }
-        // `c = (this.x = b)` keeps the value. For a static field a `dup` is
-        // enough; for an instance one the object is underneath it, so the
-        // value goes into a slot and is read back -- which is what Dalvik,
-        // being a register machine with no stack shuffles, needs anyway.
+
         self.open();
         let held = wanted.then(|| {
             if field.modifiers.static_ {
@@ -15779,8 +14013,6 @@ impl Emitter<'_> {
         Ok(what)
     }
 
-    /// An assignment. `wanted` says whether the value has to be left behind,
-    /// which is the difference between `a = b;` and `c = (a = b);`.
     fn assign(
         &mut self,
         target: &Expression,
@@ -15827,11 +14059,6 @@ impl Emitter<'_> {
                     .find(|held| held.name == *name)
                     .cloned();
                 let Some(field) = own else {
-                    // A field the class above declares is written by name
-                    // here, the same way it is read by name. `protected
-                    // String kept` in the superclass is `this.kept` in this
-                    // one, and a static one is written through the class that
-                    // declares it.
                     let above = self
                         .unit
                         .extends
@@ -15856,8 +14083,7 @@ impl Emitter<'_> {
                             return self.assign(&through, operator, value, line, wanted);
                         }
                     }
-                    // A class written inside another can write what that one
-                    // holds, the same way it reads it.
+
                     for enclosing in self.the_classes_around() {
                         if self.classpath.find_field(&enclosing, name).is_some() {
                             return self.assign_through_the_enclosing_instance(
@@ -15865,8 +14091,7 @@ impl Emitter<'_> {
                             );
                         }
                     }
-                    // And one written inside another with `static` can write
-                    // what that one holds statically.
+
                     for holder in self.holders() {
                         let held = self
                             .classpath
@@ -15888,7 +14113,7 @@ impl Emitter<'_> {
                 let read = Expression::Name(name.clone());
                 self.assign_to_own_field(&field, name, operator, value, &read, line, wanted)
             }
-            // `this.name = ...` and `other.name = ...`.
+
             Expression::Field { of, name } => {
                 if matches!(of.as_ref(), Expression::This) {
                     let own = self
@@ -15898,10 +14123,6 @@ impl Emitter<'_> {
                         .find(|held| held.name == *name)
                         .cloned();
                     if let Some(field) = own {
-                        // Read back through `this` and not by name: in
-                        // `Point(int x) { this.x = x; }` the name is the
-                        // parameter, and that is the whole reason the `this.`
-                        // is written.
                         let read = Expression::Field {
                             of: Box::new(Expression::This),
                             name: name.clone(),
@@ -15911,11 +14132,7 @@ impl Emitter<'_> {
                         );
                     }
                 }
-                // `Counter.made = 1` is a static field of a class, not a
-                // field of a value called `Counter`, and the same goes for
-                // `Outer.Inner.made`. Both are tried as a class before the
-                // left side is worked out as a value, which is what reading
-                // one does.
+
                 let named = match of.as_ref() {
                     Expression::Name(maybe) if self.meant_as_a_class(maybe) => {
                         Some(self.resolve_class(maybe, line)?)
@@ -15959,7 +14176,6 @@ impl Emitter<'_> {
                 };
                 let (holder, what, static_) = (holder.name.clone(), what.clone(), *static_);
                 if static_ && through_a_value {
-                    // The object it was named through is not wanted.
                     self.op(0x57);
                     self.pops(1);
                 }
@@ -15979,9 +14195,7 @@ impl Emitter<'_> {
                 let index = self.pool.field(&holder, name, &descriptor);
                 let found = match operator {
                     None => self.value_for(value, &what, line)?,
-                    // `o.f += x` reads the field and writes it back, and the
-                    // object is worked out once: the `dup` keeps it for the
-                    // write while the read is spending it.
+
                     Some(operator) => {
                         if static_ {
                             self.op2(0xb2, index);
@@ -16008,11 +14222,7 @@ impl Emitter<'_> {
                         ),
                     ));
                 }
-                // `c = (o.f = b)` keeps the value. For a static field a `dup`
-                // is enough; for an instance one the object is underneath it,
-                // so the value goes into a slot and is read back -- which is
-                // what Dalvik, being a register machine with no stack
-                // shuffles, needs anyway.
+
                 self.open();
                 let held = wanted.then(|| {
                     if static_ {
@@ -16046,9 +14256,6 @@ impl Emitter<'_> {
                 let found = self.value(index, line)?;
                 self.convert(&found, &Type::Int, line)?;
                 match operator {
-                    // `a[i] += x` reads the element and writes it back, and
-                    // the array and the index are worked out once. `dup2`
-                    // keeps them for the write while the read uses them.
                     Some(operator) => {
                         self.duplicates_two();
                         self.op(array_load(&element));
@@ -16064,10 +14271,7 @@ impl Emitter<'_> {
                         }
                     }
                 }
-                // `c = (a[i] = b)` keeps the value. The array and the index
-                // are underneath it, so the value goes into a slot and is
-                // read back rather than shuffled -- Dalvik is a register
-                // machine and has no instruction for the shuffle.
+
                 self.open();
                 let held = wanted.then(|| {
                     let slot = self.declare("$assigned", (*element).clone());
@@ -16095,8 +14299,6 @@ impl Emitter<'_> {
         line: u32,
         wanted: bool,
     ) -> Result<Type, Diagnostic> {
-        // `iinc` steps a local in place, which is the whole reason
-        // `for (int i = 0; i < n; i++)` costs three bytes.
         if let Expression::Name(name) = target {
             if let Some(local) = self.local(name) {
                 if local.what.is_int_like() {
@@ -16119,17 +14321,12 @@ impl Emitter<'_> {
             Binary::Subtract
         };
         let stepped = Expression::Int(i64::from(by.abs()));
-        // `held++;` on its own leaves nothing behind, and `++held` as a value
-        // leaves the new one: both are the assignment they mean.
+
         if !wanted || !after {
             let found = self.assign(target, Some(operator), &stepped, line, wanted)?;
             return Ok(if wanted { found } else { Type::Void });
         }
-        // `x = held++` hands back what was there before it stepped. Whatever
-        // the target is reached through is reached once -- `a[at()]++` calls
-        // `at` one time, not three -- so anything that is not a plain name
-        // goes into a slot of its own, and the read, the step and the write
-        // are all written against those slots.
+
         self.open();
         let target = self.reached_once(target, line)?;
         let was = self.value(&target, line)?;
@@ -16141,13 +14338,6 @@ impl Emitter<'_> {
         Ok(was)
     }
 
-    /// The same target, with everything it is reached through worked out and
-    /// put in a slot, so that reading it and writing it back does not work it
-    /// out twice.
-    ///
-    /// A name, a `this` and a dotted path are left alone: working one of those
-    /// out twice is the same as working it out once, and a slot for it would
-    /// only make the method longer.
     fn reached_once(&mut self, target: &Expression, line: u32) -> Result<Expression, Diagnostic> {
         match target {
             Expression::Index { of, at } => Ok(Expression::Index {
@@ -16162,7 +14352,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// One part of such a target: worked out, stored, and named by its slot.
     fn put_in_a_slot(
         &mut self,
         part: &Expression,
@@ -16180,9 +14369,6 @@ impl Emitter<'_> {
 }
 
 impl Emitter<'_> {
-    // -- the loops and switches around here, and the `finally` bodies that
-    // -- have to run on the way out of them.
-
     fn enter(&mut self, loops: bool) {
         let label = self.pending_label.take();
         self.levels.push(Level {
@@ -16198,7 +14384,6 @@ impl Emitter<'_> {
         self.levels.pop().expect("a level was entered")
     }
 
-    /// Which level a `break` or a `continue` is talking about.
     fn level_for(&self, label: Option<&str>, loops: bool) -> Option<usize> {
         self.levels.iter().rposition(|level| match label {
             Some(name) => level.label.as_deref() == Some(name) && (!loops || level.loops),
@@ -16224,12 +14409,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// Writes out the `finally` bodies between here and where control is going.
-    ///
-    /// Innermost first, and while one runs it is not itself pending -- a
-    /// `return` inside a `finally` must not send that same `finally` round
-    /// again. Where the copy landed is recorded, because a handler that
-    /// protects the `try` must not protect this copy of its `finally`.
     fn run_finallys(&mut self, down_to: usize) -> Result<(), Diagnostic> {
         if self.finallys.len() <= down_to {
             return Ok(());
@@ -16244,14 +14423,11 @@ impl Emitter<'_> {
                         self.statement(one)?;
                     }
                 }
-                // A lock is given back on every way out, the same as a
-                // `finally` -- and unlike a `finally` the JVM checks: a method
-                // that returns still holding one is an
-                // IllegalMonitorStateException, not a leak nobody notices.
+
                 Cleanup::Unlock(slot, what) => {
                     let (slot, what) = (*slot, what.clone());
                     self.load(slot, &what);
-                    self.op(0xc3); // monitorexit
+                    self.op(0xc3);
                     self.pops(1);
                 }
             }
@@ -16263,18 +14439,12 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Says that the stack is exactly this deep, which is what entering an
-    /// exception handler does regardless of how deep it was before.
     fn set_depth(&mut self, depth: i32) {
-        // Only ever used to say the stack is empty; anything else has to say
-        // what is on it.
         debug_assert_eq!(depth, 0);
         self.stack.clear();
         self.deepest();
     }
 
-    /// Adds the exception-table rows protecting one stretch of code, leaving
-    /// out any inlined `finally` inside it.
     fn protect(
         &mut self,
         start: usize,
@@ -16286,8 +14456,6 @@ impl Emitter<'_> {
         let mut pieces = vec![(start, end)];
         let inlined = self.inlined.clone();
         for (from, to, ran_from) in inlined {
-            // A copy that ran this `try`'s own `finally` is not inside this
-            // `try` any more; a copy of something further in still is.
             if ran_from > depth {
                 continue;
             }
@@ -16321,20 +14489,12 @@ impl Emitter<'_> {
 
     fn statement(&mut self, statement: &Positioned<Statement>) -> Result<(), Diagnostic> {
         let line = statement.line;
-        // Where this statement begins, against the line it was written on. A
-        // trace off the device reads these back and prints the line beside the
-        // method, which is the whole difference between a stack trace and a
-        // list of names. One row per instruction offset: a statement that
-        // writes nothing shares the row with whatever comes next, and a line
-        // written twice in a row says so once.
+
         let began = self.code.len() as u16;
         if line > 0 {
             match self.lines.last_mut() {
-                // A statement written around another one -- a `try`, a block --
-                // writes nothing of its own before it, so the one inside is
-                // what this offset is really on.
                 Some((before, said)) if *before == began => *said = line as u16,
-                // And a run of statements on one line is one row, not four.
+
                 Some((_, said)) if *said == line as u16 => {}
                 _ => self.lines.push((began, line as u16)),
             }
@@ -16343,9 +14503,6 @@ impl Emitter<'_> {
             Statement::Nothing => Ok(()),
             Statement::Locally(units) => self.a_class_written_in_here(units, line),
             Statement::Several(inside) => {
-                // Written as one declaration and meaning several, which is not
-                // the same as a block: `int a = 1, b = 2;` puts both names in
-                // the scope around it.
                 for one in inside {
                     self.statement(one)?;
                 }
@@ -16366,8 +14523,6 @@ impl Emitter<'_> {
                 Ok(())
             }
             Statement::Declare { what, name, value } => {
-                // `var` has no type of its own, so the value has to be worked
-                // out before there is anything to check it against.
                 if matches!(what, Written::Inferred) {
                     let Some(expression) = value else {
                         return Err(self.resolve(what, line).unwrap_err());
@@ -16414,9 +14569,6 @@ impl Emitter<'_> {
                         }
                     }
                     None => {
-                        // A local with no value written on it is not readable
-                        // until one is, so nothing is stored and nothing is
-                        // zeroed: the slot simply exists.
                         self.declare_with_nothing_in_it(name, target);
                         return Ok(());
                     }
@@ -16426,7 +14578,6 @@ impl Emitter<'_> {
                 Ok(())
             }
             Statement::Express(expression) => {
-                // The value is not wanted, so anything left behind is popped.
                 let what = match expression {
                     Expression::Assign {
                         target,
@@ -16477,13 +14628,6 @@ impl Emitter<'_> {
                 self.statement(then)?;
                 match otherwise {
                     Some(otherwise) => {
-                        // Where the `then` side always returns, the jump over
-                        // the `else` can never be taken. Writing it anyway
-                        // leaves an instruction nothing reaches, and an
-                        // instruction nothing reaches begins a block the
-                        // verifier wants a frame for -- so a version 69 class
-                        // file is refused with "expecting a stack map frame"
-                        // over three bytes that do nothing.
                         let over = (!never_completes(&then.node)).then(|| self.jump(0xa7));
                         self.land(to_else);
                         self.a_branch_lands_here();
@@ -16502,13 +14646,9 @@ impl Emitter<'_> {
             }
             Statement::While { condition, body } => {
                 let top = self.code.len();
-                // A loop jumps back here, so the verifier has to be told what
-                // is true at the top as well as after the end.
+
                 self.a_branch_lands_here();
-                // `while (true)` has no test and no way out but a `break`.
-                // Writing the test anyway leaves a jump to the end of the
-                // method, and a branch target past the last instruction is a
-                // frame the verifier asks for and nobody can write.
+
                 let out = if matches!(condition, Expression::Boolean(true)) {
                     None
                 } else {
@@ -16534,8 +14674,7 @@ impl Emitter<'_> {
                 for pending in level.breaks {
                     self.land(pending);
                 }
-                // Nothing lands after a loop nobody leaves, and nothing after
-                // it runs either.
+
                 if leaves {
                     self.a_branch_lands_here();
                 } else {
@@ -16618,9 +14757,7 @@ impl Emitter<'_> {
                 self.a_branch_lands_here();
                 self.enter(true);
                 self.statement(body)?;
-                // `continue` in a `do` block goes to the test, not to the top:
-                // the body has already run once and the question is whether it
-                // runs again.
+
                 let level = self.leave();
                 for pending in level.continues {
                     self.land(pending);
@@ -16630,7 +14767,7 @@ impl Emitter<'_> {
                 if found != Type::Boolean {
                     return Err(at("EJ206", line, 1, "A `do`/`while` wants a boolean."));
                 }
-                // ifne, so the loop runs again when the condition holds.
+
                 self.jump_back(0x9a, top);
                 self.pops(1);
                 for pending in level.breaks {
@@ -16669,10 +14806,6 @@ impl Emitter<'_> {
                 Ok(())
             }
             Statement::Synchronized { on, body } => {
-                // The lock is taken, the block runs, and the lock is given
-                // back however the block is left -- including by throwing,
-                // which is what the handler covering the whole of it is for.
-                // A lock not given back is a device that stops.
                 let found = self.value(on, line)?;
                 if !found.is_reference() {
                     return Err(at(
@@ -16689,19 +14822,12 @@ impl Emitter<'_> {
                 let held = self.declare("$locked", found.clone());
                 self.duplicates();
                 self.store(held, &found);
-                self.op(0xc2); // monitorenter
+                self.op(0xc2);
                 self.pops(1);
 
-                // Every way out of the block gives the lock back, which is why
-                // it goes on the same stack a `finally` uses: a `return` or a
-                // `break` from inside runs it on the way past.
                 let outer = self.finallys.len();
                 self.finallys.push(Cleanup::Unlock(held, found.clone()));
 
-                // What the locals are before the block runs. The handler
-                // covers the block from its first instruction, so a slot the
-                // block declares is not set when the handler is reached -- and
-                // a frame claiming otherwise is one the verifier throws out.
                 let outside = self.slots.clone();
                 let begun = self.code.len();
                 for one in body {
@@ -16711,15 +14837,13 @@ impl Emitter<'_> {
                 self.finallys.truncate(outer);
                 if !leaves {
                     self.load(held, &found);
-                    self.op(0xc3); // monitorexit
+                    self.op(0xc3);
                     self.pops(1);
                 }
                 let ended = self.code.len();
 
                 let over = (!leaves).then(|| self.jump(0xa7));
 
-                // Whatever was thrown, the lock is given back and the throw
-                // carries on.
                 let target = self.code.len();
                 self.protect(begun, ended, target, None, self.finallys.len());
                 let throwable = Type::Object("java/lang/Throwable".to_string(), Vec::new());
@@ -16744,18 +14868,13 @@ impl Emitter<'_> {
                 Ok(())
             }
             Statement::Assert { condition, said } => {
-                // `assert` runs only where the runtime was asked for it, which
-                // is what the flag the class initialiser works out is for. On
-                // Android nobody asks, so this is a field read and a branch
-                // that is never taken -- which is exactly what `javac` writes,
-                // and exactly what the person expects.
                 let index = self
                     .pool
                     .field(&self.this_class.clone(), ASSERTIONS_OFF, "Z");
                 self.op2(0xb2, index);
                 self.pushes(&Type::Boolean);
                 self.pops(1);
-                let over = self.jump(0x9a); // ifne: off, so skip
+                let over = self.jump(0x9a);
 
                 let found = self.value(condition, line)?;
                 if found != Type::Boolean {
@@ -16770,7 +14889,7 @@ impl Emitter<'_> {
                     ));
                 }
                 self.pops(1);
-                let held = self.jump(0x9a); // ifne: it held, so nothing to do
+                let held = self.jump(0x9a);
 
                 let error = self.pool.class("java/lang/AssertionError");
                 self.op2(0xbb, error);
@@ -16782,8 +14901,7 @@ impl Emitter<'_> {
                 let descriptor = match said {
                     Some(expression) => {
                         let what = self.value(expression, line)?;
-                        // Every shape of AssertionError's constructor takes
-                        // one thing; which one depends on what was written.
+
                         match &what {
                             Type::Boolean => "(Z)V",
                             Type::Char => "(C)V",
@@ -16837,16 +14955,12 @@ impl Emitter<'_> {
                     ));
                 }
                 self.op(0xbf);
-                // Nothing after an athrow is reached from here, and the stack
-                // it left behind is not the stack anything else will find.
+
                 self.set_depth(0);
                 self.reachable = false;
                 Ok(())
             }
             Statement::Labelled { label, body } => {
-                // A label on a loop or a switch belongs to it, so that
-                // `continue name` has somewhere to land. A label on anything
-                // else gets a level of its own that only `break` can reach.
                 if matches!(
                     &body.node,
                     Statement::While { .. }
@@ -16892,8 +15006,6 @@ impl Emitter<'_> {
                 let wanted = self.returns.clone();
                 match value {
                     None => {
-                        // Nothing is on the stack, so the pending `finally`
-                        // blocks can simply run here.
                         self.run_finallys(0)?;
                         if wanted != Type::Void {
                             return Err(at(
@@ -16933,25 +15045,13 @@ impl Emitter<'_> {
                                 ),
                             ));
                         }
-                        // The value is worked out before the `finally` runs,
-                        // because that is when the expression was written --
-                        // but the `finally` needs the stack, so the value
-                        // waits in a slot of its own until it is time to go.
+
                         if !self.finallys.is_empty() {
-                            // In a scope of its own: the slot belongs to this
-                            // `return` and to nothing after it. Left open, it
-                            // would be written into the frame of every branch
-                            // target further down the method -- and the paths
-                            // that did not come through here never set it,
-                            // which is a frame the verifier refuses.
                             self.open();
                             let held = self.declare("$returning", wanted.clone());
                             self.store(held, &wanted);
                             self.run_finallys(0)?;
-                            // `try { return a; } finally { return b; }` leaves
-                            // by the `finally`, and what would have followed it
-                            // is code no path arrives at -- which the verifier
-                            // wants a frame on and there is nothing to say.
+
                             if !self.reachable {
                                 self.close();
                                 return Ok(());
@@ -16977,15 +15077,6 @@ impl Emitter<'_> {
     }
 }
 
-// ------------------------------------------------------ the class file
-
-/// The StackMapTable a method's frames come to.
-///
-/// Every frame is written as a `full_frame`, which spells out every local and
-/// every stack slot rather than saying how this one differs from the last. The
-/// compact forms save a few bytes and each one is a separate chance to describe
-/// a state that is not the state; a verifier that rejects a class file gives no
-/// hint which frame it disbelieved. The bytes are cheap and being right is not.
 fn stack_map_table(frames: &[Frame], pool: &mut Pool) -> Option<Vec<u8>> {
     if frames.is_empty() {
         return None;
@@ -16996,10 +15087,6 @@ fn stack_map_table(frames: &[Frame], pool: &mut Pool) -> Option<Vec<u8>> {
     let mut body = Vec::new();
     body.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
 
-    // Offsets are written as the gap since the last frame, and the first gap is
-    // measured from the start rather than from one before it -- so every frame
-    // after the first is one less than the plain difference. Getting that wrong
-    // shifts every frame by one instruction and the verifier rejects the lot.
     let mut previous: Option<usize> = None;
     for frame in sorted {
         let delta = match previous {
@@ -17008,7 +15095,7 @@ fn stack_map_table(frames: &[Frame], pool: &mut Pool) -> Option<Vec<u8>> {
         };
         previous = Some(frame.at);
 
-        body.push(255); // full_frame
+        body.push(255);
         body.extend_from_slice(&(delta as u16).to_be_bytes());
         body.extend_from_slice(&(frame.locals.len() as u16).to_be_bytes());
         for local in &frame.locals {
@@ -17022,22 +15109,10 @@ fn stack_map_table(frames: &[Frame], pool: &mut Pool) -> Option<Vec<u8>> {
     Some(body)
 }
 
-/// Whether every way out of this statement is a `return`.
-///
-/// The first version of this asked only whether the last statement in a method
-/// was one. That is true of most methods and false of every method ending in an
-/// `if` with a `return` down both sides -- so `if (x) return a; else return b;`
-/// was refused for reaching its end without returning, which it cannot do.
-///
-/// This is the specification's "can complete normally", narrowed to what is
-/// compiled here. Where it is not sure it says no, and the worst that costs is
-/// a `return` written after code that cannot reach it.
 fn never_completes(statement: &Statement) -> bool {
     match statement {
         Statement::Return(_) | Statement::Throw(_) => true,
-        // A `break` or a `continue` does not fall through to what is written
-        // after it either. Whether it is allowed at all is the emitter's
-        // question, and it answers it.
+
         Statement::Break(_) | Statement::Continue(_) => true,
         Statement::Block(inside) => inside.iter().any(|one| never_completes(&one.node)),
         Statement::If {
@@ -17045,9 +15120,7 @@ fn never_completes(statement: &Statement) -> bool {
             otherwise: Some(otherwise),
             ..
         } => never_completes(&then.node) && never_completes(&otherwise.node),
-        // A loop with no way to fail its test runs until something inside
-        // leaves it, and a `break` is the only way out that is not a `return`
-        // or a `throw`.
+
         Statement::For {
             condition: None,
             body,
@@ -17064,14 +15137,11 @@ fn never_completes(statement: &Statement) -> bool {
         Statement::DoWhile { body, condition } => {
             matches!(condition, Expression::Boolean(true)) && !holds_a_break(&body.node)
         }
-        // A lock is taken and given back around the block; what the block does
-        // is what decides whether anything gets past it.
+
         Statement::Synchronized { body, .. } => body.iter().any(|one| never_completes(&one.node)),
-        // `assert` is a check, and a check that holds carries on.
+
         Statement::Assert { .. } => false,
-        // A `try` gets past only if something that could get past it does: the
-        // body or one of the handlers. A `finally` that never completes ends
-        // it whatever the rest did.
+
         Statement::Try {
             body,
             catches,
@@ -17088,15 +15158,7 @@ fn never_completes(statement: &Statement) -> bool {
                     .iter()
                     .all(|catch| catch.body.iter().any(|one| never_completes(&one.node)))
         }
-        // A `switch` gets past its own end if there is a value nothing
-        // answers to, if a `break` leaves it, or if the last thing it can run
-        // reaches the end.
-        //
-        // Which arm that is depends on the form. With `:` an arm runs into the
-        // next one, so the only one that can reach the end is the last -- and
-        // an empty arm in the middle is a label on the one after it, not a way
-        // out. With `->` every arm ends by jumping past the rest, so every one
-        // of them has to be checked.
+
         Statement::Switch { arms, .. } => {
             if arms.is_empty()
                 || !arms
@@ -17123,17 +15185,6 @@ fn never_completes(statement: &Statement) -> bool {
     }
 }
 
-/// Whether a `break` inside this statement could leave the loop or switch
-/// around it.
-///
-/// A `break` in a nested loop belongs to that loop, which is why this stops
-/// descending at one. A labelled `break` is counted whatever it names, because
-/// working out where it lands would need the labels around it and being wrong
-/// in this direction only costs an instruction nothing reaches.
-/// Whether a `yield` inside this statement belongs to the switch around it.
-///
-/// A `yield` in a nested switch expression belongs to that one, so this stops
-/// descending at one -- the same rule `break` follows for loops.
 fn holds_a_yield(statement: &Statement) -> bool {
     match statement {
         Statement::Yield(_) => true,
@@ -17201,12 +15252,6 @@ fn holds_a_break(statement: &Statement) -> bool {
 }
 
 impl Emitter<'_> {
-    /// `for (T name : array)`.
-    ///
-    /// The array and the index live in two slots of their own so that the body
-    /// cannot reach them and nothing it does to `name` can be seen by the next
-    /// turn. That is what Java says this means, and it is also the only way to
-    /// write it without evaluating the array once per element.
     fn for_each(
         &mut self,
         what: &Written,
@@ -17215,14 +15260,8 @@ impl Emitter<'_> {
         body: &Positioned<Statement>,
         line: u32,
     ) -> Result<(), Diagnostic> {
-        // Which of the two loops this is depends on what is being walked
-        // over, and that is known only by working it out. It is worked out
-        // here and the code for it thrown away, so that whichever loop is
-        // chosen writes it once -- writing it here and again inside was how
-        // the first version of this pushed the collection twice.
         let found = self.type_of(over, line)?;
         let Type::Array(element) = found.clone() else {
-            // Not an array, so it has to hand over an iterator.
             return self.for_each_over_an_iterator(what, name, over, body, &found, line);
         };
 
@@ -17257,9 +15296,9 @@ impl Emitter<'_> {
         self.a_branch_lands_here();
         self.load(index, &Type::Int);
         self.load(array, &found);
-        self.op(0xbe); // arraylength
+        self.op(0xbe);
         self.pops(2);
-        let out = self.jump(0xa2); // if_icmpge
+        let out = self.jump(0xa2);
 
         self.open();
         self.load(array, &found);
@@ -17293,24 +15332,10 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A `switch`, over an integer or over a String.
-    ///
-    /// The integer form becomes a real switch instruction. Which of the two
-    /// the JVM has is decided by how tightly the labels are packed:
-    /// `tableswitch` is a jump table, so it costs four bytes per value in the
-    /// range whether or not anything answers to it, and `lookupswitch` is a
-    /// sorted list the JVM searches. Dense labels take the table; scattered
-    /// ones take the list.
-    ///
-    /// The String form becomes a chain of `equals`. It is what a switch over
-    /// strings means, it throws where Java says it throws -- on a null subject
-    /// -- and it does not need the two-pass hashCode dance `javac` writes to
-    /// save comparisons in switches far larger than anybody writes by hand.
     fn switch(&mut self, subject: &Expression, arms: &[Arm], line: u32) -> Result<(), Diagnostic> {
         let found = self.value(subject, line)?;
         let over = self.what_a_switch_is_over(&found, arms, line)?;
-        // A statement needs no `default`; whether it has one decides only
-        // whether anything can get past it without running an arm.
+
         let answers_for_everything = self.covers_everything(&over, &found, arms);
 
         self.open();
@@ -17321,14 +15346,8 @@ impl Emitter<'_> {
         let over_held = over.clone();
         let dispatch = self.dispatch_for(over, arms, line)?;
 
-        // What the slots held where the dispatch was written. Every arm is
-        // jumped to from there, so no arm may be told more than this -- and
-        // an arm fallen into from the one before is told what the two agree
-        // on.
         let at_the_dispatch = self.slots.clone();
 
-        // The arms, in the order they were written, because that is the order
-        // one falls into the next.
         let mut default_at: Option<usize> = None;
         for arm in arms {
             let at_here = self.code.len();
@@ -17349,14 +15368,12 @@ impl Emitter<'_> {
                 self.statement(one)?;
             }
             self.close();
-            // An arrow arm never runs into the next one.
+
             if arm.arrow && !arm.body.iter().any(|one| never_completes(&one.node)) {
                 ends.push(self.jump(0xa7));
             }
         }
 
-        // Same as the expression form: somewhere for the dispatch to point
-        // when nothing matches, which nothing reaches.
         if default_at.is_none() && answers_for_everything {
             let here = self.code.len();
             self.set_depth(0);
@@ -17367,8 +15384,7 @@ impl Emitter<'_> {
 
         let after = self.code.len();
         let arrives = default_at.is_none() || !ends.is_empty();
-        // With no `default` written, the dispatch itself lands past the whole
-        // switch, and that road carries what was true where it was written.
+
         if default_at.is_none() {
             if self.reachable {
                 self.only_what_every_road_agrees_on(&at_the_dispatch);
@@ -17387,10 +15403,7 @@ impl Emitter<'_> {
             self.land(pending);
         }
         self.close();
-        // Where every arm leaves by returning or throwing and nothing else can
-        // match, nothing is written after this that anything reaches -- and
-        // saying otherwise would put a frame on an instruction no path
-        // arrives at, which a class file may not have.
+
         if arrives {
             self.set_depth(0);
             self.a_branch_lands_here();
@@ -17400,13 +15413,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A `switch` used for its value.
-    ///
-    /// The difference from the statement is what is on the stack at the end.
-    /// Every arm has to leave exactly one value there and jump past the rest,
-    /// or leave by throwing; anything else and the verifier would find two
-    /// paths arriving at the same instruction disagreeing about what is on the
-    /// stack, which is the one thing a frame cannot describe.
     fn switch_value(
         &mut self,
         subject: &Expression,
@@ -17444,9 +15450,6 @@ impl Emitter<'_> {
         let over_held = over.clone();
         let dispatch = self.dispatch_for(over, arms, line)?;
 
-        // What is under the switch, read after the dispatch rather than
-        // before: dispatching is what takes the subject back off the stack,
-        // and an arm starts from what is left once it has gone.
         let beneath = self.stack.clone();
 
         let mut targets: Vec<usize> = Vec::new();
@@ -17462,7 +15465,6 @@ impl Emitter<'_> {
             self.open();
             self.bind_a_pattern_here(arm)?;
 
-            // `case 1 -> 2;` is the value; anything else has to say `yield`.
             let bare = match (arm.arrow, arm.body.len(), arm.body.first()) {
                 (true, 1, Some(one)) => match &one.node {
                     Statement::Express(expression) => Some(expression.clone()),
@@ -17499,9 +15501,6 @@ impl Emitter<'_> {
             self.close();
         }
 
-        // A `switch` that answers for everything still needs somewhere for the
-        // dispatch to point when none of its arms match, because a class file
-        // read against a changed world can arrive there.
         if default_at.is_none() {
             let here = self.code.len();
             self.stack_is(beneath.clone());
@@ -17519,7 +15518,6 @@ impl Emitter<'_> {
         self.close();
 
         let Some(produced) = level.produced else {
-            // Every arm left by throwing, so nothing arrives here at all.
             return Err(at(
                 "EJ246",
                 line,
@@ -17539,8 +15537,6 @@ impl Emitter<'_> {
         Ok(produced)
     }
 
-    /// Checks that every arm of a switch expression produces the same type,
-    /// and remembers what that type is.
     fn agree_on_yield(&mut self, level: usize, found: &Type, line: u32) -> Result<(), Diagnostic> {
         match self.yields[level].produced.clone() {
             None => {
@@ -17568,13 +15564,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// What kind of thing a `switch` is choosing on.
-    /// Whether the arms answer for everything the subject can be.
-    ///
-    /// An enum has a known set of constants and a `sealed` type a known set of
-    /// subtypes, so a `switch` over one that names them all needs no `default`
-    /// -- and Java, since it started checking this, refuses to let you write
-    /// one. Anything else is not exhaustive, whatever it looks like.
     fn covers_everything(&mut self, over: &Chooser, found: &Type, arms: &[Arm]) -> bool {
         match over {
             Chooser::Constant(class) => {
@@ -17609,9 +15598,7 @@ impl Emitter<'_> {
                 if permitted.is_empty() {
                     return false;
                 }
-                // A `case null` is not one of the subtypes and does not help;
-                // an arm with a guard may not run even when its type matches,
-                // so it does not count either.
+
                 let named: Vec<String> = arms
                     .iter()
                     .filter(|arm| arm.guard.is_none())
@@ -17627,13 +15614,7 @@ impl Emitter<'_> {
         }
     }
 
-    /// The `default` a `switch` that needs none still has to have somewhere:
-    /// nothing reaches it, and if the world changes underneath the class file
-    /// it says so rather than falling quietly past.
     fn nothing_else_is_possible(&mut self, over: &Chooser, line: u32) -> Result<(), Diagnostic> {
-        // The same two the JDK's own compiler throws: an enum that gained a
-        // constant after this was compiled, and a sealed type that gained a
-        // subtype.
         let named = match over {
             Chooser::Constant(_) => "java/lang/IncompatibleClassChangeError",
             _ => "java/lang/MatchException",
@@ -17642,9 +15623,7 @@ impl Emitter<'_> {
         self.op2(0xbb, class);
         self.pushes(&Type::Object(named.to_string(), Vec::new()));
         self.duplicates();
-        // `MatchException` has no constructor taking nothing -- the one the
-        // language uses takes a message and a cause, and there is neither
-        // here. `IncompatibleClassChangeError` does.
+
         let taken = if named == "java/lang/MatchException" {
             self.op(0x01);
             self.op(0x01);
@@ -17669,8 +15648,6 @@ impl Emitter<'_> {
         arms: &[Arm],
         line: u32,
     ) -> Result<Chooser, Diagnostic> {
-        // A pattern anywhere in it makes the whole switch one: the arms are
-        // type tests in the order they were written, not a jump table.
         if arms.iter().any(|arm| arm.pattern.is_some()) {
             if !found.is_reference() {
                 return Err(at(
@@ -17691,10 +15668,7 @@ impl Emitter<'_> {
         if *found == Type::Object("java/lang/String".to_string(), Vec::new()) {
             return Ok(Chooser::Text);
         }
-        // An enum's constants are static fields of the enum's own type, so a
-        // label naming one is a name the class holds. That is true of an enum
-        // written here and of one handed over as a class file, which is why it
-        // is asked of the classpath rather than of a flag.
+
         if let Type::Object(class, _) = found {
             let every = arms.iter().flat_map(|arm| arm.labels.iter()).all(|label| {
                 let Expression::Name(named) = label else {
@@ -17735,15 +15709,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// A chain of `instanceof`, one per pattern, in the order they were
-    /// written.
-    ///
-    /// `javac` writes an `invokedynamic` to a bootstrap that builds a decision
-    /// tree, which is a call into a class this compilation would have to know
-    /// about and which Android rewrites anyway. The tests themselves are what
-    /// the feature means, so they are written out: first match wins, which is
-    /// the order the language says, and a `when` guard is one more branch on
-    /// the same road.
     fn shape_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
         let object = Type::Object("java/lang/Object".to_string(), Vec::new());
         let held = self.declare(PATTERN_SUBJECT, object.clone());
@@ -17751,11 +15716,10 @@ impl Emitter<'_> {
 
         let mut waiting: Vec<(Pending, usize)> = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
-            // `case null` answers to the one value no type test ever matches.
             if arm.labels.iter().any(|one| matches!(one, Expression::Null)) {
                 self.load(held, &object);
                 self.pops(1);
-                waiting.push((self.jump(0xc6), index)); // ifnull
+                waiting.push((self.jump(0xc6), index));
                 continue;
             }
             let Some(pattern) = arm.pattern.clone() else {
@@ -17773,8 +15737,7 @@ impl Emitter<'_> {
                     ),
                 ));
             }
-            // A record taken apart is a test and then more tests; a plain type
-            // pattern is the one test.
+
             self.open();
             if pattern.taken {
                 let whole = self.the_whole_pattern(
@@ -17797,14 +15760,12 @@ impl Emitter<'_> {
             match &arm.guard {
                 None => {
                     self.pops(1);
-                    waiting.push((self.jump(0x9a), index)); // ifne
+                    waiting.push((self.jump(0x9a), index));
                     self.close();
                 }
                 Some(guard) => {
-                    // The type has to hold before the guard can be asked, so
-                    // the guard is written after a jump over it.
                     self.pops(1);
-                    let past = self.jump(0x99); // ifeq: not this shape
+                    let past = self.jump(0x99);
                     if !pattern.taken {
                         self.bind_the_pattern(arm, held)?;
                     }
@@ -17818,7 +15779,7 @@ impl Emitter<'_> {
                         ));
                     }
                     self.pops(1);
-                    waiting.push((self.jump(0x9a), index)); // ifne
+                    waiting.push((self.jump(0x9a), index));
                     self.close();
                     self.land(past);
                     self.a_branch_lands_here();
@@ -17833,8 +15794,6 @@ impl Emitter<'_> {
         })
     }
 
-    /// Binds an arm's pattern at the top of the arm, where the slot holding
-    /// what the switch is choosing on is still in scope.
     fn bind_a_pattern_here(&mut self, arm: &Arm) -> Result<(), Diagnostic> {
         if arm.pattern.is_none() {
             return Ok(());
@@ -17845,8 +15804,6 @@ impl Emitter<'_> {
         self.bind_the_pattern(arm, subject)
     }
 
-    /// Declares the names a pattern gives what it matched, and puts the values
-    /// in them. Called at the top of the arm, where the test has already held.
     fn bind_the_pattern(&mut self, arm: &Arm, subject: u16) -> Result<(), Diagnostic> {
         let Some(pattern) = &arm.pattern else {
             return Ok(());
@@ -17857,11 +15814,6 @@ impl Emitter<'_> {
         self.bind_every_part(&pattern, &object, arm.line)
     }
 
-    /// Binds one pattern and everything inside it, with the value it matched
-    /// already on the stack.
-    ///
-    /// No tests: this runs where the whole pattern has already held, so what
-    /// is left is the casts erasure needs and one accessor call per component.
     fn bind_every_part(
         &mut self,
         pattern: &Pattern,
@@ -17916,12 +15868,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A chain of `==`, one per constant.
-    ///
-    /// An enum's constants are the only instances of their class that exist,
-    /// so identity is what a `case` means. `javac` writes a table of ordinals
-    /// instead, which is faster for a switch far larger than anybody writes by
-    /// hand and needs a synthetic class of its own to hold the table.
     fn constant_dispatch(
         &mut self,
         class: &str,
@@ -17956,7 +15902,7 @@ impl Emitter<'_> {
 
                 self.load(held, &what);
                 self.read_static_field(class, named, arm.line)?;
-                // if_acmpeq
+
                 self.pops(2);
                 waiting.push((self.jump(0xa5), index));
             }
@@ -17969,10 +15915,7 @@ impl Emitter<'_> {
         })
     }
 
-    /// Writes the switch instruction, with the offsets left to be filled in
-    /// once the arms have been written and their positions are known.
     fn integer_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
-        // Which arm answers to which value.
         let mut keys: Vec<(i32, usize)> = Vec::new();
         for (index, arm) in arms.iter().enumerate() {
             for label in &arm.labels {
@@ -18003,9 +15946,7 @@ impl Emitter<'_> {
         let low = keys.first().map(|(value, _)| *value).unwrap_or(0);
         let high = keys.last().map(|(value, _)| *value).unwrap_or(0);
         let span = i64::from(high) - i64::from(low) + 1;
-        // A jump table costs four bytes for every value in the range. It is
-        // worth that when most of them are used and wasteful when they are
-        // not.
+
         let table = !keys.is_empty() && span <= 2 * keys.len() as i64 + 8;
 
         self.op(if table { 0xaa } else { 0xab });
@@ -18025,8 +15966,7 @@ impl Emitter<'_> {
                 self.code.extend_from_slice(&[0; 4]);
                 match keys.iter().find(|(held, _)| *held == value) {
                     Some((_, arm)) => slots.push((slot, *arm)),
-                    // A hole in the range goes to the default, and which
-                    // instruction that is is not known yet.
+
                     None => slots.push((slot, usize::MAX)),
                 }
                 if value == high {
@@ -18051,8 +15991,6 @@ impl Emitter<'_> {
         })
     }
 
-    /// A chain of `equals`, one per label, and a jump to the default at the
-    /// end of it.
     fn text_dispatch(&mut self, arms: &[Arm], line: u32) -> Result<Dispatch, Diagnostic> {
         let text = Type::Object("java/lang/String".to_string(), Vec::new());
         let held = self.declare("$switch", text.clone());
@@ -18093,9 +16031,6 @@ impl Emitter<'_> {
         }
 
         if seen.is_empty() {
-            // Java throws on a null subject whether or not there is anything
-            // to compare it against, so with nothing to compare it against the
-            // check is written out.
             self.load(held, &text);
             let class_of =
                 self.pool
@@ -18113,20 +16048,6 @@ impl Emitter<'_> {
         })
     }
 
-    /// `try`, its `catch` clauses, and its `finally`.
-    ///
-    /// The `finally` is written out again at every way out: once after the
-    /// `try` completes, once after each `catch` completes, once at a handler
-    /// that catches everything and rethrows, and once at every `return`,
-    /// `break` or `continue` that jumps past it. That is four or more copies
-    /// of the same block, and it is what `javac` does, because the alternative
-    /// -- a subroutine the code jumps into and back out of -- is the `jsr`
-    /// instruction, which the type-checking verifier will not accept.
-    ///
-    /// The handler that rethrows must not protect the copies. A `finally` that
-    /// throws would otherwise run its own copy again, and then again, and the
-    /// exception would be swallowed by its own cleanup. So the ranges written
-    /// into the exception table have the inlined copies cut out of them.
     fn try_catch(
         &mut self,
         body: &[Positioned<Statement>],
@@ -18139,8 +16060,6 @@ impl Emitter<'_> {
             self.finallys.push(Cleanup::Block(finally.to_vec()));
         }
 
-        // What the `catch` clauses take, while the body is being written: a
-        // checked exception thrown in there is answered for by them.
         let mut takes: Vec<String> = Vec::new();
         for catch in catches {
             for written in &catch.types {
@@ -18170,8 +16089,6 @@ impl Emitter<'_> {
             outs.push(self.jump(0xa7));
         }
 
-        // Every catch clause, in the order written, because the first one that
-        // matches is the one that runs.
         let throwable = Type::Object("java/lang/Throwable".to_string(), Vec::new());
         let mut caught: Vec<(usize, usize)> = Vec::new();
         for catch in catches {
@@ -18192,10 +16109,6 @@ impl Emitter<'_> {
                 classes.push(name);
             }
 
-            // With one type caught, the slot holds exactly that type. With
-            // several, the slot holds what they have in common -- and working
-            // out what that is needs a class hierarchy this compiler does not
-            // have, so it holds a Throwable and says so if that is not enough.
             let held = if classes.len() == 1 {
                 Type::Object(classes[0].clone(), Vec::new())
             } else {
@@ -18227,8 +16140,6 @@ impl Emitter<'_> {
             }
         }
 
-        // The handler that exists only so the `finally` runs when something
-        // leaves by throwing.
         if let Some(finally) = finally {
             let target = self.code.len();
             self.protect(begun, ended, target, None, outer);
@@ -18249,8 +16160,6 @@ impl Emitter<'_> {
             }
             self.finallys = held;
 
-            // A `finally` that returns or throws on its own leaves by that,
-            // and rethrowing after it is code no path arrives at.
             if self.reachable {
                 self.load(slot, &throwable);
                 self.op(0xbf);
@@ -18263,9 +16172,6 @@ impl Emitter<'_> {
         let _ = line;
 
         if outs.is_empty() {
-            // Nothing arrives after this, so there is nothing to land and no
-            // frame to write: a frame at a place nothing reaches is a claim
-            // about a state that never happens.
             return Ok(());
         }
         for pending in outs {
@@ -18276,14 +16182,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// A class written where it is used.
-    ///
-    /// It gets a name -- the enclosing class, a dollar, and a number -- and
-    /// becomes an ordinary class compiled after this one. What it reads from
-    /// around it becomes what it is built with: the enclosing instance, when
-    /// there is one, and every local of the method it was written in that its
-    /// body names. Those are copied in, which is why Java insists they do not
-    /// change afterwards: a copy that could go stale is worse than a rule.
     fn anonymous(
         &mut self,
         what: &Written,
@@ -18295,13 +16193,6 @@ impl Emitter<'_> {
         self.synthesise(target, arguments, body, false, line)
     }
 
-    /// `x -> ...`: the one method of an interface, written where it is
-    /// wanted.
-    ///
-    /// A lambda has no type of its own. Which interface it is depends
-    /// entirely on where it is going, so what it is being handed to has to be
-    /// known before it can be written at all -- and where that is not known,
-    /// saying so is the only honest answer.
     fn lambda(
         &mut self,
         parameters: &[(Option<Written>, String)],
@@ -18331,11 +16222,6 @@ impl Emitter<'_> {
             ));
         };
 
-        // What the interface was written holding is what its one method takes:
-        // a `Comparator<String>` compares strings, whatever the erased
-        // descriptor says. Without this the names a lambda gives its
-        // parameters are all Object, and `left.compareTo(right)` is a method
-        // nobody has heard of.
         let single = self.the_one_method_of(&named, line)?;
         let single = as_written(&single, &holds);
         if single.parameters.len() != parameters.len() {
@@ -18353,8 +16239,6 @@ impl Emitter<'_> {
             ));
         }
 
-        // The types come from the interface. A type written on a parameter has
-        // to agree with it rather than replace it.
         let mut written = Vec::new();
         for ((given, name), wanted) in parameters.iter().zip(single.parameters.iter()) {
             if let Some(given) = given {
@@ -18384,9 +16268,6 @@ impl Emitter<'_> {
             written.push((shape, name.clone()));
         }
 
-        // An expression body is the value the method hands back, unless it
-        // hands back nothing -- in which case it is just something that
-        // happens.
         let mut inside = body.to_vec();
         if expression && single.returns != Type::Void {
             if let Some(last) = inside.pop() {
@@ -18433,10 +16314,7 @@ impl Emitter<'_> {
                 default_value: None,
                 own_variables: Vec::new(),
                 own_bounds: Vec::new(),
-                // A lambda has no signature of its own: what it may throw is
-                // what the interface's one method says it may throw, which is
-                // why `() -> { throw new Exception("no"); }` is written where
-                // a `Callable` is wanted and nowhere else.
+
                 throws: single
                     .throws
                     .iter()
@@ -18448,11 +16326,6 @@ impl Emitter<'_> {
         self.synthesise(target, &[], &made, true, line)
     }
 
-    /// `Type::method`, `value::method` and `Type::new`.
-    ///
-    /// All three are a lambda whose body is one call, so all three are written
-    /// as one: the parameters come from the interface, and the call is handed
-    /// exactly those. What differs is only where the call goes.
     fn method_reference(
         &mut self,
         on: &Expression,
@@ -18480,13 +16353,9 @@ impl Emitter<'_> {
             ));
         };
         let single = self.the_one_method_of(&named, line)?;
-        // What the interface was written holding is what its one method takes,
-        // which is the whole reason `String::length` can stand for a
-        // `Function<String, Integer>` and not for a `Function<Object, Object>`.
+
         let single = as_written(&single, &holds);
 
-        // One name per thing the interface hands over, and the call is handed
-        // exactly those, in order.
         let mut parameters = Vec::new();
         let mut arguments = Vec::new();
         for (position, wanted) in single.parameters.iter().enumerate() {
@@ -18503,7 +16372,6 @@ impl Emitter<'_> {
             arguments.push(Expression::Name(held));
         }
 
-        // `Type::new` makes one; everything else calls one.
         let call = if name == "<init>" {
             let Expression::Name(class) = on else {
                 return Err(at(
@@ -18519,9 +16387,6 @@ impl Emitter<'_> {
                 outer: None,
             }
         } else if self.called_on_the_first_one_handed_over(on, name, arguments.len()) {
-            // `String::length` written where a `Function<String, Integer>` is
-            // wanted: the class is not the receiver, the first thing handed
-            // over is, and the rest are the call's arguments.
             let receiver = arguments.remove(0);
             Expression::Call {
                 on: Some(Box::new(receiver)),
@@ -18549,13 +16414,6 @@ impl Emitter<'_> {
         self.lambda(&parameters, &body, true, line)
     }
 
-    /// Whether `Type::method` means the method of whatever is handed over
-    /// first, rather than a static method of the class.
-    ///
-    /// `Integer::parseInt` is a static call; `String::length` is not, and the
-    /// two are written identically. What tells them apart is which one the
-    /// class actually has: a static taking everything the interface hands
-    /// over, or an instance method taking one fewer.
     fn called_on_the_first_one_handed_over(
         &mut self,
         on: &Expression,
@@ -18586,14 +16444,6 @@ impl Emitter<'_> {
             .any(|one| !one.static_)
     }
 
-    /// The one method an interface has, which is what a lambda stands for.
-    /// What each argument says about which signature is meant, with what this
-    /// compilation knows brought to bear on a method reference.
-    ///
-    /// `Person::name` can be written as a `Function` and not as a
-    /// `Comparator`, and only the methods `Person` declares say so: an
-    /// instance method named through its class takes the object it is called
-    /// on in front of what it was declared with, and a static one does not.
     fn how_loosely_here(&self, arguments: &[Expression]) -> Vec<Loosely> {
         let mut said = how_loosely(arguments);
         for (at, argument) in arguments.iter().enumerate() {
@@ -18614,8 +16464,7 @@ impl Emitter<'_> {
                 continue;
             };
             let mut counts: Vec<usize> = Vec::new();
-            // Nobody writes a method taking more than this, and stopping
-            // somewhere is what makes asking by arity an answerable question.
+
             for arity in 0..=8usize {
                 let held = if name == "new" {
                     self.classpath.find_methods(&owner, "<init>", arity)
@@ -18640,12 +16489,6 @@ impl Emitter<'_> {
         said
     }
 
-    /// How many arguments the one method of an interface takes, where what is
-    /// written is an interface with one method at all.
-    ///
-    /// Nothing where it is not: a `String` parameter says nothing about how a
-    /// lambda handed to the same call was written, and a call with one of each
-    /// is decided by the other one.
     fn how_many_the_one_method_takes(&self, what: &Type) -> Option<usize> {
         let Type::Object(named, _) = what else {
             return None;
@@ -18656,11 +16499,6 @@ impl Emitter<'_> {
     }
 
     fn the_one_method_of(&self, named: &str, line: u32) -> Result<Signature, Diagnostic> {
-        // A lambda stands for an interface and nothing else. `Object` is the
-        // one that turns up, because it is what a return type or a declaration
-        // says when it says nothing, and it does declare methods -- so without
-        // asking this first, `getClass` would be offered as the thing the
-        // lambda is.
         let an_interface = match self.classpath.get(named) {
             Some(known) => known.interface,
             None => BUILT_IN_INTERFACES.contains(&named),
@@ -18679,16 +16517,7 @@ impl Emitter<'_> {
                 "A lambda takes its type from what it is handed to. Name the interface                  it stands for, or write the class out.",
             ));
         }
-        // Everything it declares and everything it inherits: `UnaryOperator`
-        // declares nothing at all and stands for `Function.apply`, which is
-        // one interface up.
-        //
-        // Only the abstract ones count. An interface with a `default` method
-        // and a `private` one has three methods and exactly one of them is
-        // what a lambda stands for. And a method that redeclares one of
-        // Object's does not count either: `Comparator` declares `equals` so
-        // that its documentation can say something about it; every object
-        // already has one, so there is nothing there for a lambda to be.
+
         let counts = |one: &Signature| {
             !one.static_
                 && one.name != "<init>"
@@ -18704,7 +16533,6 @@ impl Emitter<'_> {
                 continue;
             };
             for held in &known.methods {
-                // A method redeclared further down is the same method.
                 if found
                     .iter()
                     .any(|before| before.name == held.name && before.parameters == held.parameters)
@@ -18715,8 +16543,7 @@ impl Emitter<'_> {
             }
         }
         found.retain(counts);
-        // Where the classpath knows nothing abstract, the built-in table takes
-        // over -- a listener from a platform nobody handed over, say.
+
         if found.is_empty() {
             for (class, name, descriptor, static_) in BUILT_IN_METHODS {
                 if *class != named || *static_ {
@@ -18771,7 +16598,6 @@ impl Emitter<'_> {
         }
     }
 
-    /// The constructor of a class that takes exactly this many arguments.
     fn constructor_taking(&self, class: &str, count: usize) -> Option<Signature> {
         self.classpath
             .find_method(class, "<init>", count)
@@ -18779,7 +16605,6 @@ impl Emitter<'_> {
             .or_else(|| built_in_method(class, "<init>", count))
     }
 
-    /// Makes one class out of a body and a type it stands in for.
     fn synthesise(
         &mut self,
         target: Type,
@@ -18813,7 +16638,6 @@ impl Emitter<'_> {
             ));
         }
 
-        // What the body reads that belongs to the method around it.
         let mut wanted: Vec<String> = Vec::new();
         names_read(body, &mut wanted);
         let mut captured: Vec<Local> = Vec::new();
@@ -18821,10 +16645,7 @@ impl Emitter<'_> {
             let Some(local) = self.local(name) else {
                 continue;
             };
-            // A name this class holds itself, or inherits, is that field and
-            // not the local of the same name written outside it. Java reads
-            // the class before it reads the method around the class, and a
-            // capture here would quietly read the wrong one.
+
             if body.fields.iter().any(|held| held.name == *name)
                 || self.classpath.find_field(&named, name).is_some()
             {
@@ -18837,11 +16658,6 @@ impl Emitter<'_> {
         }
         captured.sort_by_key(|held| held.slot);
 
-        // And what it reads that belongs to the class around it rather than to
-        // the method. For a class a person wrote that is `$outer.name`; for
-        // one this compiler wrote -- a lambda inside a lambda -- there is no
-        // `$outer` to reach through, because what the outer one captured it
-        // captured by value. So the value is copied in again, the same way.
         let mut copied: Vec<(String, Type)> = Vec::new();
         if !self.static_ {
             for name in &wanted {
@@ -18882,19 +16698,11 @@ impl Emitter<'_> {
             }
         }
 
-        // What the superclass constructor is handed, worked out here because
-        // these are expressions of the method around this class.
         let mut given = Vec::new();
         for argument in arguments {
             given.push(self.type_of(argument, line)?);
         }
 
-        // Which instance this one belongs to. A class written inside a class
-        // this compiler wrote -- a lambda inside a lambda, a listener inside a
-        // listener -- belongs to the instance the one around it belongs to,
-        // and not to that one: one `$outer` either way, and a name inside
-        // reaches the class a person actually wrote rather than a chain of
-        // classes nobody did.
         let inside_a_written_one = self.unit.name.rsplit('$').next().is_some_and(|simple| {
             !simple.is_empty() && simple.chars().all(|held| held.is_ascii_digit())
         });
@@ -18906,7 +16714,6 @@ impl Emitter<'_> {
         let index = self.made.len() + 1;
         let name = format!("{}${index}", self.unit.name);
 
-        // The fields it is built with, and the constructor that fills them.
         let mut fields = Vec::new();
         let mut parameters: Vec<(Written, String)> = Vec::new();
         let mut filling: Vec<Positioned<Statement>> = Vec::new();
@@ -19049,16 +16856,12 @@ impl Emitter<'_> {
             annotation: false,
             annotations: Vec::new(),
             static_imports: self.unit.static_imports.clone(),
-            // Written where the class around it was written, which is what a
-            // trace through a listener has to say.
+
             source: self.unit.source.clone(),
-            // A class this compiler wrote for a lambda has no type parameters
-            // of its own: what it stands for was worked out where it was
-            // written, and the class holds the answer rather than the question.
+
             own_variables: Vec::new(),
         });
 
-        // And the making of it, here.
         let made = match &self.unit.package {
             Some(package) => format!("{}/{name}", package.replace('.', "/")),
             None => name,
@@ -19110,20 +16913,11 @@ impl Emitter<'_> {
         Ok(target)
     }
 
-    /// A class written inside a method.
-    ///
-    /// It is the same thing as a class written where it is used, with a name:
-    /// it is filed under one nobody wrote, it carries a copy of every local it
-    /// reads, and it carries the instance around it where there is one. What
-    /// differs is only that a name can be written for it afterwards, so what
-    /// has to be handed to its constructor is written down and used again at
-    /// every `new`.
     fn a_class_written_in_here(&mut self, units: &[Unit], line: u32) -> Result<(), Diagnostic> {
         let Some((first, beside)) = units.split_first() else {
             return Ok(());
         };
 
-        // What it reads that belongs to the method around it.
         let mut wanted: Vec<String> = Vec::new();
         for method in &first.methods {
             for held in method.body.iter().flatten() {
@@ -19138,8 +16932,7 @@ impl Emitter<'_> {
         for held in first.instance_setup.iter().chain(first.static_setup.iter()) {
             names_in_statement(&held.node, &mut wanted);
         }
-        // What this class holds itself, or inherits, is read from the class
-        // and not captured from the method around it.
+
         let mut its_own: Vec<String> = first.fields.iter().map(|held| held.name.clone()).collect();
         let above = first
             .extends
@@ -19189,8 +16982,6 @@ impl Emitter<'_> {
         made.static_imports = self.unit.static_imports.clone();
         made.outer = outer.clone();
 
-        // The fields it is built with, in front of its own, and the parameters
-        // every one of its constructors gains.
         let mut fields = Vec::new();
         let mut parameters: Vec<(Written, String)> = Vec::new();
         let mut filling: Vec<Positioned<Statement>> = Vec::new();
@@ -19244,10 +17035,6 @@ impl Emitter<'_> {
         fields.extend(made.fields);
         made.fields = fields;
 
-        // An interface written in a method has no constructor, carries no
-        // instance of anything, and holds no captured local: it is a shape,
-        // and a class file that gave one an `<init>` is one the device
-        // refuses to load at all.
         if made.shape == Shape::Interface {
             made.fields.retain(|held| held.value.is_some());
             self.made.push(made);
@@ -19303,7 +17090,7 @@ impl Emitter<'_> {
             taken.append(&mut method.parameters);
             method.parameters = taken;
             let mut body = method.body.take().unwrap_or_default();
-            // After a `super(...)` or `this(...)`, which has to stay first.
+
             let after = usize::from(matches!(
                 body.first().map(|one| &one.node),
                 Some(Statement::Chain { .. })
@@ -19337,13 +17124,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// The whole of a pattern, as one expression that says whether it held.
-    ///
-    /// `Point(int x, int y)` is `it instanceof Point $r0` and then two
-    /// bindings; `Box(String s)` is a test and then another test, because a
-    /// component written narrower than it is declared has to be checked. What
-    /// comes out is an `&&` chain, which is written by the code that already
-    /// knows how to keep the frames honest across a short circuit.
     fn the_whole_pattern(
         &mut self,
         on: &Expression,
@@ -19392,9 +17172,7 @@ impl Emitter<'_> {
                 name: component.clone(),
                 arguments: Vec::new(),
             };
-            // A component taken apart again, or one written as something
-            // narrower than it is declared, is a test. Anything else is only a
-            // name for what is already there.
+
             let inside = if part.taken {
                 self.the_whole_pattern(&reach, part, line)?
             } else {
@@ -19432,8 +17210,6 @@ impl Emitter<'_> {
         Ok(held)
     }
 
-    /// What a record holds, in the order it was written: the name of each
-    /// component's accessor, and what it hands back.
     fn what_a_record_holds(
         &self,
         class: &str,
@@ -19459,12 +17235,6 @@ impl Emitter<'_> {
             .collect())
     }
 
-    /// A method called on an array.
-    ///
-    /// An array is an object with no class file: it answers Object's methods
-    /// and `clone`, and nothing else. `clone`'s descriptor says it hands back
-    /// an Object; the language says it hands back the array's own type, and
-    /// the cast between those two is what makes both true.
     fn call_on_an_array(
         &mut self,
         array: &Type,
@@ -19518,7 +17288,6 @@ impl Emitter<'_> {
         Ok(returns)
     }
 
-    /// `super(...)` or `this(...)`, at the top of a constructor.
     fn chain_to(
         &mut self,
         owner: &str,
@@ -19615,11 +17384,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// `for (T name : thing)`, where `thing` hands over an iterator.
-    ///
-    /// This is the loop the language says it is: ask for an iterator, ask it
-    /// whether there is another, take it, run the body. The iterator lives in
-    /// a slot of its own so the body cannot reach it.
     fn for_each_over_an_iterator(
         &mut self,
         what: &Written,
@@ -19652,10 +17416,7 @@ impl Emitter<'_> {
         };
 
         let object = Type::Object("java/lang/Object".to_string(), Vec::new());
-        // What it hands out, read where it is written down. A `List<String>`
-        // says so on the receiver; a `class Counter implements
-        // Iterable<Integer>` says it on the `implements`, and the class is
-        // the only place that says it at all.
+
         let holds = match arguments.first() {
             Some(found) if *found != object => Some(found.clone()),
             _ => self
@@ -19666,9 +17427,6 @@ impl Emitter<'_> {
                 .filter(|found| *found != object),
         };
         let declared = match what {
-            // `for (var one : list)` takes what the list was written as
-            // holding. Where nothing was written, erasure is all there is to
-            // go on and Object is what it says.
             Written::Inferred => holds.clone().unwrap_or(object.clone()),
             other => self.resolve(other, line)?,
         };
@@ -19705,9 +17463,7 @@ impl Emitter<'_> {
         self.open();
         self.load(held, &iterator.returns);
         self.call_signature(&next, line);
-        // `for (int one : list)` walks a list of Integers and hands over ints:
-        // the cast erasure needs comes first, then the box is opened. Java
-        // writes both and says neither.
+
         let boxed = match boxed_name(&declared) {
             Some(named) => Type::Object(named.to_string(), Vec::new()),
             None => declared.clone(),
@@ -19755,8 +17511,6 @@ impl Emitter<'_> {
         Ok(())
     }
 
-    /// Writes the call one signature describes, with everything it takes
-    /// already on the stack.
     fn call_signature(&mut self, signature: &Signature, line: u32) {
         let _ = line;
         let descriptor = signature.descriptor();
@@ -19783,8 +17537,6 @@ impl Emitter<'_> {
         self.pushes(&signature.returns);
     }
 
-    /// `Outer.this`, which is the instance a class written inside another
-    /// belongs to.
     fn outer_this(&mut self, of: &Written, line: u32) -> Result<Type, Diagnostic> {
         let wanted = self.resolve(of, line)?;
         let Type::Object(named, _) = wanted.clone() else {
@@ -19825,11 +17577,6 @@ impl Emitter<'_> {
         Ok(wanted)
     }
 
-    /// `new int[3]`, `new int[3][4]`, `new String[2][]`.
-    ///
-    /// One dimension is `newarray` or `anewarray`; more than one is
-    /// `multianewarray`, which takes every length at once and is the only
-    /// instruction that does.
     fn new_array(
         &mut self,
         of: &Written,
@@ -19844,22 +17591,12 @@ impl Emitter<'_> {
         }
 
         if lengths.is_empty() {
-            // The size is already on the stack: `new int[3][]` fills its outer
-            // array from a loop, and each inner one is made with a count the
-            // loop already worked out.
             self.one_dimension(&whole, line)?;
             return Ok(whole);
         }
         self.allocate(&whole, lengths, line)
     }
 
-    /// An array of this type, with these lengths, made now.
-    ///
-    /// `new int[3][4]` is written as an array of arrays, each made in turn.
-    /// `multianewarray` would say it in one instruction, and Dalvik has no such
-    /// instruction -- so the loop the JVM would have run internally is written
-    /// out, which is also what makes `new int[3][]` and `new int[3][4]` the
-    /// same road.
     fn allocate(
         &mut self,
         whole: &Type,
@@ -19875,8 +17612,6 @@ impl Emitter<'_> {
         Ok(whole.clone())
     }
 
-    /// The instruction that makes one array of this type, with the length
-    /// already on the stack.
     fn one_dimension(&mut self, whole: &Type, line: u32) -> Result<(), Diagnostic> {
         let Type::Array(element) = whole.clone() else {
             return Err(at(
@@ -19910,19 +17645,12 @@ impl Emitter<'_> {
                 self.op1(0xbc, code);
             }
         }
-        // The length goes and the array arrives, which is one slot either way
-        // and two different types -- and a frame written after this has to say
-        // the second of them.
+
         self.pops(1);
         self.pushes(whole);
         Ok(())
     }
 
-    /// `new int[3][4]`: an array of three arrays, each of four.
-    ///
-    /// The outer one is made, then filled in a loop with the inner ones. Doing
-    /// it here rather than with one instruction is not a workaround: Dalvik
-    /// has no instruction for it, and this is what the JVM does anyway.
     fn array_of_arrays(
         &mut self,
         whole: &Type,
@@ -19934,8 +17662,7 @@ impl Emitter<'_> {
         };
 
         self.open();
-        // How many, worked out once, because the expression may have an
-        // effect and Java runs it once.
+
         let counted = self.value(&lengths[0], line)?;
         self.convert(&counted, &Type::Int, line)?;
         let how_many = self.declare("$many", Type::Int);
@@ -19956,12 +17683,11 @@ impl Emitter<'_> {
         self.load(at, &Type::Int);
         self.load(how_many, &Type::Int);
         self.pops(2);
-        let out = self.jump(0xa2); // if_icmpge
+        let out = self.jump(0xa2);
 
         self.load(made, whole);
         self.load(at, &Type::Int);
-        // One inner array, of whatever the rest of the lengths say -- which
-        // may itself be an array of arrays.
+
         self.allocate(inner.as_ref(), &lengths[1..], line)?;
         self.op(array_store(&inner));
         self.pops(3);
@@ -19976,7 +17702,6 @@ impl Emitter<'_> {
         Ok(whole.clone())
     }
 
-    /// `{ a, b, c }`: an array of the right size, filled in.
     fn array_of(
         &mut self,
         whole: &Type,
@@ -20006,8 +17731,7 @@ impl Emitter<'_> {
         for (position, value) in values.iter().enumerate() {
             self.duplicates();
             self.push_int(position as i64);
-            // An array written inside an array takes what it holds from the
-            // one around it, which is only known here.
+
             let found = match value {
                 Expression::ArrayOf {
                     of: None,
@@ -20016,9 +17740,7 @@ impl Emitter<'_> {
                 } => self.array_of(&element, values, *written)?,
                 other => self.value_for(other, &element, line)?,
             };
-            // `fit` widens a primitive and puts one in its box where the
-            // array holds objects, which is what `Object[] held = { 1, "a" }`
-            // means and what a varargs call packs.
+
             if !self.fit(&found, &element, line)? {
                 return Err(at(
                     "EJ121",
@@ -20037,7 +17759,6 @@ impl Emitter<'_> {
         Ok(whole.clone())
     }
 
-    /// `iinc`, on a slot this compiler owns.
     fn bump_local(&mut self, slot: u16, by: i8) {
         if slot <= 255 {
             self.op(0x84);
@@ -20052,33 +17773,24 @@ impl Emitter<'_> {
     }
 }
 
-/// How a `switch` gets from its subject to an arm, once the arms have been
-/// written and their positions are known.
-/// What a `switch` is choosing on, which decides how it gets from the subject
-/// to an arm.
 #[derive(Clone)]
 enum Chooser {
     Integer,
     Text,
-    /// An enum, named by its class.
+
     Constant(String),
-    /// `case String s ->`: the arms answer to what the subject *is* rather
-    /// than to what it equals.
+
     Shape,
 }
 
 enum Dispatch {
-    /// A `tableswitch` or a `lookupswitch`, whose offsets are still zero.
     Instruction {
         opcode_at: usize,
         default_slot: usize,
-        /// Where each offset goes, and which arm it points at. `usize::MAX`
-        /// stands for a hole in a jump table's range, which goes to the
-        /// default.
+
         slots: Vec<(usize, usize)>,
     },
-    /// A chain of comparisons, each with a jump waiting to be told where its
-    /// arm is, and one more for the default at the end.
+
     Chain {
         waiting: Vec<(Pending, usize)>,
         fallthrough: Pending,
@@ -20118,13 +17830,6 @@ impl Dispatch {
     }
 }
 
-/// A `case` label that has to be a constant integer, read as one.
-/// The value of a constant expression, where it is one an int holds.
-///
-/// Only what a person writes as a constant: a number, a character, a `true`,
-/// and a `-`, `+` or `~` in front of one. A `final` variable holding a
-/// constant is one too in Java; it is not here, because reading one back is a
-/// road this compiler has no reason to open.
 fn constant_int(expression: &Expression) -> Option<i32> {
     match expression {
         Expression::Int(value) => i32::try_from(*value).ok(),
@@ -20140,10 +17845,6 @@ fn constant_int(expression: &Expression) -> Option<i32> {
     }
 }
 
-/// The type a chain of names in front of `.class` or `.this` was spelling.
-///
-/// `java.util.List.class` parses as a field read of a field read of a name,
-/// because nothing tells the parser it is a type until the `class` arrives.
 fn as_a_written_type(expression: &Expression) -> Option<Written> {
     fn dotted(expression: &Expression) -> Option<String> {
         Some(match expression {
@@ -20155,12 +17856,6 @@ fn as_a_written_type(expression: &Expression) -> Option<Written> {
     Some(Written::Named(dotted(expression)?, Vec::new()))
 }
 
-/// Whether an annotation declared here is one the runtime keeps.
-///
-/// `@Retention(RetentionPolicy.RUNTIME)` on the declaration is what says so.
-/// Without it the default is CLASS, which reflection cannot see -- and an
-/// annotation reflection cannot see is one there is no reason to write into
-/// the file.
 fn kept_at_runtime(unit: &Unit) -> bool {
     if !unit.annotation {
         return false;
@@ -20174,8 +17869,6 @@ fn kept_at_runtime(unit: &Unit) -> bool {
     })
 }
 
-/// The annotations of the runtime library this compiler knows the retention
-/// of without being handed a class file.
 const KEPT_AT_RUNTIME: &[&str] = &[
     "java/lang/Deprecated",
     "java/lang/FunctionalInterface",
@@ -20187,13 +17880,6 @@ const KEPT_AT_RUNTIME: &[&str] = &[
     "java/lang/annotation/Target",
 ];
 
-/// The same signature, with what the arguments say its own type parameters
-/// stand for put back into its parameters.
-///
-/// `Collections.sort(rows, ...)` where `rows` is a `List<String>` is a sort
-/// with a `Comparator<String>`, and the lambda written for it compares
-/// strings. Nothing else says so: the descriptor was erased and the receiver
-/// is a class with no arguments at all.
 fn with_what_the_arguments_say(
     signature: &Signature,
     held: &[Type],
@@ -20221,12 +17907,6 @@ fn with_what_the_arguments_say(
     shaped
 }
 
-/// What a generic method's own type variables stand for at one call.
-///
-/// The arguments say first, because that is what a person reading the call
-/// sees. Where they say nothing -- `Collectors.groupingBy(Person::age)` hands
-/// over a method reference, which has no type until it has a target -- where
-/// the answer is going says the rest, which is the same road `javac` takes.
 fn what_the_call_says(
     signature: &Signature,
     given: &[Type],
@@ -20237,9 +17917,7 @@ fn what_the_call_says(
     for (shape, actual) in signature.taken_stands_for.iter().zip(given.iter()) {
         shape.bind(actual, &mut bound);
     }
-    // `asList("a", "b")` hands over the elements, not the array. Where the
-    // last parameter was written with `...`, what it holds is bound against
-    // each of them.
+
     if signature.variadic && given.len() > fixed {
         if let Some(Standing::ArrayOf(inside)) = signature.taken_stands_for.last() {
             let trailing = &given[fixed..];
@@ -20251,9 +17929,7 @@ fn what_the_call_says(
             }
         }
     }
-    // Where the answer is going fills in what the arguments left unsaid, and
-    // nothing else: an argument that said what a variable stands for has
-    // already said it, and the target of the call is one step further out.
+
     if let Some(going) = going {
         let mut theirs: Vec<(String, Type)> = Vec::new();
         signature.returns_stands_for.bind(going, &mut theirs);
@@ -20263,12 +17939,9 @@ fn what_the_call_says(
             }
         }
     }
-    // Nothing is learned from a variable that only stands for Object, which is
-    // what it erased to in the first place.
+
     bound.retain(|(_, what)| *what != Type::Object("java/lang/Object".to_string(), Vec::new()));
-    // And what the call wrote out in front of the name wins over all of it,
-    // because a person writing `Box.<String>empty()` is saying what nothing
-    // else in the call can.
+
     for (name, what) in &signature.witnessed {
         match bound.iter_mut().find(|(held, _)| held == name) {
             Some((_, before)) => *before = what.clone(),
@@ -20278,17 +17951,7 @@ fn what_the_call_says(
     bound
 }
 
-/// The same signature, with what the receiver was written as put back into it.
 fn as_written(signature: &Signature, held: &[Type]) -> Signature {
-    // What the class file's own generic signature said, where it carried one.
-    // This is the whole of what was written, so it can say things a single
-    // index cannot: `Stream<T>.map` takes a `Function<? super T, ? extends
-    // R>`, and a method reference written for it has to know that its
-    // receiver is a T.
-    // Either what it takes or what it hands back may stand for one of the
-    // class's own type parameters. A `Supplier<T>` takes nothing and hands
-    // back a T, so asking only about what it takes would leave the lambda
-    // inside `Supplier<Supplier<String>>` with nothing to stand for.
     if !held.is_empty()
         && (signature
             .taken_stands_for
@@ -20306,9 +17969,7 @@ fn as_written(signature: &Signature, held: &[Type]) -> Signature {
             }
             *one = shape.filled(one, held, &[]);
         }
-        // And what it hands back, which is what a lambda written for it
-        // returns: `Function<A, Function<B, C>>.apply` gives back a
-        // `Function<B, C>` and the lambda inside it has to know that.
+
         if signature.returns_stands_for.mentions_the_class() {
             shaped.returns = signature
                 .returns_stands_for
@@ -20316,8 +17977,7 @@ fn as_written(signature: &Signature, held: &[Type]) -> Signature {
         }
         return shaped;
     }
-    // What the class itself said, where this compilation read it; the built-in
-    // table for the collections, whose sources it has never seen.
+
     let mine: Vec<usize>;
     let which: &[usize] = if signature
         .parameter_variables
@@ -20344,8 +18004,7 @@ fn as_written(signature: &Signature, held: &[Type]) -> Signature {
         let Some(argument) = which.get(at).and_then(|index| held.get(*index)) else {
             continue;
         };
-        // Only where the erased shape really was `Object`; a `List.add(int,
-        // E)` takes an int first and that is not a type argument.
+
         if *one == Type::Object("java/lang/Object".to_string(), Vec::new()) {
             *one = argument.clone();
         }
@@ -20353,8 +18012,6 @@ fn as_written(signature: &Signature, held: &[Type]) -> Signature {
     shaped
 }
 
-/// Which type argument each parameter of a built-in method really takes.
-/// `usize::MAX` leaves one as its descriptor wrote it.
 const ELEMENT_PARAMETERS: &[(&str, &str, &[usize])] = &[
     ("java/util/Collection", "add", &[0]),
     ("java/util/Collection", "remove", &[0]),
@@ -20372,12 +18029,6 @@ const ELEMENT_PARAMETERS: &[(&str, &str, &[usize])] = &[
     ("java/util/Map", "putIfAbsent", &[0, 1]),
 ];
 
-/// Built-in methods that hand back one of the type arguments the receiver was
-/// written with, rather than what their erased descriptor says.
-///
-/// The number is which argument -- a `Map<K, V>` hands back a V from `get` and
-/// a K from nothing -- and the name, where there is one, is what it is handed
-/// back inside: `keySet` is a `Set<K>` and not a K.
 const ELEMENT_RETURN: &[(&str, &str, usize, Option<&str>)] = &[
     ("java/util/List", "get", 0, None),
     ("java/util/List", "set", 0, None),
@@ -20407,12 +18058,6 @@ const ELEMENT_RETURN: &[(&str, &str, usize, Option<&str>)] = &[
     ),
 ];
 
-/// Built-in methods that hand back a collection of something built out of the
-/// receiver's type arguments.
-///
-/// `Map<K, V>.entrySet()` is a `Set<Map.Entry<K, V>>` -- two classes deep,
-/// which is one more than the table above can say, and the shape every walk
-/// over a map goes through.
 const ELEMENT_ENTRIES: &[(&str, &str, &str, &str)] = &[(
     "java/util/Map",
     "entrySet",
@@ -20420,7 +18065,6 @@ const ELEMENT_ENTRIES: &[(&str, &str, &str, &str)] = &[(
     "java/util/Map$Entry",
 )];
 
-/// The primitive a box holds, where the type is one of the boxes.
 fn primitive_inside(what: &Type) -> Option<Type> {
     let Type::Object(named, _) = what else {
         return None;
@@ -20438,7 +18082,6 @@ fn primitive_inside(what: &Type) -> Option<Type> {
     })
 }
 
-/// The box a primitive is kept in, which is where its class lives.
 fn boxed_name(what: &Type) -> Option<&'static str> {
     Some(match what {
         Type::Boolean => "java/lang/Boolean",
@@ -20454,10 +18097,6 @@ fn boxed_name(what: &Type) -> Option<&'static str> {
     })
 }
 
-/// The instruction that writes one element into an array of this type.
-/// Whether working an expression out twice is the same as working it out
-/// once. A name, a `this`, a dotted path and a written-down number all are;
-/// a call, an assignment or a step is not.
 fn reached_the_same_way_twice(expression: &Expression) -> bool {
     match expression {
         Expression::This | Expression::Name(_) | Expression::Int(_) => true,
@@ -20466,34 +18105,20 @@ fn reached_the_same_way_twice(expression: &Expression) -> bool {
     }
 }
 
-/// How loosely one argument may be matched while choosing between two
-/// signatures that both take the right number.
-///
-/// A lambda and a method reference have no type until they have a target, and
-/// the target is what is being chosen -- so they fit wherever they are put and
-/// say nothing. `null` says almost as little: it fits anything that is not a
-/// number.
 #[derive(Clone, PartialEq, Eq)]
 enum Loosely {
     No,
-    /// Fits wherever it is put, except that the interface it stands for has to
-    /// take a number of arguments it can be written with. Empty where even
-    /// that is unknown. `thenComparing(Person::name)` is decided by this and
-    /// nothing else: `Comparator` takes two and `Function` takes one, and the
-    /// reference can only be written as one.
+
     Anywhere(Vec<usize>),
     AnyReference,
 }
 
-/// What each argument of a call says about which signature is meant.
 fn how_loosely(arguments: &[Expression]) -> Vec<Loosely> {
     arguments
         .iter()
         .map(|one| match one {
             Expression::Lambda { parameters, .. } => Loosely::Anywhere(vec![parameters.len()]),
-            // A method reference can be written as the method itself or as
-            // the method with the object it is called on in front, and which
-            // of the two it is here is exactly what is being decided.
+
             Expression::MethodRef { .. } => Loosely::Anywhere(Vec::new()),
             Expression::Null => Loosely::AnyReference,
             _ => Loosely::No,
@@ -20501,8 +18126,6 @@ fn how_loosely(arguments: &[Expression]) -> Vec<Loosely> {
         .collect()
 }
 
-/// How far one type is from another, for choosing between two signatures that
-/// both fit. Zero is the same type; a number is how many widenings away.
 fn how_far(have: &Type, want: &Type) -> u32 {
     if have == want {
         return 0;
@@ -20511,13 +18134,11 @@ fn how_far(have: &Type, want: &Type) -> u32 {
         return to.saturating_sub(from);
     }
     match want {
-        // Object takes anything, which is why it is the last resort.
         Type::Object(named, _) if named == "java/lang/Object" => 50,
         _ => 10,
     }
 }
 
-/// Where a primitive sits in the order Java widens along.
 fn how_wide(what: &Type) -> Option<u32> {
     Some(match what {
         Type::Byte => 1,
@@ -20543,7 +18164,6 @@ fn array_store(element: &Type) -> u8 {
     }
 }
 
-/// The instruction that reads one element out of an array of this type.
 fn array_load(element: &Type) -> u8 {
     match element {
         Type::Long => 0x2f,
@@ -20557,14 +18177,6 @@ fn array_load(element: &Type) -> u8 {
     }
 }
 
-/// The constant a `static final` field was given, where it was given one that
-/// is a constant at all.
-///
-/// This is what `javac` writes as `ConstantValue`, and it is the difference
-/// between a name another class can use in a `case` label and a name it has to
-/// read at run time. Anything but a literal of the field's own type is not one:
-/// `static final int SIZE = width();` is a store in the class initialiser and
-/// nothing else.
 fn folded_constant(field: &Field, what: &Type, pool: &mut Pool) -> Option<u16> {
     if !field.modifiers.static_ || !field.modifiers.final_ {
         return None;
@@ -20585,12 +18197,6 @@ fn folded_constant(field: &Field, what: &Type, pool: &mut Pool) -> Option<u16> {
     }
 }
 
-/// Whether anything about a written type survives only in a `Signature`.
-///
-/// A descriptor says `Ljava/util/List;` for every list there has ever been. A
-/// signature says `Ljava/util/List<Ljava/lang/String;>;`, and a compilation
-/// against this class reads the difference back. Where there is no difference
-/// -- an `int`, a `String`, an array of either -- nothing is written.
 fn says_more_than_the_descriptor(what: &Written) -> bool {
     match what {
         Written::Variable(_, _) | Written::OwnVariable(_, _) => true,
@@ -20600,13 +18206,6 @@ fn says_more_than_the_descriptor(what: &Written) -> bool {
     }
 }
 
-/// A written type as the generic signature a class file carries.
-///
-/// The same shape as a descriptor, with two additions: a type variable is
-/// `TName;` rather than the class it erased to, and a class written holding
-/// something says what, between angle brackets. A name this compilation cannot
-/// resolve gives nothing back, because a signature naming a class nobody has
-/// is worse than no signature at all.
 fn written_as_a_signature(
     what: &Written,
     classpath: &Classpath,
@@ -20633,15 +18232,11 @@ fn written_as_a_signature(
         }
         Written::Variable(at, bound) => match of_the_class.get(*at) {
             Some(name) => format!("T{name};"),
-            // A class this compiler wrote carries no parameters of its own, so
-            // one numbered against a class that is gone is what it erased to.
+
             None => written_as_a_signature(bound, classpath, unit, of_the_class, of_the_method)?,
         },
         Written::OwnVariable(name, _) => format!("T{name};"),
-        // A bound is read before the variable it bounds is in scope, so
-        // `<T extends Comparable<T>>` has the inner T as a name rather than as
-        // a variable. It is still the variable: a type parameter shadows a
-        // class of the same name, which is what Java says too.
+
         Written::Named(name, held)
             if held.is_empty() && (of_the_method.contains(name) || of_the_class.contains(name)) =>
         {
@@ -20668,7 +18263,6 @@ fn written_as_a_signature(
     })
 }
 
-/// `<T:Ljava/lang/Object;>` and the rest, for whatever declared them.
 fn what_it_holds_open(
     held: &[(String, Written)],
     classpath: &Classpath,
@@ -20682,9 +18276,7 @@ fn what_it_holds_open(
     let mut out = String::from("<");
     for (name, bound) in held {
         out.push_str(name);
-        // One colon for a class bound and two for an interface one: the class
-        // bound in front of an interface is empty, and `<T extends
-        // Comparable<T>>` is written `T::Ljava/lang/Comparable<TT;>;`.
+
         out.push(':');
         if let Written::Named(named, _) = bound {
             if resolve_named(classpath, unit, named)
@@ -20706,7 +18298,6 @@ fn what_it_holds_open(
     Some(out)
 }
 
-/// The `Signature` a class carries, or nothing where a descriptor says it all.
 fn class_signature(classpath: &Classpath, unit: &Unit) -> Option<String> {
     let named: Vec<String> = unit
         .own_variables
@@ -20719,8 +18310,6 @@ fn class_signature(classpath: &Classpath, unit: &Unit) -> Option<String> {
     }
     let mut out = what_it_holds_open(&unit.own_variables, classpath, unit, &named, &[])?;
 
-    // What it extends, then what it implements, in the order they were
-    // written -- which is the order the class file lists them in.
     let above_by_name = |written: &String| -> Option<&Written> {
         unit.above.iter().find(|one| match one {
             Written::Named(name, _) => name == written,
@@ -20758,8 +18347,6 @@ fn class_signature(classpath: &Classpath, unit: &Unit) -> Option<String> {
     Some(out)
 }
 
-/// The `Signature` a method carries, or nothing where its descriptor says it
-/// all.
 fn method_signature(classpath: &Classpath, unit: &Unit, method: &Method) -> Option<String> {
     let of_the_class: Vec<String> = unit
         .own_variables
@@ -20775,9 +18362,7 @@ fn method_signature(classpath: &Classpath, unit: &Unit, method: &Method) -> Opti
     if !generic {
         return None;
     }
-    // A method's own parameters are written with their bounds the same way a
-    // class's are; what this compilation kept of them is the name and the
-    // erasure, which is what a bound comes to.
+
     let object = Written::Named("java.lang.Object".to_string(), Vec::new());
     let mine: Vec<(String, Written)> = method
         .own_variables
@@ -20812,13 +18397,6 @@ fn method_signature(classpath: &Classpath, unit: &Unit, method: &Method) -> Opti
     Some(out)
 }
 
-/// The `Exceptions` attribute for a method written with a `throws`, or nothing
-/// where it was written without one.
-///
-/// A class file records what a method says it throws, and a compilation
-/// against this class reads it back. A name this compilation cannot resolve is
-/// left out rather than guessed at, which is the same rule the rest of this
-/// holds to.
 fn thrown_by(
     pool: &mut Pool,
     classpath: &Classpath,
@@ -20851,14 +18429,6 @@ fn write_attribute(out: &mut Vec<u8>, name: u16, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
-/// Compiles one unit into the bytes of a class file.
-/// The access flags a method carries beyond its written modifiers.
-/// The `RuntimeVisibleAnnotations` attribute for whatever carries these, or
-/// nothing when none of them is kept at runtime.
-///
-/// An annotation kept only for the compiler is read and dropped, which is what
-/// `@Override` is for. One kept at runtime is written down, which is what
-/// makes `getAnnotation` answer.
 fn runtime_annotations(
     pool: &mut Pool,
     classpath: &Classpath,
@@ -20906,7 +18476,6 @@ fn runtime_annotations(
     Some((pool.utf8("RuntimeVisibleAnnotations"), body))
 }
 
-/// One `element_value`, which is a tag saying what kind and then the value.
 fn annotation_value(
     pool: &mut Pool,
     classpath: &Classpath,
@@ -20961,8 +18530,6 @@ fn annotation_value(
             }
         }
         other => {
-            // `@Retention(RetentionPolicy.RUNTIME)` and everything shaped like
-            // it: the name of a constant of an enum.
             if let Some(value) = constant_int(other) {
                 out.push(b'I');
                 out.extend_from_slice(&pool.integer(value).to_be_bytes());
@@ -20979,24 +18546,13 @@ fn annotation_value(
     Some(out)
 }
 
-/// A written type as the type it stands for, without an emitter.
 fn shallow_type(classpath: &Classpath, unit: &Unit, written: &Written) -> Option<Type> {
     resolve_written(classpath, unit, written)
 }
 
-/// The methods nobody wrote that a class needs anyway.
-///
-/// `class Derived extends Base { String held() }` overriding `Object held()`
-/// is two methods in the class file, not one: a call through a `Base`
-/// reference names `()Ljava/lang/Object;` and would otherwise reach `Base`'s
-/// own. The second one is marked bridge and synthetic, takes the supertype's
-/// shape, and does nothing but hand over. The same happens wherever the
-/// supertype's parameters were generic, because erasure made them `Object`.
 fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
     let resolve = |written: &Written| -> Option<Type> { resolve_written(classpath, unit, written) };
 
-    // Everything above this class: what it extends, all the way up, and what
-    // it and they implement.
     let mut above: Vec<String> = Vec::new();
     let mut waiting: Vec<String> = Vec::new();
     if let Some(named) = &unit.extends {
@@ -21018,10 +18574,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
             if let Some(up) = &known.superclass {
                 waiting.push(up.clone());
             }
-            // And what it implements, which is as much a road to a method as
-            // what it extends: `UnaryOperator` declares nothing and promises
-            // `Function.apply`, and a class standing for one has to answer
-            // that name in the shape the interface erased it to.
+
             for held in &known.interfaces {
                 waiting.push(held.clone());
             }
@@ -21062,9 +18615,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                 if candidate.parameters == parameters && candidate.returns == returns {
                     continue;
                 }
-                // The override has to be one: every parameter the supertype
-                // takes has to reach this one, and what this one gives back
-                // has to be what the supertype promised.
+
                 let fits = candidate
                     .parameters
                     .iter()
@@ -21095,8 +18646,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                 }) {
                     continue;
                 }
-                // The call it hands over to, with each argument cast back to
-                // what the real method takes.
+
                 let arguments: Vec<Expression> = shape
                     .iter()
                     .zip(&method.parameters)
@@ -21141,9 +18691,7 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
                     default_value: None,
                     own_variables: Vec::new(),
                     own_bounds: Vec::new(),
-                    // What the method it hands over to may throw. A bridge
-                    // that said it threw nothing would be a bridge whose one
-                    // statement is not allowed to be there.
+
                     throws: method.throws.clone(),
                 });
             }
@@ -21154,28 +18702,21 @@ fn bridges_for(unit: &Unit, classpath: &Classpath) -> Vec<Method> {
 
 fn method_shape(unit: &Unit, method: &Method) -> u16 {
     let mut flags = 0u16;
-    // ACC_BRIDGE and ACC_SYNTHETIC: nobody wrote this one, and anything
-    // reading the class file should say so rather than reporting a method the
-    // source does not have.
+
     if method.bridge {
         flags |= 0x0040 | 0x1000;
     }
-    // ACC_VARARGS. It changes nothing the JVM does; it is how reflection, and
-    // anything reading the class file, knows the last parameter was written
-    // with `...` rather than as an array.
+
     if method.variadic {
         flags |= 0x0080;
     }
-    // A method of an interface with no body is abstract, whether or not
-    // anybody wrote the word -- and one with a body must not be, which is what
-    // `default`, `static` and `private` methods of an interface are.
+
     if unit.shape == Shape::Interface && method.body.is_none() && !method.modifiers.static_ {
         flags |= 0x0400;
     }
     flags
 }
 
-/// One unit, and whatever classes its bodies turned out to need.
 pub fn compile_unit(
     unit: &Unit,
     classpath: &Classpath,
@@ -21183,23 +18724,11 @@ pub fn compile_unit(
     compile_unit_in_nest(unit, classpath, &[])
 }
 
-/// One unit, told which classes share a nest with it.
-///
-/// A class and the classes written inside it are one nest, and members of a
-/// nest reach each other's private fields and methods. Saying so is two
-/// attributes: the host lists its members, and each member names its host.
-/// Without them, a lambda written inside a class -- which becomes a class of
-/// its own here -- cannot read the private field it was written next to, and
-/// the JVM says so at run time rather than at compile time.
 pub fn compile_unit_in_nest(
     unit: &Unit,
     classpath: &Classpath,
     nest: &[String],
 ) -> Result<(Vec<u8>, Vec<Unit>), Diagnostic> {
-    // An `assert` is guarded by a flag the class initialiser works out once,
-    // which is what makes assertions cost nothing where nobody asked for them
-    // -- and on Android nobody does. It is an ordinary member of the class, so
-    // it is added to the class rather than carried alongside it.
     let held;
     let unit = if holds_an_assert(unit) {
         held = with_the_assertion_flag(unit);
@@ -21243,11 +18772,8 @@ pub fn compile_unit_in_nest(
         interfaces.push(probe.resolve_class(name, 1)?);
     }
 
-    // Fields.
     let mut field_bytes = Vec::new();
-    // The fields whose value the class file carries. What is written there is
-    // not written again in the class initialiser: the constant is the value,
-    // and storing it a second time is a store nothing reads.
+
     let mut folded: Vec<String> = Vec::new();
     let of_the_class: Vec<String> = unit
         .own_variables
@@ -21267,10 +18793,7 @@ pub fn compile_unit_in_nest(
         let name = pool.utf8(&field.name);
         let descriptor = pool.utf8(&what.descriptor());
         let held = runtime_annotations(&mut pool, classpath, unit, &field.annotations);
-        // `static final int WIDTH = 3;` is a constant, and a class file says
-        // so rather than storing it: a class compiled against this one reads
-        // the value out of here, which is what makes it usable as a `case`
-        // label. Only a literal counts, which is what the language says too.
+
         let constant = folded_constant(field, &what, &mut pool)
             .map(|index| (pool.utf8("ConstantValue"), index));
         let signature = says_more_than_the_descriptor(&field.what)
@@ -21299,13 +18822,6 @@ pub fn compile_unit_in_nest(
         }
     }
 
-    // What a field was given, as a statement that gives it.
-    //
-    // Java does not run these where they are written. An instance field's
-    // value runs at the top of every constructor, after the call up into the
-    // superclass, so that a constructor which reads the field sees it set; a
-    // static field's value runs once, in the class initialiser, in the order
-    // the fields were written.
     let assignment = |field: &Field| -> Option<Positioned<Statement>> {
         let value = field.value.clone()?;
         let target = if field.modifiers.static_ {
@@ -21336,9 +18852,6 @@ pub fn compile_unit_in_nest(
         .collect();
     instance_setup.sort_by_key(|held| held.line);
 
-    // In the order they were written, which is the order Java runs them: a
-    // `static` block and a `static` field with a value on it are one sequence,
-    // not two, and `static { a(); } static int x = b();` calls `a` first.
     let mut static_setup: Vec<Positioned<Statement>> = unit
         .fields
         .iter()
@@ -21349,12 +18862,8 @@ pub fn compile_unit_in_nest(
         .collect();
     static_setup.sort_by_key(|held| held.line);
 
-    // Methods. A class with no constructor written gets the one Java would
-    // have written for it, which calls up into the superclass and returns.
     let mut methods: Vec<Method> = unit.methods.clone();
     if unit.shape == Shape::Interface {
-        // A method of an interface without a body is abstract, whether or not
-        // anybody wrote it down.
         for method in &mut methods {
             if method.body.is_none() {
                 method.modifiers.abstract_ = true;
@@ -21407,8 +18916,6 @@ pub fn compile_unit_in_nest(
         );
     }
 
-    // And the ones nobody wrote: a bridge for every override whose supertype
-    // said it in a shape erasure changed.
     methods.extend(bridges_for(unit, classpath));
 
     let code_name = pool.utf8("Code");
@@ -21457,8 +18964,7 @@ pub fn compile_unit_in_nest(
                     .to_be_bytes(),
             );
             let held = runtime_annotations(&mut pool, classpath, unit, &method.annotations);
-            // `int order() default 0;` -- what reflection hands back from
-            // `getDefaultValue`.
+
             let default_value = method.default_value.as_ref().and_then(|value| {
                 let body = annotation_value(&mut pool, classpath, unit, value)?;
                 Some((pool.utf8("AnnotationDefault"), body))
@@ -21499,22 +19005,15 @@ pub fn compile_unit_in_nest(
             method.modifiers.static_,
             &mut made,
         );
-        // A bridge hands over to the method beside it, and says so with
-        // `this.` -- which in a class written for a lambda would otherwise
-        // mean the class the lambda was written in.
+
         emitter.writing_a_bridge = method.bridge;
-        // What this method says it throws, which is what the checked
-        // exceptions inside it are answered for by. A class this compilation
-        // cannot name is left out rather than guessed at, which can only make
-        // this check quieter, never louder.
+
         emitter.said_to_throw = method
             .throws
             .iter()
             .filter_map(|one| resolve_named(classpath, unit, one))
             .collect();
-        // A constructor and a class initialiser are written from the fields
-        // and the blocks around them, and what those may throw is answered for
-        // where they were written rather than here.
+
         if method.name == "<clinit>" {
             emitter
                 .said_to_throw
@@ -21535,10 +19034,6 @@ pub fn compile_unit_in_nest(
 
         let mut body: &[Positioned<Statement>] = body;
         if method.constructor {
-            // Every constructor begins by calling one above it, or the class
-            // will not load. Written out, that is either `super(...)` or
-            // `this(...)`; written by nobody, it is the superclass's own
-            // no-argument constructor.
             let chained = match body.first().map(|one| &one.node) {
                 Some(Statement::Chain {
                     to_super,
@@ -21563,9 +19058,6 @@ pub fn compile_unit_in_nest(
                 }
             };
 
-            // A constructor that hands off to another one in the same class
-            // must not run the field values again: the one it handed off to
-            // has already run them.
             if chained == Some(true) {
                 for statement in &instance_setup {
                     emitter.statement(statement)?;
@@ -21577,12 +19069,6 @@ pub fn compile_unit_in_nest(
             emitter.statement(statement)?;
         }
 
-        // A method that can fall off its end needs a return there. A `void`
-        // one gets it; anything else that reaches the end without returning is
-        // a mistake in the source and is said so.
-        // What the source says, or what the emitter found: a `switch` that
-        // answers for everything ends every road out of it, and no reading of
-        // the source alone can tell that without knowing the types.
         let ends_returned = !emitter.reachable || body.iter().any(|one| never_completes(&one.node));
         let _ = &instance_setup;
         if returns == Type::Void {
@@ -21608,10 +19094,6 @@ pub fn compile_unit_in_nest(
         let handlers = emitter.handlers;
         let written_on = emitter.lines;
 
-        // One past the end is not a place anything can land. The very start
-        // is: a method whose first statement is a loop is jumped back to at
-        // offset zero, and the verifier wants the frame there written down
-        // even though it says what entering the method already said.
         let frames: Vec<Frame> = frames
             .into_iter()
             .filter(|frame| frame.at < code.len())
@@ -21631,16 +19113,12 @@ pub fn compile_unit_in_nest(
             attribute.extend_from_slice(&(handler.target as u16).to_be_bytes());
             let class = match &handler.class {
                 Some(name) => pool.class(name),
-                // Zero is the row that catches everything, which is how a
-                // `finally` gets to run on the way out.
+
                 None => 0,
             };
             attribute.extend_from_slice(&class.to_be_bytes());
         }
-        // What each instruction was written on, for the traces the runtime
-        // prints. Rows past the end of the code are not rows: a statement that
-        // wrote nothing at the tail leaves an offset one past the last
-        // instruction, and the runtime reads that as a line nothing is on.
+
         let mut lines: Vec<(u16, u16)> = written_on
             .into_iter()
             .filter(|(at, _)| usize::from(*at) < code.len())
@@ -21718,18 +19196,12 @@ pub fn compile_unit_in_nest(
         written += 1;
     }
 
-    // -- what the class itself carries, beyond its members.
-    // ACC_SUPER, which every class written since Java 1.1 sets. An interface
-    // sets ACC_INTERFACE and ACC_ABSTRACT instead, and must not set ACC_SUPER.
     let shape_flags = match unit.shape {
         Shape::Class => 0x0020u16,
-        // ACC_ANNOTATION as well, for an interface written `@interface`.
+
         Shape::Interface if unit.annotation => 0x0200 | 0x0400 | 0x2000,
         Shape::Interface => 0x0200 | 0x0400,
-        // ACC_ENUM as well, which is how anything reading the file knows the
-        // constants are constants. And ACC_ABSTRACT where the enum left a
-        // method for its constants to answer: nobody writes `abstract enum`,
-        // the bodiless method is what says so.
+
         Shape::Enum => {
             let left_open = unit
                 .methods
@@ -21737,7 +19209,7 @@ pub fn compile_unit_in_nest(
                 .any(|held| held.body.is_none() && !held.modifiers.static_);
             0x0020 | 0x4000 | if left_open { 0x0400 } else { 0 }
         }
-        // ACC_RECORD, and final, because a record cannot be extended.
+
         Shape::Record => 0x0020 | 0x0010,
     };
     let mut class_attributes: Vec<(u16, Vec<u8>)> = Vec::new();
@@ -21745,12 +19217,6 @@ pub fn compile_unit_in_nest(
         class_attributes.push(held);
     }
 
-    // The file this was written in. Without it every line of every trace off
-    // the device reads `Unknown Source`, which is the difference between a
-    // stack trace and a list of method names. Where the compilation was handed
-    // no file name -- one source, compiled on its own -- the name of the
-    // outermost class is what the file would have been called, because Java
-    // says a public class lives in a file of its own name.
     let written_in = unit.source.clone().unwrap_or_else(|| {
         let outermost = unit.name.split('$').next().unwrap_or(&unit.name);
         format!("{outermost}.java")
@@ -21758,16 +19224,11 @@ pub fn compile_unit_in_nest(
     let held = pool.utf8(&written_in);
     class_attributes.push((pool.utf8("SourceFile"), held.to_be_bytes().to_vec()));
 
-    // What the class was written holding, which the descriptor throws away.
-    // `class Store<K, V> implements Map<K, V>` is one class file either way;
-    // this is what tells a compilation against it that the two are the same K.
     if let Some(written) = class_signature(classpath, unit) {
         let index = pool.utf8(&written);
         class_attributes.push((pool.utf8("Signature"), index.to_be_bytes().to_vec()));
     }
 
-    // `sealed` is a list in the class file: the runtime, not the compiler
-    // alone, refuses a class outside it.
     if !unit.permits.is_empty() {
         let mut named = Vec::new();
         for one in &unit.permits {
@@ -21789,8 +19250,6 @@ pub fn compile_unit_in_nest(
         class_attributes.push((pool.utf8("PermittedSubclasses"), body));
     }
 
-    // A record says what it holds, in order, so that reflection can hand the
-    // components back and `equals` and `toString` mean what they say.
     if unit.shape == Shape::Record {
         let components: Vec<&Field> = unit
             .fields
@@ -21813,14 +19272,12 @@ pub fn compile_unit_in_nest(
             let descriptor = pool.utf8(&what.descriptor());
             body.extend_from_slice(&name.to_be_bytes());
             body.extend_from_slice(&descriptor.to_be_bytes());
-            // No attributes of its own: the signature and the annotations a
-            // component can carry are things this compiler does not write.
+
             body.extend_from_slice(&0u16.to_be_bytes());
         }
         class_attributes.push((pool.utf8("Record"), body));
     }
 
-    // The nest: who may reach whose private members.
     match this_class.split_once('$') {
         Some((host, _)) => {
             let index = pool.class(host);
@@ -21842,14 +19299,6 @@ pub fn compile_unit_in_nest(
         }
     }
 
-    // Classes written inside classes, which is how reflection answers
-    // `getSimpleName` and `getDeclaringClass` rather than reading the `$` in
-    // the name and guessing.
-    //
-    // Every class in one family writes the same table. It has to: the JVM
-    // looks a class up in its holder's table as well as its own, and the two
-    // disagreeing is an IncompatibleClassChangeError at the moment somebody
-    // asks.
     {
         let top = this_class.split('$').next().unwrap_or("").to_string();
         let mut family: Vec<String> = nest
@@ -21867,16 +19316,12 @@ pub fn compile_unit_in_nest(
             body.extend_from_slice(&(family.len() as u16).to_be_bytes());
             for one in &family {
                 let (holder, simple) = one.rsplit_once('$').unwrap_or(("", one.as_str()));
-                // A class written where it was used has a number for a name.
-                // It is not a member of anything, and saying it is would make
-                // `getDeclaringClass` answer with a class the source never
-                // wrote.
+
                 let unnamed = simple.chars().all(|held| held.is_ascii_digit());
                 let inner = pool.class(one);
                 let outer = if unnamed { 0 } else { pool.class(holder) };
                 let named = if unnamed { 0 } else { pool.utf8(simple) };
-                // Only the row naming this class is read for its modifiers,
-                // and that row is written from what this class actually is.
+
                 let flags = if *one == this_class {
                     unit.modifiers.access_flags(shape_flags & !0x0020)
                 } else {
@@ -21918,28 +19363,10 @@ pub fn compile_unit_in_nest(
     Ok((out, made))
 }
 
-/// Reads Java and writes a class file.
-/// Every class file one source file comes to.
-///
-/// A file declares one type most of the time and more than one sometimes, and
-/// each of them is a class file of its own -- which is what the JVM has always
-/// required and what `javac` has always done.
 pub fn compile(source: &str, classpath: &Classpath) -> Result<Vec<(String, Vec<u8>)>, Diagnostic> {
     compile_together(&[("".to_string(), source.to_string())], classpath)
 }
 
-/// Every class a whole project's Java comes to.
-///
-/// The files are compiled as one compilation rather than one after another,
-/// because that is what Java is: a class in one file names a class in another
-/// without either of them saying where it lives, and neither exists as a class
-/// file yet. So every file is parsed first, every type it declares is put on
-/// one shared classpath, and only then is any body written. Compiling them in
-/// turn would mean the first file could not see the second, which is a project
-/// of more than one file refused for no reason a person would accept.
-///
-/// Each source is handed over with a label -- the path it was read from -- so
-/// that a refusal says which file it is about.
 pub fn compile_together(
     sources: &[(String, String)],
     classpath: &Classpath,
@@ -21947,9 +19374,7 @@ pub fn compile_together(
     let mut declared = Vec::new();
     for (label, text) in sources {
         let units = parse(text).map_err(|error| named_file(error, label))?;
-        // A class file says which file it was written in, and a trace off the
-        // device reads it back. The path is not what it wants: `javac` writes
-        // the name alone, and the runtime prints it beside the line.
+
         let source = label
             .rsplit(['/', '\\'])
             .next()
@@ -21961,12 +19386,8 @@ pub fn compile_together(
         }
     }
 
-    // A type declared beside another can be named by it, so each one is on the
-    // classpath the others are compiled against.
     let mut together = classpath.clone();
-    // A class written inside a method is used by name in that method, so it
-    // has to be on the classpath before the method is compiled -- which is one
-    // round earlier than the classes this compiler writes for a lambda.
+
     let inside: Vec<Unit> = declared
         .iter()
         .flat_map(|(_, unit)| classes_written_inside(unit))
@@ -21984,9 +19405,6 @@ pub fn compile_together(
         together.declare(unit);
     }
 
-    // Two files declaring the same type would each write over the other's
-    // class, and which one the device ran would come down to the order the
-    // filesystem handed them back.
     for (index, (label, unit)) in declared.iter().enumerate() {
         let name = unit.internal_name();
         if let Some((first, _)) = declared
@@ -22008,16 +19426,6 @@ pub fn compile_together(
         }
     }
 
-    // A body can turn out to need a class of its own -- one written where it
-    // is used has no name until it is compiled. Those go on the end and are
-    // compiled in their turn, and may need classes themselves.
-    //
-    // Which means the full list of classes is not known until everything has
-    // been compiled once, and the nest attributes need that list before
-    // anything is written. So it is compiled twice: the first pass to find out
-    // what there is, the second to write it. The first pass throws its bytes
-    // away, which costs time and is the only way to say something about the
-    // whole that has to be written into each part.
     let mut nest: Vec<String> = Vec::new();
     let mut waiting = declared.clone();
     let mut rounds = 0usize;
@@ -22073,8 +19481,6 @@ pub fn compile_together(
     Ok(out)
 }
 
-/// Says which file a refusal is about, where there is more than one.
-/// Says which file a refusal came out of, in its words and in its location.
 fn named_file(mut error: Diagnostic, label: &str) -> Diagnostic {
     if label.is_empty() {
         return error;
@@ -22086,8 +19492,6 @@ fn named_file(mut error: Diagnostic, label: &str) -> Diagnostic {
     }
     error.with_context(format!("File: {label}"))
 }
-
-// ------------------------------------------------------- the contract
 
 pub static CONTRACT: Contract = Contract {
     id: "omni.plugin.java",
@@ -22119,11 +19523,6 @@ pub struct JavaCompiler;
 
 pub static COMPILER: JavaCompiler = JavaCompiler;
 
-/// The old plugin surface, kept so the registry still lists what exists.
-///
-/// A compilation does not fit through it: it has no request, no session and
-/// nowhere to put what it made. Anything that wants to compile Java goes
-/// through [`COMPILER`] and the contract in `crate::compiler`.
 pub struct JavaPlugin;
 
 pub static PLUGIN: JavaPlugin = JavaPlugin;
@@ -22149,8 +19548,6 @@ impl crate::plugin::Plugin for JavaPlugin {
 }
 
 impl JavaCompiler {
-    /// Everything the classpath knows, out of the class files handed over as
-    /// dependencies.
     fn classpath_from(
         &self,
         session: &Session<'_>,
@@ -22160,8 +19557,6 @@ impl JavaCompiler {
         for digest in &request.dependencies {
             let bytes = session.store().get(*digest)?;
             if bytes.len() < 4 || bytes[..4] != 0xcafe_babeu32.to_be_bytes() {
-                // A dependency that is not a class file is not this compiler's
-                // to complain about; something else may want it.
                 continue;
             }
             let class = crate::jvm::read(&bytes)?;
@@ -22182,9 +19577,6 @@ impl Compiler for JavaCompiler {
                 .with("languageRelease", LANGUAGE_RELEASE)
                 .with("classFileMajor", CLASS_MAJOR.to_string())
                 .with("stackMapFrames", "none"),
-            // Nothing here reads a clock, a path or an environment variable,
-            // and the constant pool is built in the order the source mentions
-            // things. The same source is the same class file, on any machine.
             Reproducibility::Always,
         )
     }
@@ -22211,9 +19603,6 @@ impl Compiler for JavaCompiler {
             .expect("this compiler is always usable");
         let mut expected = Vec::new();
         for source in request.ordered_sources() {
-            // The class a file produces is named by what is in the file, so the
-            // plan has to read far enough to know. Everything else about the
-            // plan is worked out without compiling.
             expected.push(Expected {
                 name: source.path.clone(),
                 kind: Kind::JvmClass,
@@ -22237,9 +19626,6 @@ impl Compiler for JavaCompiler {
         let classpath = self.classpath_from(&session, request)?;
         let sources = request.ordered_sources();
 
-        // The sources themselves come from the store, by the digest the request
-        // named. A compiler that read them from anywhere else would be
-        // compiling something other than what was planned.
         for source in &sources {
             session.carry_on()?;
             let bytes = session.store().get(source.digest)?;
@@ -22247,10 +19633,7 @@ impl Compiler for JavaCompiler {
                 fail("EJ302", "A Java source file is not text.")
                     .with_context(format!("Path: {}", source.path))
             })?;
-            // One file can declare more than one type, and each of them is a
-            // class file of its own. The name it is offered under is the
-            // class's, not the file's, because two types in one file would
-            // otherwise be offered under the same name.
+
             let produced = compile(&text, &classpath)
                 .map_err(|error| error.with_context(format!("File: {}", source.path)))?;
             for (name, class) in produced {
@@ -22270,7 +19653,6 @@ mod tests {
         Classpath::new()
     }
 
-    /// The one class a source declaring one type comes to.
     fn compile_one(source: &str, classpath: &Classpath) -> Result<(String, Vec<u8>), Diagnostic> {
         let mut produced = compile(source, classpath)?;
         assert_eq!(
@@ -22325,10 +19707,8 @@ mod tests {
         let (name, bytes) = compile_one(source, &empty()).expect("this must compile");
         assert_eq!(name, "com/my/app/Counted.class");
 
-        // Read back with this project's own class reader, which knows nothing
-        // about the compiler that wrote it.
         let class = crate::jvm::read(&bytes).expect("what was written must read");
-        // The reader hands names back the way a person writes them.
+
         assert_eq!(class.name, "com.my.app.Counted");
         assert_eq!(class.superclass.as_deref(), Some("java.lang.Object"));
         assert_eq!(class.major_version, CLASS_MAJOR);
@@ -22351,8 +19731,6 @@ mod tests {
         let describe = class.methods.iter().find(|m| m.name == "describe").unwrap();
         assert_eq!(describe.descriptor, "()Ljava/lang/String;");
 
-        // The same source is the same bytes, which is what the contract
-        // promises when it says Always.
         let (_, again) = compile_one(source, &empty()).unwrap();
         assert_eq!(bytes, again, "the same source must be the same class file");
 
@@ -22367,25 +19745,18 @@ mod tests {
     #[test]
     fn what_it_does_not_compile_it_refuses_by_name_and_line() {
         for (source, expected) in [
-            // A lambda with nothing saying what it stands for.
             (
                 "public class A { Object f() { return () -> {}; } }",
                 "EJ250",
             ),
-            // And one handed to an interface with more than one method, which
-            // cannot say which of them it is.
             (
                 "public class A { void f() { CharSequence c = () -> {}; } }",
                 "EJ250",
             ),
-            // A class that belongs to an instance, made where there is none.
             (
                 "public class A { class B { } static B f() { return new B(); } }",
                 "EJ252",
             ),
-            // A `catch` of a class nobody handed over is a handler for
-            // something that might not exist, and the class file would name
-            // it either way.
             (
                 "public class A { void f() { try { } catch (E e) { } } }",
                 "EJ200",
@@ -22398,7 +19769,6 @@ mod tests {
             assert!(refused.suggestion.is_some(), "{source}");
         }
 
-        // And what it does compile, it type-checks rather than waving through.
         for (source, expected) in [
             ("public class A { int f() { return \"text\"; } }", "EJ201"),
             ("public class A { void f() { int x = nothing; } }", "EJ211"),
@@ -22417,10 +19787,6 @@ mod tests {
 
     #[test]
     fn the_code_this_writes_comes_back_out_of_the_class_file() {
-        // A class file is only worth writing if what is in it can be got at
-        // again. Until the reader kept the Code attribute, a method could be
-        // named and described and its body was gone -- which is enough to say
-        // what a class is and not enough to turn it into anything else.
         let source = r#"
             public class Small {
                 public static int twice(int value) {
@@ -22439,8 +19805,6 @@ mod tests {
         assert_eq!(code.max_locals, 1, "one parameter, no `this`");
         assert!(code.handlers.is_empty());
 
-        // iload_0, iconst_2, imul, ireturn. Read as the bytes they are, since
-        // that is what a translator will be handed.
         assert_eq!(
             code.bytes,
             vec![0x1a, 0x05, 0x68, 0xac],
@@ -22458,9 +19822,6 @@ mod tests {
 
     #[test]
     fn java_source_becomes_a_dex_that_dexdump_reads() {
-        // The whole way through, in one test: text, to a class file, to the
-        // bytecode Android runs, read back by the Android tool. Every step here
-        // is this project's own -- there is no javac and no d8 in it.
         let source = r#"
             package com.my.app;
 
@@ -22506,8 +19867,6 @@ mod tests {
         assert_eq!(translated.instance_fields.len(), 2);
         assert!(translated.static_fields.is_empty());
 
-        // `twice` is static and the constructor is direct; the rest are
-        // dispatched on the object.
         let direct: Vec<&str> = translated
             .direct_methods
             .iter()
@@ -22524,8 +19883,6 @@ mod tests {
             assert!(virtual_.contains(&wanted), "{virtual_:?}");
         }
 
-        // Every method that has a body has instructions, and every one of them
-        // declares enough registers to hold what it uses.
         for method in translated
             .direct_methods
             .iter()
@@ -22553,17 +19910,12 @@ mod tests {
         assert_eq!(read.class_names(), vec!["com.my.app.Counter"]);
         assert!(crate::dex::integrity(&dex).unwrap().self_consistent());
 
-        // Asking the Android tool to disassemble makes it verify first, which
-        // is the difference between "the bytes are shaped like a dex" and "a
-        // device would load this".
         if let Some(text) = dexdump_disassembly(&dex) {
             for wanted in ["Lcom/my/app/Counter;", "sumTo", "iget", "return"] {
                 assert!(text.contains(wanted), "dexdump printed no {wanted:?}");
             }
         }
 
-        // The same source is the same dex, which is what the compiler contract
-        // promises when it says its output is reproducible.
         let (_, again) = compile_one(source, &empty()).unwrap();
         let again = crate::dalvik::translate_class(&crate::jvm::read(&again).unwrap())
             .unwrap()
@@ -22580,18 +19932,12 @@ mod tests {
         );
     }
 
-    /// Runs `dexdump` over a dex, with the disassembly.
-    ///
-    /// The tool is part of the Android build-tools, which are not always here,
-    /// and a missing tool is a fact about the machine rather than a failure.
     fn dexdump_disassembly(bytes: &[u8]) -> Option<String> {
         let tool = crate::tests::find_apksigner().and_then(|path| {
             let found = path.parent()?.join("dexdump");
             found.is_file().then_some(found)
         })?;
 
-        // Tests run at the same time, so a directory named after the process
-        // alone is a directory two of them write into.
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let directory =
@@ -22604,9 +19950,7 @@ mod tests {
             .output()
             .ok()?;
         std::fs::remove_dir_all(&directory).ok();
-        // A tool that is not here is a fact about the machine. A tool that is
-        // here, ran, and refused is a fact about the dex, and it must not be
-        // reported as the first one.
+
         assert!(
             output.status.success(),
             "dexdump refused a dex this wrote:\n{}{}",
@@ -22618,11 +19962,6 @@ mod tests {
 
     #[test]
     fn switch_and_try_catch_reach_dalvik_and_dexdump_reads_them_back() {
-        // A `switch` becomes an instruction plus a table written somewhere
-        // else in the method, and a `try` becomes rows in a table that is not
-        // in the instruction stream at all. Both are places where an offset
-        // that is one out produces a dex our own reader still reads. So the
-        // Android tool is asked what it sees.
         let source = r#"
             package com.my.app;
 
@@ -22715,8 +20054,6 @@ mod tests {
             "the two methods with a `try` are the two with a try table"
         );
 
-        // Every protected range has to be inside the method it belongs to, and
-        // every handler has to point at an instruction that exists.
         for method in &translated.virtual_methods {
             let total: u32 = method
                 .instructions
@@ -22750,7 +20087,6 @@ mod tests {
             return;
         };
 
-        // The instructions that only exist because of this change.
         for wanted in [
             "packed-switch",
             "sparse-switch",
@@ -22763,8 +20099,7 @@ mod tests {
                 "dexdump printed no {wanted:?} in\n{text}"
             );
         }
-        // A payload dexdump could not follow prints as an unknown opcode or a
-        // bad offset, and it says so rather than staying quiet.
+
         for wrong in ["<unknown", "bad offset", "unknown opcode", "???"] {
             assert!(!text.contains(wrong), "dexdump found {wrong:?} in\n{text}");
         }
@@ -22780,33 +20115,19 @@ mod tests {
         );
     }
 
-    /// What a real JVM said when it was handed a class file.
     enum Verdict {
-        /// It loaded and verified. The frames are right.
         Verified,
-        /// It refused, and this is what it said.
+
         Refused(String),
-        /// It is older than the class files this writes, so it never got as
-        /// far as the verifier. That is a fact about the machine the tests are
-        /// running on, not about the class file, and it must not be reported
-        /// as either a pass or a failure.
+
         TooOld(String),
     }
 
-    /// Hands a class file to a real JVM and asks it to verify it.
-    ///
-    /// `java -Xverify:all -cp <dir> <class>` loads and verifies before it looks
-    /// for a `main`, so "no main method" means the verifier was satisfied and
-    /// anything else means it was not. This is the only check that actually
-    /// exercises the frames: our own reader will read a class file whose
-    /// StackMapTable is nonsense, and so will `javap`.
     fn jvm_verifies(name: &str, bytes: &[u8]) -> Option<Verdict> {
         let mut verdict = None;
         for java in every_jvm_here() {
             let found = one_jvm_verifies(&java, name, bytes)?;
-            // A machine can have several JVMs, and the default is often not
-            // the newest. One that is too old has not disagreed with the
-            // others -- it has not looked -- so keep asking.
+
             if !matches!(found, Verdict::TooOld(_)) {
                 return Some(found);
             }
@@ -22815,7 +20136,6 @@ mod tests {
         verdict
     }
 
-    /// Every `java` this machine has, the likeliest first.
     fn every_jvm_here() -> Vec<String> {
         let mut found = Vec::new();
         if let Ok(home) = std::env::var("JAVA_HOME") {
@@ -22829,8 +20149,7 @@ mod tests {
         {
             found.push(String::from_utf8_lossy(&which.stdout).trim().to_string());
         }
-        // Newest last in name order is newest last in version order for the
-        // way distributions name these, so the list is walked backwards.
+
         if let Ok(entries) = std::fs::read_dir("/usr/lib/jvm") {
             let mut installed: Vec<String> = entries
                 .flatten()
@@ -22847,9 +20166,6 @@ mod tests {
     }
 
     fn one_jvm_verifies(java: &str, name: &str, bytes: &[u8]) -> Option<Verdict> {
-        // Tests run at the same time, and two of them verifying a class of the
-        // same name would otherwise write into one directory and delete it
-        // from under each other.
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let mine = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let directory =
@@ -22874,13 +20190,10 @@ mod tests {
         );
         std::fs::remove_dir_all(&directory).ok();
 
-        // A JVM older than the class files this writes stops at the version
-        // number and never reaches the verifier. Counting that as a refusal
-        // would turn "your JDK is old" into "the compiler is broken".
         if said.contains("UnsupportedClassVersionError") {
             return Some(Verdict::TooOld(said));
         }
-        // The verifier speaks up by name when it is unhappy.
+
         if said.contains("VerifyError") || said.contains("ClassFormatError") {
             return Some(Verdict::Refused(said));
         }
@@ -22889,10 +20202,6 @@ mod tests {
 
     #[test]
     fn a_real_jvm_verifies_what_this_writes() {
-        // Branches in every shape this compiler can produce: an if with an
-        // else, a while, a for, a conditional expression, both short-circuit
-        // operators and a comparison. Each one is a place the verifier is told
-        // what is true, and each one is a chance to have told it wrong.
         let source = r#"
             public class Branchy {
                 private int count;
@@ -22956,8 +20265,6 @@ mod tests {
         let class = crate::jvm::read(&bytes).expect("and read back");
         assert_eq!(class.major_version, CLASS_MAJOR, "Java 25 class files");
 
-        // Every method that branches has to carry a table, or a version 69
-        // class file is refused before it is even run.
         let with_frames = class
             .methods
             .iter()
@@ -22996,10 +20303,6 @@ mod tests {
 
     #[test]
     fn a_real_jvm_verifies_the_whole_of_what_java_25_adds() {
-        // Every construct this compiler learned, in one class, because the
-        // verifier is the only thing that will say whether the frames and the
-        // exception table are right. Our own reader will read nonsense; so
-        // will `javap`.
         let source = "\
 public class Wide {
     private int total;
@@ -23208,12 +20511,6 @@ public class Wide {
 
     #[test]
     fn a_local_past_the_fourth_slot_is_stored_with_the_right_instruction() {
-        // The compact store instructions live four apart and the plain ones
-        // one apart, so a table that is off by one is right for the first four
-        // slots of every type and wrong for the fifth. Nothing but a verifier
-        // notices: the bytes still read, `javap` still prints them, and the
-        // method still looks like a method. So every type gets more than four
-        // locals here, and a real JVM is asked.
         let source = r#"
             public class Slots {
                 public double crowded(int a, long b, float c, double d, String e) {
@@ -23256,8 +20553,6 @@ public class Wide {
 
     #[test]
     fn the_shapes_ordinary_java_is_written_in_all_compile() {
-        // A list rather than one large class, so that a refusal names the one
-        // thing that broke instead of the file it was in.
         let cases: &[(&str, &str)] = &[
             ("a field with a value", "public class A { private int n = 5; int f() { return n; } }"),
             ("two names in one declaration", "public class A { int f() { int a = 1, b = 2; return a + b; } }"),
@@ -23306,9 +20601,6 @@ public class Wide {
 
     #[test]
     fn a_real_jvm_verifies_the_shape_a_class_is_actually_written_in() {
-        // Field values, initialiser blocks, one constructor handing off to
-        // another, `switch` used for its value, patterns, varargs, and
-        // `System.out` -- the things a class has that a method body does not.
         let source = "\
 public class Shaped {
     private static final int LIMIT = 10;
@@ -23398,7 +20690,6 @@ public class Shaped {
         assert_eq!(name, "Shaped.class");
         let class = crate::jvm::read(&bytes).expect("and read back");
 
-        // The class initialiser exists because static fields were given values.
         assert!(
             class.methods.iter().any(|one| one.name == "<clinit>"),
             "a class with static values needs a class initialiser"
@@ -23424,7 +20715,6 @@ public class Shaped {
             Some(Verdict::Verified) => {}
         }
 
-        // And it has to reach a device, not just a JVM.
         let translated = crate::dalvik::translate_class(&class)
             .expect("and must translate to Dalvik")
             .remove(0);
@@ -23444,8 +20734,6 @@ public class Shaped {
 
     #[test]
     fn an_interface_and_the_class_that_implements_it_compile_together() {
-        // Two types in one file, naming each other, and neither of them a
-        // class file yet when the other is compiled.
         let source = r#"
             package com.my.app;
 
@@ -23497,8 +20785,7 @@ public class Shaped {
             "an interface has to say it is one"
         );
         assert!(shape.access_flags & 0x0400 != 0, "and that it is abstract");
-        // `int SIDES = 0;` in an interface is a constant, and the class file
-        // carries the value rather than a class initialiser that stores it.
+
         assert!(
             !shape.methods.iter().any(|one| one.name == "<clinit>"),
             "a constant is in the class file, not in code that runs"
@@ -23527,7 +20814,6 @@ public class Shaped {
             }
         }
 
-        // And both of them reach a device.
         let mut classes = Vec::new();
         for (_, bytes) in &produced {
             let class = crate::jvm::read(bytes).unwrap();
@@ -23613,8 +20899,6 @@ public class Shaped {
             assert!(text.contains("<clinit>"));
         }
 
-        // And a switch over it, in a class that is handed the enum's own
-        // class file -- which is how a device would see it.
         let mut classpath = empty();
         classpath.learn(&class).expect("the enum must be learnable");
         let over = r#"
@@ -23837,7 +21121,7 @@ public class Shaped {
             .iter()
             .map(|one| one.name.as_str())
             .collect();
-        // The enclosing instance, and every local the body reads.
+
         for wanted in ["$outer", "button", "said"] {
             assert!(fields.contains(&wanted), "{fields:?}");
         }
@@ -23943,8 +21227,7 @@ public class Shaped {
         let dex = crate::dexwrite::write(&classes, &[]).expect("the dex must be written");
         if let Some(text) = dexdump_disassembly(&dex) {
             assert!(text.contains("Lcom/my/app/MainActivity$2;"));
-            // No invokedynamic: the class is written out, which is what
-            // Android's own tooling does to a lambda anyway.
+
             assert!(!text.contains("invoke-polymorphic"));
         }
 
@@ -24170,10 +21453,6 @@ public class Shaped {
 
     #[test]
     fn the_mechanics_ordinary_java_leans_on_all_verify() {
-        // Arrays written out, more than one dimension, boxing, locks,
-        // assertions, class literals, varargs and stepping an array element:
-        // the things a person writes without thinking about them, which is
-        // exactly why every one of them has to be right.
         let source = r#"
             package com.my.app;
 
@@ -24310,15 +21589,7 @@ public class Shaped {
         );
     }
 
-    /// Hands a whole compilation to a real JVM and runs its `main`.
-    ///
-    /// Verifying says the class file is well formed. Running says it means
-    /// what the person wrote, which is a different question and the one that
-    /// matters.
     fn jvm_runs(produced: &[(String, Vec<u8>)], main: &str) -> Option<Result<String, String>> {
-        // A machine can have several JVMs, and the default is often not the
-        // newest. One too old to load a version 69 class file has not
-        // disagreed -- it has not looked -- so keep asking.
         for java in every_jvm_here() {
             if let Some(found) = one_jvm_runs(&java, produced, main) {
                 return Some(found);
@@ -24355,16 +21626,10 @@ public class Shaped {
         if !outcome.status.success() {
             return Some(Err(format!("{printed}{complained}")));
         }
-        // Only what the program printed. A launcher that announces its own
-        // options on the way past is not part of the answer.
+
         Some(Ok(printed))
     }
 
-    /// Every shape the language is written in, in one source.
-    ///
-    /// Named at the top of this file as what is taken; here it is, compiled,
-    /// verified by a real JVM, run, and translated to the Dalvik a device
-    /// actually executes.
     const THE_WHOLE_LANGUAGE: &str = r####"
 package com.my.app;
 
@@ -24790,12 +22055,6 @@ public final class Everything {
 }
 "####;
 
-    /// The Java a person writes on an ordinary afternoon.
-    ///
-    /// Not a list of features: an exception of one's own, a `try` that closes
-    /// what it opened, a map read back in order, arithmetic that has to carry,
-    /// a labelled loop, a `finally` that runs after the `return` has decided,
-    /// varargs, a bounded type parameter and a lambda for a generic interface.
     const AN_ORDINARY_AFTERNOON: &str = r####"
 package com.my.app;
 
@@ -24981,14 +22240,6 @@ public class Daily {
 }
 "####;
 
-    /// Every place a value can be assigned into, and every way a value can be
-    /// taken back out of the assignment: a field of another object, a static
-    /// field named through its class, an element of an array, wide ones,
-    /// strings, and `++` on all of them in front and behind.
-    ///
-    /// The last of these is why `a[at(1)]++` is here: the index is worked out
-    /// once, not once per read and once per write, and only counting the calls
-    /// says so.
     const EVERY_PLACE_A_VALUE_GOES: &str = r####"
 public class Sides {
 
@@ -25123,8 +22374,6 @@ public class Sides {
             }
         }
 
-        // And all of it reaches Dalvik, which has no stack to shuffle and has
-        // to be handed every one of these as registers.
         let translated: Vec<_> = produced
             .iter()
             .flat_map(|(file, held)| {
@@ -25139,12 +22388,6 @@ public class Sides {
         }
     }
 
-    /// An enum whose constants answer for themselves, and a `native` method,
-    /// which is a flag and no body at all.
-    ///
-    /// A constant with a body is a class of its own extending the enum, and
-    /// `values()`, `ordinal()`, `valueOf` and a `switch` all have to go on
-    /// working across the three of them.
     const AN_ENUM_THAT_ANSWERS_FOR_ITSELF: &str = r####"
 public class Ops {
     enum Op {
@@ -25204,8 +22447,6 @@ public class Ops {
             }
         }
 
-        // And all of it reaches Dalvik: the classes the constants turned into,
-        // and the two methods with no body at all.
         let translated: Vec<_> = produced
             .iter()
             .flat_map(|(file, held)| {
@@ -25220,14 +22461,6 @@ public class Ops {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// The Java somebody writes when they are not thinking about the compiler:
-    /// a sealed interface and two records, a generic class of one's own that
-    /// can be walked with a for-each, a generic method with a bound, varargs,
-    /// try-with-resources over two things, a multi-catch with a `finally`, a
-    /// switch on a String and a switch over a sealed type, a text block, a
-    /// labelled break, and the arithmetic that has caught every compiler once.
-    ///
-    /// The answer is `javac`'s, word for word.
     const AN_ORDINARY_PROGRAM: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -25416,17 +22649,6 @@ public class Wide {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// The other half of what a person writes: an abstract class with an
-    /// interface above it and a `default` method reached through `super`, a
-    /// generic method of one's own handed a lambda, method references of all
-    /// three kinds -- static, bound, and the unbound one whose receiver is the
-    /// first thing handed over -- `java.util.function`, `Optional`, a class
-    /// written inside a class and made through an instance of it, a pattern
-    /// in an `if`, and a `?:` with a box on one side and a number on the
-    /// other.
-    ///
-    /// It is compiled against the platform jar, because that is what a person
-    /// has, and the answer is `javac`'s.
     const THE_OTHER_HALF_OF_IT: &str = r####"
 package com.my.app;
 
@@ -25589,12 +22811,6 @@ public class More {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// A generic interface with a class behind it, a checked exception of
-    /// one's own carrying a cause, a sealed hierarchy read with a guarded
-    /// pattern switch, a wildcard parameter, a `static` block, an interface
-    /// constant, a switch over chars that falls through, long arithmetic,
-    /// arrays of arrays, a queue, an anonymous comparator, and every bitwise
-    /// operator there is.
     const THE_THIRD_HALF_OF_IT: &str = r####"
 package com.my.app;
 
@@ -25802,14 +23018,6 @@ public class Third {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// Streams, which is where a compiler's type inference either holds or
-    /// does not.
-    ///
-    /// `map(String::toUpperCase)` only knows its receiver is a String because
-    /// the stream was written holding one; `collect(Collectors.groupingBy(
-    /// Person::age, Collectors.mapping(Person::name, Collectors.toList())))`
-    /// knows nothing from its arguments at all -- every type in it comes from
-    /// where the answer is going, three calls further out.
     const STREAMS_AND_WHAT_THEY_INFER: &str = r####"
 package com.my.app;
 
@@ -25905,11 +23113,6 @@ public class Flow {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// A generic interface with a generic `default` method, an enum with a
-    /// field and an `EnumMap`, a generic class holding an `Object[]` and
-    /// handing out an anonymous iterator over it, a `synchronized` method and
-    /// a `synchronized` block, a thread, recursion, `Object...`, and a lambda
-    /// written inside a loop over a local it captures.
     const THE_REST_OF_WHAT_IS_WRITTEN: &str = r####"
 package com.my.app;
 
@@ -26064,13 +23267,6 @@ public class Last {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// The corners: an interface with a `private` method behind a `default`
-    /// one and a generic `static` factory, a class written inside a class
-    /// reaching the private method of the one around it, a `return` inside a
-    /// `try` whose `finally` writes to a parameter, a labelled `continue` out
-    /// of a `switch`, a `do` with a `continue` in it, an array of lists, a
-    /// jagged array, every narrowing cast, both floating-point widths, and a
-    /// pattern with a guard in a `?:`.
     const THE_CORNERS_OF_IT: &str = r####"
 package com.my.app;
 
@@ -26227,13 +23423,6 @@ public class Twist {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// A generic class with a bound and two constructors chained through
-    /// `this(...)`, a switch expression over `null` and patterns with a guard,
-    /// a switch over strings with several labels on an arm and a `yield`, a
-    /// `continue` and a `break` out of a `try` with a `finally`, a `finally`
-    /// that runs on the way out of a throw, a lambda that throws a checked
-    /// exception, three overloads of one name chosen by what is handed over,
-    /// and a `? super` parameter.
     const THE_EDGES_OF_IT: &str = r####"
 package com.my.app;
 
@@ -26392,15 +23581,6 @@ public class Edge {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// The screen somebody actually writes: an activity that keeps a list,
-    /// builds its views in code, watches a text field, shows a dialog from
-    /// inside a lambda that itself takes two more lambdas, reads and writes
-    /// preferences, posts to the main thread, and answers an intent.
-    ///
-    /// Every type in it comes out of `android.jar`. It has no `main`, so what
-    /// is checked is that it compiles, that every class it turns into reaches
-    /// Dalvik, and that the dex our own reader reads back has nothing to say
-    /// about it.
     const THE_SCREEN_SOMEBODY_WRITES: &str = r####"
 package com.my.app;
 
@@ -26573,8 +23753,7 @@ public class MainActivity extends Activity {
         classpath.learn_jar(&bytes).expect("must be read");
 
         let produced = compile(THE_SCREEN_SOMEBODY_WRITES, &classpath).expect("must compile");
-        // The activity, the anonymous classes, and the lambdas -- including
-        // the two written inside another lambda.
+
         assert!(produced.len() >= 6, "{:?}", produced.len());
 
         let translated: Vec<_> = produced
@@ -26595,15 +23774,6 @@ public class MainActivity extends Activity {
         eprintln!("java: the screen somebody actually writes, all the way to a dex");
     }
 
-    /// The standard library, leaned on hard, with nothing handed over: readers
-    /// and writers, `BigInteger` and `BigDecimal` with a rounding mode, dates
-    /// and a format for them, a regular expression with groups, an atomic, a
-    /// deque, a `StringJoiner`, a `TreeMap` and its `headMap`, `groupingBy`,
-    /// an `IntStream`, `merge` on a map, and the string and arithmetic helpers
-    /// underneath all of it.
-    ///
-    /// No jar. Every one of those names is answered by the library written
-    /// into this file, and the answer is `javac`'s.
     const THE_LIBRARY_LEANED_ON: &str = r####"
 package com.my.app;
 
@@ -26775,15 +23945,6 @@ public class Everything {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// Every method in here belongs to something other than the class it is
-    /// called on: a superclass, or a `default` written on an interface.
-    ///
-    /// The library in this file says `ArrayList.stream()` and `TreeMap
-    /// .getOrDefault(...)` the way a person would write them, and the class
-    /// files it produces name them on the class rather than on whatever
-    /// declares them -- which is what `javac` does, and which the JVM resolves
-    /// by walking up. This is the test that says so, because getting it wrong
-    /// is a `NoSuchMethodError` at run time and nothing at all before it.
     const WHAT_IS_INHERITED_RATHER_THAN_DECLARED: &str = r####"
 package com.my.app;
 
@@ -26892,13 +24053,6 @@ public class Handed {
         }
     }
 
-    /// The deep end: a generic interface with a bound and a `default` method
-    /// over it, records with type parameters of their own and a generic method
-    /// inside one, enum constants with bodies and an anonymous class inside a
-    /// constant's body, a lambda that hands back a lambda that reads what the
-    /// first one captured, a custom `Iterable` walked into an `int`, array
-    /// covariance and the store that fails, a list of arrays, files written
-    /// and read and deleted, a URI taken apart, and a charset.
     const THE_DEEP_END_OF_IT: &str = r####"
 package com.my.app;
 
@@ -27076,13 +24230,6 @@ public class Deep {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// A generic method declared on an interface and answered by two classes,
-    /// `UnaryOperator` and `BinaryOperator` and every other shape in
-    /// `java.util.function`, a constructor reference, a bound instance-method
-    /// reference, a lambda that throws a checked exception into an interface
-    /// that allows one, `computeIfAbsent` and its neighbours, `Objects`,
-    /// `Comparator.comparing(...).thenComparing(...)`, and the collectors that
-    /// build a map or split one in two.
     const WHAT_A_FUNCTION_IS_HANDED_TO: &str = r####"
 package com.my.app;
 
@@ -27248,15 +24395,6 @@ public class Wider {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// The order things happen in, and the shapes numbers come in.
-    ///
-    /// A `static` block and a `static` field with a value on it run in the
-    /// order they were written, interleaved -- not fields first and blocks
-    /// after. An instance block runs before the constructor body and once per
-    /// object, `this(...)` chains, `super.describe()` reaches past an
-    /// override, `Outer.this` reaches the instance around an inner class, and
-    /// `grid[0].clone()` is a method on an array. Then every way a number can
-    /// be written down, including the octal nobody means to write.
     const THE_ORDER_THINGS_HAPPEN_IN: &str = r####"
 package com.my.app;
 
@@ -27430,13 +24568,6 @@ public class Order {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// What Java gained in the years the rest of this was written for: the
-    /// diamond, record patterns nested inside record patterns with `var` in
-    /// them and a `when` after them, `Left.super.who()` where two interfaces
-    /// have the same `default`, a return type narrowed by an override, a class
-    /// written inside a method that reads what is around it, `var` on a local
-    /// and in a for-each, and a text block with a line continued into the
-    /// next.
     const WHAT_JAVA_GAINED: &str = r####"
 package com.my.app;
 
@@ -27560,11 +24691,6 @@ public class Modern {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// A program in four files, in two packages, which is the shape real code
-    /// comes in: a sealed interface holding records and classes of its own, a
-    /// checked exception carrying where it happened, a reader with a loop at
-    /// the top of a method and a `while (true)` in the middle of one, and a
-    /// switch over the sealed type in the other package.
     const A_PROGRAM_IN_FOUR_FILES: &[(&str, &str)] = &[
         (
             "com/my/app/Main.java",
@@ -27806,16 +24932,6 @@ public class Reading extends Exception {
         ),
     ];
 
-    /// The corners a compiler is caught out on: a `switch` over strings whose
-    /// cases collide on their hash, one spread far enough apart to be looked
-    /// up rather than indexed and one packed tightly enough to be indexed, a
-    /// `static` block in a class written inside another reaching what that one
-    /// holds, two classes initialised in the order they are first touched,
-    /// constants folded before anything runs, wildcards written both ways on
-    /// parameters, every shift including the ones past the width of what they
-    /// shift, a concatenation of a null and a null object and every primitive,
-    /// the boxes that are shared and the ones that are not, and what `.class`
-    /// and `getClass` say about a class, an array and a primitive.
     const THE_CORNERS_A_COMPILER_IS_CAUGHT_ON: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -27959,15 +25075,6 @@ public class Corners {
         }
     }
 
-    /// What a stream is asked for: `groupingBy` counted, `toMap`,
-    /// `partitioningBy` with a downstream, sums and averages, an infinite
-    /// stream taken from, the three matches, `sorted` with a comparator and
-    /// `skip`, an `IntStream` boxed, the `String` methods a person reaches
-    /// for, `Optional` with `or` and `ifPresentOrElse`, the fixed collections
-    /// and what they refuse, an iterator removing as it walks, a generic
-    /// method with its type written out at the call, a class inside a class
-    /// reading another's private field, and a `try` with a `finally` around a
-    /// `continue` and a `break`.
     const WHAT_A_STREAM_IS_ASKED_FOR: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28120,16 +25227,6 @@ public class Flow {
         }
     }
 
-    /// Generics as deep as people write them: an interface holding two of
-    /// them with `default` methods that lean on the abstract one, a class
-    /// filling both in, a class inside that one reaching the outer's type
-    /// parameters, a subclass fixing both and overriding through `super`,
-    /// `Memory<String, Integer>.Window` named with what the outer one holds
-    /// written in the middle of the name, a bounded type parameter, generic
-    /// varargs, `synchronized` on a method and on a block with a parameter
-    /// shadowing a field, `instanceof` patterns whose bindings reach the rest
-    /// of the method, a record pattern inside a record pattern, `null` beside
-    /// a number in a `?:`, and every conversion between the eight primitives.
     const GENERICS_AS_DEEP_AS_PEOPLE_WRITE_THEM: &str = r####"
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -28293,16 +25390,6 @@ public class Deeper {
         }
     }
 
-    /// The Java a person writes today: `var` almost everywhere, the diamond on
-    /// every `new`, an interface with a constant and a `static` and a
-    /// `private static`, an enum implementing it, a record with a compact
-    /// constructor implementing `Comparable` and put in a sorted set, a
-    /// generic class with a static factory called with the type written out,
-    /// an anonymous `Iterator<>` walked by a `for` that knows what it hands
-    /// out because the class says so, a `switch` inside a `switch`
-    /// expression, `Arrays` filled and searched and compared, the bit and
-    /// floor arithmetic, lambdas made in a loop, an exception with a cause,
-    /// and a builder edited in place.
     const THE_JAVA_A_PERSON_WRITES_TODAY: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28489,17 +25576,6 @@ public class Modern {
         }
     }
 
-    /// What a program leans on the library for: a checked exception declared
-    /// and caught, two resources where the second throws on the way out and
-    /// the `catch` beside them sees it, a `default` inherited from two
-    /// interfaces where one extends the other, an anonymous class filling one
-    /// in, an atomic counter, a deque used as a stack and as a queue, a linked
-    /// list sorted, a sorted set and a sorted map, `computeIfAbsent` and
-    /// `merge` and `getOrDefault`, `removeIf` and `replaceAll` and `subList`,
-    /// `Objects`, arbitrary-precision arithmetic both ways, a date printed and
-    /// formatted, a regular expression walked and replaced, a `switch` over a
-    /// char and one over a pattern with a guard, and what `format` does with
-    /// every conversion an ordinary program writes.
     const WHAT_THE_LIBRARY_IS_FOR: &str = r####"
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -28701,14 +25777,6 @@ public class Library {
         }
     }
 
-    /// What is written where a type has to be worked out: an enum with a body
-    /// per constant, a sealed interface switched over exhaustively, comparator
-    /// chains with `thenComparing` and `reversed`, `groupingBy` with a
-    /// downstream, a `map` handed a method reference and then another,
-    /// `flatMap`, `reduce`, `distinct`, `Optional` mapped and filtered and
-    /// fallen back on, functions composed both ways, a type witness written
-    /// out, `Arrays.sort` with a comparator and `System.arraycopy`, a map that
-    /// keeps its order, and what the wrappers parse.
     const WHAT_HAS_TO_BE_WORKED_OUT: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -28889,17 +25957,6 @@ public class Wide {
         }
     }
 
-    /// What a class inherits and what shadows what: a `default` method leaning
-    /// on a constant the interface declares, three levels of override with the
-    /// return narrowed twice, `super.shown()` reaching a `default` the
-    /// superclass never declared, every `String` and `Math` and wrapper method
-    /// an ordinary program reaches for, every compound assignment, a `switch`
-    /// with a `default` written between two cases and a local assigned on
-    /// every arm of it, a `finally` around a `finally` around a `return`, an
-    /// array of a generic type, `clone` on an array of objects, an anonymous
-    /// class whose inherited field has the same name as a local outside it, a
-    /// local class taking an argument and carrying a local, and a labelled
-    /// block broken out of.
     const WHAT_SHADOWS_WHAT: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -29101,16 +26158,6 @@ public class Edges {
         }
     }
 
-    /// What is left of ordinary Java once the shapes already tested are set
-    /// aside: an interface with a `private` method, a `default` that leans on
-    /// it and a `static` that makes one, a record implementing it, a generic
-    /// class bounded by `Comparable` handing out an anonymous `Iterator`,
-    /// varargs of a value type and of `Object`, every bit operator including
-    /// the unsigned shift, a labelled `continue` and `break` and a `do`, a
-    /// multi-catch beside a catch of a class written here, two resources
-    /// closed in the order they were opened, a ragged array, a map counted up
-    /// and read back in order, static imports, a text block, a pattern with a
-    /// `when` behind it, and the numbers where they wrap.
     const THE_REST_OF_ORDINARY_JAVA: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -29298,11 +26345,6 @@ public class Deep {
         }
     }
 
-    /// A class in one package extended in another: `protected` fields and
-    /// methods reached by name, a field the class above declares written to by
-    /// name, `super.describe()` and `super.kept`, a class written inside a
-    /// class written inside a class, `this.new Inner(...)` and
-    /// `inner.new Deeper()`, and `Root.this` reached from two links down.
     const WHAT_A_CLASS_INHERITS_ACROSS_PACKAGES: &[(&str, &str)] = &[
         (
             "com/my/base/Root.java",
@@ -29462,14 +26504,6 @@ public class Branch extends Root {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// Bridges, switches and the numbers at the edges: an abstract generic
-    /// class overridden twice with the type filled in and one of its methods
-    /// narrowed as well, an interface inheriting its one method and a class
-    /// reaching past it with `Named.super`, a `try` that closes something
-    /// already made, three shapes of `switch` including one over strings, a
-    /// labelled `break` out of a `try` with a `finally`, a `return` out of a
-    /// `synchronized` block inside a loop, and what the numbers do at the ends
-    /// of their ranges.
     const BRIDGES_AND_SWITCHES: &str = r####"
 public class Gen {
 
@@ -29631,16 +26665,6 @@ public class Gen {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// A lambda written inside a `default` method, which is the one place
-    /// where what `this` means decides whether the program runs or spins:
-    /// `holds(one)` inside `default Rule<T> and(...)` is the interface's, not
-    /// the one the lambda is being written to be.
-    ///
-    /// With it: a generic interface with a static factory taking explicit type
-    /// arguments, an enum whose constants answer for themselves and are
-    /// switched over, a generic method flipping a map, varargs handed nothing
-    /// and handed an array, a generic method with a bound, nested loops with
-    /// `break` and `continue`, and a list of lists.
     const A_LAMBDA_IN_A_DEFAULT_METHOD: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -29790,12 +26814,6 @@ public class Big {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// Wildcards where a person writes them -- `List<? extends Number>`,
-    /// `List<? super Integer>`, `Map<String, ? extends List<?>>` -- an
-    /// annotation with an array, a number and a class literal in it, read back
-    /// through reflection, a `private static` helper on an interface reached
-    /// from a lambda inside a `default` method, a record and an enum written
-    /// inside a method, and a `switch` over an Object with patterns.
     const WILDCARDS_AND_WHAT_IS_WRITTEN_ON_THEM: &str = r####"
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
@@ -29940,14 +26958,6 @@ public class Cards {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// A program larger than anybody writes by hand, built here rather than
-    /// written out: three hundred methods with a string constant each, a
-    /// switch with two hundred arms, another with a hundred and twenty over
-    /// strings, and a method with four hundred branches in it.
-    ///
-    /// What this is for is the sizes: a constant pool past the short forms of
-    /// `ldc`, a `tableswitch` and a `lookupswitch` next to each other, and
-    /// branch offsets long enough to be worth getting wrong.
     #[test]
     fn a_program_larger_than_anybody_writes_by_hand_still_runs() {
         let mut source = String::from(
@@ -30030,12 +27040,6 @@ public class Cards {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// An abstract generic class in one package, a class filling its type
-    /// parameters in from another, and every place that has to be noticed:
-    /// `sorted(Comparator<V>)` is a comparator of people because the
-    /// `extends Store<String, Person>` said so, `getClass()` is reached
-    /// without naming what declares it, and `equals`, `hashCode` and
-    /// `compareTo` are written by hand and used by a set, a map and a sort.
     const AN_ABSTRACT_CLASS_AND_WHAT_FILLS_IT_IN: &[(&str, &str)] = &[
         (
             "com/my/app/People.java",
@@ -30210,14 +27214,6 @@ public abstract class Store<K, V> implements Iterable<Map.Entry<K, V>> {
         assert_eq!(sink.entries().len(), 0, "{:?}", sink.entries());
     }
 
-    /// The corners left: an anonymous class with a generic method of its own,
-    /// called with the type argument written out; an array of records; an
-    /// `EnumMap` and `merge` on a map keyed by an enum; a `finally` that
-    /// returns and swallows what the body was returning; `instanceof` on an
-    /// array of primitives, an array of objects and a generic; a `switch`
-    /// expression over chars with a `yield`; a string built by `+=` in a loop;
-    /// `null` where a String is wanted; and `int.class`, `String[].class` and
-    /// `Point.class.isRecord()`.
     const THE_CORNERS_LEFT: &str = r####"
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -30382,7 +27378,6 @@ public class Rest {
             ),
         }
 
-        // And to Dalvik, which is where it would actually run.
         let translated: Vec<_> = produced
             .iter()
             .flat_map(|(file, bytes)| {
@@ -30403,12 +27398,6 @@ public class Rest {
         );
     }
 
-    /// The screen an Android application starts with.
-    ///
-    /// It cannot be run here -- the platform's classes are on a device and not
-    /// on this machine -- so what is checked is that it compiles, that every
-    /// class it comes to reaches Dalvik, and that the dex it lands in reads
-    /// back.
     const A_FIRST_SCREEN: &str = r####"
 package com.my.app;
 
@@ -30517,8 +27506,7 @@ public final class R {
             names.contains(&"com/my/app/MainActivity.class"),
             "{names:?}"
         );
-        // The listener written out and the one written as a lambda are both
-        // classes of their own.
+
         assert!(
             names
                 .iter()
@@ -30563,14 +27551,6 @@ public final class R {
         );
     }
 
-    /// A calculator, written the way Java 25 is written.
-    ///
-    /// This is the test that is not a list of features. Somebody sat down and
-    /// wrote a program: a tokeniser, a precedence-climbing parser, a tree of
-    /// sealed records, an evaluator that switches over their shapes, an enum
-    /// that carries behaviour, a map of lambdas, an exception of its own, and
-    /// the ordinary business of getting the answers right. What it prints is
-    /// compared against what `javac`'s build of the same source prints.
     const A_CALCULATOR: &str = r####"
 package com.my.app;
 
@@ -30962,10 +27942,6 @@ public final class Calculator {
 }
 "####;
 
-    /// And the screen it is worked through, which is where it would actually
-    /// run. It cannot be run here -- the platform's classes are on a device --
-    /// so what is checked is that it compiles against the same engine and
-    /// reaches the Dalvik a phone executes.
     const THE_SCREEN_FOR_IT: &str = r####"
 package com.my.app;
 
@@ -31104,9 +28080,6 @@ public final class Screen extends Activity {
             );
         }
 
-        // The pieces it is made of, checked in the class file rather than
-        // taken on trust: a sealed interface that says what it permits, a
-        // record that says what it holds, an enum that says it is one.
         let read = |file: &str| {
             let (_, bytes) = produced
                 .iter()
@@ -31133,7 +28106,6 @@ public final class Screen extends Activity {
             }
         }
 
-        // Seventeen expressions, and the answer to each of them.
         match jvm_runs(&produced, "com.my.app.Calculator") {
             None => eprintln!("java: no JVM here to run the calculator"),
             Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
@@ -31162,7 +28134,6 @@ public final class Screen extends Activity {
             ),
         }
 
-        // And the screen, against the same engine, all the way to a dex.
         let together = vec![
             ("Calculator.java".to_string(), A_CALCULATOR.to_string()),
             ("Screen.java".to_string(), THE_SCREEN_FOR_IT.to_string()),
@@ -31195,11 +28166,6 @@ public final class Screen extends Activity {
         );
     }
 
-    /// A generic class of one's own, and what a call on it gives back.
-    ///
-    /// Erasure wrote `Object` where the `T` was. What the thing was written as
-    /// says which T it is, and the cast that says so is the only thing erasure
-    /// leaves behind -- for a class written here exactly as for a `List`.
     const A_BOX_OF_ONES_OWN: &str = r####"
 import java.util.ArrayList;
 import java.util.List;
@@ -31301,12 +28267,6 @@ public class Boxed {
 
     #[test]
     fn a_jar_handed_over_is_a_jar_the_code_may_call_into() {
-        // What "import what you like" comes to: a jar of class files is read,
-        // every class in it is known, and code compiled afterwards calls into
-        // them with the descriptors the device will check.
-        //
-        // The jar here is built out of this compiler's own output, so the test
-        // needs nothing installed. The one that matters is below.
         let library = r#"
             package com.some.lib;
 
@@ -31362,7 +28322,6 @@ public class Boxed {
             "the call names the class it was handed: {called:?}"
         );
 
-        // And it runs, against the classes the jar carried.
         let mut together = produced.clone();
         together.push(("Uses.class".to_string(), held));
         match jvm_runs(&together, "Uses") {
@@ -31371,7 +28330,6 @@ public class Boxed {
             Some(Ok(said)) => assert_eq!(said.trim(), "hello world"),
         }
 
-        // A jar that is not one says so rather than being ignored.
         let refused = empty()
             .learn_jar(b"not a jar at all")
             .expect_err("that is not an archive");
@@ -31382,8 +28340,6 @@ public class Boxed {
 
     #[test]
     fn the_platform_jar_is_the_whole_android_api() {
-        // The real thing: `android.jar`, and code that imports whatever it
-        // likes out of it. None of this is in the compiler's own table.
         let Some(platform) = crate::builder::platform_jar() else {
             eprintln!("java: no android.jar on this machine");
             return;
@@ -31482,7 +28438,6 @@ public class Boxed {
             .iter()
             .any(|(name, _)| name == "com/my/app/Screen.class"));
 
-        // It has to reach the device, not just the compiler.
         let translated: Vec<_> = produced
             .iter()
             .flat_map(|(file, held)| {
@@ -31499,16 +28454,6 @@ public class Boxed {
         eprintln!("java: {learned} classes from the platform, and code that imports what it likes");
     }
 
-    /// The plain Java a person writes on an ordinary afternoon, against the
-    /// library the platform hands them: `Arrays.asList`, `Objects`,
-    /// `Collections.sort` with a lambda and with an anonymous class,
-    /// `Collections.max`, a `Map.Entry` walked out of a `HashMap`. None of it
-    /// is in this compiler's own table -- every signature here is read out of
-    /// the jar, generic signature and all, and the lambda handed to
-    /// `Collections.sort(List<T>, Comparator<? super T>)` only knows it
-    /// compares strings because the first argument said so.
-    ///
-    /// The answer is `javac`'s: `3 x pear 1 applepear`.
     #[test]
     fn the_java_a_person_writes_against_a_library_gets_the_same_answer_javac_gets() {
         let classpath = empty();
@@ -31591,13 +28536,6 @@ public class Boxed {
         }
     }
 
-    /// A checked exception has to be caught or declared, which is the one
-    /// thing this compiler refuses that a device would happily run.
-    ///
-    /// Every shape of it: a call, a `new`, a `throw`, and the four ways of
-    /// answering for one -- a `catch` that names it, a `catch` that names
-    /// something above it, a `throws` on the method, and a lambda standing for
-    /// an interface whose one method says it throws.
     #[test]
     fn a_checked_exception_has_to_be_answered_for() {
         for (source, why) in [
@@ -31644,7 +28582,6 @@ public class Boxed {
             assert!(refused.suggestion.is_some(), "{why}");
         }
 
-        // And every way of answering for one, which is what a person writes.
         for (source, why) in [
             (
                 "import java.io.IOException;
@@ -31700,12 +28637,6 @@ public class Boxed {
         eprintln!("java: a checked exception is caught, declared, or refused");
     }
 
-    /// What a class was written holding, which a descriptor throws away.
-    ///
-    /// `List<String>` and `List<Integer>` are one descriptor and two
-    /// signatures, and a class compiled against this one reads the difference
-    /// out of here. Nine of these are what `javac` writes for the same source,
-    /// character for character; the tenth is the class's own.
     const WHAT_A_DESCRIPTOR_THROWS_AWAY: &str = r####"
 import java.util.ArrayList;
 import java.util.List;
@@ -31728,8 +28659,7 @@ public class Attrs<K, V extends Number> implements Map.Entry<K, V> {
     #[test]
     fn what_a_descriptor_throws_away_is_written_where_javac_writes_it() {
         let produced = compile(WHAT_A_DESCRIPTOR_THROWS_AWAY, &empty()).expect("must compile");
-        // Read back with this project's own class reader, which knows nothing
-        // about the compiler that wrote it.
+
         let class = crate::jvm::read(&produced[0].1).expect("must read back");
         let mut written: Vec<String> = class.signature.iter().cloned().collect();
         for member in class.fields.iter().chain(class.methods.iter()) {
@@ -31758,11 +28688,6 @@ public class Attrs<K, V extends Number> implements Map.Entry<K, V> {
         eprintln!("java: ten signatures, and javac writes the same ten");
     }
 
-    /// What a class file says about itself beyond its code: the file it was
-    /// written in and the line every instruction is on, the value of every
-    /// constant, and what each method says it throws. A trace read back off
-    /// the running program names the file and the line, which is the whole
-    /// difference between a stack trace and a list of method names.
     const WHAT_A_CLASS_FILE_SAYS_ABOUT_ITSELF: &str = r####"
 import java.io.IOException;
 
@@ -31823,9 +28748,6 @@ public class Traced {
             }
         }
 
-        // `MADE` is worked out by a call, so it is not a constant and there is
-        // still a class initialiser; everything beside it is one, and none of
-        // those is stored by anything that runs.
         let traced = crate::jvm::read(&produced[0].1).expect("must read back");
         assert_eq!(traced.name, "Traced");
         assert!(
@@ -31834,16 +28756,6 @@ public class Traced {
         );
     }
 
-    /// A screen somebody writes against the platform and nothing else.
-    ///
-    /// Every name in it comes from `android.*`: an `Activity` subclassed and
-    /// its lifecycle overridden, a listener interface implemented by the
-    /// screen itself and three more written where they are used, two lambdas
-    /// handed to methods that want an interface, a builder chained four deep,
-    /// a generic adapter made with the diamond and a layout out of
-    /// `android.R`, preferences edited and read back, a handler posted to, and
-    /// a menu answered. `javac` accepts it against the real `android.jar`;
-    /// this compiles it against nothing at all.
     const A_SCREEN_WRITTEN_AGAINST_THE_PLATFORM: &str = r####"
 package com.my.app;
 
@@ -32019,17 +28931,6 @@ public class Screen extends Activity implements View.OnClickListener {
 }
 "####;
 
-    /// Java as the language, not as a subset of it.
-    ///
-    /// Each of these is a program `javac` accepts, and each is one where the
-    /// meaning is in the part of the language that is easy to get wrong:
-    /// inferring a type argument from what a call is assigned to, reading a
-    /// wildcard, giving a lambda its parameter types from the interface it
-    /// stands for, choosing between overloads by the phases the language
-    /// defines. A developer writes ordinary Java and this has to be the same
-    /// compiler for it -- so what is checked is not only that this accepts
-    /// them, but that `javac` does too, which is what makes the battery Java
-    /// rather than a dialect of it.
     #[test]
     fn the_java_a_developer_writes_is_the_java_this_compiles() {
         for (name, source) in PROBES {
@@ -32041,9 +28942,6 @@ public class Screen extends Activity implements View.OnClickListener {
             }
         }
 
-        // And the ones that are not Java. A compiler that accepts everything
-        // has not understood anything, so each of these has to be refused --
-        // and refused for the reason it is wrong.
         for (name, source) in NOT_JAVA {
             let refused = compile(source, &Classpath::new());
             assert!(refused.is_err(), "{name} is not Java and was accepted");
@@ -32104,7 +29002,6 @@ public class Screen extends Activity implements View.OnClickListener {
         );
     }
 
-    /// Where the JDK's own tools are, when there are any.
     fn find_a_java_tool(name: &str) -> Option<std::path::PathBuf> {
         if let Ok(home) = std::env::var("JAVA_HOME") {
             let held = std::path::Path::new(&home).join("bin").join(name);
@@ -32122,20 +29019,6 @@ public class Screen extends Activity implements View.OnClickListener {
         None
     }
 
-    /// Programs that are not Java, each wrong in a way a compiler has to see.
-    ///
-    /// Two things `javac` refuses are not here, and both are worth saying out
-    /// loud. A write through an upper-bounded wildcard -- `List<? extends
-    /// Number> l; l.add(one)` -- is taken here, and so is handing a
-    /// `List<Integer>` where a `List<Number>` is wanted. Both are the same
-    /// gap: a wildcard is read as what it erases to, so `List<? extends
-    /// Number>` arrives as `List<Number>` and there is nothing left saying the
-    /// type argument was unknown. Refusing either would refuse code the
-    /// language allows, so what is let through is a mistake this does not
-    /// catch rather than one it gets wrong -- the call written is the call
-    /// `javac` writes for the same code, and nothing a developer runs behaves
-    /// differently. Catching them means carrying wildcards through the whole
-    /// of the type system, which is worth doing and is not done yet.
     const NOT_JAVA: &[(&str, &str)] = &[
         (
             "ambiguous-overload",
@@ -32400,9 +29283,6 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn the_platform_is_the_whole_platform_with_no_jar_handed_over() {
-        // Not `empty()` with a jar learned into it: the classpath every
-        // compilation starts from, which is the standard library and the
-        // platform and nothing else.
         let held = Classpath::new();
         for named in [
             "android/app/Activity",
@@ -32419,8 +29299,7 @@ public class Screen extends Activity implements View.OnClickListener {
         ] {
             assert!(held.get(named).is_some(), "{named} is missing");
         }
-        // The listeners a lambda is handed to are interfaces, or the call
-        // written for one would be an `invokevirtual` the device refuses.
+
         for named in [
             "android/view/View$OnClickListener",
             "android/content/DialogInterface$OnClickListener",
@@ -32465,9 +29344,6 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn the_library_reads_and_holds_what_it_says_it_holds() {
-        // Every source in it parses. A mistake in one would otherwise be a
-        // class quietly missing from the classpath and a call refused for a
-        // reason nobody could see.
         for (named, text) in THE_LIBRARY {
             parse(text).unwrap_or_else(|why| panic!("{named}: {why:?}"));
         }
@@ -32511,22 +29387,18 @@ public class Screen extends Activity implements View.OnClickListener {
             assert!(held.get(wanted).is_some(), "{wanted} is missing");
         }
 
-        // Object is nobody's child, whatever a shell says.
         assert_eq!(held.get("java/lang/Object").unwrap().superclass, None);
-        // A class knows what it implements, which is the road to a method.
+
         assert!(held
             .ancestors("java/lang/String")
             .contains(&"java/lang/CharSequence".to_string()));
         assert!(held
             .ancestors("java/util/ArrayList")
             .contains(&"java/util/Collection".to_string()));
-        // And an interface written here is an interface, which is what says
-        // `invokeinterface` rather than `invokevirtual`.
+
         assert!(held.get("java/util/List").unwrap().interface);
         assert!(!held.get("java/util/ArrayList").unwrap().interface);
 
-        // `List<E>.get` hands back the E, which is the one thing the erased
-        // descriptor cannot say.
         let get = held
             .find_methods("java/util/List", "get", 1)
             .into_iter()
@@ -32631,7 +29503,6 @@ public class Screen extends Activity implements View.OnClickListener {
             assert_eq!(shape(owner, name, arity), wanted, "{owner}.{name}");
         }
 
-        // A field's type, which is what a `getstatic` claims.
         let field = |owner: &str, name: &str| -> String {
             held.find_field(owner, name)
                 .map(|(_, (_, what, _))| what.descriptor())
@@ -32667,7 +29538,6 @@ public class Screen extends Activity implements View.OnClickListener {
             Some(Ok(said)) => assert_eq!(said.trim(), "7 4 2147483647 9"),
         }
 
-        // A name nobody imported is still refused rather than guessed at.
         let missing = "public class Named { int f() { return max(1, 2); } }";
         let refused = compile(missing, &empty()).expect_err("must be refused");
         assert_eq!(refused.code, "EJ224");
@@ -32702,9 +29572,7 @@ public class Screen extends Activity implements View.OnClickListener {
                 "{wanted} is missing from {names:?}"
             );
         }
-        // The lambdas, the method reference and the anonymous class each
-        // become a class of their own, because Android rewrites
-        // `invokedynamic` back into one anyway.
+
         assert!(
             names.iter().filter(|one| one.contains("$1")).count() >= 1,
             "{names:?}"
@@ -32718,12 +29586,10 @@ public class Screen extends Activity implements View.OnClickListener {
             crate::jvm::read(bytes).unwrap_or_else(|why| panic!("{file}: {why:?}"))
         };
 
-        // -- Java 25 class-file generation
         let everything = read("com/my/app/Everything.class");
         assert_eq!(everything.major_version, CLASS_MAJOR);
         assert_eq!(everything.major_version, 69);
 
-        // -- StackMapTable: every method with a branch in it has one.
         let described = everything
             .methods
             .iter()
@@ -32732,7 +29598,6 @@ public class Screen extends Activity implements View.OnClickListener {
         let code = described.code.as_ref().expect("a body");
         assert!(code.max_stack > 0);
 
-        // -- synchronized methods, volatile, transient, varargs
         let guarded = everything
             .methods
             .iter()
@@ -32758,10 +29623,8 @@ public class Screen extends Activity implements View.OnClickListener {
             .unwrap();
         assert!(sum.access_flags & 0x0080 != 0, "ACC_VARARGS");
 
-        // -- static and instance initialization
         assert!(everything.methods.iter().any(|one| one.name == "<clinit>"));
 
-        // -- generics erasure: `<T> T first(List<T>)` is `(List)Object`.
         let first = everything
             .methods
             .iter()
@@ -32769,7 +29632,6 @@ public class Screen extends Activity implements View.OnClickListener {
             .unwrap();
         assert_eq!(first.descriptor, "(Ljava/util/List;)Ljava/lang/Object;");
 
-        // -- bridge methods
         let derived = read("com/my/app/Everything$Derived.class");
         let bridge = derived
             .methods
@@ -32779,7 +29641,6 @@ public class Screen extends Activity implements View.OnClickListener {
         assert!(bridge.access_flags & 0x0040 != 0, "ACC_BRIDGE");
         assert!(bridge.access_flags & 0x1000 != 0, "ACC_SYNTHETIC");
 
-        // -- interfaces with default, static and private methods
         let named = read("com/my/app/Everything$Named.class");
         let greeting = named
             .methods
@@ -32803,7 +29664,6 @@ public class Screen extends Activity implements View.OnClickListener {
         );
         assert!(prefix.access_flags & 0x0001 == 0, "and not public as well");
 
-        // -- annotations, and the retention that decides what is written down
         let marked = read("com/my/app/Marked.class");
         assert!(marked.access_flags & 0x2000 != 0, "ACC_ANNOTATION");
         assert!(marked
@@ -32811,15 +29671,12 @@ public class Screen extends Activity implements View.OnClickListener {
             .iter()
             .any(|one| one == "java.lang.annotation.Annotation"));
 
-        // -- records and sealed metadata
         let point = read("com/my/app/Point.class");
         assert_eq!(point.superclass.as_deref(), Some("java.lang.Record"));
         assert!(point.access_flags & 0x0010 != 0, "a record is final");
         let shape = read("com/my/app/Shape.class");
         assert!(shape.access_flags & 0x0200 != 0, "a sealed interface");
 
-        // -- what the class file carries beyond its members, read from the
-        // -- bytes rather than trusted.
         let bytes_of = |file: &str| {
             produced
                 .iter()
@@ -32853,8 +29710,7 @@ public class Screen extends Activity implements View.OnClickListener {
             &bytes_of("com/my/app/Marked.class"),
             "AnnotationDefault"
         ));
-        // An annotation's own `@Retention` has to reach its class file, or the
-        // runtime reads it as one it does not keep and hands nothing back.
+
         assert!(holds(
             &bytes_of("com/my/app/Marked.class"),
             "RuntimeVisibleAnnotations"
@@ -32867,11 +29723,9 @@ public class Screen extends Activity implements View.OnClickListener {
             &bytes_of("com/my/app/Everything.class"),
             "StackMapTable"
         ));
-        // A retention of SOURCE is read and dropped, which is what `@Override`
-        // and `@Hint` are for.
+
         assert!(!holds(&bytes_of("com/my/app/Everything.class"), "LHint;"));
 
-        // -- a real JVM verifies every one of them.
         for (file, bytes) in &produced {
             let one = file.trim_end_matches(".class");
             match jvm_verifies(one, bytes) {
@@ -32884,9 +29738,6 @@ public class Screen extends Activity implements View.OnClickListener {
             }
         }
 
-        // -- and runs them, which is the only thing that says the code means
-        // -- what was written. The expected line is what `javac` produces for
-        // -- the same source, character for character.
         match jvm_runs(&produced, "com.my.app.Everything") {
             None => eprintln!("java: no JVM here to run the whole language"),
             Some(Err(said)) => panic!("a real JVM would not run it:\n{said}"),
@@ -32902,7 +29753,6 @@ public class Screen extends Activity implements View.OnClickListener {
             }
         }
 
-        // -- and every one of them reaches Dalvik.
         let translated: Vec<_> = produced
             .iter()
             .flat_map(|(file, bytes)| {
@@ -32928,10 +29778,6 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn a_class_written_inside_a_class_is_reached_through_its_holder() {
-        // `R.string.app_name` is how every Android application reaches a
-        // resource, and it is a static field of a class written inside a
-        // class. Written down it looks exactly like a field of a field, which
-        // is why it has to be tried as a class first.
         let held = r#"
             package com.my.app;
 
@@ -32973,8 +29819,6 @@ public class Screen extends Activity implements View.OnClickListener {
             Some(Verdict::Verified) => {}
         }
 
-        // A name that is not there is still refused, rather than read as
-        // something else and quietly emitted.
         let missing = r#"
             package com.my.app;
             public class Screen { public int f() { return R.string.nothing; } }
@@ -32987,9 +29831,6 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn files_compiled_together_can_name_each_other() {
-        // A project is more than one file, and a class in one names a class in
-        // another without either saying where it lives. Compiling them one
-        // after the other would mean the first could not see the second.
         let sources = vec![
             (
                 "Greeter.java".to_string(),
@@ -33048,13 +29889,10 @@ public class Screen extends Activity implements View.OnClickListener {
             }
         }
 
-        // Named the other way round, the answer is the same.
         let backwards = vec![sources[1].clone(), sources[0].clone()];
         let again = compile_together(&backwards, &empty()).expect("order must not matter");
         assert_eq!(again.len(), produced.len());
 
-        // And one type in two files is refused rather than silently written
-        // over.
         let twice = vec![sources[0].clone(), sources[0].clone()];
         let refused = compile_together(&twice, &empty()).expect_err("one type, one place");
         assert_eq!(refused.code, "EJ253");
@@ -33068,11 +29906,6 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn a_branch_inside_an_expression_leaves_the_stack_where_the_verifier_expects_it() {
-        // A frame says what is on the stack where a branch lands. A branch
-        // written in the middle of an expression lands somewhere that already
-        // has the rest of the expression under it, and a frame that forgets
-        // that is a claim the verifier throws the class out over. Every shape
-        // that branches without being a statement is here.
         let source = r#"
             public class Branchy {
                 public int pick(int a, int b) { return a + b; }
@@ -33219,7 +30052,7 @@ public class Screen extends Activity implements View.OnClickListener {
                 }
             }
         "#;
-        // The lambda becomes a class of its own, and it has to verify too.
+
         let produced = compile(source, &empty()).expect("must compile");
         for (file, bytes) in &produced {
             let named = file.trim_end_matches(".class");
@@ -33235,9 +30068,6 @@ public class Screen extends Activity implements View.OnClickListener {
             }
         }
 
-        // And the same classes go the rest of the way: Dalvik is where they
-        // actually run, and a shape the JVM accepts is no use if the device
-        // refuses it.
         let translated: Vec<_> = produced
             .iter()
             .flat_map(|(file, bytes)| {
@@ -33262,18 +30092,13 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn a_text_block_keeps_what_was_meant_and_drops_what_was_not() {
-        // The indentation rule is the whole reason these exist, so it is the
-        // thing worth pinning down.
         let cases: &[(&str, &str)] = &[
             ("\"\"\"\n    a\n    b\n    \"\"\"", "a\nb\n"),
             ("\"\"\"\n    a\n      b\n    \"\"\"", "a\n  b\n"),
             ("\"\"\"\n    a\n    b\"\"\"", "a\nb"),
             ("\"\"\"\n      a\n    b\n    \"\"\"", "  a\nb\n"),
-            // Trailing whitespace is invisible and therefore cannot have been
-            // meant, unless it was written as an escape.
             ("\"\"\"\n    a   \n    \"\"\"", "a\n"),
             ("\"\"\"\n    a\\s\\s\n    \"\"\"", "a  \n"),
-            // A backslash at the end of a line joins it to the next.
             ("\"\"\"\n    a\\\n    b\n    \"\"\"", "ab\n"),
             (
                 r#""""
@@ -33294,26 +30119,19 @@ public class Screen extends Activity implements View.OnClickListener {
     #[test]
     fn what_is_still_refused_is_refused_by_name() {
         let cases: &[(&str, &str)] = &[
-            // A `try` with no way out and nothing to close.
             ("public class A { void f() { try { } } }", "EJ114"),
-            // Something a `try` closes has to be given a value.
             (
                 "public class A { void f() { try (AutoCloseable a) {} } }",
                 "EJ118",
             ),
-            // A `switch` over something that is neither an integer nor a
-            // String has no instruction behind it.
             (
                 "public class A { void f(double d) { switch (d) { default: } } }",
                 "EJ238",
             ),
-            // Two arms answering to one value is a question with two answers.
             (
                 "public class A { void f(int i) { switch (i) { case 1: case 1: } } }",
                 "EJ240",
             ),
-            // The two forms mean different things about falling through, so
-            // they are not mixed.
             (
                 "public class A { void f(int i) { switch (i) { case 1 -> {} case 2: } } }",
                 "EJ112",
@@ -33324,7 +30142,6 @@ public class Screen extends Activity implements View.OnClickListener {
                 "EJ231",
             ),
             ("public class A { void f() { throw 1; } }", "EJ235"),
-            // A module declaration is Java, and nothing on a device reads it.
             ("module com.my.app { requires java.base; }", "EJ254"),
             ("public class A { void f() { var a; } }", "EJ234"),
             (
@@ -33402,9 +30219,6 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn what_the_translator_cannot_turn_into_dalvik_it_names() {
-        // Built by hand, because the Java compiler here no longer emits
-        // anything the translator refuses -- which is what the last change was
-        // for, and not a reason to stop checking that a refusal happens.
         let class = crate::jvm::Class {
             major_version: CLASS_MAJOR,
             minor_version: 0,
@@ -33421,9 +30235,7 @@ public class Screen extends Activity implements View.OnClickListener {
                 code: Some(crate::jvm::Code {
                     max_stack: 1,
                     max_locals: 1,
-                    // aconst_null, jsr -- and a subroutine is not translated,
-                    // because Dalvik has no return address to jump back to and
-                    // the type-checking verifier refuses `jsr` anyway.
+
                     bytes: vec![0x01, 0xa8, 0x00, 0x03],
                     handlers: Vec::new(),
                     lines: Vec::new(),
@@ -33464,9 +30276,6 @@ public class Screen extends Activity implements View.OnClickListener {
 
     #[test]
     fn it_calls_into_classes_it_was_handed_and_refuses_ones_it_was_not() {
-        // A class file for something to call, written by this compiler, then
-        // read back as a dependency -- which is exactly what the contract does
-        // with the digests in a request.
         let library = r#"
             package com.my.lib;
             public class Greeter {
@@ -33502,13 +30311,9 @@ public class Screen extends Activity implements View.OnClickListener {
         assert_eq!(read.name, "com.my.app.Caller");
         assert!(read.method_names().contains(&"hello"));
 
-        // Without the dependency, the same source is refused rather than
-        // guessed at.
         let refused = compile(caller, &empty()).expect_err("an unknown class must be refused");
         assert_eq!(refused.code, "EJ200", "{}", refused.message);
 
-        // And a method the class does not have is refused even when the class
-        // is known.
         let wrong = r#"
             package com.my.app;
             import com.my.lib.Greeter;

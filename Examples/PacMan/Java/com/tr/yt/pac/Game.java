@@ -78,9 +78,6 @@ public final class Game {
         wanted = way;
     }
 
-    /**
-     * One step of the world.
-     */
     public void tick() {
         if (state != PLAYING) {
             return;

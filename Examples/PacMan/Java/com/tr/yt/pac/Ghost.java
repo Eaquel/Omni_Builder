@@ -73,9 +73,6 @@ public final class Ghost {
         frightenedFor = 0;
     }
 
-    /**
-     * One step, decided at the junction it is standing on.
-     */
     public void step(Maze maze, int targetColumn, int targetRow, boolean scattering) {
         if (mood == FRIGHTENED) {
             frightenedFor = frightenedFor - 1;
