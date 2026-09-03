@@ -1139,6 +1139,14 @@ object Preferences {
         store(context).edit().putString(TIMINGS, measured).apply()
     }
 
+    const val READING = "reading"
+
+    fun reading(context: Context): Float = store(context).getFloat(READING, 13f)
+
+    fun setReading(context: Context, size: Float) {
+        store(context).edit().putFloat(READING, size).apply()
+    }
+
 }
 
 class AuroraView(context: Context, private var palette: Palette) : View(context) {
@@ -3887,7 +3895,9 @@ class BuilderActivity : Activity() {
 
         val editor = CodeEditor(this, palette).apply {
             setPadding(gap(9), gap(2), gap(3), gap(2))
+            readAt(Preferences.reading(this@BuilderActivity))
             open(path.substringAfterLast('/'), editorText)
+            onResized = { size -> Preferences.setReading(this@BuilderActivity, size) }
         }
         this.editor = editor
         this.editorAt = root to path
@@ -4062,6 +4072,26 @@ class BuilderActivity : Activity() {
         actions += getString(R.string.omni_editor_paste) to {
             pasteInto(editor)
             changed()
+        }
+        actions += getString(R.string.omni_editor_replace) to {
+            askForName(getString(R.string.omni_editor_find_ask), findHere) { needle ->
+                findHere = needle
+                askForName(getString(R.string.omni_editor_replace_with), "") { instead ->
+                    results.removeAllViews()
+                    val count = editor.replaceEvery(needle, instead)
+                    changed()
+                    results.addView(
+                        notice(
+                            if (count == 0) {
+                                getString(R.string.omni_editor_find_none)
+                            } else {
+                                getString(R.string.omni_editor_replaced, count)
+                            },
+                            if (count == 0) palette.warning else palette.ok,
+                        )
+                    )
+                }
+            }
         }
         actions += getString(R.string.omni_editor_go) to { goToDefinition(root, editor) }
         actions += getString(R.string.omni_editor_uses) to { findUses(root, editor) }
@@ -7513,6 +7543,10 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
 
         const val STEP = "    "
 
+        const val SMALLEST_SP = 9f
+
+        const val LARGEST_SP = 28f
+
         const val REACH = 40_000
 
         val OPENERS = "{(["
@@ -7540,6 +7574,18 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     private var faultLine = -1
     private var said = ""
     private val squiggle = Path()
+    private val guide = Paint()
+    private var readingSize = 13f
+
+    private val pinch = android.view.ScaleGestureDetector(
+        context,
+        object : android.view.ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: android.view.ScaleGestureDetector): Boolean {
+                readAt(readingSize * detector.scaleFactor)
+                return true
+            }
+        },
+    )
 
     private val history = History()
 
@@ -7555,7 +7601,7 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         setTextColor(palette.foreground)
         setBackgroundColor(Color.TRANSPARENT)
         typeface = Typeface.MONOSPACE
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, readingSize)
         gravity = Gravity.TOP or Gravity.START
         setHorizontallyScrolling(true)
         isHorizontalScrollBarEnabled = true
@@ -7733,6 +7779,49 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         invalidate()
     }
 
+    fun readAt(size: Float) {
+        val wanted = size.coerceIn(SMALLEST_SP, LARGEST_SP)
+        if (kotlin.math.abs(wanted - readingSize) < 0.05f) {
+            return
+        }
+        readingSize = wanted
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, readingSize)
+        painted = -1 to -1
+        colour()
+        invalidate()
+        onResized?.invoke(readingSize)
+    }
+
+    fun readingAt(): Float = readingSize
+
+    var onResized: ((Float) -> Unit)? = null
+
+    @Suppress("ClickableViewAccessibility")
+    override fun onTouchEvent(event: android.view.MotionEvent): Boolean {
+        pinch.onTouchEvent(event)
+        if (pinch.isInProgress) {
+            return true
+        }
+        return super.onTouchEvent(event)
+    }
+
+    fun replaceEvery(needle: String, with: String): Int {
+        if (needle.isEmpty()) return 0
+        val held = text ?: return 0
+        val whole = held.toString()
+        if (!whole.contains(needle)) return 0
+        val count = whole.split(needle).size - 1
+        val caret = selectionStart.coerceIn(0, whole.length)
+        replaying = true
+        setText(whole.replace(needle, with))
+        replaying = false
+        history.forget()
+        setSelection(caret.coerceIn(0, text?.length ?: 0))
+        onChanged?.invoke()
+        read()
+        return count
+    }
+
     fun findFrom(needle: String, from: Int): Int {
         if (needle.isEmpty()) return -1
         val held = text?.toString() ?: return -1
@@ -7870,6 +7959,8 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
                 rule,
             )
 
+            drawGuides(canvas, layout, first, min(last, layout.lineCount - 1))
+
             val faulty = faultLine - 1
             if (faulty in first..min(last, layout.lineCount - 1)) {
                 drawFault(canvas, layout, faulty)
@@ -7937,6 +8028,42 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             matchThere = -1
         }
         invalidate()
+    }
+
+    private fun drawGuides(
+        canvas: Canvas,
+        layout: android.text.Layout,
+        first: Int,
+        last: Int,
+    ) {
+        val held = text ?: return
+        val step = paint.measureText("    ")
+        if (step <= 0f) return
+        guide.color = Ink.fade(palette.divider, 0.55f)
+        guide.strokeWidth = 1f
+        for (line in first..last) {
+            val from = layout.getLineStart(line)
+            val to = layout.getLineEnd(line)
+            var spaces = 0
+            var at = from
+            while (at < to && held[at] == ' ') {
+                spaces += 1
+                at += 1
+            }
+            if (at >= to || held[at] == '\n') continue
+            var depth = 1
+            while (depth * 4 <= spaces) {
+                val x = paddingLeft + step * depth
+                canvas.drawLine(
+                    x,
+                    layout.getLineTop(line).toFloat(),
+                    x,
+                    layout.getLineBottom(line).toFloat(),
+                    guide,
+                )
+                depth += 1
+            }
+        }
     }
 
     private fun drawFault(canvas: Canvas, layout: android.text.Layout, row: Int) {

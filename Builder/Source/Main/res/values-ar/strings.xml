@@ -174,6 +174,9 @@
     <string name="omni_editor_find">بحث</string>
     <string name="omni_editor_find_ask">نص للبحث عنه في هذا الملف</string>
     <string name="omni_editor_find_none">ليس في هذا الملف.</string>
+    <string name="omni_editor_replace">استبدال الكل</string>
+    <string name="omni_editor_replace_with">استبدل بـ</string>
+    <string name="omni_editor_replaced">استُبدل %1$d</string>
     <string name="omni_editor_elsewhere">%1$s يتوقف عند السطر %2$d</string>
     <string name="omni_editor_line">سطر</string>
     <string name="omni_editor_line_ask">رقم السطر</string>

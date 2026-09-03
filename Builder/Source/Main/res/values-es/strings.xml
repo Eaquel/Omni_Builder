@@ -174,6 +174,9 @@
     <string name="omni_editor_find">BUSCAR</string>
     <string name="omni_editor_find_ask">Texto que buscar en este archivo</string>
     <string name="omni_editor_find_none">No está en este archivo.</string>
+    <string name="omni_editor_replace">Reemplazar todos</string>
+    <string name="omni_editor_replace_with">Reemplazar por</string>
+    <string name="omni_editor_replaced">%1$d reemplazados</string>
     <string name="omni_editor_elsewhere">%1$s se detiene en la línea %2$d</string>
     <string name="omni_editor_line">LÍNEA</string>
     <string name="omni_editor_line_ask">Número de línea</string>
