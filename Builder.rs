@@ -26789,6 +26789,76 @@ pub mod workspace {
         crate::trash::send(trash_root, &path.to_string_lossy(), now)
     }
 
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<u64> {
+        if from.is_dir() {
+            std::fs::create_dir_all(to)?;
+            let mut count = 0;
+            for entry in std::fs::read_dir(from)? {
+                let entry = entry?;
+                count += copy_tree(&entry.path(), &to.join(entry.file_name()))?;
+            }
+            return Ok(count);
+        }
+        std::fs::copy(from, to)?;
+        Ok(1)
+    }
+
+    pub fn copy(root: &str, from: &str, to: &str) -> Result<String, Diagnostic> {
+        if to == "AndroidManifest.xml" {
+            return Err(fail("EW160", "The manifest is what makes this a project.")
+                .with_suggestion("Putting something else there would leave a folder nothing here recognises as a project."));
+        }
+        let source = inside(root, from)?;
+        let target = inside(root, to)?;
+        if !source.exists() {
+            return Err(
+                fail("EW161", "That is not in the project.").with_context(format!("Path: {from}"))
+            );
+        }
+        if target.exists() {
+            return Err(fail("EW162", "Something is already at that name.")
+                .with_context(format!("Path: {to}"))
+                .with_suggestion(
+                    "Choose another name. Copying over it would replace what is there \
+                     without asking.",
+                ));
+        }
+        if target.starts_with(&source) {
+            return Err(fail("EW163", "A folder cannot be copied inside itself.")
+                .with_context(format!("From: {from}"))
+                .with_context(format!("To: {to}")));
+        }
+        let mut count = 0u64;
+        for entry in tree(root)? {
+            if entry.folder {
+                continue;
+            }
+            if entry.path == from || entry.path.starts_with(&format!("{from}/")) {
+                count += 1;
+            }
+        }
+        if count > MAX_ENTRIES as u64 {
+            return Err(
+                fail("EW164", "That is more files than this copies at once.")
+                    .with_context(format!("Files: {count}"))
+                    .with_context(format!("Most: {MAX_ENTRIES}")),
+            );
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|why| {
+                fail("EW165", "The folder for the copy could not be made.")
+                    .with_context(format!("Reason: {why}"))
+            })?;
+        }
+        copy_tree(&source, &target).map_err(|why| {
+            fail("EW166", "That could not be copied.")
+                .with_context(format!("From: {from}"))
+                .with_context(format!("To: {to}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+        Ok(to.to_string())
+    }
+
     pub fn rename(root: &str, from: &str, to: &str) -> Result<String, Diagnostic> {
         if from == "AndroidManifest.xml" || to == "AndroidManifest.xml" {
             return Err(fail("EW150", "The manifest is what makes this a project.")
@@ -34499,6 +34569,34 @@ pub mod ffi {
                     w.field_str("path", &path);
                 }
                 Err(error) => write_failure(&mut w, "moved", &error),
+            }
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_copy_path(
+        root: *const c_char,
+        from: *const c_char,
+        to: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(from), Some(to)) =
+                (text_from(root), text_from(from), text_from(to))
+            else {
+                return std::ptr::null_mut();
+            };
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            match crate::workspace::copy(&root, &from, &to) {
+                Ok(path) => {
+                    w.field_bool("copied", true);
+                    w.field_str("from", &from);
+                    w.field_str("path", &path);
+                }
+                Err(error) => write_failure(&mut w, "copied", &error),
             }
             w.end_object();
             hand_back(w)
@@ -45748,6 +45846,68 @@ public final class MainActivity extends Activity {
                 .unwrap_err()
                 .code,
             "EW153"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn copying_carries_a_whole_folder_and_never_over_something() {
+        let directory = temp_directory("omni-copy");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+
+        super::workspace::write_text(&text, "Java/one/A.java", "class A {}\n").unwrap();
+        super::workspace::write_text(&text, "Java/one/deep/B.java", "class B {}\n").unwrap();
+        std::fs::write(root.join("Java/one/held.bin"), [0u8, 1, 2, 255]).unwrap();
+
+        let put = super::workspace::copy(&text, "Java/one", "Java/two").unwrap();
+        assert_eq!(put, "Java/two");
+        assert_eq!(
+            super::workspace::read_text(&text, "Java/two/A.java").unwrap(),
+            "class A {}\n"
+        );
+        assert_eq!(
+            super::workspace::read_text(&text, "Java/two/deep/B.java").unwrap(),
+            "class B {}\n",
+            "a folder is copied all the way down"
+        );
+        assert_eq!(
+            std::fs::read(root.join("Java/two/held.bin")).unwrap(),
+            vec![0u8, 1, 2, 255],
+            "bytes that are not text come across unchanged"
+        );
+        assert!(
+            root.join("Java/one/A.java").is_file(),
+            "copying leaves what it copied"
+        );
+
+        assert_eq!(
+            super::workspace::copy(&text, "Java/one", "Java/two")
+                .unwrap_err()
+                .code,
+            "EW162",
+            "copying over something is refused rather than silently replacing it"
+        );
+        assert_eq!(
+            super::workspace::copy(&text, "Java/one", "Java/one/inside")
+                .unwrap_err()
+                .code,
+            "EW163"
+        );
+        assert_eq!(
+            super::workspace::copy(&text, "Java/nothing", "Java/three")
+                .unwrap_err()
+                .code,
+            "EW161"
+        );
+        assert_eq!(
+            super::workspace::copy(&text, "Java/one/A.java", "../outside.java")
+                .unwrap_err()
+                .code,
+            "EW100",
+            "a copy cannot leave the project"
         );
 
         std::fs::remove_dir_all(&directory).ok();

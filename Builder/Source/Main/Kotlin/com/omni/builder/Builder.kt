@@ -556,6 +556,8 @@ object Builder {
 
     external fun nativeRenamePath(root: String, from: String, to: String): String
 
+    external fun nativeCopyPath(root: String, from: String, to: String): String
+
     external fun nativeListBuilt(directory: String): String
 
     external fun nativeTrashSend(trashRoot: String, path: String): String
@@ -1275,7 +1277,26 @@ internal object Motion {
 
 internal class Mark(private val shape: Shape, private val colour: Int) : Drawable() {
 
-    enum class Shape { FOLDER, FILE, MORE, AWAY, BACK, GEAR }
+    enum class Shape {
+        FOLDER,
+        FILE,
+        MORE,
+        AWAY,
+        BACK,
+        GEAR,
+        UNDO,
+        REDO,
+        SAVE,
+        FIND,
+        LINE,
+        FORMAT,
+        CODE,
+        IMAGE,
+        MARKUP,
+        NOTE,
+        PACKAGE,
+        SPLIT,
+    }
 
     private companion object {
         const val GRID = 24f
@@ -1348,16 +1369,165 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
             }
             Shape.GEAR -> {
                 paint.style = Paint.Style.STROKE
-                canvas.drawCircle(12f, 12f, 3.2f, paint)
+                val teeth = 8
+                val inner = 5.4f
+                val outer = 8.6f
+                val half = PI.toFloat() / teeth
                 var tooth = 0
-                while (tooth < 8) {
-                    val turn = tooth * (PI.toFloat() / 4f)
-                    val cosine = cos(turn)
-                    val sine = sin(turn)
-                    path.moveTo(12f + cosine * 6.0f, 12f + sine * 6.0f)
-                    path.lineTo(12f + cosine * 8.4f, 12f + sine * 8.4f)
+                while (tooth < teeth) {
+                    val turn = tooth * 2f * half
+                    val lip = half * 0.46f
+                    path.moveTo(
+                        12f + cos(turn - half + lip) * inner,
+                        12f + sin(turn - half + lip) * inner,
+                    )
+                    path.lineTo(12f + cos(turn - lip) * outer, 12f + sin(turn - lip) * outer)
+                    path.lineTo(12f + cos(turn + lip) * outer, 12f + sin(turn + lip) * outer)
+                    path.lineTo(
+                        12f + cos(turn + half - lip) * inner,
+                        12f + sin(turn + half - lip) * inner,
+                    )
                     tooth += 1
                 }
+                path.close()
+                canvas.drawPath(path, paint)
+                canvas.drawCircle(12f, 12f, 3.0f, paint)
+            }
+            Shape.UNDO -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(9f, 6f)
+                path.lineTo(4.6f, 10.2f)
+                path.lineTo(9f, 14.4f)
+                path.moveTo(4.6f, 10.2f)
+                path.lineTo(14f, 10.2f)
+                path.cubicTo(19f, 10.2f, 19f, 18f, 13.5f, 18f)
+                path.lineTo(9.5f, 18f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.REDO -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(15f, 6f)
+                path.lineTo(19.4f, 10.2f)
+                path.lineTo(15f, 14.4f)
+                path.moveTo(19.4f, 10.2f)
+                path.lineTo(10f, 10.2f)
+                path.cubicTo(5f, 10.2f, 5f, 18f, 10.5f, 18f)
+                path.lineTo(14.5f, 18f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SAVE -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(5f, 5f)
+                path.lineTo(15.5f, 5f)
+                path.lineTo(19f, 8.5f)
+                path.lineTo(19f, 19f)
+                path.lineTo(5f, 19f)
+                path.close()
+                path.addRect(8.6f, 5f, 15f, 9.6f, Path.Direction.CW)
+                path.addRect(8f, 13.4f, 16f, 19f, Path.Direction.CW)
+                canvas.drawPath(path, paint)
+            }
+            Shape.FIND -> {
+                paint.style = Paint.Style.STROKE
+                canvas.drawCircle(10.6f, 10.6f, 5.2f, paint)
+                path.moveTo(14.6f, 14.6f)
+                path.lineTo(19.2f, 19.2f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.LINE -> {
+                paint.style = Paint.Style.STROKE
+                var row = 0
+                while (row < 3) {
+                    val y = 7f + row * 5f
+                    path.moveTo(4.2f, y)
+                    path.lineTo(5.4f, y)
+                    path.moveTo(8.4f, y)
+                    path.lineTo(19.4f, y)
+                    row += 1
+                }
+                canvas.drawPath(path, paint)
+            }
+            Shape.FORMAT -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(4.6f, 6.4f)
+                path.lineTo(19.4f, 6.4f)
+                path.moveTo(9f, 12f)
+                path.lineTo(19.4f, 12f)
+                path.moveTo(9f, 17.6f)
+                path.lineTo(15.4f, 17.6f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.CODE -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(9f, 8f)
+                path.lineTo(4.6f, 12f)
+                path.lineTo(9f, 16f)
+                path.moveTo(15f, 8f)
+                path.lineTo(19.4f, 12f)
+                path.lineTo(15f, 16f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.IMAGE -> {
+                paint.style = Paint.Style.STROKE
+                path.addRect(4.6f, 5.6f, 19.4f, 18.4f, Path.Direction.CW)
+                path.moveTo(4.6f, 15f)
+                path.lineTo(9.6f, 10.4f)
+                path.lineTo(14f, 14.4f)
+                path.lineTo(16.6f, 12.2f)
+                path.lineTo(19.4f, 15f)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(9f, 9f, 1.5f, paint)
+            }
+            Shape.MARKUP -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(8.4f, 6.4f)
+                path.lineTo(4.6f, 12f)
+                path.lineTo(8.4f, 17.6f)
+                path.moveTo(15.6f, 6.4f)
+                path.lineTo(19.4f, 12f)
+                path.lineTo(15.6f, 17.6f)
+                path.moveTo(13.4f, 5.6f)
+                path.lineTo(10.6f, 18.4f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.NOTE -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(6.5f, 4.6f)
+                path.lineTo(17.5f, 4.6f)
+                path.lineTo(17.5f, 19.4f)
+                path.lineTo(6.5f, 19.4f)
+                path.close()
+                var row = 0
+                while (row < 3) {
+                    val y = 9f + row * 3.6f
+                    path.moveTo(9f, y)
+                    path.lineTo(15f, y)
+                    row += 1
+                }
+                canvas.drawPath(path, paint)
+            }
+            Shape.PACKAGE -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(12f, 3.8f)
+                path.lineTo(19.6f, 8.2f)
+                path.lineTo(19.6f, 15.8f)
+                path.lineTo(12f, 20.2f)
+                path.lineTo(4.4f, 15.8f)
+                path.lineTo(4.4f, 8.2f)
+                path.close()
+                path.moveTo(4.4f, 8.2f)
+                path.lineTo(12f, 12.4f)
+                path.lineTo(19.6f, 8.2f)
+                path.moveTo(12f, 12.4f)
+                path.lineTo(12f, 20.2f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SPLIT -> {
+                paint.style = Paint.Style.STROKE
+                path.addRect(4.4f, 5.4f, 19.6f, 18.6f, Path.Direction.CW)
+                path.moveTo(12f, 5.4f)
+                path.lineTo(12f, 18.6f)
                 canvas.drawPath(path, paint)
             }
         }
@@ -1514,6 +1684,14 @@ class BuilderActivity : Activity() {
 
         const val WIZARD_STEPS = 4
 
+        const val WATCH_CODE_MILLIS = 1_200L
+
+        const val OFFER_MILLIS = 220L
+
+        const val OFFER_LEAST = 2
+
+        const val OFFER_MOST = 6
+
         val STAGE_NAMES = listOf(
             R.string.omni_stage_project,
             R.string.omni_stage_resources,
@@ -1565,6 +1743,16 @@ class BuilderActivity : Activity() {
 
         val PICTURE_SUFFIXES = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
+        val CODE_SUFFIXES = listOf(
+            ".java", ".kt", ".kts", ".rs", ".cpp", ".hpp", ".c", ".h", ".py", ".gradle",
+        )
+
+        val PACKAGE_SUFFIXES = listOf(".apk", ".aab", ".jar", ".aar", ".zip", ".so")
+
+        val NOTE_SUFFIXES = listOf(
+            ".txt", ".md", ".json", ".toml", ".properties", ".cfg", ".pro",
+        )
+
         val KEY_SIZES = listOf(2048, 3072, 4096)
         val VALIDITY_YEARS = listOf(1, 5, 10, 25, 100)
     }
@@ -1577,6 +1765,7 @@ class BuilderActivity : Activity() {
     private lateinit var rail: LinearLayout
     private lateinit var crown: LinearLayout
     private lateinit var crownBack: View
+    private lateinit var crownSplit: View
     private lateinit var crownTitle: TextView
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
@@ -1601,7 +1790,7 @@ class BuilderActivity : Activity() {
     private val formLocales = Preferences.LANGUAGES.mapTo(linkedSetOf()) { it.first }
     private var formImage: String? = null
     private var imageForProject: String? = null
-    private var held: String? = null
+    private var secondFolder: String? = null
 
     private var keyAlias = DEFAULT_KEY_ALIAS
     private var keyCommonName = DEFAULT_KEY_COMMON_NAME
@@ -1626,6 +1815,10 @@ class BuilderActivity : Activity() {
 
     private var editorLine = 0
     private var findHere = ""
+    private var checkingCode = false
+    private var offering = false
+    private var offerRoot: String? = null
+    private var offers: android.widget.PopupWindow? = null
 
     override fun attachBaseContext(base: Context) {
 
@@ -1687,6 +1880,11 @@ class BuilderActivity : Activity() {
         }
 
         crownBack = markControl(Mark.Shape.BACK, R.string.omni_action_back) { stepBack() }
+        crownSplit = markControl(Mark.Shape.SPLIT, R.string.omni_files_split) {
+            val here = screen
+            secondFolder = if (secondFolder == null && here is Screen.Files) here.folder else null
+            render(true)
+        }
         crownTitle = TextView(this).apply {
             typeface = Type.heading
             setTextColor(palette.foreground)
@@ -1706,6 +1904,10 @@ class BuilderActivity : Activity() {
                     marginStart = gap(2)
                     marginEnd = gap(2)
                 },
+            )
+            addView(
+                crownSplit,
+                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
             )
             addView(
                 markControl(Mark.Shape.GEAR, R.string.omni_tab_settings) { go(Screen.Settings) },
@@ -1888,6 +2090,7 @@ class BuilderActivity : Activity() {
     }
 
     override fun onPause() {
+        hideOffers()
         keepTheDraft()
         aurora.pauseDrawing()
         super.onPause()
@@ -1989,6 +2192,7 @@ class BuilderActivity : Activity() {
 
     private fun render(animated: Boolean) {
         keepTheDraft()
+        hideOffers()
         editor = null
         editorAt = null
         content.removeAllViews()
@@ -2121,10 +2325,6 @@ class BuilderActivity : Activity() {
         if (root != null) {
             actions += getString(R.string.omni_tab_files) to { go(Screen.Files(root, "")) }
             actions += getString(R.string.omni_search_title) to { go(Screen.Search(root)) }
-            actions += getString(R.string.omni_check_title) to {
-                go(Screen.Files(root, ""))
-                checkProject(root)
-            }
             actions += getString(R.string.omni_tab_build) to { go(Screen.Build(root)) }
             actions += getString(R.string.omni_action_new_file) to {
                 go(Screen.Files(root, ""))
@@ -2171,6 +2371,14 @@ class BuilderActivity : Activity() {
     private fun drawCrown() {
         val here = screen
         crownBack.visibility = if (here is Screen.Projects) View.GONE else View.VISIBLE
+        crownSplit.visibility = if (here is Screen.Files) View.VISIBLE else View.GONE
+        crownSplit.foreground = Mark(
+            Mark.Shape.SPLIT,
+            if (secondFolder == null) palette.foreground else palette.accent,
+        )
+        if (here !is Screen.Files) {
+            secondFolder = null
+        }
         crownTitle.text = when (here) {
             is Screen.Projects -> getString(R.string.omni_projects_title)
             is Screen.NewProject -> getString(R.string.omni_projects_new)
@@ -2281,7 +2489,6 @@ class BuilderActivity : Activity() {
     private fun openHere(root: String) {
         if (openProject != root) {
 
-            held = null
         }
         openProject = root
         go(Screen.Files(root, ""))
@@ -2560,17 +2767,37 @@ class BuilderActivity : Activity() {
             .filter { it.path.substringBeforeLast('/', "") == folder }
             .sortedWith(compareBy({ !it.folder }, { it.path.lowercase(Locale.getDefault()) }))
 
-        val tree = card()
-        if (here.isEmpty()) {
-            tree.addView(quiet(getString(R.string.omni_files_empty)))
-        }
-        here.forEachIndexed { index, entry ->
-            if (index > 0) {
-                tree.addView(rule(), MATCH_PARENT, 1)
+        val beside = secondFolder
+        if (beside == null) {
+            content.addView(filePane(root, folder, entries, null))
+        } else {
+            val panes = LinearLayout(this).apply {
+                orientation = if (wideEnoughForARail()) {
+                    LinearLayout.HORIZONTAL
+                } else {
+                    LinearLayout.VERTICAL
+                }
             }
-            tree.addView(fileRow(root, folder, entry, entries))
+            panes.addView(
+                filePane(root, folder, entries, beside),
+                if (panes.orientation == LinearLayout.HORIZONTAL) {
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) }
+                } else {
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT)
+                },
+            )
+            panes.addView(
+                filePane(root, beside, entries, folder),
+                if (panes.orientation == LinearLayout.HORIZONTAL) {
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) }
+                } else {
+                    LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                        topMargin = gap(2)
+                    }
+                },
+            )
+            content.addView(panes)
         }
-        content.addView(tree)
 
         val making = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -2594,22 +2821,6 @@ class BuilderActivity : Activity() {
         )
         content.addView(making)
 
-        held?.let { moving ->
-            content.addView(
-                primary(
-                    getString(R.string.omni_files_paste, moving.substringAfterLast('/'))
-                ) {
-                    val target = joined(folder, moving.substringAfterLast('/'))
-                    held = null
-                    act(Builder.nativeRenamePath(root, moving, target), "moved")
-                }
-            )
-            content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
-                held = null
-                render(false)
-            })
-        }
-
         if (folder.isEmpty()) {
             content.addView(label(getString(R.string.omni_files_config)))
             val settings = FlowLayout(this, gap(2), gap(2)).apply {
@@ -2629,9 +2840,6 @@ class BuilderActivity : Activity() {
             }
             tools.addView(tool(getString(R.string.omni_health_title), palette.accent) {
                 go(Screen.Health(root))
-            })
-            tools.addView(tool(getString(R.string.omni_check_title), palette.warning) {
-                checkProject(root)
             })
             tools.addView(tool(getString(R.string.omni_search_title), palette.accent) {
                 go(Screen.Search(root))
@@ -3130,50 +3338,6 @@ class BuilderActivity : Activity() {
         return (0 until array.length()).joinToString(", ") { array.getString(it) }
     }
 
-    private fun checkProject(root: String) {
-        working({ Builder.nativeCheckProject(root) }) finished@{ answer ->
-            val checked = runCatching { CodeCheck.parse(answer) }.getOrElse {
-                results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
-                return@finished
-            }
-            if (checked.clear) {
-                results.addView(
-                    notice(
-                        getString(
-                            R.string.omni_check_clear,
-                            checked.classes,
-                            checked.resources,
-                            checked.locales,
-                        ),
-                        palette.ok,
-                    )
-                )
-                showPolicy(answer)
-                return@finished
-            }
-            checked.refusal?.let { showRefusal(it, results) }
-
-            if (checked.file.isNotEmpty()) {
-                results.addView(
-                    row(
-                        checked.file,
-                        getString(R.string.omni_check_open),
-                        if (checked.line > 0) {
-                            checked.line.toString() + ":" + checked.column
-                        } else {
-                            ""
-                        },
-                        palette.error,
-                    ) {
-                        editorLine = checked.line
-                        go(Screen.Editor(root, checked.file))
-                    }
-                )
-            }
-            showPolicy(answer)
-        }
-    }
-
     private fun showPolicy(answer: String) {
         val rules = runCatching {
             JSONObject(answer).optJSONObject("code")?.optJSONArray("rules")
@@ -3345,6 +3509,68 @@ class BuilderActivity : Activity() {
     private fun joined(folder: String, name: String): String =
         if (folder.isEmpty()) name else "$folder/$name"
 
+    private fun filePane(
+        root: String,
+        folder: String,
+        entries: List<FileEntry>,
+        other: String?,
+    ): View {
+        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        if (other != null) {
+            holder.addView(
+                row(
+                    folder.ifEmpty { getString(R.string.omni_files_root) },
+                    "",
+                    "",
+                    palette.muted,
+                ) {
+                    if (folder.isNotEmpty()) {
+                        stepPane(root, folder, folder.substringBeforeLast('/', ""))
+                    }
+                }
+            )
+        }
+        val here = entries
+            .filter { it.path.substringBeforeLast('/', "") == folder }
+            .sortedWith(compareBy({ !it.folder }, { it.path.lowercase(Locale.getDefault()) }))
+        val tree = card()
+        if (here.isEmpty()) {
+            tree.addView(quiet(getString(R.string.omni_files_empty)))
+        }
+        here.forEachIndexed { index, entry ->
+            if (index > 0) {
+                tree.addView(rule(), MATCH_PARENT, 1)
+            }
+            tree.addView(fileRow(root, folder, entry, entries, other))
+        }
+        holder.addView(tree)
+        return holder
+    }
+
+    private fun stepPane(root: String, pane: String, into: String) {
+        if (pane == secondFolder) {
+            secondFolder = into
+            render(false)
+        } else {
+            go(Screen.Files(root, into))
+        }
+    }
+
+    private fun markFor(entry: FileEntry): Pair<Mark.Shape, Int> {
+        if (entry.folder) {
+            return Mark.Shape.FOLDER to palette.accent
+        }
+        val name = entry.path.substringAfterLast('/').lowercase(Locale.US)
+        return when {
+            CODE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.CODE to palette.accent
+            name.endsWith(".xml") -> Mark.Shape.MARKUP to palette.warning
+            PICTURE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.IMAGE to palette.ok
+            PACKAGE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.PACKAGE to palette.ok
+            NOTE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.NOTE to palette.muted
+            else -> Mark.Shape.FILE to palette.muted
+        }
+    }
+
     private fun looksLikeAPicture(path: String): Boolean {
         val lower = path.lowercase(Locale.US)
         return PICTURE_SUFFIXES.any { lower.endsWith(it) }
@@ -3378,6 +3604,7 @@ class BuilderActivity : Activity() {
         folder: String,
         entry: FileEntry,
         all: List<FileEntry>,
+        other: String? = null,
     ): View {
         val name = entry.path.substringAfterLast('/')
         val absolute = File(root, entry.path).absolutePath
@@ -3393,9 +3620,15 @@ class BuilderActivity : Activity() {
             isFocusable = true
             readAs(Button::class.java.name)
             background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
-            setOnClickListener { openEntry(root, entry) }
+            setOnClickListener {
+                if (entry.folder && other != null) {
+                    stepPane(root, folder, entry.path)
+                } else {
+                    openEntry(root, entry)
+                }
+            }
             setOnLongClickListener {
-                showActions(root, folder, entry)
+                showActions(root, folder, entry, other)
                 true
             }
 
@@ -3405,10 +3638,8 @@ class BuilderActivity : Activity() {
                 } else {
                     View(context).apply {
                         background = pill(palette.raised, gap(2).toFloat())
-                        foreground = Mark(
-                            if (entry.folder) Mark.Shape.FOLDER else Mark.Shape.FILE,
-                            if (entry.folder) palette.accent else palette.muted,
-                        )
+                        val (shape, tint) = markFor(entry)
+                        foreground = Mark(shape, tint)
                         importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     }
                 },
@@ -3422,7 +3653,7 @@ class BuilderActivity : Activity() {
                         TextView(context).apply {
                             text = name
                             setTextColor(
-                                if (entry.path == held) palette.warning else palette.foreground
+                                palette.foreground
                             )
                             typeface = Type.strong
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
@@ -3430,10 +3661,10 @@ class BuilderActivity : Activity() {
                     )
                     addView(
                         TextView(context).apply {
-                            text = when {
-                                entry.path == held -> getString(R.string.omni_files_holding)
-                                entry.folder -> getString(R.string.omni_files_holds, inside)
-                                else -> size(entry.bytes)
+                            text = if (entry.folder) {
+                                getString(R.string.omni_files_holds, inside)
+                            } else {
+                                size(entry.bytes)
                             }
                             setTextColor(palette.muted)
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -3454,7 +3685,7 @@ class BuilderActivity : Activity() {
                         palette.accent,
                     )
                     foreground = Mark(Mark.Shape.MORE, palette.muted)
-                    setOnClickListener { showActions(root, folder, entry) }
+                    setOnClickListener { showActions(root, folder, entry, other) }
                     layoutParams = LinearLayout.LayoutParams(
                         gap(TOUCH_UNITS),
                         gap(TOUCH_UNITS),
@@ -3475,11 +3706,29 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun showActions(root: String, folder: String, entry: FileEntry) {
+    private fun showActions(root: String, folder: String, entry: FileEntry, other: String?) {
         val name = entry.path.substringAfterLast('/')
         val actions = mutableListOf<Pair<String, () -> Unit>>()
 
         actions.add(getString(R.string.omni_action_open) to { openEntry(root, entry) })
+        if (other != null) {
+            actions.add(
+                getString(R.string.omni_files_copy_across) to {
+                    act(
+                        Builder.nativeCopyPath(root, entry.path, joined(other, name)),
+                        "copied",
+                    )
+                }
+            )
+            actions.add(
+                getString(R.string.omni_files_move_across) to {
+                    act(
+                        Builder.nativeRenamePath(root, entry.path, joined(other, name)),
+                        "moved",
+                    )
+                }
+            )
+        }
         actions.add(
             getString(R.string.omni_action_rename) to {
                 askForName(getString(R.string.omni_action_rename), name) { chosen ->
@@ -3488,15 +3737,6 @@ class BuilderActivity : Activity() {
                         "moved",
                     )
                 }
-            }
-        )
-        actions.add(
-            getString(R.string.omni_action_move) to {
-                held = entry.path
-                render(false)
-                results.addView(
-                    notice(getString(R.string.omni_files_held, name), palette.accent)
-                )
             }
         )
         if (!entry.folder) {
@@ -3592,14 +3832,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderEditor(root: String, path: String) {
-        val where = TextView(this).apply {
-            text = path
-            setTextColor(palette.muted)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-            setPadding(0, 0, 0, gap(1))
-        }
-        content.addView(where)
-
         val answer = runCatching { JSONObject(Builder.nativeReadFile(root, path)) }.getOrNull()
         if (answer == null || !answer.optBoolean("read", false)) {
             answer?.let { showRefusal(Refusal.parse(it), content) }
@@ -3624,148 +3856,32 @@ class BuilderActivity : Activity() {
             editor.showLine(editorLine)
             editorLine = 0
         }
-        if (draft != null) {
-            content.addView(notice(getString(R.string.omni_editor_restored), palette.warning))
-        }
 
         var dirty = draft != null
-        if (dirty) {
-            where.text = getString(R.string.omni_editor_unsaved)
-            where.setTextColor(palette.warning)
-        }
-
-        val keep = Runnable { Drafts.write(this, root, path, editorText) }
-        fun mark() {
-            editorText = editor.text?.toString().orEmpty()
-            val changed = editorText != onDisk
-            if (changed != dirty) {
-                dirty = changed
-                where.text = if (changed) getString(R.string.omni_editor_unsaved) else path
-                where.setTextColor(if (changed) palette.warning else palette.muted)
-            }
-            editor.removeCallbacks(keep)
-            if (changed) {
-                editor.postDelayed(keep, Drafts.REST_MILLIS)
-            } else {
-                Drafts.forget(this, root, path)
-            }
-        }
-        editor.onChanged = ::mark
-
-        val tools = FlowLayout(this, gap(2), gap(2)).apply { setPadding(0, gap(1), 0, gap(1)) }
-        tools.addView(tool(getString(R.string.omni_editor_undo), palette.accent) {
-            editor.undo()
-            mark()
-        })
-        tools.addView(tool(getString(R.string.omni_editor_redo), palette.accent) {
-            editor.redo()
-            mark()
-        })
-        tools.addView(tool(getString(R.string.omni_action_copy), palette.foreground) {
-            copyOut(selectionOf(editor), path.substringAfterLast('/'))
-        })
-        tools.addView(tool(getString(R.string.omni_editor_paste), palette.foreground) {
-            pasteInto(editor)
-            mark()
-        })
-        tools.addView(tool(getString(R.string.omni_editor_check), palette.warning) {
-            working({ Builder.nativeCheckProject(root) }) finished@{ answer ->
-                val checked = runCatching { CodeCheck.parse(answer) }.getOrElse {
-                    results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
-                    return@finished
-                }
-                if (checked.clear) {
-                    editor.fault(-1)
-                    results.addView(
-                        notice(getString(R.string.omni_editor_check_clear), palette.ok)
-                    )
-                    return@finished
-                }
-                checked.refusal?.let { showRefusal(it, results) }
-                if (checked.file == path && checked.line > 0) {
-                    editor.fault(checked.line)
-                } else if (checked.file.isNotEmpty()) {
-                    editor.fault(-1)
-                    results.addView(
-                        row(
-                            checked.file,
-                            getString(R.string.omni_check_open),
-                            if (checked.line > 0) "${checked.line}:${checked.column}" else "",
-                            palette.error,
-                        ) {
-                            editorLine = checked.line
-                            go(Screen.Editor(root, checked.file))
-                        }
-                    )
-                }
-            }
-        })
-        tools.addView(tool(getString(R.string.omni_editor_find), palette.accent) {
-            askForName(getString(R.string.omni_editor_find_ask), findHere) { asked ->
-                findHere = asked
-                results.removeAllViews()
-                val at = editor.findFrom(asked, editor.selectionEnd)
-                if (at < 0) {
-                    results.addView(
-                        notice(getString(R.string.omni_editor_find_none), palette.warning)
-                    )
-                } else {
-                    editor.show(at, at + asked.length)
-                }
-            }
-        })
-        tools.addView(tool(getString(R.string.omni_editor_line), palette.accent) {
-            askForName(getString(R.string.omni_editor_line_ask), "") { asked ->
-                results.removeAllViews()
-                val line = asked.toIntOrNull()
-                if (line == null || line < 1) {
-                    results.addView(
-                        notice(getString(R.string.omni_editor_line_ask), palette.warning)
-                    )
-                } else {
-                    editor.showLine(line)
-                }
-            }
-        })
-        tools.addView(tool(getString(R.string.omni_editor_name), palette.accent) {
-            offerNames(root, editor)
-        })
-        tools.addView(tool(getString(R.string.omni_editor_go), palette.accent) {
-            goToDefinition(root, editor)
-        })
-        tools.addView(tool(getString(R.string.omni_editor_uses), palette.accent) {
-            findUses(root, editor)
-        })
-        tools.addView(tool(getString(R.string.omni_editor_shape), palette.accent) {
-            layOut(path.substringAfterLast('/'), editor)
-            mark()
-        })
-        content.addView(tools)
-
-        val sheet = card()
-        sheet.addView(
-            editor,
-            LinearLayout.LayoutParams(
-                MATCH_PARENT,
-                (resources.displayMetrics.heightPixels * 0.52f).toInt(),
-            ),
-        )
-        content.addView(sheet)
-
         var overwrite = false
-        content.addView(primary(getString(R.string.omni_action_save)) {
-            results.removeAllViews()
+        val keep = Runnable { Drafts.write(this, root, path, editorText) }
+        lateinit var saveMark: View
+
+        fun paintSave() {
+            saveMark.foreground = Mark(
+                Mark.Shape.SAVE,
+                if (dirty) palette.warning else palette.muted,
+            )
+        }
+
+        fun save() {
             editorText = editor.text?.toString().orEmpty()
             val now = runCatching { JSONObject(Builder.nativeReadFile(root, path)) }.getOrNull()
             val elsewhere = now != null &&
                 now.optBoolean("read", false) &&
                 now.optString("text") != editorOnDisk
+            results.removeAllViews()
             if (elsewhere && !overwrite) {
                 overwrite = true
                 results.addView(
                     notice(getString(R.string.omni_editor_changed_elsewhere), palette.warning)
                 )
-                return@primary
+                return
             }
             val saved = runCatching { JSONObject(Builder.nativeWriteFile(root, path, editorText)) }
                 .getOrNull()
@@ -3773,16 +3889,144 @@ class BuilderActivity : Activity() {
                 dirty = false
                 overwrite = false
                 editorOnDisk = editorText
-                where.text = path
-                where.setTextColor(palette.muted)
+                paintSave()
                 editor.removeCallbacks(keep)
                 Drafts.forget(this, root, path)
-                results.addView(notice(getString(R.string.omni_editor_saved, path), palette.ok))
             } else {
                 saved?.let { showRefusal(Refusal.parse(it), results) }
             }
-        })
-        content.addView(subtle(getString(R.string.omni_action_delete), palette.error) {
+        }
+
+        val watch = Runnable { checkWhileTyping(root, path, editor) }
+        fun mark() {
+            editorText = editor.text?.toString().orEmpty()
+            val changed = editorText != onDisk
+            if (changed != dirty) {
+                dirty = changed
+                paintSave()
+            }
+            editor.removeCallbacks(keep)
+            if (changed) {
+                editor.postDelayed(keep, Drafts.REST_MILLIS)
+            } else {
+                Drafts.forget(this, root, path)
+            }
+            editor.removeCallbacks(watch)
+            editor.postDelayed(watch, WATCH_CODE_MILLIS)
+            offerWhileTyping(root, editor)
+        }
+        editor.onChanged = ::mark
+
+        val tools = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, gap(1))
+        }
+        val each = LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS))
+        tools.addView(
+            markControl(Mark.Shape.UNDO, R.string.omni_editor_undo) {
+                editor.undo()
+                mark()
+            },
+            each,
+        )
+        tools.addView(
+            markControl(Mark.Shape.REDO, R.string.omni_editor_redo) {
+                editor.redo()
+                mark()
+            },
+            LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+        )
+        tools.addView(
+            markControl(Mark.Shape.FIND, R.string.omni_editor_find) {
+                askForName(getString(R.string.omni_editor_find_ask), findHere) { asked ->
+                    findHere = asked
+                    results.removeAllViews()
+                    val at = editor.findFrom(asked, editor.selectionEnd)
+                    if (at < 0) {
+                        results.addView(
+                            notice(getString(R.string.omni_editor_find_none), palette.warning)
+                        )
+                    } else {
+                        editor.show(at, at + asked.length)
+                    }
+                }
+            },
+            LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+        )
+        tools.addView(
+            markControl(Mark.Shape.LINE, R.string.omni_editor_line) {
+                askForName(getString(R.string.omni_editor_line_ask), "") { asked ->
+                    results.removeAllViews()
+                    val line = asked.toIntOrNull()
+                    if (line == null || line < 1) {
+                        results.addView(
+                            notice(getString(R.string.omni_editor_line_ask), palette.warning)
+                        )
+                    } else {
+                        editor.showLine(line)
+                    }
+                }
+            },
+            LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+        )
+        tools.addView(
+            markControl(Mark.Shape.FORMAT, R.string.omni_editor_shape) {
+                layOut(path.substringAfterLast('/'), editor)
+                mark()
+            },
+            LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+        )
+        tools.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
+
+        saveMark = markControl(Mark.Shape.SAVE, R.string.omni_action_save) { save() }
+        tools.addView(
+            saveMark,
+            LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+        )
+        tools.addView(
+            markControl(Mark.Shape.MORE, R.string.omni_action_more) {
+                editorMenu(root, path, editor, ::mark, keep)
+            },
+            LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+        )
+        paintSave()
+        content.addView(tools)
+
+        if (draft != null) {
+            content.addView(notice(getString(R.string.omni_editor_restored), palette.warning))
+        }
+
+        val sheet = card()
+        sheet.addView(
+            editor,
+            LinearLayout.LayoutParams(
+                MATCH_PARENT,
+                (resources.displayMetrics.heightPixels * 0.62f).toInt(),
+            ),
+        )
+        content.addView(sheet)
+        editor.postDelayed(watch, WATCH_CODE_MILLIS)
+    }
+
+    private fun editorMenu(
+        root: String,
+        path: String,
+        editor: CodeEditor,
+        changed: () -> Unit,
+        keep: Runnable,
+    ) {
+        val actions = mutableListOf<Pair<String, () -> Unit>>()
+        actions += getString(R.string.omni_action_copy) to {
+            copyOut(selectionOf(editor), path.substringAfterLast('/'))
+        }
+        actions += getString(R.string.omni_editor_paste) to {
+            pasteInto(editor)
+            changed()
+        }
+        actions += getString(R.string.omni_editor_go) to { goToDefinition(root, editor) }
+        actions += getString(R.string.omni_editor_uses) to { findUses(root, editor) }
+        actions += getString(R.string.omni_action_delete) to {
             results.removeAllViews()
             val thrown = runCatching {
                 JSONObject(Builder.nativeRemovePath(root, path, trashFolder()))
@@ -3794,58 +4038,176 @@ class BuilderActivity : Activity() {
             } else {
                 thrown?.let { showRefusal(Refusal.parse(it), results) }
             }
-        })
-        content.addView(quiet(getString(R.string.omni_trash_note)))
-        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-            go(Screen.Files(root, path.substringBeforeLast('/', "")))
-        })
+        }
+        AlertDialog.Builder(this)
+            .setTitle(path.substringAfterLast('/'))
+            .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
+                actions[which].second()
+            }
+            .show()
     }
 
-    private fun offerNames(root: String, editor: CodeEditor) {
-        val held = editor.text ?: return
+    private fun checkWhileTyping(root: String, path: String, editor: CodeEditor) {
+        if (checkingCode) {
+            return
+        }
+        checkingCode = true
+        val mine = editor
+        Thread {
+            val answer = runCatching { Builder.nativeCheckProject(root) }.getOrNull()
+            runOnUiThread {
+                checkingCode = false
+                if (isFinishing || isDestroyed || this.editor !== mine) {
+                    return@runOnUiThread
+                }
+                val checked = answer
+                    ?.let { runCatching { CodeCheck.parse(it) }.getOrNull() }
+                    ?: return@runOnUiThread
+                if (checked.clear) {
+                    mine.fault(-1)
+                    mine.say("")
+                    return@runOnUiThread
+                }
+                if (checked.file == path && checked.line > 0) {
+                    mine.fault(checked.line)
+                    mine.say(checked.refusal?.message.orEmpty())
+                } else {
+                    mine.fault(-1)
+                    mine.say(
+                        if (checked.file.isEmpty()) {
+                            checked.refusal?.message.orEmpty()
+                        } else {
+                            getString(
+                                R.string.omni_editor_elsewhere,
+                                checked.file.substringAfterLast('/'),
+                                checked.line,
+                            )
+                        }
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun offerWhileTyping(root: String, editor: CodeEditor) {
+        editor.removeCallbacks(offerSoon)
+        offerRoot = root
+        editor.postDelayed(offerSoon, OFFER_MILLIS)
+    }
+
+    private val offerSoon = Runnable {
+        val editor = this.editor ?: return@Runnable
+        val root = offerRoot ?: return@Runnable
+        val held = editor.text ?: return@Runnable
         val caret = editor.selectionEnd.coerceIn(0, held.length)
+        if (caret < held.length && isNamePart(held[caret])) {
+            hideOffers()
+            return@Runnable
+        }
         var from = caret
         while (from > 0 && isNamePart(held[from - 1])) from -= 1
-        var to = caret
-        while (to < held.length && isNamePart(held[to])) to += 1
-        val word = held.subSequence(from, to).toString()
-        if (word.isEmpty()) {
-            results.removeAllViews()
-            results.addView(notice(getString(R.string.omni_editor_name_none), palette.muted))
+        val word = held.subSequence(from, caret).toString()
+        if (word.length < OFFER_LEAST || !word[0].isLetter()) {
+            hideOffers()
+            return@Runnable
+        }
+        if (offering) {
+            return@Runnable
+        }
+        offering = true
+        Thread {
+            val answer = runCatching { Builder.nativeSymbols(root, word) }.getOrNull()
+            runOnUiThread {
+                offering = false
+                if (isFinishing || isDestroyed || this.editor !== editor) {
+                    return@runOnUiThread
+                }
+                showOffers(editor, from, caret, word, answer)
+            }
+        }.start()
+    }
+
+    private fun showOffers(
+        editor: CodeEditor,
+        from: Int,
+        to: Int,
+        word: String,
+        answer: String?,
+    ) {
+        val named = answer
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?.optJSONArray("named")
+        if (named == null || named.length() == 0) {
+            hideOffers()
+            return
+        }
+        val held = editor.text ?: return
+        if (editor.selectionEnd != to || to > held.length) {
+            hideOffers()
             return
         }
 
-        working({ Builder.nativeSymbols(root, word) }) finished@{ answer ->
-            val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
-            val named = document.optJSONArray("named")
-            if (named == null || named.length() == 0) {
-                results.addView(
-                    notice(getString(R.string.omni_editor_name_nothing, word), palette.muted)
-                )
-                return@finished
-            }
-            results.addView(heading(getString(R.string.omni_editor_name_found, word)))
-            val listed = card()
-            for (index in 0 until minOf(named.length(), 30)) {
-                val one = named.optJSONObject(index) ?: continue
-                if (index > 0) {
-                    listed.addView(rule(), MATCH_PARENT, 1)
-                }
-                val project = one.optString("from") == "project"
-                listed.addView(
-                    row(
-                        one.optString("simple"),
-                        one.optString("package"),
-                        if (project) getString(R.string.omni_editor_name_yours) else "",
-                        if (project) palette.ok else palette.muted,
-                    ) {
-                        putName(editor, from, to, one)
-                        results.removeAllViews()
-                    }
-                )
-            }
-            results.addView(listed)
+        val list = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheet(palette.surface, palette.accent)
+            setPadding(gap(1), gap(1), gap(1), gap(1))
         }
+        var shown = 0
+        for (index in 0 until named.length()) {
+            if (shown >= OFFER_MOST) break
+            val one = named.optJSONObject(index) ?: continue
+            val simple = one.optString("simple")
+            if (!simple.startsWith(word, ignoreCase = true)) continue
+            shown += 1
+            list.addView(
+                TextView(this).apply {
+                    text = simple
+                    typeface = Type.data
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+                    minimumHeight = gap(9)
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(gap(3), gap(1), gap(3), gap(1))
+                    isClickable = true
+                    isFocusable = true
+                    readAs(Button::class.java.name)
+                    background = reacting(Color.TRANSPARENT, gap(2).toFloat(), palette.accent)
+                    setOnClickListener {
+                        hideOffers()
+                        putName(editor, from, to, one)
+                    }
+                },
+                LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT),
+            )
+        }
+        if (shown == 0) {
+            hideOffers()
+            return
+        }
+
+        hideOffers()
+        val window = android.widget.PopupWindow(
+            list,
+            (resources.displayMetrics.widthPixels * 0.62f).toInt(),
+            WRAP_CONTENT,
+            true,
+        ).apply {
+            isOutsideTouchable = true
+            elevation = gap(2).toFloat()
+        }
+        offers = window
+        val layout = editor.layout
+        val row = layout?.getLineForOffset(to) ?: 0
+        val x = editor.paddingLeft + (layout?.getPrimaryHorizontal(to)?.toInt() ?: 0)
+        val y = (layout?.getLineBottom(row) ?: 0) - editor.scrollY + gap(1)
+        runCatching {
+            window.showAsDropDown(editor, x.coerceAtMost(gap(40)), y)
+        }.onFailure { offers = null }
+    }
+
+    private fun hideOffers() {
+        offers?.let { runCatching { it.dismiss() } }
+        offers = null
     }
 
     private fun isNamePart(c: Char): Boolean =
@@ -6994,6 +7356,7 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     private var matchHere = -1
     private var matchThere = -1
     private var faultLine = -1
+    private var said = ""
     private val squiggle = Path()
 
     private val history = History()
@@ -7183,6 +7546,11 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         invalidate()
     }
 
+    fun say(what: String) {
+        said = what
+        invalidate()
+    }
+
     fun findFrom(needle: String, from: Int): Int {
         if (needle.isEmpty()) return -1
         val held = text?.toString() ?: return -1
@@ -7342,6 +7710,27 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             if (matchHere >= 0 && matchThere >= 0) {
                 drawMatch(canvas, layout, matchHere)
                 drawMatch(canvas, layout, matchThere)
+            }
+
+            if (said.isNotEmpty()) {
+                gutter.textAlign = Paint.Align.LEFT
+                gutter.color = if (faultLine > 0) palette.error else palette.muted
+                val tall = gutter.textSize * 1.9f
+                rule.color = Ink.fade(palette.background, 0.92f)
+                canvas.drawRect(
+                    scrollX.toFloat(),
+                    (scrollY + height).toFloat() - tall,
+                    (scrollX + width).toFloat(),
+                    (scrollY + height).toFloat(),
+                    rule,
+                )
+                canvas.drawText(
+                    said,
+                    scrollX + gutter.textSize,
+                    (scrollY + height).toFloat() - tall * 0.42f,
+                    gutter,
+                )
+                gutter.textAlign = Paint.Align.RIGHT
             }
 
             rule.color = Ink.fade(palette.divider, 0.9f)

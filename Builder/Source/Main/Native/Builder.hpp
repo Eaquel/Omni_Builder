@@ -80,6 +80,8 @@ char *omni_remove_path(const char *root, const char *relative,
 
 char *omni_rename_path(const char *root, const char *from, const char *to);
 
+char *omni_copy_path(const char *root, const char *from, const char *to);
+
 char *omni_list_built(const char *directory);
 
 char *omni_trash_send(const char *trash_root, const char *path);

@@ -635,6 +635,24 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeRenamePath(
                                         to_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCopyPath(
+    JNIEnv *env, jobject , jstring root, jstring from, jstring to) {
+  std::string root_text;
+  std::string from_text;
+  std::string to_text;
+  if (!TwoPaths(env, root, from, &root_text, &from_text,
+                "Moving something needs a project and two paths.")) {
+    return nullptr;
+  }
+  if (to == nullptr || !JavaStringToUtf8(env, to, &to_text)) {
+    ThrowJava(env, kIllegalState,
+              "Moving something needs a project and two paths.");
+    return nullptr;
+  }
+  return HandBack(env, omni_copy_path(root_text.c_str(), from_text.c_str(),
+                                        to_text.c_str()));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListBuilt(
     JNIEnv *env, jobject , jstring directory) {
   std::string directory_text;
