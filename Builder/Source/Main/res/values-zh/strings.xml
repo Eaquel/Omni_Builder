@@ -147,6 +147,11 @@
     <string name="omni_editor_undo">撤销</string>
     <string name="omni_editor_redo">重做</string>
     <string name="omni_editor_paste">粘贴</string>
+    <string name="omni_editor_find">查找</string>
+    <string name="omni_editor_find_ask">在此文件中查找的文本</string>
+    <string name="omni_editor_find_none">此文件中没有。</string>
+    <string name="omni_editor_line">行</string>
+    <string name="omni_editor_line_ask">行号</string>
     <string name="omni_editor_unsaved">有未保存的改动</string>
     <string name="omni_editor_restored">你上次在这里输入的内容已保留并放回。保存它，或改掉它。</string>
     <string name="omni_search_title">在项目中查找</string>

@@ -147,6 +147,11 @@
     <string name="omni_editor_undo">DESHACER</string>
     <string name="omni_editor_redo">REHACER</string>
     <string name="omni_editor_paste">PEGAR</string>
+    <string name="omni_editor_find">BUSCAR</string>
+    <string name="omni_editor_find_ask">Texto que buscar en este archivo</string>
+    <string name="omni_editor_find_none">No está en este archivo.</string>
+    <string name="omni_editor_line">LÍNEA</string>
+    <string name="omni_editor_line_ask">Número de línea</string>
     <string name="omni_editor_unsaved">Cambios sin guardar</string>
     <string name="omni_editor_restored">Lo que escribiste aquí la última vez se guardó y se ha devuelto. Guárdalo o edítalo hasta quitarlo.</string>
     <string name="omni_search_title">Buscar en el proyecto</string>

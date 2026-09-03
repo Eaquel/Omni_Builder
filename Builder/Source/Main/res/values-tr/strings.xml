@@ -147,6 +147,11 @@
     <string name="omni_editor_undo">GERİ AL</string>
     <string name="omni_editor_redo">İLERİ AL</string>
     <string name="omni_editor_paste">YAPIŞTIR</string>
+    <string name="omni_editor_find">BUL</string>
+    <string name="omni_editor_find_ask">Bu dosyada aranacak metin</string>
+    <string name="omni_editor_find_none">Bu dosyada yok.</string>
+    <string name="omni_editor_line">SATIR</string>
+    <string name="omni_editor_line_ask">Satır numarası</string>
     <string name="omni_editor_unsaved">Kaydedilmemiş değişiklikler</string>
     <string name="omni_editor_restored">Buraya en son yazdıkların saklanıp geri kondu. Kaydet ya da düzenleyip çıkar.</string>
     <string name="omni_search_title">Projede ara</string>

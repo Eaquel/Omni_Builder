@@ -147,6 +147,11 @@
     <string name="omni_editor_undo">UNDO</string>
     <string name="omni_editor_redo">REDO</string>
     <string name="omni_editor_paste">PASTE</string>
+    <string name="omni_editor_find">FIND</string>
+    <string name="omni_editor_find_ask">Text to find in this file</string>
+    <string name="omni_editor_find_none">Not in this file.</string>
+    <string name="omni_editor_line">LINE</string>
+    <string name="omni_editor_line_ask">Line number</string>
     <string name="omni_editor_unsaved">Unsaved changes</string>
     <string name="omni_editor_restored">What you typed here last time was kept and put back. Save it, or edit it away.</string>
     <string name="omni_search_title">Find in project</string>

@@ -147,6 +147,11 @@
     <string name="omni_editor_undo">ZURÜCK</string>
     <string name="omni_editor_redo">VOR</string>
     <string name="omni_editor_paste">EINFÜGEN</string>
+    <string name="omni_editor_find">SUCHEN</string>
+    <string name="omni_editor_find_ask">Text in dieser Datei suchen</string>
+    <string name="omni_editor_find_none">Nicht in dieser Datei.</string>
+    <string name="omni_editor_line">ZEILE</string>
+    <string name="omni_editor_line_ask">Zeilennummer</string>
     <string name="omni_editor_unsaved">Nicht gespeicherte Änderungen</string>
     <string name="omni_editor_restored">Was Sie hier zuletzt getippt haben, wurde aufbewahrt und zurückgelegt. Speichern Sie es oder bearbeiten Sie es weg.</string>
     <string name="omni_search_title">Im Projekt suchen</string>

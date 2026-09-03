@@ -147,6 +147,11 @@
     <string name="omni_editor_undo">ОТМЕНИТЬ</string>
     <string name="omni_editor_redo">ВЕРНУТЬ</string>
     <string name="omni_editor_paste">ВСТАВИТЬ</string>
+    <string name="omni_editor_find">НАЙТИ</string>
+    <string name="omni_editor_find_ask">Что искать в этом файле</string>
+    <string name="omni_editor_find_none">В этом файле этого нет.</string>
+    <string name="omni_editor_line">СТРОКА</string>
+    <string name="omni_editor_line_ask">Номер строки</string>
     <string name="omni_editor_unsaved">Несохранённые изменения</string>
     <string name="omni_editor_restored">То, что вы набрали здесь в прошлый раз, сохранено и возвращено. Сохраните это или удалите правкой.</string>
     <string name="omni_search_title">Поиск по проекту</string>

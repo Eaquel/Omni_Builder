@@ -1548,6 +1548,7 @@ class BuilderActivity : Activity() {
     private var editorOnDisk = ""
 
     private var editorLine = 0
+    private var findHere = ""
 
     override fun attachBaseContext(base: Context) {
 
@@ -3343,6 +3344,33 @@ class BuilderActivity : Activity() {
         tools.addView(tool(getString(R.string.omni_editor_paste), palette.foreground) {
             pasteInto(editor)
             mark()
+        })
+        tools.addView(tool(getString(R.string.omni_editor_find), palette.accent) {
+            askForName(getString(R.string.omni_editor_find_ask), findHere) { asked ->
+                findHere = asked
+                results.removeAllViews()
+                val at = editor.findFrom(asked, editor.selectionEnd)
+                if (at < 0) {
+                    results.addView(
+                        notice(getString(R.string.omni_editor_find_none), palette.warning)
+                    )
+                } else {
+                    editor.show(at, at + asked.length)
+                }
+            }
+        })
+        tools.addView(tool(getString(R.string.omni_editor_line), palette.accent) {
+            askForName(getString(R.string.omni_editor_line_ask), "") { asked ->
+                results.removeAllViews()
+                val line = asked.toIntOrNull()
+                if (line == null || line < 1) {
+                    results.addView(
+                        notice(getString(R.string.omni_editor_line_ask), palette.warning)
+                    )
+                } else {
+                    editor.showLine(line)
+                }
+            }
         })
         tools.addView(tool(getString(R.string.omni_editor_name), palette.accent) {
             offerNames(root, editor)
@@ -6228,6 +6256,13 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
         const val MARGIN_LINES = 40
 
         const val REST_MILLIS = 140L
+
+        const val STEP = "    "
+
+        const val REACH = 40_000
+
+        val OPENERS = "{(["
+        val CLOSERS = "})]"
     }
 
     private val gutter = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -6243,6 +6278,11 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     private var generation = 0
 
     private var replaying = false
+    private var helping = false
+    private var typedAt = -1
+    private var typedOne = '\u0000'
+    private var matchHere = -1
+    private var matchThere = -1
 
     private val history = History()
 
@@ -6275,6 +6315,8 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
 
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
                 if (replaying || s == null) return
+                typedAt = start
+                typedOne = if (before == 0 && count == 1) s[start] else '\u0000'
                 history.record(
                     History.Change(
                         start,
@@ -6286,6 +6328,11 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             }
 
             override fun afterTextChanged(s: Editable?) {
+                if (s != null && !helping && !replaying && typedOne != '\u0000') {
+                    val typed = typedOne
+                    typedOne = '\u0000'
+                    helpTyping(s, typedAt, typed)
+                }
                 onChanged?.invoke()
                 removeCallbacks(readAgain)
                 postDelayed(readAgain, REST_MILLIS)
@@ -6327,6 +6374,106 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             scrollTo(0, (layout.getLineTop(row) - height / 3).coerceAtLeast(0))
             invalidate()
         }
+    }
+
+    private fun helpTyping(s: Editable, at: Int, typed: Char) {
+        if (at < 0 || at >= s.length) return
+        val closer = OPENERS.indexOf(typed).takeIf { it >= 0 }?.let { CLOSERS[it] }
+        if (closer != null) {
+            val after = if (at + 1 < s.length) s[at + 1] else '\n'
+            if (after != '\n' && after != ' ' && CLOSERS.indexOf(after) < 0) return
+            helping = true
+            s.insert(at + 1, closer.toString())
+            helping = false
+            setSelection((at + 1).coerceIn(0, s.length))
+            return
+        }
+        if (typed != '\n') return
+
+        var lineStart = at
+        while (lineStart > 0 && s[lineStart - 1] != '\n') {
+            lineStart -= 1
+        }
+        val indent = StringBuilder()
+        var walk = lineStart
+        while (walk < at && (s[walk] == ' ' || s[walk] == '\t')) {
+            indent.append(s[walk])
+            walk += 1
+        }
+        val above = s.subSequence(lineStart, at).toString().trimEnd()
+        val deeper = above.isNotEmpty() && OPENERS.indexOf(above.last()) >= 0
+        val here = indent.toString() + if (deeper) STEP else ""
+        val closes = at + 1 < s.length && CLOSERS.indexOf(s[at + 1]) >= 0
+        val put = StringBuilder(here)
+        if (deeper && closes) {
+            put.append('\n').append(indent)
+        }
+        if (put.isEmpty()) return
+        helping = true
+        s.insert(at + 1, put.toString())
+        helping = false
+        setSelection((at + 1 + here.length).coerceIn(0, s.length))
+    }
+
+    private fun matchAround(caret: Int) {
+        matchHere = -1
+        matchThere = -1
+        val held = text ?: return
+        if (held.length > REACH) return
+
+        var at = -1
+        var forward = true
+        if (caret < held.length && OPENERS.indexOf(held[caret]) >= 0) {
+            at = caret
+        } else if (caret > 0 && CLOSERS.indexOf(held[caret - 1]) >= 0) {
+            at = caret - 1
+            forward = false
+        } else if (caret < held.length && CLOSERS.indexOf(held[caret]) >= 0) {
+            at = caret
+            forward = false
+        } else if (caret > 0 && OPENERS.indexOf(held[caret - 1]) >= 0) {
+            at = caret - 1
+        }
+        if (at < 0) return
+
+        val mine = held[at]
+        val other = if (forward) {
+            CLOSERS[OPENERS.indexOf(mine)]
+        } else {
+            OPENERS[CLOSERS.indexOf(mine)]
+        }
+        var depth = 0
+        var walk = at
+        while (walk >= 0 && walk < held.length) {
+            val one = held[walk]
+            if (one == mine) {
+                depth += 1
+            } else if (one == other) {
+                depth -= 1
+                if (depth == 0) {
+                    matchHere = at
+                    matchThere = walk
+                    return
+                }
+            }
+            walk += if (forward) 1 else -1
+        }
+    }
+
+    fun findFrom(needle: String, from: Int): Int {
+        if (needle.isEmpty()) return -1
+        val held = text?.toString() ?: return -1
+        val ahead = held.indexOf(needle, from.coerceIn(0, held.length))
+        return if (ahead >= 0) ahead else held.indexOf(needle)
+    }
+
+    fun show(from: Int, to: Int) {
+        val held = text ?: return
+        setSelection(from.coerceIn(0, held.length), to.coerceIn(0, held.length))
+        val layout = layout ?: return
+        val row = layout.getLineForOffset(from.coerceIn(0, held.length))
+        scrollTo(0, (layout.getLineTop(row) - height / 3).coerceAtLeast(0))
+        invalidate()
     }
 
     fun undo() = move { history.undo(it) }
@@ -6464,6 +6611,11 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
                 )
             }
 
+            if (matchHere >= 0 && matchThere >= 0) {
+                drawMatch(canvas, layout, matchHere)
+                drawMatch(canvas, layout, matchThere)
+            }
+
             rule.color = Ink.fade(palette.divider, 0.9f)
             val at = (paddingLeft - gutter.textSize * 0.35f) + scrollX
             canvas.drawLine(
@@ -6479,7 +6631,28 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
 
     override fun onSelectionChanged(start: Int, end: Int) {
         super.onSelectionChanged(start, end)
+        if (start == end) {
+            matchAround(start)
+        } else {
+            matchHere = -1
+            matchThere = -1
+        }
         invalidate()
+    }
+
+    private fun drawMatch(canvas: Canvas, layout: android.text.Layout, at: Int) {
+        if (at < 0 || at >= (text?.length ?: 0)) return
+        val row = layout.getLineForOffset(at)
+        val from = layout.getPrimaryHorizontal(at)
+        val to = layout.getPrimaryHorizontal(at + 1)
+        rule.color = Ink.fade(palette.accent, 0.28f)
+        canvas.drawRect(
+            min(from, to),
+            layout.getLineTop(row).toFloat(),
+            max(from, to),
+            layout.getLineBottom(row).toFloat(),
+            rule,
+        )
     }
 
     override fun onDetachedFromWindow() {

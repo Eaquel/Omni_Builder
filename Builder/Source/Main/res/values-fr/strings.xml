@@ -147,6 +147,11 @@
     <string name="omni_editor_undo">ANNULER</string>
     <string name="omni_editor_redo">RÉTABLIR</string>
     <string name="omni_editor_paste">COLLER</string>
+    <string name="omni_editor_find">CHERCHER</string>
+    <string name="omni_editor_find_ask">Texte à chercher dans ce fichier</string>
+    <string name="omni_editor_find_none">Pas dans ce fichier.</string>
+    <string name="omni_editor_line">LIGNE</string>
+    <string name="omni_editor_line_ask">Numéro de ligne</string>
     <string name="omni_editor_unsaved">Modifications non enregistrées</string>
     <string name="omni_editor_restored">Ce que vous aviez tapé ici a été conservé et remis. Enregistrez-le, ou modifiez-le pour l\'effacer.</string>
     <string name="omni_search_title">Chercher dans le projet</string>
