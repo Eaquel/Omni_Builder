@@ -201,7 +201,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
                   and value back out of it.",
         missing: &[
             "A qualifier this build does not know is refused rather than treated as the default, which would put the wrong file on every device.",
-            "Nothing marks a name public or private, so every entry in the table is reachable from anywhere.",
+            "A library brings its resources in whole. There is no overlay order and no way for a project to replace one of them.",
             "The table carries one package and no overlays, libraries or staged aliases.",
             "Nothing reads resource files through the virtual filesystem yet.",
         ],
@@ -375,7 +375,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Image codec",
         status: Status::Beta,
         directive_section: 22,
-        summary: "Decodes a PNG to pixels and writes one back: every chunk checked against its own CRC-32, every filter and bit depth the format defines, and an encoder that picks the narrowest colour type, a palette when it wins, and the cheapest filter per line. 200 images written by other tools decode here and survive a write and a read unchanged, within a tenth of the size the tools that made them wrote.",
+        summary: "Decodes a PNG to pixels and writes one back: every chunk checked against its own CRC-32, every filter and bit depth the format defines, and an encoder that picks the narrowest colour type, a palette when it wins, and the cheapest filter per line. 200 images written by other tools decode here and survive a write and a read unchanged, within a tenth of the size the tools that made them wrote. A nine-patch is compiled rather than carried: the guide border is read into stretchable runs, padding and per-region colours, written into the npTc chunk the platform reads, and the border is cropped away -- byte for byte what aapt2 writes for the same file.",
         missing: &[
             "PNG only. No JPEG, no WebP and no vector drawable.",
             "Interlaced images are refused rather than decoded: Adam7 stores one image as seven and nothing here needs it.",
@@ -9477,10 +9477,12 @@ pub mod resources {
                 }
             };
 
-            let stem = file_name
-                .rsplit_once('.')
-                .map(|(stem, _)| stem)
-                .unwrap_or(file_name);
+            let (stem, extension) = file_name.rsplit_once('.').unwrap_or((file_name, ""));
+            let stem = if extension.eq_ignore_ascii_case("png") {
+                stem.strip_suffix(".9").unwrap_or(stem)
+            } else {
+                stem
+            };
             if let Err(reason) = validate_name(stem) {
                 sink.emit(
                     self.problem("E9011", reason, path, Position::default())
@@ -10420,9 +10422,28 @@ pub mod resources {
                 );
                 None
             }
+            Kind::Drawable => match parse_color(trimmed) {
+                Ok(color) => Some(Value::Color(color)),
+                Err(_) => {
+                    sink.emit(
+                        reject(
+                            "E9047",
+                            "A drawable in a values file holds a colour and nothing else."
+                                .to_string(),
+                            origin,
+                            position,
+                        )
+                        .with_suggestion(
+                            "A drawable that is a picture is declared by the file that \
+                             holds it. One written here is a colour, and Android makes a \
+                             plain colour drawable of it.",
+                        ),
+                    );
+                    None
+                }
+            },
             Kind::Anim
             | Kind::Animator
-            | Kind::Drawable
             | Kind::Font
             | Kind::Interpolator
             | Kind::Layout
@@ -25473,6 +25494,177 @@ pub mod image {
         out.extend_from_slice(&check.finish().to_be_bytes());
     }
 
+    pub const NINE_PATCH_SUFFIX: &str = ".9.png";
+
+    pub const NO_COLOUR: u32 = 0x0000_0001;
+
+    fn marked(pixel: [u8; 4]) -> bool {
+        pixel[3] > 0x7f && pixel[0] < 0x40 && pixel[1] < 0x40 && pixel[2] < 0x40
+    }
+
+    fn runs(reader: impl Fn(u32) -> bool, from: u32, until: u32) -> Vec<i32> {
+        let mut out = Vec::new();
+        let mut inside = false;
+        for at in from..until {
+            let held = reader(at);
+            if held && !inside {
+                out.push((at - from) as i32);
+                inside = true;
+            } else if !held && inside {
+                out.push((at - from) as i32);
+                inside = false;
+            }
+        }
+        if inside {
+            out.push((until - from) as i32);
+        }
+        out
+    }
+
+    fn edges(reader: impl Fn(u32) -> bool, from: u32, until: u32) -> (i32, i32) {
+        let held = runs(reader, from, until);
+        if held.len() < 2 {
+            return (0, 0);
+        }
+        let first = held[0];
+        let last = held[held.len() - 1];
+        (first, (until - from) as i32 - last)
+    }
+
+    pub fn nine_patch(source: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        let raster = decode(source)?;
+        if raster.width < 3 || raster.height < 3 {
+            return Err(fail(
+                "EM030",
+                "A nine-patch needs a one pixel border on every side.",
+            )
+            .with_context(format!("Size: {}x{}", raster.width, raster.height)));
+        }
+        let right = raster.width - 1;
+        let bottom = raster.height - 1;
+
+        let stretch_x = runs(|x| marked(raster.at(x, 0)), 1, right);
+        let stretch_y = runs(|y| marked(raster.at(0, y)), 1, bottom);
+        if stretch_x.len() > 255 || stretch_y.len() > 255 {
+            return Err(
+                fail("EM031", "A nine-patch marks too many stretchable runs.").with_context(
+                    format!("Across: {}, down: {}", stretch_x.len(), stretch_y.len()),
+                ),
+            );
+        }
+        let (pad_left, pad_right) = edges(|x| marked(raster.at(x, bottom)), 1, right);
+        let (pad_top, pad_bottom) = edges(|y| marked(raster.at(right, y)), 1, bottom);
+
+        let mut inside = Raster::new(raster.width - 2, raster.height - 2);
+        for y in 0..inside.height {
+            for x in 0..inside.width {
+                inside.put(x, y, raster.at(x + 1, y + 1));
+            }
+        }
+
+        let across = stretch_x.len() + 1;
+        let down = stretch_y.len() + 1;
+        let regions = across * down;
+
+        let bounds = |divs: &[i32], whole: u32| -> Vec<(u32, u32)> {
+            let mut edges = vec![0u32];
+            for one in divs {
+                edges.push(*one as u32);
+            }
+            edges.push(whole);
+            edges.windows(2).map(|pair| (pair[0], pair[1])).collect()
+        };
+        let columns = bounds(&stretch_x, inside.width);
+        let rows = bounds(&stretch_y, inside.height);
+
+        let mut colours = Vec::with_capacity(regions);
+        for (top, bottom_edge) in &rows {
+            for (left, right_edge) in &columns {
+                let mut one: Option<[u8; 4]> = None;
+                let mut same = true;
+                for y in *top..*bottom_edge {
+                    for x in *left..*right_edge {
+                        let pixel = inside.at(x, y);
+                        match one {
+                            None => one = Some(pixel),
+                            Some(held) if held == pixel => {}
+                            Some(_) => {
+                                same = false;
+                                break;
+                            }
+                        }
+                    }
+                    if !same {
+                        break;
+                    }
+                }
+                colours.push(match (same, one) {
+                    (true, Some(pixel)) if pixel[3] == 0 => 0u32,
+                    (true, Some(pixel)) => {
+                        (u32::from(pixel[3]) << 24)
+                            | (u32::from(pixel[0]) << 16)
+                            | (u32::from(pixel[1]) << 8)
+                            | u32::from(pixel[2])
+                    }
+                    _ => NO_COLOUR,
+                });
+            }
+        }
+
+        let mut body = Vec::with_capacity(32 + 4 * (stretch_x.len() + stretch_y.len() + regions));
+        body.push(0u8);
+        body.push(stretch_x.len() as u8);
+        body.push(stretch_y.len() as u8);
+        body.push(regions as u8);
+        let x_at = 32u32;
+        let y_at = x_at + 4 * stretch_x.len() as u32;
+        let colours_at = y_at + 4 * stretch_y.len() as u32;
+        body.extend_from_slice(&x_at.to_le_bytes());
+        body.extend_from_slice(&y_at.to_le_bytes());
+        for one in [pad_left, pad_right, pad_top, pad_bottom] {
+            body.extend_from_slice(&one.to_le_bytes());
+        }
+        body.extend_from_slice(&colours_at.to_le_bytes());
+        for one in &stretch_x {
+            body.extend_from_slice(&one.to_be_bytes());
+        }
+        for one in &stretch_y {
+            body.extend_from_slice(&one.to_be_bytes());
+        }
+        for one in &colours {
+            body.extend_from_slice(&one.to_be_bytes());
+        }
+
+        let written = encode_smallest(&inside)?;
+        let mut out = Vec::with_capacity(written.len() + body.len() + 12);
+        let mut at = 8usize;
+        out.extend_from_slice(&written[..8]);
+        let mut placed = false;
+        while at + 8 <= written.len() {
+            let length = u32::from_be_bytes([
+                written[at],
+                written[at + 1],
+                written[at + 2],
+                written[at + 3],
+            ]) as usize;
+            let kind = &written[at + 4..at + 8];
+            let whole = at + 12 + length;
+            if whole > written.len() {
+                break;
+            }
+            if !placed && kind != b"IHDR" {
+                write_chunk(&mut out, b"npTc", &body);
+                placed = true;
+            }
+            out.extend_from_slice(&written[at..whole]);
+            at = whole;
+        }
+        if !placed {
+            write_chunk(&mut out, b"npTc", &body);
+        }
+        Ok(out)
+    }
+
     pub fn resize(raster: &Raster, width: u32, height: u32) -> Raster {
         if width == raster.width && height == raster.height {
             return raster.clone();
@@ -28771,6 +28963,14 @@ pub mod builder {
         pub files: Vec<(String, Vec<u8>)>,
     }
 
+    fn packaged(name: &str, bytes: Vec<u8>) -> Result<Vec<u8>, Diagnostic> {
+        if !name.ends_with(crate::image::NINE_PATCH_SUFFIX) {
+            return Ok(bytes);
+        }
+        crate::image::nine_patch(&bytes)
+            .map_err(|error| error.with_context(format!("File: {name}")))
+    }
+
     fn entry_for(folder: &str, name: &str) -> String {
         if name.ends_with(".xml") {
             return format!("res/{folder}/{name}");
@@ -28907,7 +29107,8 @@ pub mod builder {
                 }
                 compiling.push((entry, held.clone()));
             } else {
-                files.push((entry, held.bytes.clone()));
+                let bytes = packaged(&entry, held.bytes.clone())?;
+                files.push((entry, bytes));
             }
         }
 
@@ -28971,9 +29172,26 @@ pub mod builder {
                         .map(|(kind, _)| kind.is_compiled_xml())
                         .unwrap_or(false)
                 {
+                    let mut named = crate::diag::Sink::new();
+                    let text = String::from_utf8_lossy(&held.bytes).to_string();
+                    if let Some(parsed) = crate::xml::parse(&text, &entry, &mut named) {
+                        let mut declared = Vec::new();
+                        ids_declared_in(&parsed, &mut declared);
+                        for name in declared {
+                            if !table.declare_id(&name, &entry, sink) {
+                                return Err(fail(
+                                    "EB051",
+                                    "An identifier a library declares could not be added.",
+                                )
+                                .with_context(format!("File: {entry}"))
+                                .with_context(format!("Identifier: {name}")));
+                            }
+                        }
+                    }
                     compiling.push((entry, held));
                 } else {
-                    files.push((entry, held.bytes));
+                    let bytes = packaged(&entry, held.bytes)?;
+                    files.push((entry, bytes));
                 }
             }
         }
@@ -29045,6 +29263,10 @@ pub mod builder {
                 continue;
             };
             if rest.starts_with("0x") || rest.starts_with("0X") {
+                continue;
+            }
+            if rest == "null" || rest == "empty" {
+                attribute.value = "@0x00000000".to_string();
                 continue;
             }
             let Some(reference) = crate::resources::Reference::parse(&attribute.value) else {
@@ -38917,6 +39139,352 @@ public class Written {
             } else if path.extension().and_then(|one| one.to_str()) == Some("class") {
                 into.push(path);
             }
+        }
+    }
+
+    fn library_corpus() -> Vec<std::path::PathBuf> {
+        let folder = std::env::var("OMNI_LIBRARY_CORPUS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/library-corpus")
+            });
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            return Vec::new();
+        };
+        let mut found: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .map(|held| held == "jar" || held == "aar")
+                    .unwrap_or(false)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+
+    const CALLS_INTO_COMMONS: &str = r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.widget.TextView;
+import org.apache.commons.lang3.StringUtils;
+
+public final class MainActivity extends Activity {
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        String said = StringUtils.reverse("omni builder");
+        String padded = StringUtils.leftPad(said, 20, '.');
+        boolean numeric = StringUtils.isNumeric(padded);
+        TextView view = new TextView(this);
+        view.setText(padded + " " + numeric + " " + StringUtils.capitalize("done"));
+        setContentView(view);
+    }
+}
+"#;
+
+    const CALLS_INTO_GSON: &str = r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.widget.TextView;
+import com.google.gson.Gson;
+import java.util.ArrayList;
+import java.util.List;
+
+public final class MainActivity extends Activity {
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        List<String> held = new ArrayList<>();
+        held.add("omni");
+        held.add("builder");
+        Gson gson = new Gson();
+        String written = gson.toJson(held);
+        TextView view = new TextView(this);
+        view.setText(written);
+        setContentView(view);
+    }
+}
+"#;
+
+    const CALLS_INTO_ANDROIDX: &str = r#"
+package com.tr.yt;
+
+import android.app.Activity;
+import android.os.Bundle;
+import android.view.View;
+import android.widget.TextView;
+import androidx.core.view.ViewCompat;
+
+public final class MainActivity extends Activity {
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        TextView view = new TextView(this);
+        view.setText("carried");
+        ViewCompat.setElevation(view, 8.0f);
+        int direction = ViewCompat.getLayoutDirection(view);
+        view.setText("carried " + direction);
+        setContentView(view);
+    }
+}
+"#;
+
+    #[test]
+    fn a_nine_patch_is_compiled_the_way_aapt2_compiles_one() {
+        let corpus = library_corpus();
+        let Some(aar) = corpus
+            .iter()
+            .find(|one| one.file_name().unwrap().to_string_lossy().ends_with(".aar"))
+        else {
+            eprintln!("nine-patch: no published library is available here");
+            return;
+        };
+        let Some(aapt2) = find_build_tool("aapt2") else {
+            eprintln!("nine-patch: aapt2 is not available here");
+            return;
+        };
+
+        let bytes = std::fs::read(aar).unwrap();
+        let mut sink = Sink::new();
+        let archive = super::archive::read(&bytes, &mut sink).unwrap();
+        let held: Vec<String> = archive
+            .entries()
+            .iter()
+            .map(|one| one.name.clone())
+            .filter(|name| name.ends_with(".9.png"))
+            .collect();
+        assert!(!held.is_empty(), "the library carries no nine-patch");
+
+        let directory = temp_directory("omni-nine-patch");
+        let inbox = directory.join("drawable");
+        let outbox = directory.join("out");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&outbox).unwrap();
+        let mut checked = 0;
+
+        for name in held.iter().take(4) {
+            let entry = archive
+                .entries()
+                .iter()
+                .find(|one| one.name == *name)
+                .unwrap();
+            let source = super::builder::entry_bytes(&bytes, entry, "aar").unwrap();
+            let short = name.rsplit('/').next().unwrap();
+            let raw = inbox.join(short);
+            std::fs::write(&raw, &source).unwrap();
+
+            let mine = super::image::nine_patch(&source)
+                .unwrap_or_else(|error| panic!("{short}: {} {}", error.code, error.message));
+
+            let made = std::process::Command::new(&aapt2)
+                .args([
+                    "compile",
+                    raw.to_str().unwrap(),
+                    "-o",
+                    outbox.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                made.status.success(),
+                "aapt2 would not compile {short}:\n{}",
+                String::from_utf8_lossy(&made.stderr)
+            );
+
+            let theirs = std::fs::read_dir(&outbox)
+                .unwrap()
+                .flatten()
+                .map(|one| one.path())
+                .find(|path| path.extension().map(|held| held == "flat").unwrap_or(false))
+                .expect("aapt2 wrote a compiled resource");
+            let flat = std::fs::read(&theirs).unwrap();
+            std::fs::remove_file(&theirs).ok();
+
+            let ours = find_chunk(&mine, b"npTc").expect("this build writes an npTc chunk");
+            let count = flat.windows(4).filter(|window| *window == b"npTc").count();
+            assert!(
+                count > 0,
+                "{short}: aapt2 wrote no npTc chunk to compare with"
+            );
+            let at = flat
+                .windows(4)
+                .position(|window| window == b"npTc")
+                .unwrap();
+            let length =
+                u32::from_be_bytes([flat[at - 4], flat[at - 3], flat[at - 2], flat[at - 1]])
+                    as usize;
+            let theirs = &flat[at + 4..at + 4 + length];
+
+            assert_eq!(
+                ours.len(),
+                theirs.len(),
+                "{short}: a different sized npTc chunk"
+            );
+            assert_eq!(ours[1], theirs[1], "{short}: a different number of x runs");
+            assert_eq!(ours[2], theirs[2], "{short}: a different number of y runs");
+            assert_eq!(ours[3], theirs[3], "{short}: a different number of regions");
+            assert_eq!(&ours[8..24], &theirs[8..24], "{short}: different padding");
+            assert_eq!(
+                &ours[32..],
+                &theirs[32..],
+                "{short}: different runs or region colours"
+            );
+
+            let inside = super::image::read_png(&mine).unwrap();
+            let outside = super::image::read_png(&source).unwrap();
+            assert_eq!(inside.width, outside.width - 2, "{short}");
+            assert_eq!(inside.height, outside.height - 2, "{short}");
+            checked += 1;
+        }
+
+        assert!(checked > 0);
+        eprintln!("nine-patch: {checked} compiled, and aapt2 agrees on every one");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    fn find_chunk<'a>(png: &'a [u8], wanted: &[u8; 4]) -> Option<&'a [u8]> {
+        let mut at = 8usize;
+        while at + 8 <= png.len() {
+            let length =
+                u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]) as usize;
+            let kind = &png[at + 4..at + 8];
+            if kind == wanted {
+                return png.get(at + 8..at + 8 + length);
+            }
+            at += 12 + length;
+        }
+        None
+    }
+
+    #[test]
+    fn a_library_somebody_else_published_compiles_into_a_package() {
+        let corpus = library_corpus();
+        if corpus.is_empty() {
+            assert!(
+                std::env::var("OMNI_REQUIRE_LIBRARY_CORPUS").is_err(),
+                "OMNI_REQUIRE_LIBRARY_CORPUS is set but no library is here"
+            );
+            eprintln!("libraries: no published library is available here");
+            return;
+        }
+
+        let mut read = 0usize;
+        let mut compiled = 0usize;
+        let mut report: Vec<String> = Vec::new();
+
+        for library in &corpus {
+            let named = library.file_name().unwrap().to_string_lossy().to_string();
+            let directory = temp_directory("omni-published");
+            let root = directory.join("Uses");
+            let folder = root.to_str().unwrap().to_string();
+            super::scaffold::create(
+                &folder,
+                &super::scaffold::Spec {
+                    package: "com.tr.yt".to_string(),
+                    label: "Uses".to_string(),
+                    languages: vec!["java".to_string()],
+                    min_sdk: 30,
+                    target_sdk: 36,
+                    ..Default::default()
+                },
+            )
+            .expect("the project must be made");
+
+            let libraries = root.join(super::scaffold::LIBRARY_FOLDER);
+            std::fs::create_dir_all(&libraries).unwrap();
+            std::fs::copy(library, libraries.join(&named)).unwrap();
+
+            let held = super::depends::held(&folder).expect("the library folder reads");
+            let one = held
+                .each
+                .iter()
+                .find(|dependency| dependency.name == named)
+                .unwrap_or_else(|| panic!("{named} was not read back"));
+            assert!(one.classes > 0, "{named} carries no class");
+            assert!(one.bytes > 0);
+            read += 1;
+            report.push(format!("{named}: {} classes", one.classes));
+
+            let source = match () {
+                _ if named.starts_with("commons-lang3") => Some(CALLS_INTO_COMMONS),
+                _ if named.starts_with("gson") => Some(CALLS_INTO_GSON),
+                _ if named.starts_with("core-") && named.ends_with(".aar") => {
+                    Some(CALLS_INTO_ANDROIDX)
+                }
+                _ => None,
+            };
+            let Some(source) = source else {
+                std::fs::remove_dir_all(&directory).ok();
+                continue;
+            };
+
+            super::workspace::write_text(
+                &folder,
+                &format!("{}/MainActivity.java", super::scaffold::JAVA_FOLDER),
+                source.trim_start(),
+            )
+            .unwrap();
+
+            let project = super::builder::from_project(&folder).unwrap_or_else(|error| {
+                panic!(
+                    "{named}: {} {} {:?}",
+                    error.code, error.message, error.context
+                )
+            });
+            let names: Vec<&str> = project
+                .code
+                .iter()
+                .map(|class| class.descriptor.as_str())
+                .collect();
+            assert!(
+                names.contains(&"Lcom/tr/yt/MainActivity;"),
+                "{named}: the activity is missing from {}",
+                names.len()
+            );
+            let wanted = match () {
+                _ if named.starts_with("gson") => "Lcom/google/gson/Gson;",
+                _ if named.starts_with("core-") => "Landroidx/core/view/ViewCompat;",
+                _ => "Lorg/apache/commons/lang3/StringUtils;",
+            };
+            assert!(
+                names.contains(&wanted),
+                "{named}: {wanted} did not come along, {} classes did",
+                names.len()
+            );
+
+            let key = super::rsa::generate(2048).unwrap();
+            let mut sink = Sink::new();
+            let outcome = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
+                .unwrap_or_else(|error| panic!("{named}: {} {}", error.code, error.message));
+            assert!(!sink.has_blocking(), "{named}: {:?}", sink.entries());
+            assert!(outcome.carries_code);
+            assert!(outcome.verified.everything_checkable_passed());
+
+            let path = directory.join("uses.apk");
+            std::fs::write(&path, &outcome.package).unwrap();
+            let found = super::inspect::package(path.to_str().unwrap()).expect("it opens");
+            assert_eq!(found.package, "com.tr.yt");
+            assert!(found.classes > 100, "{named}: {} classes", found.classes);
+            compiled += 1;
+            report.push(format!(
+                "{named}: {} classes and {} methods packaged, {} KB",
+                found.classes,
+                found.methods,
+                outcome.package.len() / 1024
+            ));
+            std::fs::remove_dir_all(&directory).ok();
+        }
+
+        assert!(read > 0, "nothing in the corpus was read");
+        eprintln!("libraries: {read} read, {compiled} compiled against");
+        for line in report {
+            eprintln!("libraries: {line}");
         }
     }
 
