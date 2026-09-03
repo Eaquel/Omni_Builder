@@ -56,6 +56,8 @@
     <string name="omni_action_purge">KALICI SİL</string>
     <string name="omni_action_empty">ÇÖPÜ BOŞALT</string>
     <string name="omni_action_back">GERİ</string>
+    <string name="omni_action_next">İLERİ</string>
+    <string name="omni_form_step">ADIM %1$d / %2$d</string>
     <string name="omni_action_cancel">VAZGEÇ</string>
     <string name="omni_action_new_file">YENİ DOSYA</string>
     <string name="omni_action_new_folder">YENİ KLASÖR</string>

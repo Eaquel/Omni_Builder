@@ -56,6 +56,8 @@
     <string name="omni_action_purge">ELIMINA PER SEMPRE</string>
     <string name="omni_action_empty">SVUOTA IL CESTINO</string>
     <string name="omni_action_back">INDIETRO</string>
+    <string name="omni_action_next">AVANTI</string>
+    <string name="omni_form_step">PASSO %1$d DI %2$d</string>
     <string name="omni_action_cancel">ANNULLA</string>
     <string name="omni_action_new_file">NUOVO FILE</string>
     <string name="omni_action_new_folder">NUOVA CARTELLA</string>

@@ -56,6 +56,8 @@
     <string name="omni_action_purge">ENDGÜLTIG LÖSCHEN</string>
     <string name="omni_action_empty">PAPIERKORB LEEREN</string>
     <string name="omni_action_back">ZURÜCK</string>
+    <string name="omni_action_next">WEITER</string>
+    <string name="omni_form_step">SCHRITT %1$d VON %2$d</string>
     <string name="omni_action_cancel">ABBRECHEN</string>
     <string name="omni_action_new_file">NEUE DATEI</string>
     <string name="omni_action_new_folder">NEUER ORDNER</string>

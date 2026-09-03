@@ -56,6 +56,8 @@
     <string name="omni_action_purge">DELETE FOR GOOD</string>
     <string name="omni_action_empty">EMPTY THE TRASH</string>
     <string name="omni_action_back">BACK</string>
+    <string name="omni_action_next">NEXT</string>
+    <string name="omni_form_step">STEP %1$d OF %2$d</string>
     <string name="omni_action_cancel">CANCEL</string>
     <string name="omni_action_new_file">NEW FILE</string>
     <string name="omni_action_new_folder">NEW FOLDER</string>

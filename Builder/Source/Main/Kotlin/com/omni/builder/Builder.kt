@@ -1512,6 +1512,8 @@ class BuilderActivity : Activity() {
 
         const val COLUMN_DP = 640
 
+        const val WIZARD_STEPS = 4
+
         val STAGE_NAMES = listOf(
             R.string.omni_stage_project,
             R.string.omni_stage_resources,
@@ -1592,6 +1594,7 @@ class BuilderActivity : Activity() {
     private var formLabel = DEFAULT_LABEL
     private var formVersionName = "1.0.0"
     private var formVersionCode = "1"
+    private var formStep = 0
     private var formMinSdk = 30
     private var formTargetSdk = 36
     private val formLanguages = linkedSetOf("java")
@@ -1905,6 +1908,9 @@ class BuilderActivity : Activity() {
     private fun go(next: Screen) {
         if (next == screen && !navigating) {
             return
+        }
+        if (next is Screen.NewProject && screen !is Screen.NewProject) {
+            formStep = 0
         }
         screen = next
         answerBackTheWayThisScreenWants()
@@ -2321,10 +2327,94 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderNewProject() {
+        formStep = formStep.coerceIn(0, WIZARD_STEPS - 1)
+        content.addView(stepMarker(formStep, WIZARD_STEPS))
 
+        when (formStep) {
+            0 -> newProjectIdentity()
+            1 -> newProjectPicture()
+            2 -> newProjectAndroid()
+            else -> newProjectLanguages()
+        }
+
+        val onwards = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(3)
+            }
+        }
+        if (formStep > 0) {
+            onwards.addView(
+                subtle(getString(R.string.omni_action_back), palette.muted) {
+                    formStep -= 1
+                    render(true)
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginEnd = gap(1) },
+            )
+        }
+        onwards.addView(
+            if (formStep == WIZARD_STEPS - 1) {
+                primary(getString(R.string.omni_action_create)) { createProject() }
+            } else {
+                primary(getString(R.string.omni_action_next)) {
+                    formStep += 1
+                    render(true)
+                }
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+        )
+        content.addView(onwards)
+        content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
+            formStep = 0
+            go(Screen.Projects)
+        })
+    }
+
+    private fun stepMarker(at: Int, count: Int): View {
+        val holder = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, gap(1), 0, gap(3))
+        }
+        holder.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_form_step, at + 1, count)
+                typeface = Type.label
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                letterSpacing = Type.TRACKING
+            }
+        )
+        val track = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
+                topMargin = gap(2)
+            }
+        }
+        for (index in 0 until count) {
+            track.addView(
+                View(this).apply {
+                    background = pill(
+                        when {
+                            index < at -> Ink.fade(palette.accent, 0.55f)
+                            index == at -> palette.accent
+                            else -> palette.raised
+                        },
+                        gap(1).toFloat(),
+                    )
+                },
+                LinearLayout.LayoutParams(0, gap(1), 1f).apply {
+                    marginEnd = if (index == count - 1) 0 else gap(1)
+                },
+            )
+        }
+        holder.addView(track)
+        return holder
+    }
+
+    private fun newProjectIdentity() {
         val identity = card()
-        identity.addView(field(getString(R.string.omni_form_package), formPackage) { formPackage = it })
         identity.addView(field(getString(R.string.omni_form_label), formLabel) { formLabel = it })
+        identity.addView(field(getString(R.string.omni_form_package), formPackage) { formPackage = it })
         identity.addView(
             field(getString(R.string.omni_form_version_name), formVersionName) { formVersionName = it }
         )
@@ -2332,7 +2422,43 @@ class BuilderActivity : Activity() {
             field(getString(R.string.omni_form_version_code), formVersionCode) { formVersionCode = it }
         )
         content.addView(identity)
+    }
 
+    private fun newProjectPicture() {
+        content.addView(label(getString(R.string.omni_form_image)))
+        val picture = card()
+        picture.addView(
+            LauncherPreview(this, palette).apply {
+                show(formImage)
+                layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, gap(30)).apply {
+                    topMargin = gap(1)
+                    bottomMargin = gap(2)
+                }
+            }
+        )
+        picture.addView(
+            quiet(formImage?.let { File(it).name } ?: getString(R.string.omni_form_image_none))
+        )
+        val choosing = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        choosing.addView(
+            subtle(getString(R.string.omni_form_image_choose), palette.accent) { chooseImage(null) },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+        if (formImage != null) {
+            choosing.addView(
+                subtle(getString(R.string.omni_action_clear), palette.muted) {
+                    formImage = null
+                    render(false)
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { marginStart = gap(1) },
+            )
+        }
+        picture.addView(choosing)
+        content.addView(picture)
+        content.addView(quiet(getString(R.string.omni_form_image_note)))
+    }
+
+    private fun newProjectAndroid() {
         content.addView(label(getString(R.string.omni_form_min_sdk)))
         content.addView(
             chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == formMinSdk }) {
@@ -2348,7 +2474,9 @@ class BuilderActivity : Activity() {
                 if (formMinSdk > formTargetSdk) formMinSdk = formTargetSdk
             }
         )
+    }
 
+    private fun newProjectLanguages() {
         content.addView(label(getString(R.string.omni_form_locales)))
         content.addView(
             chips(
@@ -2361,20 +2489,6 @@ class BuilderActivity : Activity() {
             }
         )
         content.addView(quiet(getString(R.string.omni_form_locales_note)))
-
-        content.addView(label(getString(R.string.omni_form_image)))
-        val picture = card()
-        picture.addView(quiet(formImage?.let { File(it).name } ?: getString(R.string.omni_form_image_none)))
-        picture.addView(subtle(getString(R.string.omni_form_image_choose), palette.accent) {
-            chooseImage(null)
-        })
-        content.addView(picture)
-        content.addView(quiet(getString(R.string.omni_form_image_note)))
-
-        content.addView(primary(getString(R.string.omni_action_create)) { createProject() })
-        content.addView(subtle(getString(R.string.omni_action_cancel), palette.muted) {
-            go(Screen.Projects)
-        })
     }
 
     private fun renderFiles(root: String, folder: String) {
@@ -5627,6 +5741,62 @@ internal object Tape {
         dropouts(canvas, paint, w, h, life, strength)
         bloom(canvas, paint, w, h, life, strength)
         headSwitch(canvas, paint, w, h, life, strength)
+    }
+}
+
+class LauncherPreview(context: Context, private val palette: Palette) : View(context) {
+
+    private companion object {
+        const val SHAPES = 3
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val mask = Path()
+    private val box = RectF()
+    private var picture: Bitmap? = null
+
+    fun show(path: String?) {
+        picture = path?.let { runCatching { BitmapFactory.decodeFile(it) }.getOrNull() }
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        if (w <= 0f || h <= 0f) return
+
+        val edge = min(h * 0.78f, w / SHAPES * 0.72f)
+        val gap = (w - edge * SHAPES) / (SHAPES + 1)
+        val top = (h - edge) * 0.42f
+
+        for (index in 0 until SHAPES) {
+            val left = gap + index * (edge + gap)
+            box.set(left, top, left + edge, top + edge)
+            mask.rewind()
+            when (index) {
+                0 -> mask.addRoundRect(box, edge * 0.16f, edge * 0.16f, Path.Direction.CW)
+                1 -> mask.addCircle(box.centerX(), box.centerY(), edge * 0.5f, Path.Direction.CW)
+                else -> mask.addRoundRect(box, edge * 0.42f, edge * 0.42f, Path.Direction.CW)
+            }
+
+            paint.style = Paint.Style.FILL
+            paint.color = palette.raised
+            canvas.drawPath(mask, paint)
+
+            val held = picture
+            if (held != null) {
+                canvas.save()
+                canvas.clipPath(mask)
+                canvas.drawBitmap(held, null, box, paint)
+                canvas.restore()
+            }
+
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = max(1f, edge * 0.012f)
+            paint.color = Ink.fade(palette.divider, 0.9f)
+            canvas.drawPath(mask, paint)
+        }
+        paint.style = Paint.Style.FILL
     }
 }
 

@@ -56,6 +56,8 @@
     <string name="omni_action_purge">永久删除</string>
     <string name="omni_action_empty">清空回收站</string>
     <string name="omni_action_back">返回</string>
+    <string name="omni_action_next">下一步</string>
+    <string name="omni_form_step">第 %1$d 步，共 %2$d 步</string>
     <string name="omni_action_cancel">取消</string>
     <string name="omni_action_new_file">新建文件</string>
     <string name="omni_action_new_folder">新建文件夹</string>

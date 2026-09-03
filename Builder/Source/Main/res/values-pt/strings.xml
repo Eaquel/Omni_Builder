@@ -56,6 +56,8 @@
     <string name="omni_action_purge">APAGAR PARA SEMPRE</string>
     <string name="omni_action_empty">ESVAZIAR A LIXEIRA</string>
     <string name="omni_action_back">VOLTAR</string>
+    <string name="omni_action_next">SEGUINTE</string>
+    <string name="omni_form_step">PASSO %1$d DE %2$d</string>
     <string name="omni_action_cancel">CANCELAR</string>
     <string name="omni_action_new_file">NOVO ARQUIVO</string>
     <string name="omni_action_new_folder">NOVA PASTA</string>

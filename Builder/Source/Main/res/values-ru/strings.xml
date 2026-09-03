@@ -56,6 +56,8 @@
     <string name="omni_action_purge">УДАЛИТЬ НАВСЕГДА</string>
     <string name="omni_action_empty">ОЧИСТИТЬ КОРЗИНУ</string>
     <string name="omni_action_back">НАЗАД</string>
+    <string name="omni_action_next">ДАЛЕЕ</string>
+    <string name="omni_form_step">ШАГ %1$d ИЗ %2$d</string>
     <string name="omni_action_cancel">ОТМЕНА</string>
     <string name="omni_action_new_file">НОВЫЙ ФАЙЛ</string>
     <string name="omni_action_new_folder">НОВАЯ ПАПКА</string>

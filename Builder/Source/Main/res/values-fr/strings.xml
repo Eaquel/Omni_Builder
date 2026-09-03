@@ -56,6 +56,8 @@
     <string name="omni_action_purge">SUPPRIMER DÉFINITIVEMENT</string>
     <string name="omni_action_empty">VIDER LA CORBEILLE</string>
     <string name="omni_action_back">RETOUR</string>
+    <string name="omni_action_next">SUIVANT</string>
+    <string name="omni_form_step">ÉTAPE %1$d SUR %2$d</string>
     <string name="omni_action_cancel">ANNULER</string>
     <string name="omni_action_new_file">NOUVEAU FICHIER</string>
     <string name="omni_action_new_folder">NOUVEAU DOSSIER</string>
