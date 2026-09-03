@@ -5387,24 +5387,6 @@ internal object Ink {
         )
     }
 
-    fun tube(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
-        val spacing = max(3f, h / 300f)
-        val drift = (life * 22f) % spacing
-        paint.style = Paint.Style.FILL
-        paint.color = fade(0xFF000000.toInt(), 0.26f * strength)
-        paint.strokeWidth = spacing * 0.42f
-        var y = -spacing + drift
-        while (y < h) {
-            canvas.drawLine(0f, y, w, y, paint)
-            y += spacing
-        }
-
-        val band = ((life * 0.22f) % 1.4f) * h - h * 0.2f
-        val tall = h * 0.10f
-        paint.color = fade(0xFFFFFFFF.toInt(), 0.035f * strength)
-        canvas.drawRect(0f, band, w, band + tall, paint)
-    }
-
     fun vignette(canvas: Canvas, paint: Paint, w: Float, h: Float, strength: Float) {
         val radius = hypot(w, h) * 0.62f
         paint.shader = RadialGradient(
@@ -5423,6 +5405,140 @@ internal object Ink {
         var held = seed * 374_761_393 + salt * 668_265_263
         held = (held xor (held shr 13)) * 1_274_126_177
         return ((held xor (held shr 16)) and 0x00FF_FFFF) / 16_777_216f
+    }
+}
+
+internal object Tape {
+
+    const val LUMA_LINES = 240f
+
+    const val CHROMA_RED = 0xFFFF2D3A.toInt()
+    const val CHROMA_BLUE = 0xFF2BD6FF.toInt()
+
+    const val SWITCH_HEIGHT = 0.024f
+
+    const val DROPOUTS = 7
+
+    fun wobble(life: Float, strength: Float): Float =
+        (sin(life * 11.3f) * 0.6f + sin(life * 2.7f) * 0.4f) * strength
+
+    fun trackingAt(life: Float): Float = ((life * 0.13f) % 1.6f) - 0.3f
+
+    fun chroma(life: Float, strength: Float): Float =
+        (0.55f + 0.45f * sin(life * 1.9f)) * strength
+
+    fun lines(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        val spacing = max(2f, h / LUMA_LINES)
+        val drift = (life * 22f) % spacing
+        paint.style = Paint.Style.FILL
+        paint.color = Ink.fade(0xFF000000.toInt(), 0.26f * strength)
+        paint.strokeWidth = spacing * 0.42f
+        var y = -spacing + drift
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, paint)
+            y += spacing
+        }
+    }
+
+    fun bloom(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        val band = ((life * 0.22f) % 1.4f) * h - h * 0.2f
+        val tall = h * 0.10f
+        paint.style = Paint.Style.FILL
+        paint.color = Ink.fade(0xFFFFFFFF.toInt(), 0.035f * strength)
+        canvas.drawRect(0f, band, w, band + tall, paint)
+    }
+
+    fun headSwitch(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        val tall = h * SWITCH_HEIGHT
+        val top = h - tall
+        paint.style = Paint.Style.FILL
+        paint.color = Ink.fade(0xFF000000.toInt(), 0.55f * strength)
+        canvas.drawRect(0f, top, w, h, paint)
+
+        var y = top
+        var row = 0
+        val step = max(1f, tall / 9f)
+        while (y < h) {
+            val fell = (row + (life * 30f).toInt()) % 97
+            val torn = (Ink.scatter(fell, 41) - 0.5f) * w * 1.1f
+            paint.color = Ink.fade(0xFFFFFFFF.toInt(), (0.05f + 0.16f * Ink.scatter(fell, 43)) * strength)
+            canvas.drawRect(torn, y, torn + w, y + step, paint)
+            y += step
+            row += 1
+        }
+        paint.color = Ink.fade(0xFFFFFFFF.toInt(), 0.10f * strength)
+        canvas.drawRect(0f, top - h * 0.002f, w, top, paint)
+    }
+
+    fun tracking(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        val at = trackingAt(life)
+        if (at < 0f || at > 1f) return
+        val tall = h * 0.055f
+        val top = at * h
+        val fade = 1f - abs(at - 0.5f) * 1.4f
+        if (fade <= 0f) return
+        paint.style = Paint.Style.FILL
+        var y = top
+        var row = 0
+        while (y < top + tall) {
+            val slip = (Ink.scatter(row, (life * 60f).toInt()) - 0.5f) * w * 0.18f
+            paint.color = Ink.fade(0xFFFFFFFF.toInt(), 0.05f * fade * strength)
+            canvas.drawRect(slip, y, slip + w, y + 2f, paint)
+            paint.color = Ink.fade(0xFF000000.toInt(), 0.16f * fade * strength)
+            canvas.drawRect(0f, y + 2f, w, y + 3.4f, paint)
+            y += 3.4f
+            row += 1
+        }
+    }
+
+    fun dropouts(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        paint.style = Paint.Style.FILL
+        val moment = (life * 7f).toInt()
+        for (index in 0 until DROPOUTS) {
+            val seed = index * 31 + moment
+            if (Ink.scatter(seed, 17) > 0.42f) continue
+            val y = Ink.scatter(seed, 19) * h
+            val from = Ink.scatter(seed, 23) * w * 0.86f
+            val wide = w * (0.02f + Ink.scatter(seed, 29) * 0.10f)
+            val tall = max(1.4f, h / LUMA_LINES * (1f + Ink.scatter(seed, 31) * 1.6f))
+            paint.color = Ink.fade(0xFFFFFFFF.toInt(), 0.45f * strength)
+            canvas.drawRect(from, y, from + wide, y + tall, paint)
+            paint.color = Ink.fade(0xFF000000.toInt(), 0.35f * strength)
+            canvas.drawRect(from, y + tall, from + wide, y + tall * 1.8f, paint)
+        }
+    }
+
+    fun colourUnder(
+        canvas: Canvas,
+        paint: Paint,
+        w: Float,
+        h: Float,
+        life: Float,
+        strength: Float,
+    ) {
+        val late = (w * 0.006f) * chroma(life, strength)
+        if (late <= 0.2f) return
+        paint.style = Paint.Style.FILL
+        val rows = 26
+        val tall = h / rows
+        for (row in 0 until rows) {
+            val y = row * tall
+            val smear = late * (0.5f + Ink.scatter(row, (life * 4f).toInt()) * 1.2f)
+            paint.color = Ink.fade(CHROMA_RED, 0.030f * strength)
+            canvas.drawRect(-smear, y, w - smear, y + tall, paint)
+            paint.color = Ink.fade(CHROMA_BLUE, 0.030f * strength)
+            canvas.drawRect(smear * 1.6f, y, w + smear * 1.6f, y + tall, paint)
+        }
+    }
+
+    fun over(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        if (strength <= 0f) return
+        colourUnder(canvas, paint, w, h, life, strength)
+        lines(canvas, paint, w, h, life, strength)
+        tracking(canvas, paint, w, h, life, strength)
+        dropouts(canvas, paint, w, h, life, strength)
+        bloom(canvas, paint, w, h, life, strength)
+        headSwitch(canvas, paint, w, h, life, strength)
     }
 }
 
@@ -5536,6 +5652,9 @@ class BinaryVeil(context: Context) : View(context) {
         val tracking = 1f - abs(t - 0.5f) * 2f
         val life = (SystemClock.uptimeMillis() - began) / 1000f
 
+        canvas.save()
+        canvas.translate(0f, Tape.wobble(life, h * 0.0035f * (0.4f + tracking)))
+
         for (row in 0 until rows) {
             val y = (row + 0.5f) / rows
             val distance = abs(y - front)
@@ -5558,48 +5677,33 @@ class BinaryVeil(context: Context) : View(context) {
                 val x = (column + 0.5f) * columnWidth + shift
                 val baseline = (row + 0.72f) * rowHeight
 
-                paint.color = Ink.fade(0xFFFF3B30.toInt(), 0.22f + lit * 0.30f)
-                canvas.drawText(glyph, 0, 1, x - split, baseline, paint)
-                paint.color = Ink.fade(0xFF2BD6FF.toInt(), 0.22f + lit * 0.30f)
-                canvas.drawText(glyph, 0, 1, x + split, baseline, paint)
+                paint.color = Ink.fade(Tape.CHROMA_RED, 0.20f + lit * 0.26f)
+                canvas.drawText(glyph, 0, 1, x - split * 0.55f, baseline, paint)
+                paint.color = Ink.fade(Tape.CHROMA_BLUE, 0.22f + lit * 0.30f)
+                canvas.drawText(glyph, 0, 1, x + split * 1.45f, baseline, paint)
                 paint.color = Ink.fade(Ink.hot(accent, lit * 0.85f), 0.20f + lit * 0.80f)
                 canvas.drawText(glyph, 0, 1, x, baseline, paint)
             }
         }
 
-        drawScanlines(canvas, w, h, life)
-        drawHeadSwitch(canvas, w, h, front, tracking)
-    }
-
-    private fun drawScanlines(canvas: Canvas, w: Float, h: Float, life: Float) {
-        val spacing = max(3f, h / 260f)
-        val drift = (life * 26f) % spacing
-        line.color = Ink.fade(0xFF000000.toInt(), 0.30f)
-        line.strokeWidth = spacing * 0.45f
-        var y = -spacing + drift
-        while (y < h) {
-            canvas.drawLine(0f, y, w, y, line)
-            y += spacing
-        }
-    }
-
-    private fun drawHeadSwitch(canvas: Canvas, w: Float, h: Float, front: Float, tracking: Float) {
-        if (tracking <= 0f) return
-        val band = h * 0.018f
-        val at = (front * h).coerceIn(-band, h + band)
+        val seam = h * 0.018f
+        val at = (front * h).coerceIn(-seam, h + seam)
         line.strokeWidth = 1f
-        var y = at
+        var torn = at
         var index = 0
-        while (y < at + band) {
-            val torn = (Ink.scatter(index, (front * 400f).toInt()) - 0.5f) * w * 0.5f
+        while (torn < at + seam) {
+            val slip = (Ink.scatter(index, (front * 400f).toInt()) - 0.5f) * w * 0.5f
             line.color = Ink.fade(Ink.hot(accent, 0.85f), 0.10f + 0.28f * tracking)
-            canvas.drawLine(torn, y, w + torn, y, line)
-            y += 1.5f
+            canvas.drawLine(slip, torn, w + slip, torn, line)
+            torn += 1.5f
             index += 1
         }
         line.color = Ink.fade(Ink.hot(accent, 1f), 0.35f * tracking)
         line.strokeWidth = 1.4f
         canvas.drawLine(0f, at, w, at, line)
+
+        canvas.restore()
+        Tape.over(canvas, line, w, h, life, 0.65f + 0.35f * tracking)
     }
 }
 
@@ -5751,47 +5855,60 @@ class KeyForgeView(context: Context, private var palette: Palette) : View(contex
         key.reset()
         trace.reset()
         val span = min(w, h)
-        val r = span * 0.155f
+        val r = span * 0.150f
         val cx = w * 0.5f
-        val cy = h * 0.34f
+        val cy = h * 0.33f
         bowCentreY = cy
         bowRadius = r
         bounds.set(cx - r, cy - r, cx + r, cy + r)
 
-        key.addCircle(cx, cy, r, Path.Direction.CW)
-        key.addCircle(cx, cy - r * 0.30f, r * 0.30f, Path.Direction.CCW)
+        val outer = RectF(cx - r, cy - r, cx + r, cy + r)
+        key.addRoundRect(outer, r * 0.42f, r * 0.42f, Path.Direction.CW)
+        val ward = RectF(
+            cx - r * 0.40f,
+            cy - r * 0.46f,
+            cx + r * 0.40f,
+            cy + r * 0.34f,
+        )
+        key.addRoundRect(ward, r * 0.18f, r * 0.18f, Path.Direction.CCW)
 
-        val half = span * 0.036f
-        val top = cy + r * 0.92f
-        val foot = h * 0.80f
-        key.moveTo(cx - half, top)
-        key.lineTo(cx - half, foot)
+        val half = span * 0.030f
+        val shoulder = cy + r * 0.98f
+        val foot = h * 0.79f
+        val tooth = span * 0.050f
 
-        val tooth = span * 0.052f
+        key.moveTo(cx - half * 1.9f, shoulder - half * 0.9f)
+        key.quadTo(cx - half * 1.5f, shoulder, cx - half, shoulder + half * 0.5f)
+        key.lineTo(cx - half, foot - tooth * 0.4f)
+        key.quadTo(cx - half, foot, cx - half + tooth * 0.35f, foot)
         key.lineTo(cx + half, foot)
-        key.lineTo(cx + half, foot - tooth * 0.55f)
-        key.lineTo(cx + half + tooth, foot - tooth * 0.55f)
-        key.lineTo(cx + half + tooth, foot - tooth * 1.15f)
+        key.lineTo(cx + half, foot - tooth * 0.60f)
+        key.lineTo(cx + half + tooth * 1.05f, foot - tooth * 0.60f)
+        key.lineTo(cx + half + tooth * 1.05f, foot - tooth * 1.15f)
         key.lineTo(cx + half, foot - tooth * 1.15f)
-        key.lineTo(cx + half, foot - tooth * 2.0f)
-        key.lineTo(cx + half + tooth * 0.72f, foot - tooth * 2.0f)
-        key.lineTo(cx + half + tooth * 0.72f, foot - tooth * 2.6f)
-        key.lineTo(cx + half, foot - tooth * 2.6f)
-        key.lineTo(cx + half, top)
+        key.lineTo(cx + half, foot - tooth * 1.85f)
+        key.lineTo(cx + half + tooth * 0.70f, foot - tooth * 1.85f)
+        key.lineTo(cx + half + tooth * 0.70f, foot - tooth * 2.35f)
+        key.lineTo(cx + half, foot - tooth * 2.35f)
+        key.lineTo(cx + half, shoulder + half * 0.5f)
+        key.quadTo(cx + half * 1.5f, shoulder, cx + half * 1.9f, shoulder - half * 0.9f)
         key.close()
 
-        trace.moveTo(cx, foot - tooth * 3.4f)
-        trace.lineTo(cx, cy + r * 0.55f)
-        trace.moveTo(cx - r * 0.62f, cy + r * 0.10f)
-        trace.lineTo(cx - r * 0.30f, cy + r * 0.10f)
-        trace.lineTo(cx - r * 0.12f, cy + r * 0.38f)
-        trace.moveTo(cx + r * 0.62f, cy - r * 0.02f)
-        trace.lineTo(cx + r * 0.32f, cy - r * 0.02f)
-        trace.lineTo(cx + r * 0.14f, cy + r * 0.28f)
-        trace.moveTo(cx - r * 0.50f, cy - r * 0.52f)
-        trace.lineTo(cx - r * 0.22f, cy - r * 0.52f)
-        trace.moveTo(cx + r * 0.50f, cy + r * 0.56f)
-        trace.lineTo(cx + r * 0.24f, cy + r * 0.56f)
+        val collar = shoulder + half * 1.6f
+        trace.moveTo(cx - half * 2.1f, collar)
+        trace.lineTo(cx + half * 2.1f, collar)
+        trace.moveTo(cx - half * 1.7f, collar + half * 0.9f)
+        trace.lineTo(cx + half * 1.7f, collar + half * 0.9f)
+
+        trace.moveTo(cx, foot - tooth * 3.2f)
+        trace.lineTo(cx, collar + half * 2.2f)
+
+        trace.moveTo(cx - r * 0.40f, cy - r * 0.06f)
+        trace.lineTo(cx + r * 0.40f, cy - r * 0.06f)
+        trace.moveTo(cx - r * 0.22f, cy - r * 0.46f)
+        trace.lineTo(cx - r * 0.22f, cy + r * 0.34f)
+        trace.moveTo(cx + r * 0.22f, cy - r * 0.46f)
+        trace.lineTo(cx + r * 0.22f, cy + r * 0.34f)
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -5813,37 +5930,59 @@ class KeyForgeView(context: Context, private var palette: Palette) : View(contex
         drawParticles(canvas, w, h, life, gather, sealing)
         if (reveal > 0f) drawKey(canvas, life, reveal, sealing)
         drawWords(canvas, w, h, life, sealing)
-        Ink.tube(canvas, glass, w, h, life, 1f)
+        Tape.over(canvas, glass, w, h, life, 1f)
         Ink.vignette(canvas, glass, w, h, 1f)
     }
 
     private fun drawGround(canvas: Canvas, w: Float, h: Float, life: Float) {
         canvas.drawColor(palette.background)
+        val horizon = h * 0.79f
+
         paint.shader = RadialGradient(
-            w * 0.5f, bowCentreY, max(w, h) * 0.75f,
-            Ink.fade(palette.glowFirst, 0.55f),
+            w * 0.5f, bowCentreY, max(w, h) * 0.70f,
+            Ink.fade(palette.glowFirst, 0.42f),
             Ink.fade(palette.background, 0f),
             Shader.TileMode.CLAMP,
         )
         canvas.drawRect(0f, 0f, w, h, paint)
+
+        val heat = 0.72f + 0.28f * sin(life * 1.7f)
+        paint.shader = RadialGradient(
+            w * 0.5f, horizon, w * 0.62f,
+            Ink.fade(Ink.hot(palette.accent, 0.35f), 0.34f * heat),
+            Ink.fade(palette.background, 0f),
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, horizon - w * 0.62f, w, h, paint)
         paint.shader = null
 
         paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 1f
-        paint.color = Ink.fade(palette.accent, 0.07f)
-        val spacing = h / 22f
-        val drift = (life * 9f) % spacing
-        var y = -spacing + drift
-        while (y < h) {
+        paint.strokeWidth = max(1f, h * 0.0012f)
+        var step = 1
+        while (step <= 7) {
+            val fall = step / 7f
+            val y = horizon + (h - horizon) * fall * fall
+            paint.color = Ink.fade(palette.accent, 0.11f * (1f - fall * 0.7f))
             canvas.drawLine(0f, y, w, y, paint)
-            y += spacing
+            step += 1
         }
-        var x = 0f
-        val across = w / 9f
-        while (x <= w) {
-            canvas.drawLine(x, 0f, x, h, paint)
-            x += across
+        var column = -6
+        while (column <= 6) {
+            val spread = column / 6f
+            paint.color = Ink.fade(palette.accent, 0.09f * (1f - abs(spread) * 0.6f))
+            canvas.drawLine(
+                w * 0.5f + spread * w * 0.10f,
+                horizon,
+                w * 0.5f + spread * w * 1.35f,
+                h,
+                paint,
+            )
+            column += 1
         }
+
+        paint.strokeWidth = max(1.2f, h * 0.0022f)
+        paint.color = Ink.fade(Ink.hot(palette.accent, 0.55f), 0.42f * heat)
+        canvas.drawLine(0f, horizon, w, horizon, paint)
         paint.style = Paint.Style.FILL
     }
 
@@ -6109,7 +6248,7 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
         canvas.drawText(remaining, w * 0.5f, h * 0.925f, text)
         canvas.drawText(note, w * 0.5f, h * 0.962f, text)
 
-        Ink.tube(canvas, glass, w, h, life, 0.75f)
+        Tape.over(canvas, glass, w, h, life, 0.75f)
         Ink.vignette(canvas, glass, w, h, 0.8f)
     }
 
