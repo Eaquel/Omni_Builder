@@ -1275,7 +1275,7 @@ internal object Motion {
 
 internal class Mark(private val shape: Shape, private val colour: Int) : Drawable() {
 
-    enum class Shape { FOLDER, FILE, MORE, AWAY }
+    enum class Shape { FOLDER, FILE, MORE, AWAY, BACK, GEAR }
 
     private companion object {
         const val GRID = 24f
@@ -1337,6 +1337,27 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 path.moveTo(10f, 7f)
                 path.lineTo(15f, 12f)
                 path.lineTo(10f, 17f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.BACK -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(14f, 6f)
+                path.lineTo(8f, 12f)
+                path.lineTo(14f, 18f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.GEAR -> {
+                paint.style = Paint.Style.STROKE
+                canvas.drawCircle(12f, 12f, 3.2f, paint)
+                var tooth = 0
+                while (tooth < 8) {
+                    val turn = tooth * (PI.toFloat() / 4f)
+                    val cosine = cos(turn)
+                    val sine = sin(turn)
+                    path.moveTo(12f + cosine * 6.0f, 12f + sine * 6.0f)
+                    path.lineTo(12f + cosine * 8.4f, 12f + sine * 8.4f)
+                    tooth += 1
+                }
                 canvas.drawPath(path, paint)
             }
         }
@@ -1487,6 +1508,8 @@ class BuilderActivity : Activity() {
 
         const val WIDE_DP = 600
 
+        val ON_THE_BAR = listOf(Tab.PROJECTS, Tab.FILES, Tab.BUILD)
+
         const val COLUMN_DP = 640
 
         val STAGE_NAMES = listOf(
@@ -1550,6 +1573,9 @@ class BuilderActivity : Activity() {
     private lateinit var ceremony: FrameLayout
     private lateinit var bar: LinearLayout
     private lateinit var rail: LinearLayout
+    private lateinit var crown: LinearLayout
+    private lateinit var crownBack: View
+    private lateinit var crownTitle: TextView
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var results: LinearLayout
@@ -1657,10 +1683,42 @@ class BuilderActivity : Activity() {
             }
         }
 
+        crownBack = markControl(Mark.Shape.BACK, R.string.omni_action_back) { stepBack() }
+        crownTitle = TextView(this).apply {
+            typeface = Type.heading
+            setTextColor(palette.foreground)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            letterSpacing = Type.TRACKING * 0.5f
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.MIDDLE
+        }
+        crown = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(gap(2), gap(1), gap(2), gap(1))
+            addView(crownBack, LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)))
+            addView(
+                crownTitle,
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    marginStart = gap(2)
+                    marginEnd = gap(2)
+                },
+            )
+            addView(
+                markControl(Mark.Shape.GEAR, R.string.omni_tab_settings) { go(Screen.Settings) },
+                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+            )
+            addView(
+                markControl(Mark.Shape.MORE, R.string.omni_action_more) { openPalette() },
+                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
+            )
+        }
+
         val roof = View(this)
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(roof, LinearLayout.LayoutParams(MATCH_PARENT, 0))
+            addView(crown, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
             addView(body, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
@@ -1943,6 +2001,7 @@ class BuilderActivity : Activity() {
         if (standing == "TAMPERED") {
             bar.removeAllViews()
             bar.visibility = View.GONE
+            crown.visibility = View.GONE
             content.addView(notice(getString(R.string.omni_integrity_refused_title), palette.error))
             content.addView(body(getString(R.string.omni_integrity_refused_body)))
             content.addView(quiet(getString(R.string.omni_integrity_checked)))
@@ -1951,6 +2010,8 @@ class BuilderActivity : Activity() {
             return
         }
 
+        crown.visibility = View.VISIBLE
+        drawCrown()
         bar.visibility = View.VISIBLE
         drawBar()
 
@@ -2090,6 +2151,38 @@ class BuilderActivity : Activity() {
         }
     }
 
+    private fun markControl(shape: Mark.Shape, named: Int, onPress: () -> Unit) =
+        View(this).apply {
+            contentDescription = getString(named)
+            isClickable = true
+            isFocusable = true
+            readAs(Button::class.java.name)
+            background = reacting(Color.TRANSPARENT, gap(6).toFloat(), palette.accent)
+            foreground = Mark(shape, palette.foreground)
+            setOnClickListener { onPress() }
+        }
+
+    private fun drawCrown() {
+        val here = screen
+        crownBack.visibility = if (here is Screen.Projects) View.GONE else View.VISIBLE
+        crownTitle.text = when (here) {
+            is Screen.Projects -> getString(R.string.omni_projects_title)
+            is Screen.NewProject -> getString(R.string.omni_projects_new)
+            is Screen.Files -> File(here.root).name
+            is Screen.Search -> getString(R.string.omni_search_title)
+            is Screen.Manifest -> getString(R.string.omni_manifest_title)
+            is Screen.Depends -> getString(R.string.omni_depends_title)
+            is Screen.Health -> getString(R.string.omni_health_title)
+            is Screen.Editor -> here.path.substringAfterLast('/')
+            is Screen.Picture -> here.path.substringAfterLast('/')
+            is Screen.Build -> getString(R.string.omni_build_title)
+            is Screen.Trash -> getString(R.string.omni_tab_trash)
+            is Screen.Settings -> getString(R.string.omni_tab_settings)
+            is Screen.Keys -> getString(R.string.omni_keys_title)
+            is Screen.NewKey -> getString(R.string.omni_keys_new)
+        }
+    }
+
     private fun wideEnoughForARail(): Boolean =
         resources.configuration.screenWidthDp >= WIDE_DP
 
@@ -2113,10 +2206,8 @@ class BuilderActivity : Activity() {
             Tab.PROJECTS to R.string.omni_tab_projects,
             Tab.FILES to R.string.omni_tab_files,
             Tab.BUILD to R.string.omni_tab_build,
-            Tab.TRASH to R.string.omni_tab_trash,
-            Tab.SETTINGS to R.string.omni_tab_settings,
         )
-        for (tab in Tab.entries) {
+        for (tab in ON_THE_BAR) {
             val active = screen.tab == tab
             val reachable = tab != Tab.FILES && tab != Tab.BUILD || openProject != null
             into.addView(
@@ -2193,7 +2284,6 @@ class BuilderActivity : Activity() {
     private fun keysFolder() = File(filesDir, "Keys")
 
     private fun renderProjects() {
-        content.addView(heading(getString(R.string.omni_projects_title)))
 
         val projects = runCatching {
             ProjectSummary.list(Builder.nativeListProjects(projectsFolder().absolutePath))
@@ -2231,7 +2321,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderNewProject() {
-        content.addView(heading(getString(R.string.omni_projects_new)))
 
         val identity = card()
         identity.addView(field(getString(R.string.omni_form_package), formPackage) { formPackage = it })
@@ -2421,7 +2510,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderHealth(root: String) {
-        content.addView(heading(getString(R.string.omni_health_title)))
 
         val answer = runCatching { JSONObject(Builder.nativeProjectHealth(root)) }.getOrNull()
         val health = answer?.optJSONObject("health")
@@ -2537,7 +2625,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderDepends(root: String) {
-        content.addView(heading(getString(R.string.omni_depends_title)))
 
         val answer = runCatching { JSONObject(Builder.nativeDependencies(root)) }.getOrNull()
         val held = answer?.optJSONObject("dependencies")
@@ -2638,7 +2725,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderManifest(root: String) {
-        content.addView(heading(getString(R.string.omni_manifest_title)))
 
         val answer = runCatching { JSONObject(Builder.nativeManifestFacts(root)) }.getOrNull()
         val facts = answer?.optJSONObject("manifest")
@@ -3011,7 +3097,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderSearch(root: String) {
-        content.addView(heading(getString(R.string.omni_search_title)))
 
         val field = EditText(this).apply {
             setText(searchFor)
@@ -3331,7 +3416,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderPicture(root: String, path: String) {
-        content.addView(heading(path.substringAfterLast('/')))
         content.addView(quiet(path))
 
         val file = File(root, path)
@@ -3376,7 +3460,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderEditor(root: String, path: String) {
-        content.addView(heading(path.substringAfterLast('/')))
         val where = TextView(this).apply {
             text = path
             setTextColor(palette.muted)
@@ -3838,7 +3921,6 @@ class BuilderActivity : Activity() {
 
     private fun renderBuild(root: String) {
         val summary = summaryOf(root)
-        content.addView(heading(getString(R.string.omni_build_title)))
         content.addView(
             quiet(summary?.label?.ifEmpty { null } ?: File(root).name)
         )
@@ -3927,7 +4009,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderTrash() {
-        content.addView(heading(getString(R.string.omni_trash_title)))
 
         val held = runCatching {
             Trashed.list(Builder.nativeTrashList(trashFolder()))
@@ -3982,7 +4063,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderKeys() {
-        content.addView(heading(getString(R.string.omni_keys_title)))
 
         val keys = keysHere()
         val chosen = Preferences.signingKey(this)
@@ -4027,7 +4107,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderNewKey() {
-        content.addView(heading(getString(R.string.omni_keys_new)))
 
         val who = card()
         who.addView(field(getString(R.string.omni_key_alias), keyAlias) { keyAlias = it })
@@ -4162,6 +4241,15 @@ class BuilderActivity : Activity() {
             go(Screen.Keys)
         })
         content.addView(signing)
+
+        content.addView(
+            row(
+                getString(R.string.omni_tab_trash),
+                getString(R.string.omni_trash_title),
+                "",
+                palette.muted,
+            ) { go(Screen.Trash) }
+        )
 
         content.addView(heading(getString(R.string.omni_settings_logs)))
         val transcript = OmniLog.transcript().trimEnd()
