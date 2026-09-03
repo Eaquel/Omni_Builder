@@ -187,6 +187,47 @@ def tool_present(finder, name: str) -> bool:
         return False
 
 
+def sign_a_copy(package: Path) -> Path:
+    """A signed copy of an unsigned package, for the checks that need one.
+
+    Continuous integration has signing secrets and a developer does not, so
+    the package built here is unsigned and the one built there is signed. Every
+    check that reads a signed package therefore ran only there -- which is how
+    a stale claim about signatures reached fifteen red runs without one red
+    check on anybody's machine.
+
+    So the gap is closed by signing a copy with a key made on the spot. It is
+    not the release key and it is never installed; it exists so that the checks
+    which need a signature have one to read.
+    """
+    try:
+        apksigner = build_tool("apksigner")
+    except Skip:
+        return package
+    if shutil.which("keytool") is None:
+        return package
+
+    work = WORK / "signed"
+    work.mkdir(parents=True, exist_ok=True)
+    store = work / "throwaway.jks"
+    copy = work / package.name.replace("-unsigned", "-locally-signed")
+    if not store.is_file():
+        run([
+            "keytool", "-genkeypair", "-keystore", str(store),
+            "-storepass", "omnilocal", "-keypass", "omnilocal", "-alias", "local",
+            "-keyalg", "RSA", "-keysize", "2048", "-validity", "3650",
+            "-dname", "CN=Omni Local, O=Omni, C=TR",
+        ])
+    shutil.copyfile(package, copy)
+    run([
+        str(apksigner), "sign",
+        "--ks", str(store), "--ks-pass", "pass:omnilocal",
+        "--key-pass", "pass:omnilocal", "--ks-key-alias", "local",
+        "--min-sdk-version", "30", str(copy),
+    ])
+    return copy
+
+
 def check_core() -> str:
     """The Core's own suite, demanding every conformance check the tools here allow."""
     if shutil.which("cargo") is None:
@@ -197,7 +238,7 @@ def check_core() -> str:
     built = sorted(ROOT.glob("Builder/build/outputs/apk/*/*.apk"))
     release = [one for one in built if "/release/" in one.as_posix()]
     signed = [one for one in release if not one.name.endswith("-unsigned.apk")]
-    under_test = signed or built
+    under_test = signed or [sign_a_copy(one) for one in release] or built
 
     env = dict(CONFORMANCE)
     demanded = list(CONFORMANCE)

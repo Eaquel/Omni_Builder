@@ -42671,13 +42671,23 @@ public final class MainActivity extends Activity {
 
         assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
         assert!(report.digests_verified > 0, "{:?}", sink.entries());
-        assert!(!report.signatures_checked);
+        // A package the Android Gradle Plugin signed is signed with a key
+        // this build did not choose, so what it verifies against is whatever
+        // that key was. It still has to verify: the whole point of reading a
+        // package this build did not write is that the answer is the same.
+        assert!(report.signatures_checked, "{:?}", sink.entries());
+        assert_eq!(report.signatures_failed, 0, "{:?}", sink.entries());
+        assert!(report.signatures_verified > 0, "{:?}", sink.entries());
+        assert!(report.key_matches_certificate);
+        assert!(report.everything_checkable_passed());
 
         eprintln!(
-            "signing conformance: {} entries, schemes {:?}, {} digest(s) matched",
+            "signing conformance: {} entries, schemes {:?}, {} digest(s) and \
+             {} signature(s) matched",
             archive.entries().len(),
             report.schemes,
-            report.digests_verified
+            report.digests_verified,
+            report.signatures_verified
         );
     }
 
