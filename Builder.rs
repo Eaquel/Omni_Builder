@@ -100,8 +100,8 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "SHA-2",
         status: Status::Beta,
         directive_section: 30,
-        summary: "FIPS 180-4 SHA-256 and SHA-512, each verified against the \
-                  published NIST vectors including the long-message one.",
+        summary: "FIPS 180-4 SHA-256, SHA-384 and SHA-512, each verified against \
+                  the published NIST vectors including the long-message one.",
         missing: &["Randomised robustness testing only; not coverage-guided fuzzing."],
     },
     Subsystem {
@@ -285,9 +285,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Certificate writer",
         status: Status::Partial,
         directive_section: 25,
-        summary: "Writes a self-signed X.509 v3 certificate with a random serial, proper UTC or generalised time, and an RSA public key, signed with SHA-256.",
+        summary: "Writes a self-signed X.509 v3 certificate with a random serial, proper UTC or generalised time, an RSA public key and the extensions a signing certificate carries -- subject and authority key identifiers over the SHA-1 of the key, basic constraints and key usage marked critical, and code signing as the extended use -- signed with SHA-256. OpenSSL reads back every one of them.",
         missing: &[
-            "No extensions: no basic constraints, no key usage, no subject key identifier.",
+            "Five extensions and no more: subject and authority key identifiers, \
+             basic constraints, key usage and extended key usage. No name \
+             constraints, no policies, no distribution points.",
             "Self-signed only; there is no chain and no certificate authority.",
             "Names carry a common name, organisation and country and nothing else.",
         ],
@@ -309,7 +311,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 25,
         summary: "RFC 8017 RSASSA-PKCS1-v1_5 signing with SHA-256 and SHA-512, over PKCS#1 and PKCS#8 private keys read with the Core's own DER reader. Signatures are byte-identical to the ones OpenSSL produces from the same key. Nothing signs unblinded: the message is multiplied by a factor drawn fresh for every signature, so the exponentiation runs on a number nobody outside chose, and the private exponent has a multiple of its order added to it, so two signings with one key walk different rungs. Every signature is then verified with the public exponent before it is handed back, which is what catches a fault in the Chinese-remainder halves.",
         missing: &[
-            "Signing only. RSASSA-PSS is not implemented and neither is encryption.",
+            "PKCS#1 v1.5 only. RSASSA-PSS is not implemented and neither is encryption.",
             "No elliptic-curve arithmetic, so an EC key cannot be used.",
             "Blinding and a ladder, not constant-time arithmetic; see the big integer entry. The key also sits in ordinary memory while it is used.",
         ],
@@ -499,10 +501,15 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Reads a certificate's names, validity, serial, key size and \
                   algorithms, and fingerprints it with SHA-256.",
         missing: &[
-            "The certificate's own signature is never checked, so this identifies \
-             a certificate but never validates one.",
-            "No chain building and no trust store.",
-            "Extensions are not read, so key usage and basic constraints are unseen.",
+            "A certificate signed by somebody else is not checked, because that \
+             needs a chain and a trust store and there is neither. A self-signed \
+             one is checked against its own key.",
+            "Extensions are written but not read back, so key usage and basic \
+             constraints are not enforced on a certificate that arrives from \
+             elsewhere.",
+            "Only RSA over SHA-256, SHA-384 and SHA-512 can be checked. A \
+             certificate signed any other way is reported as unchecked rather \
+             than as passing.",
         ],
     },
     Subsystem {
@@ -2870,6 +2877,37 @@ pub mod hash {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct Digest384([u8; 48]);
+
+    impl Digest384 {
+        pub const fn as_bytes(&self) -> &[u8; 48] {
+            &self.0
+        }
+
+        pub fn to_hex(self) -> String {
+            const HEX: &[u8; 16] = b"0123456789abcdef";
+            let mut out = String::with_capacity(96);
+            for byte in self.0 {
+                out.push(HEX[(byte >> 4) as usize] as char);
+                out.push(HEX[(byte & 0x0f) as usize] as char);
+            }
+            out
+        }
+    }
+
+    impl core::fmt::Debug for Digest384 {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            write!(f, "sha384:{}", self.to_hex())
+        }
+    }
+
+    impl core::fmt::Display for Digest384 {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            f.write_str(&self.to_hex())
+        }
+    }
+
     const K512: [u64; 80] = [
         0x428a2f98d728ae22,
         0x7137449123ef65cd,
@@ -3104,6 +3142,27 @@ pub mod hash {
         let mut hasher = Sha512::new();
         hasher.update(data);
         hasher.finish()
+    }
+
+    const H0_384: [u64; 8] = [
+        0xcbbb9d5dc1059ed8,
+        0x629a292a367cd507,
+        0x9159015a3070dd17,
+        0x152fecd8f70e5939,
+        0x67332667ffc00b31,
+        0x8eb44a8768581511,
+        0xdb0c2e0d64f98fa7,
+        0x47b5481dbefa4fa4,
+    ];
+
+    pub fn sha384(data: &[u8]) -> Digest384 {
+        let mut hasher = Sha512::new();
+        hasher.state = H0_384;
+        hasher.update(data);
+        let whole = hasher.finish();
+        let mut out = [0u8; 48];
+        out.copy_from_slice(&whole.as_bytes()[..48]);
+        Digest384(out)
     }
 
     pub fn sha256(data: &[u8]) -> Digest {
@@ -12493,6 +12552,58 @@ pub mod x509 {
         }
     }
 
+    #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+    pub struct SelfSignature {
+        pub self_issued: bool,
+        pub checkable: bool,
+        pub holds: bool,
+    }
+
+    impl SelfSignature {
+        pub fn nothing_wrong(&self) -> bool {
+            !self.self_issued || !self.checkable || self.holds
+        }
+    }
+
+    pub fn own_signature(data: &[u8]) -> Result<SelfSignature, Diagnostic> {
+        let certificate = Certificate::parse(data)?;
+        let mut out = SelfSignature {
+            self_issued: certificate.issuer == certificate.subject,
+            ..SelfSignature::default()
+        };
+        if !out.self_issued {
+            return Ok(out);
+        }
+
+        let which = match certificate.signature_algorithm.oid.as_str() {
+            "1.2.840.113549.1.1.11" => crate::rsa::DigestAlgorithm::Sha256,
+            "1.2.840.113549.1.1.12" => crate::rsa::DigestAlgorithm::Sha384,
+            "1.2.840.113549.1.1.13" => crate::rsa::DigestAlgorithm::Sha512,
+            _ => return Ok(out),
+        };
+        out.checkable = true;
+
+        let mut outer = der::Reader::new(data, 0);
+        let whole = outer.expect(tag::SEQUENCE)?;
+        let mut body = whole.reader();
+        let tbs = body.expect(tag::SEQUENCE)?;
+        let signed = der::encode_element(tbs.tag, tbs.contents);
+        let _algorithm = body.expect(tag::SEQUENCE)?;
+        let bits = body.expect(tag::BIT_STRING)?;
+        let Some((unused, signature)) = bits.contents.split_first() else {
+            return Ok(out);
+        };
+        if *unused != 0 {
+            return Ok(out);
+        }
+
+        let key_info = Certificate::public_key_info(data)?;
+        let (modulus, exponent) = crate::rsa::parse_public_key(&key_info)?;
+        let digest = which.digest(&signed);
+        out.holds = crate::rsa::verify(&modulus, &exponent, which, &digest, signature)?;
+        Ok(out)
+    }
+
     #[derive(Clone, PartialEq, Eq, Debug)]
     pub struct Certificate {
         pub serial: String,
@@ -13068,6 +13179,7 @@ pub mod signing {
     #[derive(Clone, Debug)]
     pub struct SignerCheck {
         pub key_matches_certificate: bool,
+        pub certificate: crate::x509::SelfSignature,
         pub signatures: Vec<(SignatureAlgorithm, Checked)>,
     }
 
@@ -13300,6 +13412,9 @@ pub mod signing {
         pub signatures_failed: u64,
 
         pub key_matches_certificate: bool,
+
+        pub certificates_hold: bool,
+        pub certificates_self_signed: u64,
     }
 
     impl Report {
@@ -13310,6 +13425,7 @@ pub mod signing {
                 && self.signatures_failed == 0
                 && self.signatures_verified > 0
                 && self.key_matches_certificate
+                && self.certificates_hold
         }
 
         pub fn write_json(&self, w: &mut Writer, key: &str) {
@@ -13329,12 +13445,18 @@ pub mod signing {
             w.field_u64("signaturesUnimplemented", self.signatures_unimplemented);
             w.field_u64("signaturesFailed", self.signatures_failed);
             w.field_bool("keyMatchesCertificate", self.key_matches_certificate);
+            w.field_bool("certificatesHold", self.certificates_hold);
+            w.field_u64("certificatesSelfSigned", self.certificates_self_signed);
             w.field_str(
                 "note",
                 "A verified digest proves the package has not changed since the \
                  block was written. A verified signature proves the key in the \
                  block wrote it, and a key matching the certificate proves that \
-                 key is the one the certificate names. RSASSA-PSS, ECDSA and DSA \
+                 key is the one the certificate names. A self-signed certificate \
+                 is checked against its own key, which catches one altered after \
+                 it was made; a certificate signed by somebody else is not \
+                 checked, because there is no chain and no trust store. \
+                 RSASSA-PSS, ECDSA and DSA \
                  signatures are named here but not checked; a package carrying \
                  only those reports none verified rather than reporting a pass.",
             );
@@ -13468,6 +13590,16 @@ pub mod signing {
                 .as_bytes()
                 .to_vec(),
             ),
+            crate::rsa::DigestAlgorithm::Sha384 => {
+                return Err(fail(
+                    "ES040",
+                    "APK Signature Scheme v2 and v3 define no SHA-384 algorithm.",
+                )
+                .with_suggestion(
+                    "Sign with SHA-256 or SHA-512. SHA-384 is read here because \
+                     certificates are signed with it, not because a package can be.",
+                ));
+            }
         };
 
         let mut block = Vec::new();
@@ -13526,8 +13658,30 @@ pub mod signing {
     pub fn verify_signer(signer: &Signer, sink: &mut Sink) -> SignerCheck {
         let mut out = SignerCheck {
             key_matches_certificate: false,
+            certificate: crate::x509::SelfSignature::default(),
             signatures: Vec::new(),
         };
+
+        match crate::x509::own_signature(&signer.first_certificate) {
+            Ok(held) => out.certificate = held,
+            Err(error) => sink.emit(error),
+        }
+        if out.certificate.self_issued && out.certificate.checkable && !out.certificate.holds {
+            sink.emit(
+                Diagnostic::new(
+                    "ES035",
+                    Severity::Fatal,
+                    FailureClass::SecurityFailure,
+                    "core.signing",
+                    "The certificate is signed by itself and that signature does not hold.",
+                )
+                .with_suggestion(
+                    "A self-signed certificate whose own signature fails has been \
+                     altered since it was made. Do not install it.",
+                ),
+            );
+            return out;
+        }
 
         let expected = match crate::x509::Certificate::public_key_info(&signer.first_certificate) {
             Ok(bytes) => bytes,
@@ -13642,6 +13796,8 @@ pub mod signing {
             signatures_unimplemented: 0,
             signatures_failed: 0,
             key_matches_certificate: false,
+            certificates_hold: false,
+            certificates_self_signed: 0,
         };
 
         let block = match find_block(data, central_directory_offset) {
@@ -13823,11 +13979,18 @@ pub mod signing {
         }
 
         report.key_matches_certificate = !report.signers.is_empty();
+        report.certificates_hold = true;
         let signers = report.signers.clone();
         for signer in &signers {
             let checked = verify_signer(signer, sink);
             if !checked.key_matches_certificate {
                 report.key_matches_certificate = false;
+            }
+            if checked.certificate.self_issued {
+                report.certificates_self_signed += 1;
+            }
+            if !checked.certificate.nothing_wrong() {
+                report.certificates_hold = false;
             }
             for (_, outcome) in checked.signatures {
                 report.signatures_checked = true;
@@ -15437,7 +15600,7 @@ pub mod rsa {
     use crate::bignum::Natural;
     use crate::der;
     use crate::diag::{Diagnostic, Severity};
-    use crate::hash::{sha256, sha512};
+    use crate::hash::{sha256, sha384, sha512};
     use crate::FailureClass;
     use core::cmp::Ordering;
 
@@ -15446,6 +15609,11 @@ pub mod rsa {
     pub const SHA256_PREFIX: &[u8] = &[
         0x30, 0x31, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x01,
         0x05, 0x00, 0x04, 0x20,
+    ];
+
+    pub const SHA384_PREFIX: &[u8] = &[
+        0x30, 0x41, 0x30, 0x0d, 0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x02, 0x02,
+        0x05, 0x00, 0x04, 0x30,
     ];
 
     pub const SHA512_PREFIX: &[u8] = &[
@@ -15469,6 +15637,7 @@ pub mod rsa {
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub enum DigestAlgorithm {
         Sha256,
+        Sha384,
         Sha512,
     }
 
@@ -15476,6 +15645,7 @@ pub mod rsa {
         pub fn prefix(self) -> &'static [u8] {
             match self {
                 DigestAlgorithm::Sha256 => SHA256_PREFIX,
+                DigestAlgorithm::Sha384 => SHA384_PREFIX,
                 DigestAlgorithm::Sha512 => SHA512_PREFIX,
             }
         }
@@ -15483,6 +15653,7 @@ pub mod rsa {
         pub fn digest(self, message: &[u8]) -> Vec<u8> {
             match self {
                 DigestAlgorithm::Sha256 => sha256(message).as_bytes().to_vec(),
+                DigestAlgorithm::Sha384 => sha384(message).as_bytes().to_vec(),
                 DigestAlgorithm::Sha512 => sha512(message).as_bytes().to_vec(),
             }
         }
@@ -15490,8 +15661,13 @@ pub mod rsa {
         pub fn name(self) -> &'static str {
             match self {
                 DigestAlgorithm::Sha256 => "SHA-256",
+                DigestAlgorithm::Sha384 => "SHA-384",
                 DigestAlgorithm::Sha512 => "SHA-512",
             }
+        }
+
+        pub fn signs_a_package(self) -> bool {
+            !matches!(self, DigestAlgorithm::Sha384)
         }
     }
 
@@ -16166,6 +16342,13 @@ pub mod certificate {
     const ORGANISATION: &[u8] = &[0x55, 0x04, 0x0a];
     const COUNTRY: &[u8] = &[0x55, 0x04, 0x06];
 
+    const SUBJECT_KEY_ID: &[u8] = &[0x55, 0x1d, 0x0e];
+    const KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x0f];
+    const BASIC_CONSTRAINTS: &[u8] = &[0x55, 0x1d, 0x13];
+    const AUTHORITY_KEY_ID: &[u8] = &[0x55, 0x1d, 0x23];
+    const EXTENDED_KEY_USAGE: &[u8] = &[0x55, 0x1d, 0x25];
+    const CODE_SIGNING: &[u8] = &[0x2b, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x03];
+
     fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
         Diagnostic::new(
             code,
@@ -16279,6 +16462,72 @@ pub mod certificate {
         Ok(der::encode_element(der::tag::SEQUENCE, &body))
     }
 
+    fn extension(oid: &[u8], critical: bool, value: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&der::encode_element(der::tag::OID, oid));
+        if critical {
+            body.extend_from_slice(&der::encode_element(0x01, &[0xff]));
+        }
+        body.extend_from_slice(&der::encode_element(der::tag::OCTET_STRING, value));
+        der::encode_element(der::tag::SEQUENCE, &body)
+    }
+
+    fn key_identifier(key_info: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        let mut outer = der::Reader::new(key_info, 0);
+        let sequence = outer.expect(der::tag::SEQUENCE)?;
+        let mut fields = sequence.reader();
+        let _algorithm = fields.expect(der::tag::SEQUENCE)?;
+        let bits = fields.expect(der::tag::BIT_STRING)?;
+        let Some((unused, rest)) = bits.contents.split_first() else {
+            return Err(fail("EC010", "A public key holds no bits."));
+        };
+        if *unused != 0 {
+            return Err(fail("EC011", "A public key does not end on a whole byte."));
+        }
+        Ok(crate::hash::sha1(rest).as_bytes().to_vec())
+    }
+
+    fn extensions(key_info: &[u8]) -> Result<Vec<u8>, Diagnostic> {
+        let identifier = key_identifier(key_info)?;
+        let named = der::encode_element(der::tag::OCTET_STRING, &identifier);
+
+        let mut authority = Vec::new();
+        authority.extend_from_slice(&der::encode_element(0x80, &identifier));
+
+        let mut usage = vec![7u8];
+        usage.push(0x80);
+
+        let mut purposes = Vec::new();
+        purposes.extend_from_slice(&der::encode_element(der::tag::OID, CODE_SIGNING));
+
+        let mut all = Vec::new();
+        all.extend_from_slice(&extension(SUBJECT_KEY_ID, false, &named));
+        all.extend_from_slice(&extension(
+            AUTHORITY_KEY_ID,
+            false,
+            &der::encode_element(der::tag::SEQUENCE, &authority),
+        ));
+        all.extend_from_slice(&extension(
+            BASIC_CONSTRAINTS,
+            true,
+            &der::encode_element(der::tag::SEQUENCE, &[]),
+        ));
+        all.extend_from_slice(&extension(
+            KEY_USAGE,
+            true,
+            &der::encode_element(der::tag::BIT_STRING, &usage),
+        ));
+        all.extend_from_slice(&extension(
+            EXTENDED_KEY_USAGE,
+            false,
+            &der::encode_element(der::tag::SEQUENCE, &purposes),
+        ));
+        Ok(der::encode_element(
+            0xa3,
+            &der::encode_element(der::tag::SEQUENCE, &all),
+        ))
+    }
+
     pub fn self_signed(
         key: &rsa::PrivateKey,
         common_name: &str,
@@ -16322,7 +16571,9 @@ pub mod certificate {
         tbs_body.extend_from_slice(&name);
         tbs_body.extend_from_slice(&validity);
         tbs_body.extend_from_slice(&name);
-        tbs_body.extend_from_slice(&public_key_info(key)?);
+        let key_info = public_key_info(key)?;
+        tbs_body.extend_from_slice(&key_info);
+        tbs_body.extend_from_slice(&extensions(&key_info)?);
         let tbs = der::encode_element(der::tag::SEQUENCE, &tbs_body);
 
         let signature = rsa::sign(key, rsa::DigestAlgorithm::Sha256, &tbs)?;
@@ -39864,6 +40115,142 @@ public final class MainActivity extends Activity {
     }
 
     #[test]
+    fn sha384_matches_the_published_vectors() {
+        assert_eq!(
+            super::hash::sha384(b"").to_hex(),
+            "38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da\
+             274edebfe76f65fbd51ad2f14898b95b"
+                .replace(char::is_whitespace, "")
+        );
+        assert_eq!(
+            super::hash::sha384(b"abc").to_hex(),
+            "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed\
+             8086072ba1e7cc2358baeca134c825a7"
+                .replace(char::is_whitespace, "")
+        );
+        assert_eq!(
+            super::hash::sha384(
+                b"abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmn\
+                  hijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+                    .iter()
+                    .copied()
+                    .filter(|byte| !byte.is_ascii_whitespace())
+                    .collect::<Vec<u8>>()
+                    .as_slice()
+            )
+            .to_hex(),
+            "09330c33f71147e83d192fc782cd1b4753111b173b3b05d22fa08086e3b0f712\
+             fcc7c71a557e2db966c3e9fa91746039"
+                .replace(char::is_whitespace, "")
+        );
+
+        let long: Vec<u8> = std::iter::repeat_n(b'a', 1_000_000).collect();
+        assert_eq!(
+            super::hash::sha384(&long).to_hex(),
+            "9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b\
+             07b8b3dc38ecc4ebae97ddd87f3d8985"
+                .replace(char::is_whitespace, "")
+        );
+    }
+
+    #[test]
+    fn a_self_signed_certificate_is_checked_against_its_own_key() {
+        let held =
+            super::x509::own_signature(CONFORMANCE_CERTIFICATE).expect("the certificate reads");
+        assert!(
+            held.self_issued,
+            "the conformance certificate is self-signed"
+        );
+        assert!(held.checkable, "and it is signed with RSA over SHA-384");
+        assert!(
+            held.holds,
+            "a certificate another tool signed must verify here"
+        );
+        assert!(held.nothing_wrong());
+
+        let mut altered = CONFORMANCE_CERTIFICATE.to_vec();
+        let at = altered.len() / 3;
+        altered[at] ^= 0x01;
+        if let Ok(said) = super::x509::own_signature(&altered) {
+            assert!(
+                !said.holds || !said.checkable,
+                "a certificate altered after it was signed cannot still hold"
+            );
+        }
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let mine = super::certificate::self_signed(
+            &key,
+            "Omni Extensions",
+            "Omni",
+            "TR",
+            super::certificate::moment_from_epoch(1_700_000_000),
+            super::certificate::moment_from_epoch(2_000_000_000),
+        )
+        .expect("a certificate");
+
+        let said = super::x509::own_signature(&mine).expect("it reads");
+        assert!(said.self_issued && said.checkable && said.holds);
+
+        let read = super::x509::Certificate::parse(&mine).expect("it parses");
+        assert_eq!(read.subject, "C=TR, O=Omni, CN=Omni Extensions");
+        assert_eq!(read.issuer, read.subject);
+        assert_eq!(read.public_key_bits, Some(2048));
+
+        for (name, oid) in [
+            ("subject key identifier", [0x06u8, 0x03, 0x55, 0x1d, 0x0e]),
+            ("key usage", [0x06, 0x03, 0x55, 0x1d, 0x0f]),
+            ("basic constraints", [0x06, 0x03, 0x55, 0x1d, 0x13]),
+            ("authority key identifier", [0x06, 0x03, 0x55, 0x1d, 0x23]),
+            ("extended key usage", [0x06, 0x03, 0x55, 0x1d, 0x25]),
+        ] {
+            assert!(
+                mine.windows(oid.len()).any(|held| held == oid),
+                "the certificate carries no {name}"
+            );
+        }
+
+        if let Some(tool) = openssl() {
+            let directory = temp_directory("omni-certificate-extensions");
+            let der = directory.join("mine.der");
+            std::fs::write(&der, &mine).unwrap();
+            let shown = std::process::Command::new(&tool)
+                .args([
+                    "x509",
+                    "-inform",
+                    "DER",
+                    "-in",
+                    der.to_str().unwrap(),
+                    "-noout",
+                    "-text",
+                ])
+                .output()
+                .expect("openssl runs");
+            assert!(
+                shown.status.success(),
+                "openssl would not read this certificate:\n{}",
+                String::from_utf8_lossy(&shown.stderr)
+            );
+            let said = String::from_utf8_lossy(&shown.stdout);
+            for wanted in [
+                "X509v3 Subject Key Identifier",
+                "X509v3 Authority Key Identifier",
+                "X509v3 Basic Constraints: critical",
+                "X509v3 Key Usage: critical",
+                "Digital Signature",
+                "Code Signing",
+            ] {
+                assert!(
+                    said.contains(wanted),
+                    "openssl does not report {wanted}:\n{said}"
+                );
+            }
+            eprintln!("certificate: openssl reads every extension this writes");
+            std::fs::remove_dir_all(&directory).ok();
+        }
+    }
+
+    #[test]
     fn a_certificate_never_claims_its_signature_was_checked() {
         let certificate = Certificate::parse(CONFORMANCE_CERTIFICATE).unwrap();
         let mut w = Writer::new();
@@ -49837,6 +50224,8 @@ class Screen
     fn nothing_the_inventory_calls_missing_is_something_this_build_now_does() {
         const RETIRED: &[&str] = &[
             "there is no multidex",
+            "The certificate's own signature is never checked",
+            "No extensions: no basic constraints",
             "No fields, no virtual methods",
             "Nothing writes a class file",
             "Nothing writes a DEX",
