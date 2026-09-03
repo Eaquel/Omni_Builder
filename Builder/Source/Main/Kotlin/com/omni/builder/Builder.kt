@@ -27,6 +27,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ColorFilter
 import android.graphics.LinearGradient
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PixelFormat
@@ -1124,8 +1125,14 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val place = Matrix()
     private val started = SystemClock.uptimeMillis()
     private var running = false
+
+    private var glows: Array<RadialGradient>? = null
+    private var fade: LinearGradient? = null
+    private var madeAt = 0
+    private var madeFor = 0
 
     private val step = object : Runnable {
         override fun run() {
@@ -1139,11 +1146,17 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
 
     fun repaint(next: Palette) {
         palette = next
+        glows = null
+        fade = null
         invalidate()
     }
 
     fun resumeDrawing() {
         if (running) {
+            return
+        }
+        if (Motion.still()) {
+            invalidate()
             return
         }
         running = true
@@ -1167,39 +1180,60 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
             return
         }
         canvas.drawColor(palette.background)
+        ready(height)
 
         val phase = ((SystemClock.uptimeMillis() - started) % PERIOD_MILLIS.toLong()) /
             PERIOD_MILLIS
         val turn = (phase * 2.0 * Math.PI).toFloat()
         val radius = maxOf(w, h) * 0.72f
+        val held = glows ?: return
 
-        blob(canvas, w * (0.22f + 0.16f * sin(turn)), h * (0.18f + 0.10f * cos(turn * 0.8f)),
-            radius, palette.glowFirst)
-        blob(canvas, w * (0.82f + 0.12f * cos(turn * 1.3f)), h * (0.34f + 0.12f * sin(turn * 1.1f)),
-            radius * 0.85f, palette.glowSecond)
-        blob(canvas, w * (0.48f + 0.20f * sin(turn * 0.7f + 1.4f)),
-            h * (0.86f + 0.08f * cos(turn * 0.9f)), radius * 0.95f, palette.glowThird)
+        blob(canvas, held[0], w * (0.22f + 0.16f * sin(turn)),
+            h * (0.18f + 0.10f * cos(turn * 0.8f)), radius)
+        blob(canvas, held[1], w * (0.82f + 0.12f * cos(turn * 1.3f)),
+            h * (0.34f + 0.12f * sin(turn * 1.1f)), radius * 0.85f)
+        blob(canvas, held[2], w * (0.48f + 0.20f * sin(turn * 0.7f + 1.4f)),
+            h * (0.86f + 0.08f * cos(turn * 0.9f)), radius * 0.95f)
 
-        paint.shader = LinearGradient(
-            0f, 0f, 0f, h,
+        paint.shader = fade
+        paint.alpha = 255
+        canvas.drawRect(0f, 0f, w, h, paint)
+        paint.shader = null
+    }
+
+    private fun ready(tall: Int) {
+        if (glows != null && madeAt == palette.background && madeFor == tall) {
+            return
+        }
+        madeAt = palette.background
+        madeFor = tall
+        glows = arrayOf(
+            unit(palette.glowFirst),
+            unit(palette.glowSecond),
+            unit(palette.glowThird),
+        )
+        fade = LinearGradient(
+            0f, 0f, 0f, tall.toFloat(),
             Color.argb(0, Color.red(palette.background), Color.green(palette.background),
                 Color.blue(palette.background)),
             Color.argb(210, Color.red(palette.background), Color.green(palette.background),
                 Color.blue(palette.background)),
             Shader.TileMode.CLAMP,
         )
-        paint.alpha = 255
-        canvas.drawRect(0f, 0f, w, h, paint)
-        paint.shader = null
     }
 
-    private fun blob(canvas: Canvas, x: Float, y: Float, radius: Float, colour: Int) {
-        paint.shader = RadialGradient(
-            x, y, radius,
-            Color.argb(BLOB_ALPHA, Color.red(colour), Color.green(colour), Color.blue(colour)),
-            Color.argb(0, Color.red(colour), Color.green(colour), Color.blue(colour)),
-            Shader.TileMode.CLAMP,
-        )
+    private fun unit(colour: Int) = RadialGradient(
+        0f, 0f, 1f,
+        Color.argb(BLOB_ALPHA, Color.red(colour), Color.green(colour), Color.blue(colour)),
+        Color.argb(0, Color.red(colour), Color.green(colour), Color.blue(colour)),
+        Shader.TileMode.CLAMP,
+    )
+
+    private fun blob(canvas: Canvas, glow: RadialGradient, x: Float, y: Float, radius: Float) {
+        place.setScale(radius, radius)
+        place.postTranslate(x, y)
+        glow.setLocalMatrix(place)
+        paint.shader = glow
         canvas.drawCircle(x, y, radius, paint)
         paint.shader = null
     }
@@ -1806,7 +1840,9 @@ class BuilderActivity : Activity() {
         }
         ceremony.alpha = 0f
         ceremony.visibility = View.VISIBLE
-        ceremony.animate().alpha(1f).setDuration(Motion.of(Motion.ENTER)).start()
+        ceremony.animate().alpha(1f).setDuration(Motion.of(Motion.ENTER)).withEndAction {
+            aurora.pauseDrawing()
+        }.start()
     }
 
     private fun hideCeremony(then: () -> Unit) {
@@ -1816,6 +1852,7 @@ class BuilderActivity : Activity() {
             .withEndAction {
                 ceremony.removeAllViews()
                 ceremony.visibility = View.GONE
+                aurora.resumeDrawing()
                 then()
             }
             .start()
@@ -5153,8 +5190,10 @@ internal object Ink {
 class BinaryVeil(context: Context) : View(context) {
 
     private companion object {
-        const val COLUMNS = 26
-        const val ROWS = 44
+        const val WIDEST = 26
+        const val TALLEST = 44
+
+        const val CELL_DP = 15f
         const val SWEEP_MILLIS = 420f
 
         const val LATEST_MILLIS = 400L
@@ -5190,6 +5229,13 @@ class BinaryVeil(context: Context) : View(context) {
 
     fun sweep(colour: Int, swap: () -> Unit) {
         swapNow()
+        if (Motion.still()) {
+            running = false
+            visibility = GONE
+            removeCallbacks(deadline)
+            swap()
+            return
+        }
         accent = colour
         whenDone = swap
         began = SystemClock.uptimeMillis()
@@ -5217,6 +5263,16 @@ class BinaryVeil(context: Context) : View(context) {
         super.onDetachedFromWindow()
     }
 
+    private var columns = WIDEST
+    private var rows = TALLEST
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        val cell = CELL_DP * resources.displayMetrics.density
+        columns = (w / cell).toInt().coerceIn(8, WIDEST)
+        rows = (h / cell).toInt().coerceIn(12, TALLEST)
+    }
+
     override fun onDraw(canvas: Canvas) {
         if (!running) return
         val w = width.toFloat()
@@ -5234,15 +5290,15 @@ class BinaryVeil(context: Context) : View(context) {
         if (t >= 0.5f) swapNow()
 
         val front = t * (1f + EDGE * 2f) - EDGE
-        val columnWidth = w / COLUMNS
-        val rowHeight = h / ROWS
+        val columnWidth = w / columns
+        val rowHeight = h / rows
         paint.textSize = min(columnWidth * 0.72f, rowHeight * 0.86f)
 
         val tracking = 1f - abs(t - 0.5f) * 2f
         val life = (SystemClock.uptimeMillis() - began) / 1000f
 
-        for (row in 0 until ROWS) {
-            val y = (row + 0.5f) / ROWS
+        for (row in 0 until rows) {
+            val y = (row + 0.5f) / rows
             val distance = abs(y - front)
             if (distance > EDGE) continue
             val near = 1f - distance / EDGE
@@ -5256,7 +5312,7 @@ class BinaryVeil(context: Context) : View(context) {
 
             val split = columnWidth * (0.10f + 0.30f * tracking) * (0.4f + lit)
 
-            for (column in 0 until COLUMNS) {
+            for (column in 0 until columns) {
                 val roll = Ink.scatter(row * 131 + column, 7)
                 if (roll > 0.55f + near * 0.4f) continue
                 glyph[0] = if (Ink.scatter(row * 977 + column, 13) > 0.5f) '1' else '0'
