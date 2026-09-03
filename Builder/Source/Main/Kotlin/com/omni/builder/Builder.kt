@@ -186,18 +186,6 @@ object OmniLog {
         append(synchronized(lock) { session.toString() })
     }
 
-    fun lastCrash(): String? {
-        val file = privateFile(CRASH_FILE) ?: return null
-        if (!file.isFile || file.length() == 0L) {
-            return null
-        }
-        return runCatching {
-            val text = file.readText()
-            val start = text.lastIndexOf("CRASH  ")
-            if (start < 0) null else text.substring(start).lineSequence().take(12).joinToString("\n")
-        }.getOrNull()
-    }
-
     fun transcript(): String = synchronized(lock) { session.toString() }
 
     fun clearTranscript() {
@@ -342,16 +330,7 @@ object Sentry {
         return standing
     }
 
-    fun disarm(context: Context) {
-        val scheduler = context.getSystemService(JobScheduler::class.java) ?: return
-        runCatching { scheduler.cancel(JOB_ID) }
-        OmniLog.event(LogLevel.INFO, "sentry", "Watch stopped; the check at every start remains.")
-    }
-
     fun refused(context: Context): Boolean = store(context).getBoolean(REFUSED, false)
-
-    fun lastStanding(context: Context): String =
-        store(context).getString(LAST_STANDING, "").orEmpty()
 
     fun lastChecked(context: Context): Long = store(context).getLong(LAST_CHECKED, 0L)
 }
@@ -3699,9 +3678,6 @@ class BuilderActivity : Activity() {
     private fun keysHere(): List<SigningKey> = runCatching {
         SigningKey.list(Builder.nativeListKeys(keysFolder().absolutePath))
     }.getOrDefault(emptyList())
-
-    private fun folderName(folder: String): String =
-        folder.substringAfterLast('/').ifEmpty { getString(R.string.omni_files_root) }
 
     private fun breadcrumb(root: String, folder: String): View {
         val steps = mutableListOf(getString(R.string.omni_files_root) to "")

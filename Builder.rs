@@ -406,14 +406,14 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         ],
     },
     Subsystem {
-        name: "Binary XML writer",
+        name: "Binary XML",
         status: Status::Partial,
         directive_section: 22,
-        summary: "The binary XML an APK carries, written from parsed text: string pool, resource map, namespaces, elements and typed attribute values. aapt2 reads what this writes and agrees on every value.",
+        summary: "The binary XML an APK carries, written from parsed text and read back out of it: string pool in either encoding the platform writes, resource map, namespaces, elements and typed attribute values. aapt2 reads what this writes and agrees on every value, and this reads what aapt2 writes.",
         missing: &[
             "A resource reference by name is refused, not resolved: that needs the resource table, which is not written yet.",
             "The attribute identifier table covers what a manifest uses, not every android attribute.",
-            "No styles, no CDATA nodes, and no reader: this writes binary XML and does not read it.",
+            "No CDATA nodes.",
         ],
     },
     Subsystem {
@@ -504,15 +504,16 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Signature inspection",
         status: Status::Partial,
         directive_section: 25,
-        summary: "Finds the APK signing block, reads its v2 signers and \
-                  certificates, and recomputes the chunked SHA-256 or SHA-512 \
-                  content digest over the package's own bytes -- both matched \
-                  against apksigner.",
+        summary: "Finds the APK signing block, reads every scheme in it, \
+                  recomputes the chunked SHA-256 or SHA-512 content digest over \
+                  the package's own bytes, verifies the RSA signature over each \
+                  signer's signed data, and checks that the key in the block is \
+                  the key in the certificate it presents -- all matched against \
+                  apksigner.",
         missing: &[
-            "The signature over the signed data is never verified, because there \
-             is no RSA or elliptic-curve arithmetic here. A digest match proves \
-             the package is unchanged, not who signed it.",
-            "Reads v2 only; v3 and v3.1 blocks are listed but not parsed.",
+            "RSASSA-PSS, ECDSA and DSA signatures are named and left unchecked: \
+             a package carrying only those reports none verified rather than \
+             reporting a pass.",
             "A verity digest is reported as not recomputed: the fs-verity Merkle \
              tree is a different construction and is not implemented.",
             "Nothing writes a signing block, so signing still belongs to the \
