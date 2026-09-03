@@ -39,6 +39,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -1889,14 +1890,14 @@ class BuilderActivity : Activity() {
         text = getString(R.string.omni_stage_stop)
         isAllCaps = false
         stateListAnimator = null
-        setTextColor(palette.foreground)
+        setTextColor(stated(palette.foreground))
         typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         letterSpacing = Type.TRACKING
         minimumWidth = gap(30)
         minimumHeight = gap(TOUCH_UNITS)
         setPadding(gap(6), gap(3), gap(6), gap(3))
-        background = touchable(pill(palette.raised, gap(5).toFloat()), palette.error)
+        background = reacting(palette.raised, gap(5).toFloat(), palette.error)
         setOnClickListener {
             isEnabled = false
             alpha = 0.5f
@@ -2104,19 +2105,22 @@ class BuilderActivity : Activity() {
                 control().apply {
                     text = getString(labels.getValue(tab))
                     setTextColor(
-                        when {
-                            active -> palette.background
-                            reachable -> palette.foreground
-                            else -> palette.muted
-                        }
+                        stated(
+                            when {
+                                active -> palette.background
+                                reachable -> palette.foreground
+                                else -> palette.muted
+                            }
+                        )
                     )
                     typeface = Type.label
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     letterSpacing = Type.TRACKING
                     maxLines = 1
                     setPadding(gap(1), gap(3), gap(1), gap(3))
-                    background = touchable(
-                        pill(if (active) palette.accent else Color.TRANSPARENT, gap(3).toFloat()),
+                    background = reacting(
+                        if (active) palette.accent else Color.TRANSPARENT,
+                        gap(3).toFloat(),
                         palette.accent,
                     )
                     isSelected = active
@@ -3794,11 +3798,11 @@ class BuilderActivity : Activity() {
 
     private fun tool(text: String, colour: Int, onPress: () -> Unit) = control().apply {
         this.text = text
-        setTextColor(colour)
+        setTextColor(stated(colour))
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         maxLines = 1
         setPadding(gap(4), gap(2), gap(4), gap(2))
-        background = touchable(pill(palette.raised, gap(4).toFloat()), colour)
+        background = reacting(palette.raised, gap(4).toFloat(), colour)
         setOnClickListener {
             onPress()
             press()
@@ -4869,6 +4873,22 @@ class BuilderActivity : Activity() {
     private fun touchable(background: GradientDrawable, ripple: Int): Drawable =
         RippleDrawable(ColorStateList.valueOf(ripple), background, null)
 
+    private fun reacting(fill: Int, radius: Float, accent: Int): Drawable {
+        val ring = pill(fill, radius).apply {
+            setStroke(gap(1) / 2, accent)
+        }
+        val states = StateListDrawable().apply {
+            addState(intArrayOf(android.R.attr.state_focused), ring)
+            addState(intArrayOf(), pill(fill, radius))
+        }
+        return RippleDrawable(ColorStateList.valueOf(accent), states, null)
+    }
+
+    private fun stated(colour: Int): ColorStateList = ColorStateList(
+        arrayOf(intArrayOf(-android.R.attr.state_enabled), intArrayOf()),
+        intArrayOf(Ink.fade(colour, 0.38f), colour),
+    )
+
     private fun card(): LinearLayout = LinearLayout(this).apply {
         orientation = LinearLayout.VERTICAL
         background = sheet(palette.surface, palette.divider)
@@ -4959,11 +4979,11 @@ class BuilderActivity : Activity() {
 
     private fun primary(text: String, onPress: () -> Unit) = control().apply {
         this.text = text
-        setTextColor(palette.background)
+        setTextColor(stated(palette.background))
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
         letterSpacing = 0.06f
         setPadding(gap(4), gap(4), gap(4), gap(4))
-        background = touchable(pill(palette.accent, gap(3).toFloat()), palette.background)
+        background = reacting(palette.accent, gap(3).toFloat(), palette.background)
         setOnClickListener { onPress() }
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = gap(2)
@@ -4973,10 +4993,10 @@ class BuilderActivity : Activity() {
 
     private fun subtle(text: String, colour: Int, onPress: () -> Unit) = control().apply {
         this.text = text
-        setTextColor(colour)
+        setTextColor(stated(colour))
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         setPadding(gap(4), gap(3), gap(4), gap(3))
-        background = touchable(pill(Color.TRANSPARENT, gap(3).toFloat()), colour)
+        background = reacting(Color.TRANSPARENT, gap(3).toFloat(), colour)
         setOnClickListener { onPress() }
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = gap(1)
@@ -5170,9 +5190,10 @@ class BuilderActivity : Activity() {
             views.forEachIndexed { index, view ->
                 val on = selected(index)
                 view.isSelected = on
-                view.setTextColor(if (on) palette.background else palette.foreground)
-                view.background = touchable(
-                    pill(if (on) palette.accent else palette.raised, gap(4).toFloat()),
+                view.setTextColor(stated(if (on) palette.background else palette.foreground))
+                view.background = reacting(
+                    if (on) palette.accent else palette.raised,
+                    gap(4).toFloat(),
                     palette.accent,
                 )
             }
