@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Ouvrir un projet le place sous Fichiers et Construire. Le supprimer envoie le dossier entier à la corbeille, où il attend un jour avant de disparaître.</string>
     <string name="omni_keys_title">Clés de signature</string>
     <string name="omni_keys_none">Aucune clé de signature pour l\'instant. Un paquet est signé avec une clé que tu crées ici.</string>
+    <string name="omni_keys_verify">VÉRIFIER LE MOT DE PASSE</string>
+    <string name="omni_keys_verified">Le mot de passe ouvre cette clé.</string>
+    <string name="omni_keys_refused">Ce mot de passe n\'ouvre pas cette clé.</string>
     <string name="omni_keys_new">NOUVELLE CLÉ</string>
     <string name="omni_keys_in_use">EN USAGE</string>
     <string name="omni_keys_expires">Expire</string>

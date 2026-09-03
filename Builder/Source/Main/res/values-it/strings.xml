@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Aprire un progetto lo mette sotto File e Costruisci. Eliminarlo porta l\'intera cartella nel cestino, dove attende un giorno prima di sparire.</string>
     <string name="omni_keys_title">Chiavi di firma</string>
     <string name="omni_keys_none">Ancora nessuna chiave di firma. Un pacchetto si firma con una chiave che crei qui.</string>
+    <string name="omni_keys_verify">CONTROLLA LA PASSWORD</string>
+    <string name="omni_keys_verified">La password apre questa chiave.</string>
+    <string name="omni_keys_refused">Questa password non apre questa chiave.</string>
     <string name="omni_keys_new">NUOVA CHIAVE</string>
     <string name="omni_keys_in_use">IN USO</string>
     <string name="omni_keys_expires">Scade</string>

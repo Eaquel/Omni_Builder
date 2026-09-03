@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Abrir un proyecto lo coloca bajo Archivos y Construir. Borrarlo lleva la carpeta entera a la papelera, donde espera un día antes de irse.</string>
     <string name="omni_keys_title">Claves de firma</string>
     <string name="omni_keys_none">Aún no hay ninguna clave de firma. Un paquete se firma con una clave que creas aquí.</string>
+    <string name="omni_keys_verify">COMPROBAR LA CONTRASEÑA</string>
+    <string name="omni_keys_verified">La contraseña abre esta clave.</string>
+    <string name="omni_keys_refused">Esa contraseña no abre esta clave.</string>
     <string name="omni_keys_new">NUEVA CLAVE</string>
     <string name="omni_keys_in_use">EN USO</string>
     <string name="omni_keys_expires">Caduca</string>

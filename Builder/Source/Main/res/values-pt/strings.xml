@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Abrir um projeto o coloca em Arquivos e Construir. Apagá-lo leva a pasta inteira para a lixeira, onde espera um dia antes de sumir.</string>
     <string name="omni_keys_title">Chaves de assinatura</string>
     <string name="omni_keys_none">Ainda não há chave de assinatura. Um pacote é assinado com uma chave que crias aqui.</string>
+    <string name="omni_keys_verify">VERIFICAR A PALAVRA-PASSE</string>
+    <string name="omni_keys_verified">A palavra-passe abre esta chave.</string>
+    <string name="omni_keys_refused">Essa palavra-passe não abre esta chave.</string>
     <string name="omni_keys_new">NOVA CHAVE</string>
     <string name="omni_keys_in_use">EM USO</string>
     <string name="omni_keys_expires">Expira</string>

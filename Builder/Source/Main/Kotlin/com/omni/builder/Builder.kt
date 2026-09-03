@@ -485,12 +485,6 @@ object Builder {
         return state
     }
 
-    external fun nativeAbiVersion(): Int
-
-    external fun nativeCoreVersion(): String
-
-    external fun nativeStateReport(observedEnvironment: String?): String
-
     external fun nativeCreateProject(root: String, spec: String): String
 
     external fun nativeBuildAll(
@@ -3784,6 +3778,27 @@ class BuilderActivity : Activity() {
             .show()
     }
 
+    private fun askForSecret(title: String, onChosen: (CharArray) -> Unit) {
+        val field = EditText(this).apply {
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            setTextColor(palette.foreground)
+            setPadding(gap(4), gap(3), gap(4), gap(3))
+        }
+        AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(field)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val held = CharArray(field.text.length)
+                field.text.getChars(0, field.text.length, held, 0)
+                field.text.clear()
+                onChosen(held)
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+        field.requestFocus()
+    }
+
     private fun askForName(title: String, initial: String, onChosen: (String) -> Unit) {
         val editor = EditText(this).apply {
             setText(initial)
@@ -4636,6 +4651,25 @@ class BuilderActivity : Activity() {
                     render(false)
                 }
             )
+            vault.addView(subtle(getString(R.string.omni_keys_verify), palette.accent) {
+                askForSecret(getString(R.string.omni_keys_verify)) { secret ->
+                    results.removeAllViews()
+                    val answer = runCatching {
+                        JSONObject(Builder.nativeCheckKey(key.path, secret))
+                    }.getOrNull()
+                    secret.fill(' ')
+                    if (answer != null && answer.optBoolean("opened", false)) {
+                        results.addView(
+                            notice(getString(R.string.omni_keys_verified), palette.ok)
+                        )
+                    } else {
+                        answer?.let { showRefusal(Refusal.parse(it), results) }
+                            ?: results.addView(
+                                notice(getString(R.string.omni_keys_refused), palette.error)
+                            )
+                    }
+                }
+            })
             if (shared) {
                 vault.addView(quiet(getString(R.string.omni_keys_shared_note, DEFAULT_KEY_PASSWORD)))
             } else {
@@ -5335,6 +5369,7 @@ class BuilderActivity : Activity() {
                 )
             )
             results.addView(facts)
+            showPolicy(answer)
 
             if (outcome.findings.isNotEmpty()) {
                 results.addView(

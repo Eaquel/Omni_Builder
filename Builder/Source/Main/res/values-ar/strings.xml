@@ -15,6 +15,9 @@
     <string name="omni_projects_note">فتح مشروع يضعه تحت الملفات والبناء. وحذفه ينقل المجلد كله إلى المهملات، حيث ينتظر يومًا قبل أن يزول.</string>
     <string name="omni_keys_title">مفاتيح التوقيع</string>
     <string name="omni_keys_none">لا مفتاح توقيع بعد. تُوقَّع الحزمة بمفتاح تنشئه هنا.</string>
+    <string name="omni_keys_verify">تحقّق من كلمة المرور</string>
+    <string name="omni_keys_verified">كلمة المرور تفتح هذا المفتاح.</string>
+    <string name="omni_keys_refused">كلمة المرور هذه لا تفتح هذا المفتاح.</string>
     <string name="omni_keys_new">مفتاح جديد</string>
     <string name="omni_keys_in_use">قيد الاستعمال</string>
     <string name="omni_keys_expires">ينتهي</string>

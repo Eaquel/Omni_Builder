@@ -15,6 +15,9 @@
     <string name="omni_projects_note">打开项目后，它会出现在文件和构建之下。删除会把整个文件夹移到回收站，在那里等一天才消失。</string>
     <string name="omni_keys_title">签名密钥</string>
     <string name="omni_keys_none">还没有签名密钥。安装包用你在这里创建的密钥签名。</string>
+    <string name="omni_keys_verify">检查密码</string>
+    <string name="omni_keys_verified">该密码可以打开此密钥。</string>
+    <string name="omni_keys_refused">该密码打不开此密钥。</string>
     <string name="omni_keys_new">新建密钥</string>
     <string name="omni_keys_in_use">使用中</string>
     <string name="omni_keys_expires">到期</string>

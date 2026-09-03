@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Открытый проект появляется в разделах Файлы и Сборка. Удаление отправляет всю папку в корзину, где она ждёт сутки, прежде чем исчезнуть.</string>
     <string name="omni_keys_title">Ключи подписи</string>
     <string name="omni_keys_none">Ключа подписи пока нет. Пакет подписывается ключом, который вы создаёте здесь.</string>
+    <string name="omni_keys_verify">ПРОВЕРИТЬ ПАРОЛЬ</string>
+    <string name="omni_keys_verified">Пароль открывает этот ключ.</string>
+    <string name="omni_keys_refused">Этот пароль не открывает этот ключ.</string>
     <string name="omni_keys_new">НОВЫЙ КЛЮЧ</string>
     <string name="omni_keys_in_use">В РАБОТЕ</string>
     <string name="omni_keys_expires">Истекает</string>

@@ -166,26 +166,6 @@ bool JavaCharsToUtf8(JNIEnv *env, jcharArray value, std::string *out) {
   return ok;
 }
 
-jstring CallCoreReport(JNIEnv *env, const char *observed) {
-  char *report = omni_state_report(observed);
-  if (report == nullptr) {
-    ThrowJava(env, kIllegalState,
-              "Omni Core could not produce a state report. This is a defect in "
-              "the Core, not in the project being built.");
-    return nullptr;
-  }
-
-  jstring result = env->NewStringUTF(report);
-  omni_string_free(report);
-
-  if (result == nullptr) {
-    ThrowJava(env, kOutOfMemory,
-              "Omni Core state report could not be converted to a Java string.");
-    return nullptr;
-  }
-  return result;
-}
-
 }
 
 extern "C" {
@@ -211,25 +191,6 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void * ) {
                       "Omni Core %s loaded (ABI %u).", omni_core_version(),
                       core_abi);
   return JNI_VERSION_1_6;
-}
-
-JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeAbiVersion(
-    JNIEnv * , jobject ) {
-  return static_cast<jint>(omni_abi_version());
-}
-
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCoreVersion(
-    JNIEnv *env, jobject ) {
-  const char *version = omni_core_version();
-  if (version == nullptr) {
-    ThrowJava(env, kIllegalState, "Omni Core reported no version.");
-    return nullptr;
-  }
-  jstring result = env->NewStringUTF(version);
-  if (result == nullptr) {
-    ThrowJava(env, kOutOfMemory, "Omni Core version could not be converted.");
-  }
-  return result;
 }
 
 jstring HandBack(JNIEnv *env, char *report) {
@@ -787,20 +748,6 @@ JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildExpect(
     return;
   }
   omni_build_expect(held.c_str());
-}
-
-JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeStateReport(
-    JNIEnv *env, jobject , jstring observed_environment) {
-  if (observed_environment == nullptr) {
-    return CallCoreReport(env, nullptr);
-  }
-
-  std::string observed;
-  if (!JavaStringToUtf8(env, observed_environment, &observed)) {
-    return nullptr;
-  }
-
-  return CallCoreReport(env, observed.c_str());
 }
 
 }

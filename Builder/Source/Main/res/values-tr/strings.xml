@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Bir projeyi açmak onu Dosyalar ve Derle altına koyar. Silmek ise klasörün tamamını çöpe taşır; orada gitmeden önce bir gün bekler.</string>
     <string name="omni_keys_title">İmza anahtarları</string>
     <string name="omni_keys_none">Henüz imza anahtarı yok. Paket, burada oluşturduğun anahtarla imzalanır.</string>
+    <string name="omni_keys_verify">PAROLAYI DENETLE</string>
+    <string name="omni_keys_verified">Parola bu anahtarı açıyor.</string>
+    <string name="omni_keys_refused">Bu parola bu anahtarı açmıyor.</string>
     <string name="omni_keys_new">YENİ ANAHTAR</string>
     <string name="omni_keys_in_use">KULLANIMDA</string>
     <string name="omni_keys_expires">Bitiş</string>

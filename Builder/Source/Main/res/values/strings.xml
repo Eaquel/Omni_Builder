@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Opening a project puts it under Files and Build. Deleting one moves the whole folder to the trash, where it waits a day before it goes.</string>
     <string name="omni_keys_title">Signing keys</string>
     <string name="omni_keys_none">No signing key yet. A package is signed with a key you make here.</string>
+    <string name="omni_keys_verify">CHECK THE PASSWORD</string>
+    <string name="omni_keys_verified">The password opens this key.</string>
+    <string name="omni_keys_refused">That password does not open this key.</string>
     <string name="omni_keys_new">NEW KEY</string>
     <string name="omni_keys_in_use">IN USE</string>
     <string name="omni_keys_expires">Expires</string>

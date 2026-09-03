@@ -11,8 +11,6 @@ uint32_t omni_abi_version(void);
 
 const char *omni_core_version(void);
 
-char *omni_state_report(const char *observed_environment);
-
 char *omni_create_project(const char *root, const char *spec);
 
 char *omni_build_all(const char *root, const char *package_path,

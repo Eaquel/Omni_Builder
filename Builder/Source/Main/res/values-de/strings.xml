@@ -15,6 +15,9 @@
     <string name="omni_projects_note">Ein geöffnetes Projekt erscheint unter Dateien und Bauen. Beim Löschen wandert der ganze Ordner in den Papierkorb und wartet dort einen Tag.</string>
     <string name="omni_keys_title">Signaturschlüssel</string>
     <string name="omni_keys_none">Noch kein Signaturschlüssel. Ein Paket wird mit einem Schlüssel signiert, den du hier erzeugst.</string>
+    <string name="omni_keys_verify">PASSWORT PRÜFEN</string>
+    <string name="omni_keys_verified">Das Passwort öffnet diesen Schlüssel.</string>
+    <string name="omni_keys_refused">Dieses Passwort öffnet diesen Schlüssel nicht.</string>
     <string name="omni_keys_new">NEUER SCHLÜSSEL</string>
     <string name="omni_keys_in_use">IN GEBRAUCH</string>
     <string name="omni_keys_expires">Läuft ab</string>
