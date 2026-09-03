@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">NUOVO FILE</string>
     <string name="omni_action_new_folder">NUOVA CARTELLA</string>
     <string name="omni_action_open">APRI</string>
+    <string name="omni_action_more">Altro</string>
     <string name="omni_files_root">Progetto</string>
     <string name="omni_files_empty">Questa cartella è vuota.</string>
     <string name="omni_files_holds">%1$d dentro</string>

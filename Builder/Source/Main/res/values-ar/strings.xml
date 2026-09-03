@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">ملف جديد</string>
     <string name="omni_action_new_folder">مجلد جديد</string>
     <string name="omni_action_open">افتح</string>
+    <string name="omni_action_more">المزيد</string>
     <string name="omni_files_root">المشروع</string>
     <string name="omni_files_empty">هذا المجلد فارغ.</string>
     <string name="omni_files_holds">بداخله %1$d</string>

@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">YENİ DOSYA</string>
     <string name="omni_action_new_folder">YENİ KLASÖR</string>
     <string name="omni_action_open">AÇ</string>
+    <string name="omni_action_more">Daha fazla</string>
     <string name="omni_files_root">Proje</string>
     <string name="omni_files_empty">Bu klasör boş.</string>
     <string name="omni_files_holds">içinde %1$d</string>

@@ -25,9 +25,11 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.PathMeasure
 import android.graphics.RadialGradient
 import android.graphics.RectF
@@ -60,6 +62,7 @@ import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
 import android.view.WindowInsets
 import android.view.WindowInsetsController
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
@@ -1202,6 +1205,117 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
     }
 }
 
+internal object Motion {
+
+    const val TOUCH_UNITS = 12
+
+    const val TAP = 70L
+    const val REBOUND = 110L
+    const val LEAVE = 140L
+    const val ENTER = 260L
+    const val SWEEP = 420L
+    const val SETTLE = 620L
+    const val REFUSAL = 1_400L
+
+    private var scale = 1f
+
+    fun readWhatTheDeviceAsksFor(context: Context) {
+        scale = runCatching {
+            Settings.Global.getFloat(
+                context.contentResolver,
+                Settings.Global.ANIMATOR_DURATION_SCALE,
+                1f,
+            )
+        }.getOrDefault(1f).coerceIn(0f, 4f)
+    }
+
+    fun still(): Boolean = scale <= 0.01f
+
+    fun of(millis: Long): Long = if (still()) 0L else (millis * scale).toLong().coerceAtLeast(1L)
+}
+
+internal class Mark(private val shape: Shape, private val colour: Int) : Drawable() {
+
+    enum class Shape { FOLDER, FILE, MORE, AWAY }
+
+    private companion object {
+        const val GRID = 24f
+        const val STROKE = 1.7f
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val path = Path()
+
+    override fun draw(canvas: Canvas) {
+        val edge = min(bounds.width(), bounds.height()).toFloat()
+        if (edge <= 0f) return
+        val unit = edge / GRID
+        canvas.save()
+        canvas.translate(
+            bounds.left + (bounds.width() - edge) / 2f,
+            bounds.top + (bounds.height() - edge) / 2f,
+        )
+        canvas.scale(unit, unit)
+        paint.color = colour
+        paint.strokeWidth = STROKE
+        path.rewind()
+        when (shape) {
+            Shape.FOLDER -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(3.5f, 7f)
+                path.lineTo(9.5f, 7f)
+                path.lineTo(11.5f, 10f)
+                path.lineTo(20.5f, 10f)
+                path.lineTo(20.5f, 18.5f)
+                path.lineTo(3.5f, 18.5f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.FILE -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(6.5f, 3.5f)
+                path.lineTo(14f, 3.5f)
+                path.lineTo(17.5f, 7.5f)
+                path.lineTo(17.5f, 20.5f)
+                path.lineTo(6.5f, 20.5f)
+                path.close()
+                path.moveTo(14f, 3.5f)
+                path.lineTo(14f, 7.5f)
+                path.lineTo(17.5f, 7.5f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.MORE -> {
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(12f, 6f, 1.6f, paint)
+                canvas.drawCircle(12f, 12f, 1.6f, paint)
+                canvas.drawCircle(12f, 18f, 1.6f, paint)
+            }
+            Shape.AWAY -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(10f, 7f)
+                path.lineTo(15f, 12f)
+                path.lineTo(10f, 17f)
+                canvas.drawPath(path, paint)
+            }
+        }
+        canvas.restore()
+    }
+
+    override fun setAlpha(alpha: Int) {
+        paint.alpha = alpha
+    }
+
+    override fun setColorFilter(filter: ColorFilter?) {
+        paint.colorFilter = filter
+    }
+
+    @Deprecated("The platform asks for this and nothing reads it.")
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+}
+
 class FlowLayout(
     context: Context,
     private val betweenX: Int,
@@ -1209,8 +1323,9 @@ class FlowLayout(
 ) : ViewGroup(context) {
 
     private fun measureRows(width: Int, place: Boolean): Int {
-        val limit = width - paddingLeft - paddingRight
-        var x = paddingLeft
+        val mirrored = layoutDirection == LAYOUT_DIRECTION_RTL
+        val limit = width - paddingStart - paddingEnd
+        var x = 0
         var y = paddingTop
         var tallest = 0
         for (index in 0 until childCount) {
@@ -1218,13 +1333,18 @@ class FlowLayout(
             if (child.visibility == GONE) {
                 continue
             }
-            if (x > paddingLeft && x - paddingLeft + child.measuredWidth > limit) {
-                x = paddingLeft
+            if (x > 0 && x + child.measuredWidth > limit) {
+                x = 0
                 y += tallest + betweenY
                 tallest = 0
             }
             if (place) {
-                child.layout(x, y, x + child.measuredWidth, y + child.measuredHeight)
+                val from = if (mirrored) {
+                    width - paddingStart - x - child.measuredWidth
+                } else {
+                    paddingStart + x
+                }
+                child.layout(from, y, from + child.measuredWidth, y + child.measuredHeight)
             }
             x += child.measuredWidth + betweenX
             tallest = maxOf(tallest, child.measuredHeight)
@@ -1235,7 +1355,7 @@ class FlowLayout(
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
         val width = MeasureSpec.getSize(widthSpec)
         val room = MeasureSpec.makeMeasureSpec(
-            (width - paddingLeft - paddingRight).coerceAtLeast(0),
+            (width - paddingStart - paddingEnd).coerceAtLeast(0),
             MeasureSpec.AT_MOST,
         )
         for (index in 0 until childCount) {
@@ -1317,18 +1437,12 @@ class BuilderActivity : Activity() {
 
     private companion object {
         const val IMAGE_REQUEST = 2
-        const val ENTER_MILLIS = 260L
-        const val LEAVE_MILLIS = 140L
-
-        const val REFUSAL_MILLIS = 1_400L
 
         const val LOOK_MILLIS = 60L
 
         const val WATCH_MILLIS = 110L
 
-        const val TOUCH_UNITS = 12
-
-        const val SETTLE_MILLIS = 620L
+        const val TOUCH_UNITS = Motion.TOUCH_UNITS
 
         val STAGE_NAMES = listOf(
             R.string.omni_stage_project,
@@ -1378,9 +1492,6 @@ class BuilderActivity : Activity() {
         const val LARGEST_ICON_EDGE = 512
         const val PROJECT_RES = "Res"
         const val PROJECT_ICON = "Icon.png"
-        const val FOLDER_MARK = "\u25B8"
-        const val FILE_MARK = "\u2022"
-        const val MENU_MARK = "\u22EE"
 
         val PICTURE_SUFFIXES = listOf(".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 
@@ -1456,6 +1567,7 @@ class BuilderActivity : Activity() {
         super.onCreate(savedInstanceState)
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
 
+        Motion.readWhatTheDeviceAsksFor(this)
         palette = Preferences.palette(this)
         aurora = AuroraView(this, palette)
         content = LinearLayout(this).apply {
@@ -1555,12 +1667,19 @@ class BuilderActivity : Activity() {
                 @Suppress("DEPRECATION")
                 bottom = insets.systemWindowInsetBottom
             }
+            val keyboard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                insets.getInsets(WindowInsets.Type.ime()).bottom
+            } else {
+                0
+            }
             val above = roof.layoutParams as LinearLayout.LayoutParams
             if (above.height != top) {
                 above.height = top
                 roof.layoutParams = above
             }
+            bar.visibility = if (keyboard > 0) View.GONE else View.VISIBLE
             bar.setPadding(gap(2), gap(2), gap(2), gap(2) + bottom)
+            scroller.setPadding(0, 0, 0, keyboard)
             insets
         }
     }
@@ -1659,7 +1778,7 @@ class BuilderActivity : Activity() {
         content.animate()
             .alpha(0f)
             .translationY(-gap(RISE_DP / 6).toFloat())
-            .setDuration(LEAVE_MILLIS)
+            .setDuration(Motion.of(Motion.LEAVE))
             .setInterpolator(AccelerateInterpolator())
             .start()
         veil.sweep(palette.accent) {
@@ -1686,13 +1805,13 @@ class BuilderActivity : Activity() {
         }
         ceremony.alpha = 0f
         ceremony.visibility = View.VISIBLE
-        ceremony.animate().alpha(1f).setDuration(ENTER_MILLIS).start()
+        ceremony.animate().alpha(1f).setDuration(Motion.of(Motion.ENTER)).start()
     }
 
     private fun hideCeremony(then: () -> Unit) {
         ceremony.animate()
             .alpha(0f)
-            .setDuration(LEAVE_MILLIS)
+            .setDuration(Motion.of(Motion.LEAVE))
             .withEndAction {
                 ceremony.removeAllViews()
                 ceremony.visibility = View.GONE
@@ -1777,7 +1896,7 @@ class BuilderActivity : Activity() {
             content.animate()
                 .alpha(1f)
                 .translationY(0f)
-                .setDuration(ENTER_MILLIS)
+                .setDuration(Motion.of(Motion.ENTER))
                 .setInterpolator(DecelerateInterpolator())
                 .start()
         } else {
@@ -1902,7 +2021,7 @@ class BuilderActivity : Activity() {
             val active = screen.tab == tab
             val reachable = tab != Tab.FILES && tab != Tab.BUILD || openProject != null
             bar.addView(
-                TextView(this).apply {
+                control().apply {
                     text = getString(labels.getValue(tab))
                     setTextColor(
                         when {
@@ -1914,14 +2033,15 @@ class BuilderActivity : Activity() {
                     typeface = Type.label
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     letterSpacing = Type.TRACKING
-                    gravity = Gravity.CENTER
                     maxLines = 1
                     setPadding(gap(1), gap(3), gap(1), gap(3))
                     background = touchable(
                         pill(if (active) palette.accent else Color.TRANSPARENT, gap(3).toFloat()),
                         palette.accent,
                     )
-                    isClickable = true
+                    isSelected = active
+                    isEnabled = true
+                    readAs(android.widget.ToggleButton::class.java.name)
                     setOnClickListener {
                         if (reachable) {
                             go(destination(tab))
@@ -2942,7 +3062,10 @@ class BuilderActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, gap(2), 0, gap(2))
+            minimumHeight = gap(TOUCH_UNITS)
             isClickable = true
+            isFocusable = true
+            readAs(Button::class.java.name)
             background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
             setOnClickListener { openEntry(root, entry) }
             setOnLongClickListener {
@@ -2954,12 +3077,13 @@ class BuilderActivity : Activity() {
                 if (picture) {
                     thumbnail(absolute, gap(9))
                 } else {
-                    TextView(context).apply {
-                        text = if (entry.folder) FOLDER_MARK else FILE_MARK
-                        setTextColor(if (entry.folder) palette.accent else palette.muted)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-                        gravity = Gravity.CENTER
+                    View(context).apply {
                         background = pill(palette.raised, gap(2).toFloat())
+                        foreground = Mark(
+                            if (entry.folder) Mark.Shape.FOLDER else Mark.Shape.FILE,
+                            if (entry.folder) palette.accent else palette.muted,
+                        )
+                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
                     }
                 },
                 LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
@@ -2994,19 +3118,21 @@ class BuilderActivity : Activity() {
             )
 
             addView(
-                TextView(context).apply {
-                    text = MENU_MARK
-                    setTextColor(palette.muted)
-                    typeface = Type.strong
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-                    gravity = Gravity.CENTER
+                View(context).apply {
+                    contentDescription = getString(R.string.omni_action_more)
                     isClickable = true
+                    isFocusable = true
+                    readAs(Button::class.java.name)
                     background = touchable(
                         pill(Color.TRANSPARENT, gap(5).toFloat()),
                         palette.accent,
                     )
+                    foreground = Mark(Mark.Shape.MORE, palette.muted)
                     setOnClickListener { showActions(root, folder, entry) }
-                    layoutParams = LinearLayout.LayoutParams(gap(10), gap(10))
+                    layoutParams = LinearLayout.LayoutParams(
+                        gap(TOUCH_UNITS),
+                        gap(TOUCH_UNITS),
+                    )
                 }
             )
         }
@@ -3506,22 +3632,26 @@ class BuilderActivity : Activity() {
         editor.setSelection((from + held.length).coerceIn(0, editor.text?.length ?: 0))
     }
 
-    private fun tool(text: String, colour: Int, onPress: () -> Unit) = TextView(this).apply {
+    private fun tool(text: String, colour: Int, onPress: () -> Unit) = control().apply {
         this.text = text
         setTextColor(colour)
-        typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        gravity = Gravity.CENTER
         maxLines = 1
         setPadding(gap(4), gap(2), gap(4), gap(2))
         background = touchable(pill(palette.raised, gap(4).toFloat()), colour)
-        isClickable = true
         setOnClickListener {
             onPress()
-            animate().scaleX(0.94f).scaleY(0.94f).setDuration(70L).withEndAction {
-                animate().scaleX(1f).scaleY(1f).setDuration(110L).start()
-            }.start()
+            press()
         }
+    }
+
+    private fun View.press() {
+        if (Motion.still()) {
+            return
+        }
+        animate().scaleX(0.94f).scaleY(0.94f).setDuration(Motion.of(Motion.TAP)).withEndAction {
+            animate().scaleX(1f).scaleY(1f).setDuration(Motion.of(Motion.REBOUND)).start()
+        }.start()
     }
 
     private fun renderBuild(root: String) {
@@ -4074,7 +4204,7 @@ class BuilderActivity : Activity() {
                     results.addView(notice(said, palette.error))
                 }
             }
-        }, REFUSAL_MILLIS)
+        }, Motion.of(Motion.REFUSAL))
     }
 
     private fun waitFor(ready: () -> Boolean, then: () -> Unit) {
@@ -4200,7 +4330,7 @@ class BuilderActivity : Activity() {
                 results.removeAllViews()
                 then()
             }
-        }, SETTLE_MILLIS)
+        }, Motion.of(Motion.SETTLE))
     }
 
     private fun buildEnded(answer: String, apk: File, aab: File, started: Long) {
@@ -4545,6 +4675,21 @@ class BuilderActivity : Activity() {
         return chars
     }
 
+    private fun View.readAs(className: String) {
+        accessibilityDelegate = object : View.AccessibilityDelegate() {
+            override fun onInitializeAccessibilityNodeInfo(
+                host: View,
+                info: AccessibilityNodeInfo,
+            ) {
+                super.onInitializeAccessibilityNodeInfo(host, info)
+                info.className = className
+            }
+        }
+    }
+
+    private fun said(vararg parts: String): String =
+        parts.filter { it.isNotBlank() }.joinToString(", ")
+
     private fun gap(units: Int): Int =
         (units * resources.displayMetrics.density * 4f).toInt().coerceAtLeast(1)
 
@@ -4639,16 +4784,26 @@ class BuilderActivity : Activity() {
         setBackgroundColor(palette.divider)
     }
 
-    private fun primary(text: String, onPress: () -> Unit) = TextView(this).apply {
+    private fun control(): Button = Button(this).apply {
+        isAllCaps = false
+        stateListAnimator = null
+        minWidth = 0
+        minHeight = gap(TOUCH_UNITS)
+        minimumWidth = 0
+        minimumHeight = gap(TOUCH_UNITS)
+        gravity = Gravity.CENTER
+        isFocusable = true
+        elevation = 0f
+        typeface = Type.strong
+    }
+
+    private fun primary(text: String, onPress: () -> Unit) = control().apply {
         this.text = text
         setTextColor(palette.background)
-        typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
         letterSpacing = 0.06f
-        gravity = Gravity.CENTER
         setPadding(gap(4), gap(4), gap(4), gap(4))
         background = touchable(pill(palette.accent, gap(3).toFloat()), palette.background)
-        isClickable = true
         setOnClickListener { onPress() }
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = gap(2)
@@ -4656,15 +4811,12 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun subtle(text: String, colour: Int, onPress: () -> Unit) = TextView(this).apply {
+    private fun subtle(text: String, colour: Int, onPress: () -> Unit) = control().apply {
         this.text = text
         setTextColor(colour)
-        typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-        gravity = Gravity.CENTER
         setPadding(gap(4), gap(3), gap(4), gap(3))
         background = touchable(pill(Color.TRANSPARENT, gap(3).toFloat()), colour)
-        isClickable = true
         setOnClickListener { onPress() }
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = gap(1)
@@ -4682,8 +4834,13 @@ class BuilderActivity : Activity() {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(0, gap(2), 0, gap(2))
+        minimumHeight = gap(TOUCH_UNITS)
         background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
         isClickable = true
+        isFocusable = true
+        contentDescription = said(title, detail, trailing)
+        isScreenReaderFocusable = true
+        readAs(Button::class.java.name)
         setOnClickListener { onPress() }
 
         addView(
@@ -4706,8 +4863,13 @@ class BuilderActivity : Activity() {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.CENTER_VERTICAL
         setPadding(0, gap(2), 0, gap(2))
+        minimumHeight = gap(TOUCH_UNITS)
         background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
         isClickable = true
+        isFocusable = true
+        contentDescription = said(title, detail, trailing)
+        isScreenReaderFocusable = true
+        readAs(Button::class.java.name)
         setOnClickListener { onPress() }
 
         addView(
@@ -4842,11 +5004,12 @@ class BuilderActivity : Activity() {
         val holder = FlowLayout(this, gap(2), gap(2)).apply {
             setPadding(0, gap(1), 0, gap(1))
         }
-        val views = mutableListOf<TextView>()
+        val views = mutableListOf<Button>()
 
         fun repaint() {
             views.forEachIndexed { index, view ->
                 val on = selected(index)
+                view.isSelected = on
                 view.setTextColor(if (on) palette.background else palette.foreground)
                 view.background = touchable(
                     pill(if (on) palette.accent else palette.raised, gap(4).toFloat()),
@@ -4856,19 +5019,16 @@ class BuilderActivity : Activity() {
         }
 
         labels.forEachIndexed { index, text ->
-            val chip = TextView(this).apply {
+            val chip = control().apply {
                 this.text = text
-                typeface = Type.strong
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setPadding(gap(4), gap(2), gap(4), gap(2))
                 maxLines = 1
-                isClickable = true
+                readAs(android.widget.ToggleButton::class.java.name)
                 setOnClickListener {
                     onPick(index)
                     repaint()
-                    animate().scaleX(0.94f).scaleY(0.94f).setDuration(70L).withEndAction {
-                        animate().scaleX(1f).scaleY(1f).setDuration(110L).start()
-                    }.start()
+                    press()
                 }
             }
             views.add(chip)

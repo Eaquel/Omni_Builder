@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">NOUVEAU FICHIER</string>
     <string name="omni_action_new_folder">NOUVEAU DOSSIER</string>
     <string name="omni_action_open">OUVRIR</string>
+    <string name="omni_action_more">Plus</string>
     <string name="omni_files_root">Projet</string>
     <string name="omni_files_empty">Ce dossier est vide.</string>
     <string name="omni_files_holds">%1$d dedans</string>

@@ -28,7 +28,8 @@
         <activity
             android:name=".BuilderActivity"
             android:exported="true"
-            android:label="@string/omni_app_name">
+            android:label="@string/omni_app_name"
+            android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

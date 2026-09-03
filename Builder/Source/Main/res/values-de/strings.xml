@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">NEUE DATEI</string>
     <string name="omni_action_new_folder">NEUER ORDNER</string>
     <string name="omni_action_open">ÖFFNEN</string>
+    <string name="omni_action_more">Mehr</string>
     <string name="omni_files_root">Projekt</string>
     <string name="omni_files_empty">Dieser Ordner ist leer.</string>
     <string name="omni_files_holds">%1$d darin</string>

@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">NOVO ARQUIVO</string>
     <string name="omni_action_new_folder">NOVA PASTA</string>
     <string name="omni_action_open">ABRIR</string>
+    <string name="omni_action_more">Mais</string>
     <string name="omni_files_root">Projeto</string>
     <string name="omni_files_empty">Esta pasta está vazia.</string>
     <string name="omni_files_holds">%1$d dentro</string>

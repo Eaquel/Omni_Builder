@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">NUEVO ARCHIVO</string>
     <string name="omni_action_new_folder">NUEVA CARPETA</string>
     <string name="omni_action_open">ABRIR</string>
+    <string name="omni_action_more">Más</string>
     <string name="omni_files_root">Proyecto</string>
     <string name="omni_files_empty">Esta carpeta está vacía.</string>
     <string name="omni_files_holds">%1$d dentro</string>

@@ -60,6 +60,7 @@
     <string name="omni_action_new_file">НОВЫЙ ФАЙЛ</string>
     <string name="omni_action_new_folder">НОВАЯ ПАПКА</string>
     <string name="omni_action_open">ОТКРЫТЬ</string>
+    <string name="omni_action_more">Ещё</string>
     <string name="omni_files_root">Проект</string>
     <string name="omni_files_empty">Эта папка пуста.</string>
     <string name="omni_files_holds">внутри: %1$d</string>
