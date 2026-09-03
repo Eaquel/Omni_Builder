@@ -50579,6 +50579,226 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    /// A game somebody wrote, built by this build.
+    ///
+    /// `Examples/PacMan` is six files and six hundred lines, written to be a
+    /// game rather than to be a test: a maze read out of a table of strings,
+    /// four ghosts each choosing a direction at every junction by distance, a
+    /// player steered by swipes, and a view that draws all of it on a canvas.
+    /// It uses arrays of objects, a two dimensional array, character and
+    /// string handling, static constants, an `Activity`, a `View`, `Paint`,
+    /// `Canvas`, `RectF` and `MotionEvent`.
+    ///
+    /// Nothing in it was shaped to what this compiler happens to do, which is
+    /// the point. It is the shape of a real Android application, and what this
+    /// asserts is that a real Android application comes out the other side: it
+    /// compiles, it becomes Dalvik, it packages, it signs, and the package
+    /// verifies against its own key.
+    #[test]
+    fn a_game_somebody_wrote_becomes_a_package_that_verifies() {
+        let example = std::path::Path::new("Examples/PacMan");
+        assert!(example.is_dir(), "the example project must be in the tree");
+
+        let directory = temp_directory("omni-pac-man");
+        let root = directory.join("PacMan");
+        copy_tree(example, &root);
+        let folder = root.to_str().unwrap().to_string();
+
+        // Six files, and the size of them, so a test that quietly stopped
+        // reading the project would say so.
+        let sources = super::workspace::tree(&folder)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.path.ends_with(".java"))
+            .count();
+        assert_eq!(sources, 6, "the game is six files");
+        let lines: usize = std::fs::read_dir(example.join("Java/com/tr/yt/pac"))
+            .unwrap()
+            .flatten()
+            .map(|entry| {
+                std::fs::read_to_string(entry.path())
+                    .unwrap()
+                    .lines()
+                    .count()
+            })
+            .sum();
+        assert!(
+            lines > 550,
+            "{lines} lines is not the game that was written"
+        );
+
+        // Through this build's own Java compiler, every one of them.
+        let project = super::builder::from_project(&folder)
+            .unwrap_or_else(|error| panic!("the game did not compile: {error}"));
+        let named: Vec<&str> = project
+            .code
+            .iter()
+            .map(|held| held.descriptor.as_str())
+            .collect();
+        for wanted in [
+            "Lcom/tr/yt/pac/Maze;",
+            "Lcom/tr/yt/pac/Ghost;",
+            "Lcom/tr/yt/pac/Direction;",
+            "Lcom/tr/yt/pac/Game;",
+            "Lcom/tr/yt/pac/Board;",
+            "Lcom/tr/yt/pac/MainActivity;",
+        ] {
+            assert!(
+                named.contains(&wanted),
+                "{wanted} is missing from {named:?}"
+            );
+        }
+
+        // And all the way to a package.
+        let key = super::rsa::generate(2048).expect("a key");
+        let certificate = super::certificate::self_signed(
+            &key,
+            "Pac Man",
+            "Omni",
+            "TR",
+            super::certificate::moment_from_epoch(1_700_000_000),
+            super::certificate::moment_from_epoch(2_000_000_000),
+        )
+        .expect("a certificate");
+        let mut sink = Sink::new();
+        let outcome = super::builder::assemble(&project, &key, &certificate, &mut sink)
+            .expect("the game must package");
+        assert!(outcome.carries_code);
+        assert!(outcome.verified.everything_checkable_passed());
+
+        let path = directory.join("pac.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+        let found = super::inspect::package(path.to_str().unwrap()).expect("it must open");
+        assert_eq!(found.package, "com.tr.yt.pac");
+        assert_eq!(found.dex_files, 1);
+        assert!(found.classes >= 7, "{} classes", found.classes);
+        assert!(found.sound);
+        assert!(
+            found
+                .activities
+                .iter()
+                .any(|one| one.contains("MainActivity")),
+            "{:?}",
+            found.activities
+        );
+
+        // And the same source through the Java compiler everybody else uses,
+        // at the release this project pins, with every warning turned on. If
+        // `javac` will not take it then what was tested above is a dialect
+        // that happens to look like Java, and the whole exercise is worthless.
+        let mut agreed = "not checked";
+        if let (Some(javac), Some(jar)) = (find_javac(), android_jar()) {
+            let out = directory.join("javac");
+            std::fs::create_dir_all(&out).unwrap();
+            let mut command = std::process::Command::new(&javac);
+            command.args([
+                "--release",
+                crate::compilers::java::LANGUAGE_RELEASE,
+                "-classpath",
+                jar.to_str().unwrap(),
+                "-d",
+                out.to_str().unwrap(),
+                "-Xlint:all",
+                "-Werror",
+            ]);
+            for entry in std::fs::read_dir(example.join("Java/com/tr/yt/pac"))
+                .unwrap()
+                .flatten()
+            {
+                command.arg(entry.path());
+            }
+            let done = command.output().unwrap();
+            assert!(
+                done.status.success(),
+                "javac refused the game this build compiled:\n{}",
+                String::from_utf8_lossy(&done.stderr)
+            );
+            let written = std::fs::read_dir(out.join("com/tr/yt/pac"))
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|held| held == "class"))
+                .count();
+            assert_eq!(written, 6, "javac wrote {written} classes");
+            agreed = "and javac takes the same source with every warning on";
+        }
+
+        eprintln!(
+            "pac man: {lines} lines of Java became {} classes and {} methods in a \
+             {} KB package that verifies, {agreed}",
+            found.classes,
+            found.methods,
+            found.bytes / 1024
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    /// A Java compiler new enough for the release this project pins.
+    ///
+    /// A machine may carry several, and the one `JAVA_HOME` names is not
+    /// always the newest -- so the version each reports is what decides,
+    /// rather than the order they happen to be found in. One too old is not a
+    /// compiler that disagrees with this build; it is a compiler that has
+    /// never heard of the language, and taking its refusal as a finding would
+    /// be reading the wrong thing.
+    fn find_javac() -> Option<std::path::PathBuf> {
+        let wanted: u32 = crate::compilers::java::LANGUAGE_RELEASE.parse().ok()?;
+        let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(home) = std::env::var("JAVA_HOME") {
+            candidates.push(std::path::Path::new(&home).join("bin/javac"));
+        }
+        if let Ok(found) = std::process::Command::new("which").arg("javac").output() {
+            if found.status.success() {
+                candidates.push(std::path::PathBuf::from(
+                    String::from_utf8_lossy(&found.stdout).trim(),
+                ));
+            }
+        }
+        if let Ok(entries) = std::fs::read_dir("/usr/lib/jvm") {
+            for entry in entries.flatten() {
+                candidates.push(entry.path().join("bin/javac"));
+            }
+        }
+
+        let mut best: Option<(u32, std::path::PathBuf)> = None;
+        for held in candidates {
+            if !held.is_file() {
+                continue;
+            }
+            let Ok(said) = std::process::Command::new(&held).arg("-version").output() else {
+                continue;
+            };
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&said.stdout),
+                String::from_utf8_lossy(&said.stderr)
+            );
+            let Some(number) = text
+                .split_whitespace()
+                .find_map(|word| word.split('.').next()?.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if number >= wanted && best.as_ref().is_none_or(|(held, _)| number > *held) {
+                best = Some((number, held));
+            }
+        }
+        best.map(|(_, held)| held)
+    }
+
+    /// Copies a folder and everything under it.
+    fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap().flatten() {
+            let target = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &target);
+            } else {
+                std::fs::copy(entry.path(), &target).unwrap();
+            }
+        }
+    }
+
     /// The list of rules is the rules, and stays the rules.
     ///
     /// A security page that names eleven checks while the build applies ten is
