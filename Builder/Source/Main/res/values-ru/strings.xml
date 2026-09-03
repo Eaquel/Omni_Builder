@@ -29,14 +29,12 @@
     <string name="omni_form_version_code">Код версии</string>
     <string name="omni_form_min_sdk">Самый старый Android</string>
     <string name="omni_form_target_sdk">Самый новый Android</string>
-    <string name="omni_form_languages">Языки</string>
     <string name="omni_form_locales">Языки, на которых говорит приложение</string>
     <string name="omni_form_locales_note">Для каждого пишется папка слов, и из неё читается имя приложения. Английский пишется всегда: устройство, настроенное ни на один из остальных, обращается к нему.</string>
     <string name="omni_form_image">Изображение приложения</string>
     <string name="omni_form_image_choose">ВЫБРАТЬ ИЗОБРАЖЕНИЕ</string>
     <string name="omni_form_image_none">Изображение не выбрано.</string>
     <string name="omni_form_image_note">Одно изображение становится десятью значками запуска: пять размеров, квадратный и круглый. Все они попадают в проект, где их видно и можно заменить.</string>
-    <string name="omni_form_no_compiler">Для выбранного создаются папки. Здесь компилируется только %1$s: проект с кодом на других языках отклоняется, а не собирается без него.</string>
     <string name="omni_key_alias">Имя ключа</string>
     <string name="omni_key_common_name">Ваше имя</string>
     <string name="omni_key_organisation">Организация</string>
@@ -122,9 +120,6 @@
     <string name="omni_settings_logs_empty">За этот запуск ничего не записано.</string>
     <string name="omni_settings_logs_copied">СКОПИРОВАНО</string>
     <string name="omni_settings_logs_note">Журнал лежит в собственном хранилище этого приложения и больше нигде. Скопируйте его отсюда, если он нужен там, где его можно прочесть.</string>
-    <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
-    <string name="omni_about_how">Проект — это манифест, папки для выбранных языков и папка ресурсов. Нажатие «Собрать» компилирует таблицу ресурсов, пишет двоичный манифест, упаковывает архив, подписывает его и пишет пакет для установки и bundle для загрузки. Всё происходит на этом устройстве: ваш проект не видит ни один сервер, и не используется ничего, кроме инструментов Android, которые у вас уже есть.</string>
-    <string name="omni_about_watch">Подпись этого приложения проверяется при каждом запуске и каждом возврате на этот экран, а также в фоне, пока Android это позволяет.</string>
     <string name="omni_forge_title">КЛЮЧ СОЗДАЁТСЯ</string>
     <string name="omni_forge_bits">%1$d бит, создан на этом устройстве</string>
     <string name="omni_forge_sealed">КЛЮЧ ЗАПЕЧАТАН</string>
@@ -181,7 +176,6 @@
     <string name="omni_editor_name_nothing">Ни один тип не отзывается на %1$s.</string>
     <string name="omni_editor_name_found">Типы, которыми мог бы быть %1$s</string>
     <string name="omni_editor_name_yours">ваш</string>
-    <string name="omni_form_not_compiled">не компилируется</string>
     <string name="omni_editor_go">ПЕРЕЙТИ</string>
     <string name="omni_editor_uses">ИСПОЛЬЗОВАНИЯ</string>
     <string name="omni_editor_go_platform">%1$s принадлежит платформе, поэтому на этом устройстве не написан.</string>
@@ -221,4 +215,7 @@
     <string name="omni_health_spare">%1$d никто не спрашивает</string>
     <string name="omni_health_short_and_spare">не хватает %1$d, %2$d никто не спрашивает</string>
     <string name="omni_health_language_note">Строка, которую объявляет первый язык, а перевод — нет, это экран не на том языке на чьём-то телефоне. Сборка приложения никогда бы об этом не сказала.</string>
+    <string name="omni_about_reach">Связаться с теми, кто это сделал</string>
+    <string name="omni_about_soon_short">СКОРО</string>
+    <string name="omni_about_soon">Здесь появится способ связаться. Пока его нет.</string>
 </resources>

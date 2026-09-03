@@ -29,14 +29,12 @@
     <string name="omni_form_version_code">Sürüm kodu</string>
     <string name="omni_form_min_sdk">En eski Android</string>
     <string name="omni_form_target_sdk">En yeni Android</string>
-    <string name="omni_form_languages">Diller</string>
     <string name="omni_form_locales">Uygulamanın konuştuğu diller</string>
     <string name="omni_form_locales_note">Her biri için bir kelime klasörü yazılır ve uygulama adı oradan okunur. İngilizce her zaman yazılır, çünkü diğerlerinden hiçbirine ayarlı olmayan bir cihaz ona döner.</string>
     <string name="omni_form_image">Uygulama görseli</string>
     <string name="omni_form_image_choose">GÖRSEL SEÇ</string>
     <string name="omni_form_image_none">Görsel seçilmedi.</string>
     <string name="omni_form_image_note">Tek görsel on başlatıcı simgesine dönüşür: beş boy, kare ve yuvarlak. Hepsi projenin içine yazılır; görebilir ve değiştirebilirsin.</string>
-    <string name="omni_form_no_compiler">Seçtiklerin için klasörler oluşturulur. Burada yalnızca %1$s derlenir: diğerlerinde kod tutan bir proje, o kod olmadan uygulamaya çevrilmek yerine reddedilir.</string>
     <string name="omni_key_alias">Anahtar adı</string>
     <string name="omni_key_common_name">Adın</string>
     <string name="omni_key_organisation">Kurum</string>
@@ -122,9 +120,6 @@
     <string name="omni_settings_logs_empty">Bu çalışmada henüz bir şey kaydedilmedi.</string>
     <string name="omni_settings_logs_copied">KOPYALANDI</string>
     <string name="omni_settings_logs_note">Günlük yalnızca bu uygulamanın kendi deposunda durur, başka hiçbir yerde. Okuyabileceğin bir yere taşımak istersen buradan kopyala.</string>
-    <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
-    <string name="omni_about_how">Bir proje; bir manifest, seçtiğin diller için klasörler ve bir kaynak klasöründen oluşur. Derle\'ye bastığında kaynak tablosu derlenir, ikili manifest yazılır, arşiv paketlenir, imzalanır ve kurulacak bir paket ile yüklenecek bir demet yazılır. Her şey bu cihazda olur: projeni hiçbir sunucu görmez ve zaten sende olan Android araçlarından başkası kullanılmaz.</string>
-    <string name="omni_about_watch">Bu uygulamanın imzası her başlangıçta ve bu ekrana her dönüşte, ayrıca Android izin verdiği sürece arka planda denetlenir.</string>
     <string name="omni_forge_title">ANAHTAR DÖVÜLÜYOR</string>
     <string name="omni_forge_bits">%1$d bit, bu cihazda üretildi</string>
     <string name="omni_forge_sealed">ANAHTAR MÜHÜRLENDİ</string>
@@ -181,7 +176,6 @@
     <string name="omni_editor_name_nothing">%1$s adına karşılık gelen tür yok.</string>
     <string name="omni_editor_name_found">%1$s olabilecek türler</string>
     <string name="omni_editor_name_yours">senin</string>
-    <string name="omni_form_not_compiled">derlenmiyor</string>
     <string name="omni_editor_go">GİT</string>
     <string name="omni_editor_uses">KULLANIMLAR</string>
     <string name="omni_editor_go_platform">%1$s platforma ait, bu yüzden bu cihazda yazılı değil.</string>
@@ -221,4 +215,7 @@
     <string name="omni_health_spare">%1$d tanesini kimse istemiyor</string>
     <string name="omni_health_short_and_spare">%1$d eksik, %2$d tanesini kimse istemiyor</string>
     <string name="omni_health_language_note">İlk dilin tanımladığı ama bir çevirinin tanımlamadığı dize, birinin telefonunda yanlış dilde bir ekran demektir. Uygulamayı derlemek bunu asla söylemezdi.</string>
+    <string name="omni_about_reach">Bunu yapanlara ulaş</string>
+    <string name="omni_about_soon_short">YAKINDA</string>
+    <string name="omni_about_soon">Buraya bir iletişim yolu gelecek. Henüz yok.</string>
 </resources>

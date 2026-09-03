@@ -1096,71 +1096,6 @@ data class Palette(
     val glowThird: Int,
 ) {
     companion object {
-        val MIDNIGHT = Palette(
-            key = "midnight",
-            label = "Midnight",
-            background = 0xFF05070B.toInt(),
-            surface = 0xFF0D1119.toInt(),
-            raised = 0xFF141A25.toInt(),
-            foreground = 0xFFE8EEF6.toInt(),
-            muted = 0xFF8A94A6.toInt(),
-            accent = 0xFF6CB6FF.toInt(),
-            ok = 0xFF5BD48A.toInt(),
-            warning = 0xFFE9B44C.toInt(),
-            error = 0xFFE5534B.toInt(),
-            divider = 0xFF1C2432.toInt(),
-            glowFirst = 0xFF1B4B8F.toInt(),
-            glowSecond = 0xFF0E5C52.toInt(),
-            glowThird = 0xFF3A2166.toInt(),
-        )
-
-        val SLATE = Palette(
-            key = "slate",
-            label = "Slate",
-            background = 0xFF0E1116.toInt(),
-            surface = 0xFF171C24.toInt(),
-            raised = 0xFF202733.toInt(),
-            foreground = 0xFFE6EDF3.toInt(),
-            muted = 0xFF9198A1.toInt(),
-            accent = 0xFF6CB6FF.toInt(),
-            ok = 0xFF57C98A.toInt(),
-            warning = 0xFFE3B341.toInt(),
-            error = 0xFFE5534B.toInt(),
-            divider = 0xFF262C36.toInt(),
-            glowFirst = 0xFF23508C.toInt(),
-            glowSecond = 0xFF135E55.toInt(),
-            glowThird = 0xFF43286E.toInt(),
-        )
-
-        val DAYLIGHT = Palette(
-            key = "daylight",
-            label = "Daylight",
-            background = 0xFFF6F8FB.toInt(),
-            surface = 0xFFFFFFFF.toInt(),
-            raised = 0xFFEDF1F7.toInt(),
-            foreground = 0xFF121821.toInt(),
-            muted = 0xFF5A6472.toInt(),
-            accent = 0xFF1A6FD4.toInt(),
-            ok = 0xFF1E8E4F.toInt(),
-            warning = 0xFF9A6A00.toInt(),
-            error = 0xFFC0362C.toInt(),
-            divider = 0xFFD8DFE9.toInt(),
-            glowFirst = 0xFFBBD5F5.toInt(),
-            glowSecond = 0xFFBEE6DD.toInt(),
-            glowThird = 0xFFD6C9F0.toInt(),
-        )
-
-        /**
-         * The one this application was drawn for, and the one it opens in.
-         *
-         * It is not a dark grey with a blue accent. The ground is the near
-         * black of a screen with nothing lit on it, the surfaces above it are
-         * separated by four points of brightness rather than by borders, and
-         * the accent is the cyan a cathode tube throws rather than the blue
-         * every framework ships. The three glows are what the aurora behind
-         * the content is painted from: a deep sea blue, a green that only
-         * shows where it overlaps, and a violet that never quite arrives.
-         */
         val FORGE = Palette(
             key = "forge",
             label = "Forge",
@@ -1179,10 +1114,85 @@ data class Palette(
             glowThird = 0xFF2A1B4E.toInt(),
         )
 
-        val ALL: List<Palette> = listOf(FORGE, MIDNIGHT, SLATE, DAYLIGHT)
+        val EMBER = Palette(
+            key = "ember",
+            label = "Ember",
+            background = 0xFF0B0705.toInt(),
+            surface = 0xFF150E09.toInt(),
+            raised = 0xFF1F1610.toInt(),
+            foreground = 0xFFF5E3CE.toInt(),
+            muted = 0xFF9A8064.toInt(),
+            accent = 0xFFFFA53A.toInt(),
+            ok = 0xFFB8D14A.toInt(),
+            warning = 0xFFFFD166.toInt(),
+            error = 0xFFF2593F.toInt(),
+            divider = 0xFF2A1E14.toInt(),
+            glowFirst = 0xFF6B3A0E.toInt(),
+            glowSecond = 0xFF4A2A05.toInt(),
+            glowThird = 0xFF33160A.toInt(),
+        )
+
+        val PHOSPHOR = Palette(
+            key = "phosphor",
+            label = "Phosphor",
+            background = 0xFF060A07.toInt(),
+            surface = 0xFF0C120D.toInt(),
+            raised = 0xFF131B15.toInt(),
+            foreground = 0xFFD8F2DC.toInt(),
+            muted = 0xFF6B8570.toInt(),
+            accent = 0xFF4CE86A.toInt(),
+            ok = 0xFF8FFFA8.toInt(),
+            warning = 0xFFE8D24C.toInt(),
+            error = 0xFFFF6B5B.toInt(),
+            divider = 0xFF17231A.toInt(),
+            glowFirst = 0xFF0C4A1E.toInt(),
+            glowSecond = 0xFF06381E.toInt(),
+            glowThird = 0xFF1E3D12.toInt(),
+        )
+
+        val PAPER = Palette(
+            key = "paper",
+            label = "Paper",
+            background = 0xFFF2EDE3.toInt(),
+            surface = 0xFFFBF8F1.toInt(),
+            raised = 0xFFE8E1D3.toInt(),
+            foreground = 0xFF1A1613.toInt(),
+            muted = 0xFF6B6156.toInt(),
+            accent = 0xFFC4442E.toInt(),
+            ok = 0xFF2E6B4F.toInt(),
+            warning = 0xFFA5701A.toInt(),
+            error = 0xFF97231A.toInt(),
+            divider = 0xFFD8CFBE.toInt(),
+            glowFirst = 0xFFE8C9B8.toInt(),
+            glowSecond = 0xFFCFDDCB.toInt(),
+            glowThird = 0xFFDCD2C0.toInt(),
+        )
+
+        val ALL: List<Palette> = listOf(FORGE, EMBER, PHOSPHOR, PAPER)
 
         fun of(key: String): Palette = ALL.firstOrNull { it.key == key } ?: FORGE
     }
+}
+
+/**
+ * The lettering, which is one of the two things that make an application look
+ * like itself rather than like the toolkit it was built with.
+ *
+ * Nothing here is a font file. Android carries a condensed cut of its sans and
+ * a monospace, and those two against each other -- narrow capitals with the
+ * letters pushed apart for anything that labels, a fixed pitch for anything
+ * that is a number or a name the machine chose -- read as an instrument panel.
+ * Shipping a typeface to say the same thing would cost two hundred kilobytes.
+ */
+object Type {
+    val heading: Typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+    val label: Typeface = Typeface.create("sans-serif-condensed", Typeface.BOLD)
+    val body: Typeface = Typeface.create("sans-serif", Typeface.NORMAL)
+    val strong: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+    val data: Typeface = Typeface.MONOSPACE
+
+    /** How far apart the letters of a label sit. */
+    const val TRACKING = 0.14f
 }
 
 object Preferences {
@@ -1500,8 +1510,8 @@ class BuilderActivity : Activity() {
         val ONLY_ABI = listOf("arm64-v8a")
 
         val ANDROID_RELEASES = listOf(
-            30 to "11", 31 to "12", 32 to "12L",
-            33 to "13", 34 to "14", 35 to "15", 36 to "16",
+            30 to "11", 31 to "12", 32 to "12L", 33 to "13",
+            34 to "14", 35 to "15", 36 to "16", 37 to "17",
         )
         /**
          * The languages a project may hold, and whether a build compiles one.
@@ -1512,12 +1522,7 @@ class BuilderActivity : Activity() {
          * with none of that code in it -- and a person choosing here should
          * know which is which before they write anything.
          */
-        val LANGUAGE_CHOICES = listOf(
-            Triple("java", "Java", true),
-            Triple("kotlin", "Kotlin", false),
-            Triple("cpp", "C++", false),
-            Triple("rust", "Rust", false),
-        )
+        val LANGUAGE_CHOICES = listOf(Triple("java", "Java", true))
         /**
          * The permissions offered as one press.
          *
@@ -2036,9 +2041,9 @@ class BuilderActivity : Activity() {
                             else -> palette.muted
                         }
                     )
-                    setTypeface(Typeface.DEFAULT_BOLD)
+                    typeface = Type.label
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    letterSpacing = 0.04f
+                    letterSpacing = Type.TRACKING
                     gravity = Gravity.CENTER
                     maxLines = 1
                     setPadding(gap(1), gap(3), gap(1), gap(3))
@@ -2105,7 +2110,8 @@ class BuilderActivity : Activity() {
             }
             val open = project.root == openProject
             card.addView(
-                row(
+                pictured(
+                    File(project.root, "$PROJECT_RES/$PROJECT_ICON").absolutePath,
                     project.label.ifEmpty { project.name },
                     "${project.packageName}  ·  ${project.versionName}  ·  " +
                         "API ${project.minSdk}–${project.targetSdk}  ·  " +
@@ -2156,27 +2162,6 @@ class BuilderActivity : Activity() {
             }
         )
 
-        content.addView(label(getString(R.string.omni_form_languages)))
-        content.addView(
-            chips(
-                LANGUAGE_CHOICES.map {
-                    if (it.third) it.second else it.second + "  ·  " +
-                        getString(R.string.omni_form_not_compiled)
-                },
-                { formLanguages.contains(LANGUAGE_CHOICES[it].first) },
-            ) { index ->
-                val key = LANGUAGE_CHOICES[index].first
-                if (!formLanguages.remove(key)) formLanguages.add(key)
-            }
-        )
-        content.addView(
-            quiet(
-                getString(
-                    R.string.omni_form_no_compiler,
-                    LANGUAGE_CHOICES.filter { it.third }.joinToString(", ") { it.second },
-                )
-            )
-        )
 
         content.addView(label(getString(R.string.omni_form_locales)))
         content.addView(
@@ -2230,7 +2215,7 @@ class BuilderActivity : Activity() {
                     TextView(context).apply {
                         text = getString(R.string.omni_form_image)
                         setTextColor(palette.foreground)
-                        setTypeface(Typeface.DEFAULT_BOLD)
+                        typeface = Type.strong
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
                     }
                 )
@@ -2252,7 +2237,7 @@ class BuilderActivity : Activity() {
             TextView(this).apply {
                 text = getString(R.string.omni_action_change)
                 setTextColor(palette.accent)
-                setTypeface(Typeface.DEFAULT_BOLD)
+                typeface = Type.strong
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 letterSpacing = 0.08f
             }
@@ -2999,7 +2984,7 @@ class BuilderActivity : Activity() {
             hint = getString(R.string.omni_search_hint)
             setHintTextColor(palette.muted)
             setTextColor(palette.foreground)
-            setTypeface(Typeface.MONOSPACE)
+            typeface = Type.data
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setSingleLine()
             imeOptions = EditorInfo.IME_ACTION_SEARCH
@@ -3187,7 +3172,7 @@ class BuilderActivity : Activity() {
                             setTextColor(
                                 if (entry.path == held) palette.warning else palette.foreground
                             )
-                            setTypeface(Typeface.DEFAULT_BOLD)
+                            typeface = Type.strong
                             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                         }
                     )
@@ -3210,7 +3195,7 @@ class BuilderActivity : Activity() {
                 TextView(context).apply {
                     text = MENU_MARK
                     setTextColor(palette.muted)
-                    setTypeface(Typeface.DEFAULT_BOLD)
+                    typeface = Type.strong
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
                     gravity = Gravity.CENTER
                     isClickable = true
@@ -3768,7 +3753,7 @@ class BuilderActivity : Activity() {
     private fun tool(text: String, colour: Int, onPress: () -> Unit) = TextView(this).apply {
         this.text = text
         setTextColor(colour)
-        setTypeface(Typeface.DEFAULT_BOLD)
+        typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         gravity = Gravity.CENTER
         maxLines = 1
@@ -4123,7 +4108,7 @@ class BuilderActivity : Activity() {
                 )
                 setTextColor(palette.foreground)
                 setBackgroundColor(Color.TRANSPARENT)
-                setTypeface(Typeface.MONOSPACE)
+                typeface = Type.data
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 gravity = Gravity.TOP or Gravity.START
                 setHorizontallyScrolling(false)
@@ -4164,12 +4149,15 @@ class BuilderActivity : Activity() {
         content.addView(heading(getString(R.string.omni_settings_about)))
         val about = card()
         about.addView(
-            keyValue(
+            row(
                 getString(R.string.omni_app_name),
-                getString(R.string.omni_about_developer),
-                versionShown(),
+                getString(R.string.omni_about_reach),
+                getString(R.string.omni_about_soon_short),
                 palette.accent,
-            )
+            ) {
+                results.removeAllViews()
+                results.addView(notice(getString(R.string.omni_about_soon), palette.muted))
+            }
         )
         about.addView(
             keyValue(
@@ -4186,20 +4174,7 @@ class BuilderActivity : Activity() {
             )
         )
         content.addView(about)
-        content.addView(body(getString(R.string.omni_about_how)))
-        content.addView(quiet(getString(R.string.omni_about_watch)))
     }
-
-    private fun versionShown(): String = runCatching {
-        val about = packageManager.getPackageInfo(packageName, 0)
-        val code = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            about.longVersionCode
-        } else {
-            @Suppress("DEPRECATION")
-            about.versionCode.toLong()
-        }
-        "${'$'}{about.versionName} (${'$'}code)"
-    }.getOrDefault("")
 
     private fun deviceLanguage(): String {
         val spoken = Resources.getSystem().configuration.locales
@@ -4876,19 +4851,20 @@ class BuilderActivity : Activity() {
     }
 
     private fun heading(value: String) = TextView(this).apply {
-        text = value
+        text = value.uppercase(Locale.getDefault())
         setTextColor(palette.foreground)
-        setTypeface(Typeface.DEFAULT_BOLD)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+        typeface = Type.heading
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+        letterSpacing = 0.06f
         setPadding(0, gap(4), 0, gap(1))
     }
 
     private fun label(value: String) = TextView(this).apply {
         text = value.uppercase(Locale.getDefault())
         setTextColor(palette.muted)
-        setTypeface(Typeface.DEFAULT_BOLD)
+        typeface = Type.label
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-        letterSpacing = 0.12f
+        letterSpacing = Type.TRACKING
         setPadding(0, gap(3), 0, gap(1))
     }
 
@@ -4924,7 +4900,7 @@ class BuilderActivity : Activity() {
     private fun notice(value: String, colour: Int) = TextView(this).apply {
         text = value
         setTextColor(colour)
-        setTypeface(Typeface.DEFAULT_BOLD)
+        typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         setPadding(gap(3), gap(3), gap(3), gap(3))
         background = sheet(palette.surface, colour)
@@ -4941,7 +4917,7 @@ class BuilderActivity : Activity() {
     private fun primary(text: String, onPress: () -> Unit) = TextView(this).apply {
         this.text = text
         setTextColor(palette.background)
-        setTypeface(Typeface.DEFAULT_BOLD)
+        typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
         letterSpacing = 0.06f
         gravity = Gravity.CENTER
@@ -4958,7 +4934,7 @@ class BuilderActivity : Activity() {
     private fun subtle(text: String, colour: Int, onPress: () -> Unit) = TextView(this).apply {
         this.text = text
         setTextColor(colour)
-        setTypeface(Typeface.DEFAULT_BOLD)
+        typeface = Type.strong
         setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         gravity = Gravity.CENTER
         setPadding(gap(4), gap(3), gap(4), gap(3))
@@ -4968,6 +4944,31 @@ class BuilderActivity : Activity() {
         layoutParams = LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply {
             topMargin = gap(1)
         }
+    }
+
+    private fun pictured(
+        picture: String,
+        title: String,
+        detail: String,
+        trailing: String,
+        trailingColour: Int = palette.muted,
+        onPress: () -> Unit,
+    ) = LinearLayout(this).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(0, gap(2), 0, gap(2))
+        background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+        isClickable = true
+        setOnClickListener { onPress() }
+
+        addView(
+            thumbnail(picture, gap(11)),
+            LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
+        )
+        addView(
+            row(title, detail, trailing, trailingColour, onPress),
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
     }
 
     private fun row(
@@ -4991,7 +4992,7 @@ class BuilderActivity : Activity() {
                     TextView(context).apply {
                         text = title
                         setTextColor(palette.foreground)
-                        setTypeface(Typeface.DEFAULT_BOLD)
+                        typeface = Type.strong
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
                     }
                 )
@@ -5014,9 +5015,9 @@ class BuilderActivity : Activity() {
                 TextView(context).apply {
                     text = trailing
                     setTextColor(trailingColour)
-                    setTypeface(Typeface.DEFAULT_BOLD)
+                    typeface = Type.label
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    letterSpacing = 0.08f
+                    letterSpacing = Type.TRACKING
                     setPadding(gap(2), gap(1), gap(2), gap(1))
                     background = pill(palette.raised, gap(2).toFloat())
                 }
@@ -5132,7 +5133,7 @@ class BuilderActivity : Activity() {
         labels.forEachIndexed { index, text ->
             val chip = TextView(this).apply {
                 this.text = text
-                setTypeface(Typeface.DEFAULT_BOLD)
+                typeface = Type.strong
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
                 setPadding(gap(4), gap(2), gap(4), gap(2))
                 maxLines = 1

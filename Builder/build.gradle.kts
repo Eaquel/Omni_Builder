@@ -1,5 +1,8 @@
 @file:OptIn(org.jetbrains.kotlin.buildtools.api.ExperimentalBuildToolsApi::class)
 
+import java.io.File
+import java.security.KeyStore
+import java.security.MessageDigest
 import java.util.Properties
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -68,8 +71,45 @@ val omniSigningStoreFile = omniSetting("omni.signing.storeFile", "OMNI_SIGNING_S
 val omniSigningStorePassword =
     omniSetting("omni.signing.storePassword", "OMNI_SIGNING_STORE_PASSWORD")
 val omniSigningKeyAlias = omniSetting("omni.signing.keyAlias", "OMNI_SIGNING_KEY_ALIAS")
-val omniExpectedCertificate: String =
-    omniSetting("omni.signing.certificateSha256", "OMNI_SIGNING_CERT_SHA256") ?: ""
+val omniSigningKeyPasswordEarly =
+    omniSetting("omni.signing.keyPassword", "OMNI_SIGNING_KEY_PASSWORD")
+
+// The fingerprint the application checks itself against, taken out of the
+// keystore that is about to sign it.
+//
+// It used to be a second secret, set by hand beside the four that configure
+// signing. A second secret that has to agree with the first four is a second
+// secret that will one day not, and the way it fails is silent: the package is
+// signed correctly, the check finds a certificate it was told nothing about,
+// and every copy in the world reports itself unverified. Reading it off the
+// keystore doing the signing cannot drift, because there is nothing left for
+// it to drift from.
+//
+// It can still be set by hand, for a build signed somewhere else by something
+// this has no keystore for.
+val omniExpectedCertificate: String = run {
+    val given = omniSetting("omni.signing.certificateSha256", "OMNI_SIGNING_CERT_SHA256")
+    if (given != null) {
+        return@run given
+    }
+    val store = omniSigningStoreFile ?: return@run ""
+    val alias = omniSigningKeyAlias ?: return@run ""
+    val password = omniSigningStorePassword ?: return@run ""
+    runCatching<String> {
+        val keystore = KeyStore.getInstance(File(store), password.toCharArray())
+        val certificate = keystore.getCertificate(alias)
+            ?: throw GradleException("The keystore holds no certificate for alias $alias.")
+        MessageDigest.getInstance("SHA-256")
+            .digest(certificate.encoded)
+            .joinToString("") { byte -> "%02x".format(byte) }
+    }.getOrElse { why ->
+        throw GradleException(
+            "The signing keystore was configured but its certificate could not be " +
+                "read, so the application would ship unable to recognise its own " +
+                "signature.\nKeystore: $store\nAlias: $alias\nReported: ${why.message}"
+        )
+    }
+}
 
 val omniSigningKeyPassword =
     omniSetting("omni.signing.keyPassword", "OMNI_SIGNING_KEY_PASSWORD")

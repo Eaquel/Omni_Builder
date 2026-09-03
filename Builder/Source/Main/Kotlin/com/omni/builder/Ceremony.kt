@@ -70,6 +70,49 @@ internal object Ink {
      * that the ceremony looks the same on every run and a screenshot of it
      * means something.
      */
+    /**
+     * The lines a tube draws between the lines it draws.
+     *
+     * Every ceremony in this application is a picture off a screen rather than
+     * a picture on one, and this is most of the difference: the dark bands, a
+     * slow roll down the glass, and the corners going off.
+     */
+    fun tube(canvas: Canvas, paint: Paint, w: Float, h: Float, life: Float, strength: Float) {
+        val spacing = max(3f, h / 300f)
+        val drift = (life * 22f) % spacing
+        paint.style = Paint.Style.FILL
+        paint.color = fade(0xFF000000.toInt(), 0.26f * strength)
+        paint.strokeWidth = spacing * 0.42f
+        var y = -spacing + drift
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, paint)
+            y += spacing
+        }
+
+        // One bright band rolling down, the way a badly locked picture does.
+        val band = ((life * 0.22f) % 1.4f) * h - h * 0.2f
+        val tall = h * 0.10f
+        paint.color = fade(0xFFFFFFFF.toInt(), 0.035f * strength)
+        canvas.drawRect(0f, band, w, band + tall, paint)
+    }
+
+    /**
+     * The corners going dark, which is what a lens does and a screen does not.
+     */
+    fun vignette(canvas: Canvas, paint: Paint, w: Float, h: Float, strength: Float) {
+        val radius = hypot(w, h) * 0.62f
+        paint.shader = RadialGradient(
+            w * 0.5f,
+            h * 0.5f,
+            radius,
+            intArrayOf(0x00000000, fade(0xFF000000.toInt(), 0.55f * strength)),
+            floatArrayOf(0.55f, 1f),
+            Shader.TileMode.CLAMP,
+        )
+        canvas.drawRect(0f, 0f, w, h, paint)
+        paint.shader = null
+    }
+
     fun scatter(seed: Int, salt: Int): Float {
         var held = seed * 374_761_393 + salt * 668_265_263
         held = (held xor (held shr 13)) * 1_274_126_177
@@ -103,6 +146,7 @@ class BinaryVeil(context: Context) : View(context) {
         typeface = Typeface.MONOSPACE
         textAlign = Paint.Align.CENTER
     }
+    private val line = Paint()
     private var accent = Color.WHITE
     private var began = 0L
     private var running = false
@@ -166,35 +210,100 @@ class BinaryVeil(context: Context) : View(context) {
         }
         if (t >= 0.5f) swapNow()
 
-        // The wipe runs top to bottom and back out, so the field is never on
-        // screen at full strength for more than an instant.
         val front = t * (1f + EDGE * 2f) - EDGE
         val columnWidth = w / COLUMNS
         val rowHeight = h / ROWS
         paint.textSize = min(columnWidth * 0.72f, rowHeight * 0.86f)
+
+        // How badly the tube is tracking, worst as the head crosses.
+        val tracking = 1f - abs(t - 0.5f) * 2f
+        val life = (SystemClock.uptimeMillis() - began) / 1000f
 
         for (row in 0 until ROWS) {
             val y = (row + 0.5f) / ROWS
             val distance = abs(y - front)
             if (distance > EDGE) continue
             val near = 1f - distance / EDGE
+            val lit = near * near
+
+            // Every row slips sideways by its own amount, the way a tape does
+            // when the drum is not quite in step. It is the difference between
+            // a grid of characters and a picture off a tape.
+            val slip = (Ink.scatter(row, (life * 12f).toInt()) - 0.5f) *
+                columnWidth * 3.2f * tracking
+            val bend = sin((y * 9f + life * 3.4f).toDouble()).toFloat() *
+                columnWidth * 0.5f * tracking
+            val shift = slip + bend
+            // The channels do not land on top of each other on a tube.
+            val split = columnWidth * (0.10f + 0.30f * tracking) * (0.4f + lit)
+
             for (column in 0 until COLUMNS) {
-                // Each cell keeps its digit for the whole sweep, and which
-                // cells are lit at all is fixed too: a field that reshuffles
-                // every frame reads as noise rather than as a transition.
                 val roll = Ink.scatter(row * 131 + column, 7)
                 if (roll > 0.55f + near * 0.4f) continue
                 glyph[0] = if (Ink.scatter(row * 977 + column, 13) > 0.5f) '1' else '0'
-                val lit = near * near
-                paint.color = Ink.fade(Ink.hot(accent, lit * 0.7f), 0.15f + lit * 0.85f)
-                canvas.drawText(
-                    glyph, 0, 1,
-                    (column + 0.5f) * columnWidth,
-                    (row + 0.72f) * rowHeight,
-                    paint,
-                )
+                val x = (column + 0.5f) * columnWidth + shift
+                val baseline = (row + 0.72f) * rowHeight
+
+                // Red and blue either side, then the digit itself over them:
+                // three passes is what makes an edge look like light rather
+                // than like a font.
+                paint.color = Ink.fade(0xFFFF3B30.toInt(), 0.22f + lit * 0.30f)
+                canvas.drawText(glyph, 0, 1, x - split, baseline, paint)
+                paint.color = Ink.fade(0xFF2BD6FF.toInt(), 0.22f + lit * 0.30f)
+                canvas.drawText(glyph, 0, 1, x + split, baseline, paint)
+                paint.color = Ink.fade(Ink.hot(accent, lit * 0.85f), 0.20f + lit * 0.80f)
+                canvas.drawText(glyph, 0, 1, x, baseline, paint)
             }
         }
+
+        drawScanlines(canvas, w, h, life)
+        drawHeadSwitch(canvas, w, h, front, tracking)
+    }
+
+    /**
+     * The lines between the lines.
+     *
+     * A tube draws every other line a moment after the one above it, and the
+     * gap between them is what a photograph of a screen shows and a screen
+     * drawing a screen does not. They drift downwards slowly, which is what
+     * makes the whole thing look scanned rather than printed.
+     */
+    private fun drawScanlines(canvas: Canvas, w: Float, h: Float, life: Float) {
+        val spacing = max(3f, h / 260f)
+        val drift = (life * 26f) % spacing
+        line.color = Ink.fade(0xFF000000.toInt(), 0.30f)
+        line.strokeWidth = spacing * 0.45f
+        var y = -spacing + drift
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, line)
+            y += spacing
+        }
+    }
+
+    /**
+     * The band at the bottom where the head leaves the tape.
+     *
+     * On a real machine it is torn, brighter than everything above it, and it
+     * moves. Here it rides the wipe, so the brightest part of the picture is
+     * the part that is being replaced.
+     */
+    private fun drawHeadSwitch(canvas: Canvas, w: Float, h: Float, front: Float, tracking: Float) {
+        if (tracking <= 0f) return
+        val band = h * 0.018f
+        val at = (front * h).coerceIn(-band, h + band)
+        line.strokeWidth = 1f
+        var y = at
+        var index = 0
+        while (y < at + band) {
+            val torn = (Ink.scatter(index, (front * 400f).toInt()) - 0.5f) * w * 0.5f
+            line.color = Ink.fade(Ink.hot(accent, 0.85f), 0.10f + 0.28f * tracking)
+            canvas.drawLine(torn, y, w + torn, y, line)
+            y += 1.5f
+            index += 1
+        }
+        line.color = Ink.fade(Ink.hot(accent, 1f), 0.35f * tracking)
+        line.strokeWidth = 1.4f
+        canvas.drawLine(0f, at, w, at, line)
     }
 }
 
@@ -231,6 +340,7 @@ class KeyForgeView(context: Context, private var palette: Palette) : View(contex
         typeface = Typeface.MONOSPACE
         textAlign = Paint.Align.CENTER
     }
+    private val glass = Paint()
     private val key = Path()
     private val trace = Path()
     private val measure = PathMeasure()
@@ -447,6 +557,8 @@ class KeyForgeView(context: Context, private var palette: Palette) : View(contex
         drawParticles(canvas, w, h, life, gather, sealing)
         if (reveal > 0f) drawKey(canvas, life, reveal, sealing)
         drawWords(canvas, w, h, life, sealing)
+        Ink.tube(canvas, glass, w, h, life, 1f)
+        Ink.vignette(canvas, glass, w, h, 1f)
     }
 
     private fun drawGround(canvas: Canvas, w: Float, h: Float, life: Float) {
@@ -541,6 +653,28 @@ class KeyForgeView(context: Context, private var palette: Palette) : View(contex
         }
     }
 
+    /**
+     * The outline, drawn three times slightly apart.
+     *
+     * A tube does not land red, green and blue on the same spot, and an edge
+     * that does looks drawn. Splitting them by a fraction of a pixel is what
+     * turns a stroke into something that was photographed.
+     */
+    private fun split(canvas: Canvas, path: Path, width: Float, alpha: Float, by: Float) {
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = width
+        paint.color = Ink.fade(0xFFFF3B30.toInt(), alpha * 0.55f)
+        canvas.save()
+        canvas.translate(-by, 0f)
+        canvas.drawPath(path, paint)
+        canvas.restore()
+        paint.color = Ink.fade(0xFF2BD6FF.toInt(), alpha * 0.55f)
+        canvas.save()
+        canvas.translate(by, 0f)
+        canvas.drawPath(path, paint)
+        canvas.restore()
+    }
+
     private fun drawKey(canvas: Canvas, life: Float, reveal: Float, sealing: Float) {
         val breath = 0.82f + 0.18f * sin(life * 2.1f)
         paint.style = Paint.Style.STROKE
@@ -556,6 +690,8 @@ class KeyForgeView(context: Context, private var palette: Palette) : View(contex
         paint.color = Ink.fade(Ink.hot(palette.accent, 0.35f), 0.42f * reveal)
         canvas.drawPath(key, paint)
 
+        split(canvas, key, max(1.4f, bowRadius * 0.028f), reveal, bowRadius * 0.030f)
+        paint.style = Paint.Style.STROKE
         paint.strokeWidth = max(1.4f, bowRadius * 0.028f)
         paint.color = Ink.fade(Ink.hot(palette.accent, 0.85f + sealing * 0.15f), reveal)
         canvas.drawPath(key, paint)
@@ -658,6 +794,7 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
     }
+    private val glass = Paint()
     private val ring = RectF()
     private val glyph = CharArray(1)
 
@@ -749,6 +886,9 @@ class BuildStageView(context: Context, private var palette: Palette) : View(cont
         text.color = palette.muted
         canvas.drawText(remaining, w * 0.5f, h * 0.925f, text)
         canvas.drawText(note, w * 0.5f, h * 0.962f, text)
+
+        Ink.tube(canvas, glass, w, h, life, 0.75f)
+        Ink.vignette(canvas, glass, w, h, 0.8f)
     }
 
     private fun drawRain(canvas: Canvas, w: Float, h: Float, life: Float) {

@@ -29,14 +29,12 @@
     <string name="omni_form_version_code">Code de version</string>
     <string name="omni_form_min_sdk">Android le plus ancien</string>
     <string name="omni_form_target_sdk">Android le plus récent</string>
-    <string name="omni_form_languages">Langages</string>
     <string name="omni_form_locales">Langues que parle l\'application</string>
     <string name="omni_form_locales_note">Un dossier de mots est écrit pour chacune, et le nom de l\'application y est lu. L\'anglais est toujours écrit, car un appareil réglé sur aucune des autres s\'y rabat.</string>
     <string name="omni_form_image">Image de l\'application</string>
     <string name="omni_form_image_choose">CHOISIR UNE IMAGE</string>
     <string name="omni_form_image_none">Aucune image choisie.</string>
     <string name="omni_form_image_note">Une image devient dix icônes de lanceur : cinq tailles, en carré et en rond. Toutes sont écrites dans le projet, visibles et remplaçables.</string>
-    <string name="omni_form_no_compiler">Des dossiers sont créés pour ce que vous choisissez. Seul %1$s est compilé ici : un projet contenant du code dans les autres est refusé plutôt que construit sans lui.</string>
     <string name="omni_key_alias">Nom de la clé</string>
     <string name="omni_key_common_name">Ton nom</string>
     <string name="omni_key_organisation">Organisation</string>
@@ -122,9 +120,6 @@
     <string name="omni_settings_logs_empty">Rien n\'a été enregistré durant cette exécution.</string>
     <string name="omni_settings_logs_copied">COPIÉ</string>
     <string name="omni_settings_logs_note">Le journal reste dans l\'espace propre de cette application et nulle part ailleurs. Copie-le d\'ici si tu le veux quelque part où le lire.</string>
-    <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
-    <string name="omni_about_how">Un projet, c\'est un manifeste, des dossiers pour les langages choisis et un dossier de ressources. Appuyer sur construire compile la table des ressources, écrit le manifeste binaire, assemble l\'archive, la signe, et écrit un paquet à installer et un bundle à téléverser. Tout se passe sur cet appareil : aucun serveur ne voit ton projet, et rien d\'autre que les outils Android que tu as déjà n\'est utilisé.</string>
-    <string name="omni_about_watch">La signature de cette application est vérifiée à chaque démarrage et à chaque retour à cet écran, et encore en arrière-plan tant qu\'Android l\'autorise.</string>
     <string name="omni_forge_title">FORGE DE LA CLÉ</string>
     <string name="omni_forge_bits">%1$d bits, créée sur cet appareil</string>
     <string name="omni_forge_sealed">CLÉ SCELLÉE</string>
@@ -181,7 +176,6 @@
     <string name="omni_editor_name_nothing">Aucun type ne répond à %1$s.</string>
     <string name="omni_editor_name_found">Types qui pourraient être %1$s</string>
     <string name="omni_editor_name_yours">le vôtre</string>
-    <string name="omni_form_not_compiled">non compilé</string>
     <string name="omni_editor_go">ALLER À</string>
     <string name="omni_editor_uses">UTILISATIONS</string>
     <string name="omni_editor_go_platform">%1$s appartient à la plateforme, il n\'est donc pas écrit sur cet appareil.</string>
@@ -221,4 +215,7 @@
     <string name="omni_health_spare">%1$d que personne ne demande</string>
     <string name="omni_health_short_and_spare">%1$d manquantes, %2$d que personne ne demande</string>
     <string name="omni_health_language_note">Une chaîne que la première langue déclare et qu\'une traduction ne déclare pas, c\'est un écran dans la mauvaise langue sur le téléphone de quelqu\'un. Construire l\'application ne l\'aurait jamais dit.</string>
+    <string name="omni_about_reach">Joindre ceux qui l\'ont fait</string>
+    <string name="omni_about_soon_short">BIENTÔT</string>
+    <string name="omni_about_soon">Il y aura ici un moyen de nous joindre. Il n\'y en a pas encore.</string>
 </resources>

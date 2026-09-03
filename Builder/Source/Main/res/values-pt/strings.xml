@@ -29,14 +29,12 @@
     <string name="omni_form_version_code">Código da versão</string>
     <string name="omni_form_min_sdk">Android mais antigo</string>
     <string name="omni_form_target_sdk">Android mais recente</string>
-    <string name="omni_form_languages">Linguagens</string>
     <string name="omni_form_locales">Idiomas que a aplicação fala</string>
     <string name="omni_form_locales_note">Para cada um é escrita uma pasta de palavras, e dela se lê o nome da aplicação. O inglês é sempre escrito, porque um aparelho definido em nenhum dos outros recorre a ele.</string>
     <string name="omni_form_image">Imagem da aplicação</string>
     <string name="omni_form_image_choose">ESCOLHER IMAGEM</string>
     <string name="omni_form_image_none">Nenhuma imagem escolhida.</string>
     <string name="omni_form_image_note">Uma imagem vira dez ícones de lançador: cinco tamanhos, em quadrado e em redondo. Todos ficam no projeto, visíveis e substituíveis.</string>
-    <string name="omni_form_no_compiler">São criadas pastas para o que escolher. Aqui só se compila %1$s: um projeto com código nos outros é recusado em vez de construído sem ele.</string>
     <string name="omni_key_alias">Nome da chave</string>
     <string name="omni_key_common_name">O teu nome</string>
     <string name="omni_key_organisation">Organização</string>
@@ -122,9 +120,6 @@
     <string name="omni_settings_logs_empty">Nada foi registado nesta execução.</string>
     <string name="omni_settings_logs_copied">COPIADO</string>
     <string name="omni_settings_logs_note">O registo fica no armazenamento próprio desta aplicação e em mais lado nenhum. Copia-o daqui se o quiseres onde o possas ler.</string>
-    <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
-    <string name="omni_about_how">Um projeto é um manifesto, pastas para as linguagens que escolheste e uma pasta de recursos. Carregar em construir compila a tabela de recursos, escreve o manifesto binário, empacota o arquivo, assina-o e escreve um pacote para instalar e um bundle para enviar. Tudo acontece neste aparelho: nenhum servidor vê o teu projeto, e não se usa nada além das ferramentas Android que já tens.</string>
-    <string name="omni_about_watch">A assinatura desta aplicação é verificada a cada arranque e a cada regresso a este ecrã, e ainda em segundo plano enquanto o Android permitir.</string>
     <string name="omni_forge_title">FORJANDO A CHAVE</string>
     <string name="omni_forge_bits">%1$d bits, criada neste dispositivo</string>
     <string name="omni_forge_sealed">CHAVE SELADA</string>
@@ -181,7 +176,6 @@
     <string name="omni_editor_name_nothing">Nenhum tipo responde a %1$s.</string>
     <string name="omni_editor_name_found">Tipos que poderiam ser %1$s</string>
     <string name="omni_editor_name_yours">seu</string>
-    <string name="omni_form_not_compiled">não compilado</string>
     <string name="omni_editor_go">IR PARA</string>
     <string name="omni_editor_uses">USOS</string>
     <string name="omni_editor_go_platform">%1$s pertence à plataforma, por isso não está escrito neste dispositivo.</string>
@@ -221,4 +215,7 @@
     <string name="omni_health_spare">%1$d que ninguém pede</string>
     <string name="omni_health_short_and_spare">%1$d em falta, %2$d que ninguém pede</string>
     <string name="omni_health_language_note">Uma cadeia que o primeiro idioma declara e uma tradução não é um ecrã no idioma errado no telefone de alguém. Construir a aplicação nunca o teria dito.</string>
+    <string name="omni_about_reach">Contactar quem o fez</string>
+    <string name="omni_about_soon_short">EM BREVE</string>
+    <string name="omni_about_soon">Vai haver aqui uma forma de entrar em contacto. Ainda não há.</string>
 </resources>

@@ -29,14 +29,12 @@
     <string name="omni_form_version_code">رمز الإصدار</string>
     <string name="omni_form_min_sdk">أقدم أندرويد</string>
     <string name="omni_form_target_sdk">أحدث أندرويد</string>
-    <string name="omni_form_languages">اللغات</string>
     <string name="omni_form_locales">اللغات التي يتحدثها التطبيق</string>
     <string name="omni_form_locales_note">يُكتب لكل واحدة مجلد كلمات، ومنه يُقرأ اسم التطبيق. تُكتب الإنجليزية دائمًا، لأن الجهاز غير المضبوط على أي من الأخريات يرجع إليها.</string>
     <string name="omni_form_image">صورة التطبيق</string>
     <string name="omni_form_image_choose">اختر صورة</string>
     <string name="omni_form_image_none">لم تُختر صورة.</string>
     <string name="omni_form_image_note">تصير الصورة الواحدة عشرة أيقونات إطلاق: خمسة أحجام، مربعة ومستديرة. جميعها تُكتب في المشروع حيث تراها وتستبدلها.</string>
-    <string name="omni_form_no_compiler">تُنشأ مجلدات لما تختاره. لا يُترجم هنا سوى %1$s: المشروع الذي يحوي شيفرة بغيرها يُرفض بدل أن يُبنى بدونها.</string>
     <string name="omni_key_alias">اسم المفتاح</string>
     <string name="omni_key_common_name">اسمك</string>
     <string name="omni_key_organisation">المؤسسة</string>
@@ -122,9 +120,6 @@
     <string name="omni_settings_logs_empty">لم يُسجَّل شيء في هذا التشغيل.</string>
     <string name="omni_settings_logs_copied">نُسخ</string>
     <string name="omni_settings_logs_note">السجل يبقى في مخزن هذا التطبيق وحده ولا مكان آخر. انسخه من هنا إن أردته حيث تستطيع قراءته.</string>
-    <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
-    <string name="omni_about_how">المشروع ملف تعريفي، ومجلدات للغات التي اخترتها، ومجلد موارد. الضغط على البناء يُصرّف جدول الموارد، ويكتب الملف التعريفي الثنائي، ويحزم الأرشيف، ويوقّعه، ويكتب حزمة للتثبيت وحزمة تطبيق للرفع. كل ذلك يجري على هذا الجهاز: لا خادم يرى مشروعك، ولا يُستعمل شيء سوى أدوات أندرويد التي لديك أصلًا.</string>
-    <string name="omni_about_watch">يُتحقق من توقيع هذا التطبيق عند كل بدء وعند كل عودة إلى هذه الشاشة، وكذلك في الخلفية ما دام أندرويد يسمح.</string>
     <string name="omni_forge_title">يجري صَوغ المفتاح</string>
     <string name="omni_forge_bits">%1$d بت، أُنشئ على هذا الجهاز</string>
     <string name="omni_forge_sealed">خُتم المفتاح</string>
@@ -181,7 +176,6 @@
     <string name="omni_editor_name_nothing">لا يوجد نوع باسم %1$s.</string>
     <string name="omni_editor_name_found">أنواع قد تكون %1$s</string>
     <string name="omni_editor_name_yours">لك</string>
-    <string name="omni_form_not_compiled">لا يُترجم</string>
     <string name="omni_editor_go">اذهب إلى</string>
     <string name="omni_editor_uses">الاستعمالات</string>
     <string name="omni_editor_go_platform">‏%1$s يخص المنصة، فهو غير مكتوب على هذا الجهاز.</string>
@@ -221,4 +215,7 @@
     <string name="omni_health_spare">‏%1$d لا يطلبها أحد</string>
     <string name="omni_health_short_and_spare">ينقص %1$d، و%2$d لا يطلبها أحد</string>
     <string name="omni_health_language_note">نص تُعلنه اللغة الأولى ولا تُعلنه ترجمة يعني شاشة بلغة خاطئة على هاتف أحدهم. بناء التطبيق ما كان ليقول ذلك أبدًا.</string>
+    <string name="omni_about_reach">التواصل مع من صنعوا هذا</string>
+    <string name="omni_about_soon_short">قريبًا</string>
+    <string name="omni_about_soon">سيكون هنا سبيل للتواصل. لا يوجد بعد.</string>
 </resources>

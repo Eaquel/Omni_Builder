@@ -29,14 +29,12 @@
     <string name="omni_form_version_code">Version code</string>
     <string name="omni_form_min_sdk">Oldest Android</string>
     <string name="omni_form_target_sdk">Newest Android</string>
-    <string name="omni_form_languages">Languages</string>
     <string name="omni_form_locales">Languages the application speaks</string>
     <string name="omni_form_locales_note">A folder of words is written for each one, and the application name is read from it. English is always written, because a device set to none of the others falls back to it.</string>
     <string name="omni_form_image">Application image</string>
     <string name="omni_form_image_choose">CHOOSE IMAGE</string>
     <string name="omni_form_image_none">No image chosen.</string>
     <string name="omni_form_image_note">One image becomes ten launcher icons, five sizes in a square and a round shape, written into the project where you can see and replace them.</string>
-    <string name="omni_form_no_compiler">Folders are created for what you pick. Only %1$s is compiled here: a project holding code in any of the others is refused rather than built into an application without it.</string>
     <string name="omni_key_alias">Key name</string>
     <string name="omni_key_common_name">Your name</string>
     <string name="omni_key_organisation">Organisation</string>
@@ -122,9 +120,6 @@
     <string name="omni_settings_logs_empty">Nothing has been recorded this run.</string>
     <string name="omni_settings_logs_copied">COPIED</string>
     <string name="omni_settings_logs_note">The log lives in this application\'s own storage and nowhere else. Copy it from here if you want it somewhere you can read it.</string>
-    <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
-    <string name="omni_about_how">A project is a manifest, folders for the languages you chose, and a resource folder. Pressing build compiles the resource table, writes the binary manifest, packs the archive, signs it, and writes a package to install and a bundle to upload. Everything happens on this device: no server sees your project, and nothing but the Android tools you already have is used.</string>
-    <string name="omni_about_watch">The signature on this application is checked at every start and every return to this screen, and again in the background while Android allows it.</string>
     <string name="omni_forge_title">FORGING THE KEY</string>
     <string name="omni_forge_bits">%1$d bits, made on this device</string>
     <string name="omni_forge_sealed">KEY SEALED</string>
@@ -181,7 +176,6 @@
     <string name="omni_editor_name_nothing">No type answers to %1$s.</string>
     <string name="omni_editor_name_found">Types that could be %1$s</string>
     <string name="omni_editor_name_yours">yours</string>
-    <string name="omni_form_not_compiled">not compiled</string>
     <string name="omni_editor_go">GO TO</string>
     <string name="omni_editor_uses">USES</string>
     <string name="omni_editor_go_platform">%1$s belongs to the platform, so it is not written on this device.</string>
@@ -221,4 +215,7 @@
     <string name="omni_health_spare">%1$d nothing asks for</string>
     <string name="omni_health_short_and_spare">%1$d missing, %2$d nothing asks for</string>
     <string name="omni_health_language_note">A string the first language declares and a translation does not is a screen in the wrong language on somebody\'s phone. Nothing about building the application would have said so.</string>
+    <string name="omni_about_reach">Reach the people who made this</string>
+    <string name="omni_about_soon_short">SOON</string>
+    <string name="omni_about_soon">There will be a way to get in touch here. There is not one yet.</string>
 </resources>

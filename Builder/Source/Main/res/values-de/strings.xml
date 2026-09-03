@@ -29,14 +29,12 @@
     <string name="omni_form_version_code">Versionscode</string>
     <string name="omni_form_min_sdk">Ältestes Android</string>
     <string name="omni_form_target_sdk">Neuestes Android</string>
-    <string name="omni_form_languages">Sprachen</string>
     <string name="omni_form_locales">Sprachen, die die Anwendung spricht</string>
     <string name="omni_form_locales_note">Für jede wird ein Wortordner geschrieben, aus dem der Anwendungsname gelesen wird. Englisch wird immer geschrieben, denn ein Gerät, das auf keine der anderen eingestellt ist, greift darauf zurück.</string>
     <string name="omni_form_image">Anwendungsbild</string>
     <string name="omni_form_image_choose">BILD WÄHLEN</string>
     <string name="omni_form_image_none">Kein Bild gewählt.</string>
     <string name="omni_form_image_note">Aus einem Bild werden zehn Startsymbole: fünf Größen, jeweils eckig und rund. Alle liegen im Projekt, sichtbar und austauschbar.</string>
-    <string name="omni_form_no_compiler">Für Ihre Auswahl werden Ordner angelegt. Hier wird nur %1$s kompiliert: ein Projekt mit Code in einer der anderen Sprachen wird abgelehnt, statt ohne diesen Code gebaut zu werden.</string>
     <string name="omni_key_alias">Schlüsselname</string>
     <string name="omni_key_common_name">Dein Name</string>
     <string name="omni_key_organisation">Organisation</string>
@@ -122,9 +120,6 @@
     <string name="omni_settings_logs_empty">In diesem Lauf wurde noch nichts aufgezeichnet.</string>
     <string name="omni_settings_logs_copied">KOPIERT</string>
     <string name="omni_settings_logs_note">Das Protokoll liegt im eigenen Speicher dieser Anwendung und sonst nirgends. Kopiere es von hier, wenn du es woanders lesen willst.</string>
-    <string name="omni_about_developer">Eaquel · github.com/Eaquel/Omni_Builder</string>
-    <string name="omni_about_how">Ein Projekt besteht aus einem Manifest, Ordnern für die gewählten Sprachen und einem Ressourcenordner. Ein Druck auf Bauen übersetzt die Ressourcentabelle, schreibt das binäre Manifest, packt das Archiv, signiert es und schreibt ein Paket zum Installieren und ein Bundle zum Hochladen. Alles geschieht auf diesem Gerät: kein Server sieht dein Projekt, und nichts außer den Android-Werkzeugen, die du ohnehin hast, wird benutzt.</string>
-    <string name="omni_about_watch">Die Signatur dieser Anwendung wird bei jedem Start und bei jeder Rückkehr zu diesem Bildschirm geprüft, und weiter im Hintergrund, solange Android es zulässt.</string>
     <string name="omni_forge_title">SCHLÜSSEL WIRD GESCHMIEDET</string>
     <string name="omni_forge_bits">%1$d Bit, auf diesem Gerät erzeugt</string>
     <string name="omni_forge_sealed">SCHLÜSSEL VERSIEGELT</string>
@@ -181,7 +176,6 @@
     <string name="omni_editor_name_nothing">Kein Typ heißt %1$s.</string>
     <string name="omni_editor_name_found">Typen, die %1$s sein könnten</string>
     <string name="omni_editor_name_yours">Ihrer</string>
-    <string name="omni_form_not_compiled">nicht kompiliert</string>
     <string name="omni_editor_go">GEHE ZU</string>
     <string name="omni_editor_uses">VERWENDUNGEN</string>
     <string name="omni_editor_go_platform">%1$s gehört zur Plattform und ist auf diesem Gerät nicht geschrieben.</string>
@@ -221,4 +215,7 @@
     <string name="omni_health_spare">%1$d fragt niemand ab</string>
     <string name="omni_health_short_and_spare">%1$d fehlen, %2$d fragt niemand ab</string>
     <string name="omni_health_language_note">Ein String, den die erste Sprache deklariert und eine Übersetzung nicht, ist ein Bildschirm in der falschen Sprache auf jemandes Telefon. Das Bauen der Anwendung hätte das nie gesagt.</string>
+    <string name="omni_about_reach">Die Leute erreichen, die das gemacht haben</string>
+    <string name="omni_about_soon_short">BALD</string>
+    <string name="omni_about_soon">Hier wird es einen Weg geben, Kontakt aufzunehmen. Noch gibt es keinen.</string>
 </resources>
