@@ -2284,7 +2284,7 @@ class BuilderActivity : Activity() {
             setOnClickListener { chooseImage(root) }
         }
         face.addView(
-            thumbnail(File(root, "${'$'}{PROJECT_RES}/${'$'}{PROJECT_ICON}").absolutePath, gap(12)),
+            thumbnail(File(root, "${PROJECT_RES}/${PROJECT_ICON}").absolutePath, gap(12)),
             LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginEnd = gap(3) },
         )
         face.addView(
@@ -2301,8 +2301,8 @@ class BuilderActivity : Activity() {
                 addView(
                     TextView(context).apply {
                         text = summary?.let {
-                            "${'$'}{it.packageName}  ·  ${'$'}{it.versionName}  ·  " +
-                                "API ${'$'}{it.minSdk}–${'$'}{it.targetSdk}"
+                            "${it.packageName}  ·  ${it.versionName}  ·  " +
+                                "API ${it.minSdk}–${it.targetSdk}"
                         } ?: getString(R.string.omni_form_image_choose)
                         setTextColor(palette.muted)
                         setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -3108,7 +3108,7 @@ class BuilderActivity : Activity() {
     }
 
     private fun joined(folder: String, name: String): String =
-        if (folder.isEmpty()) name else "${'$'}folder/${'$'}name"
+        if (folder.isEmpty()) name else "$folder/$name"
 
     private fun looksLikeAPicture(path: String): Boolean {
         val lower = path.lowercase(Locale.US)
@@ -3147,7 +3147,7 @@ class BuilderActivity : Activity() {
         val name = entry.path.substringAfterLast('/')
         val absolute = File(root, entry.path).absolutePath
         val picture = !entry.folder && looksLikeAPicture(entry.path)
-        val inside = all.count { it.path.startsWith("${'$'}{entry.path}/") }
+        val inside = all.count { it.path.startsWith("${entry.path}/") }
 
         return LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -3278,7 +3278,7 @@ class BuilderActivity : Activity() {
         )
 
         AlertDialog.Builder(this)
-            .setTitle(if (entry.folder) "${'$'}name/" else name)
+            .setTitle(if (entry.folder) "$name/" else name)
             .setItems(actions.map { it.first }.toTypedArray()) { _, which ->
                 actions[which].second()
             }
@@ -3331,7 +3331,7 @@ class BuilderActivity : Activity() {
         sheet.addView(
             keyValue(
                 getString(R.string.omni_picture_size),
-                if (bounds.outWidth > 0) "${'$'}{bounds.outWidth} × ${'$'}{bounds.outHeight}" else "",
+                if (bounds.outWidth > 0) "${bounds.outWidth} × ${bounds.outHeight}" else "",
                 size(file.length()),
                 palette.muted,
             )
@@ -3457,7 +3457,7 @@ class BuilderActivity : Activity() {
                         row(
                             checked.file,
                             getString(R.string.omni_check_open),
-                            if (checked.line > 0) "${'$'}{checked.line}:${'$'}{checked.column}" else "",
+                            if (checked.line > 0) "${checked.line}:${checked.column}" else "",
                             palette.error,
                         ) {
                             editorLine = checked.line
@@ -3725,7 +3725,7 @@ class BuilderActivity : Activity() {
         val qualified = chosen.optString("qualified")
         val whole = held.toString()
 
-        val already = whole.contains("import ${'$'}qualified;")
+        val already = whole.contains("import $qualified;")
         val mine = whole.lineSequence()
             .firstOrNull { it.trimStart().startsWith("package ") }
             ?.trim()
@@ -3756,7 +3756,7 @@ class BuilderActivity : Activity() {
             line += 1
             if (line > 200) break
         }
-        val statement = "import ${'$'}qualified;\n"
+        val statement = "import $qualified;\n"
         val put = at.coerceIn(0, editor.text?.length ?: 0)
         editor.text?.insert(put, statement)
 
@@ -4640,7 +4640,7 @@ class BuilderActivity : Activity() {
             hand(
                 Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${'$'}packageName"),
+                    Uri.parse("package:$packageName"),
                 )
             )
             return
@@ -6893,7 +6893,7 @@ internal object Drafts {
     fun write(context: Context, root: String, path: String, text: String) {
         val here = folder(context)
         val target = File(here, named(root, path))
-        val beside = File(here, "${'$'}{target.name}.part")
+        val beside = File(here, "${target.name}.part")
         runCatching {
             FileOutputStream(beside).use { out ->
                 out.write(text.toByteArray(Charsets.UTF_8))

@@ -506,9 +506,37 @@ def check_installable() -> str:
     gradle(":Builder:verifyApkClasses", ":Builder:verifyApkInstallability", "--rerun-tasks")
     return "classes present and signatures accepted"
 
+def check_interpolation() -> str:
+    """No string the interface shows carries a name instead of the thing named.
+
+    Kotlin writes a literal dollar as ${'$'}, which is the same six characters
+    a template needs to be escaped with. Get it the wrong way round and the
+    screen says ${it.packageName} where the package name should be, an import
+    written into somebody's file reads `import ${qualified};`, and the intent
+    that asks for install permission carries the URI `package:${packageName}`,
+    which Android opens and closes again because no such package exists.
+
+    Nothing in this interface wants a literal dollar in a template, so the rule
+    is simply that the sequence may not appear. A dollar inside a character
+    literal is a different thing and is left alone.
+    """
+    text = KOTLIN.read_text(encoding="utf-8")
+    found = [
+        index + 1
+        for index, line in enumerate(text.split("\n"))
+        if "${'$'}" in line
+    ]
+    if found:
+        raise AssertionError(
+            "these lines write a dollar where a value belongs: "
+            + ", ".join(f"{KOTLIN.name}:{line}" for line in found[:20])
+        )
+    return f"no escaped template in {len(text.split(chr(10)))} lines of interface"
+
 CHECKS: dict[str, tuple[str, object]] = {
     "layout": ("the tree is the agreed one", check_layout),
     "comments": ("no file explains itself", check_comments),
+    "templates": ("no name shown where a value belongs", check_interpolation),
     "format": ("rustfmt", check_format),
     "lint": ("clippy", check_lint),
     "core": ("the Core suite", check_core),
@@ -521,7 +549,7 @@ CHECKS: dict[str, tuple[str, object]] = {
 }
 
 DEFAULT = [
-    "layout", "comments", "format", "lint", "dependencies", "strings",
+    "layout", "comments", "templates", "format", "lint", "dependencies", "strings",
     "release", "core", "bridge", "installable",
 ]
 
