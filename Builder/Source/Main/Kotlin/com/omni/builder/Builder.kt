@@ -3369,13 +3369,27 @@ class BuilderActivity : Activity() {
         )
         content.addView(sheet)
 
+        var overwrite = false
         content.addView(primary(getString(R.string.omni_action_save)) {
             results.removeAllViews()
             editorText = editor.text?.toString().orEmpty()
+            val now = runCatching { JSONObject(Builder.nativeReadFile(root, path)) }.getOrNull()
+            val elsewhere = now != null &&
+                now.optBoolean("read", false) &&
+                now.optString("text") != editorOnDisk
+            if (elsewhere && !overwrite) {
+                overwrite = true
+                results.addView(
+                    notice(getString(R.string.omni_editor_changed_elsewhere), palette.warning)
+                )
+                return@primary
+            }
             val saved = runCatching { JSONObject(Builder.nativeWriteFile(root, path, editorText)) }
                 .getOrNull()
             if (saved != null && saved.optBoolean("saved", false)) {
                 dirty = false
+                overwrite = false
+                editorOnDisk = editorText
                 where.text = path
                 where.setTextColor(palette.muted)
                 editor.removeCallbacks(keep)
@@ -6500,7 +6514,22 @@ internal object Drafts {
     }
 
     fun write(context: Context, root: String, path: String, text: String) {
-        runCatching { File(folder(context), named(root, path)).writeText(text) }
+        val here = folder(context)
+        val target = File(here, named(root, path))
+        val beside = File(here, "${'$'}{target.name}.part")
+        runCatching {
+            FileOutputStream(beside).use { out ->
+                out.write(text.toByteArray(Charsets.UTF_8))
+                out.flush()
+                out.fd.sync()
+            }
+            if (!beside.renameTo(target)) {
+                target.delete()
+                if (!beside.renameTo(target)) {
+                    throw IOException("the draft could not be put in place")
+                }
+            }
+        }.onFailure { beside.delete() }
     }
 
     fun forget(context: Context, root: String, path: String) {

@@ -66,6 +66,7 @@
     <string name="omni_files_holds">内有 %1$d 项</string>
     <string name="omni_files_needs_name">请先输入名称。</string>
     <string name="omni_editor_saved">已保存 %1$s</string>
+    <string name="omni_editor_changed_elsewhere">该文件自打开以来在别处已被更改。再次保存会覆盖那次更改。</string>
     <string name="omni_created">项目已创建</string>
     <string name="omni_refused">未生成任何安装包</string>
     <string name="omni_build_title">构建</string>

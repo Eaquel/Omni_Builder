@@ -66,6 +66,7 @@
     <string name="omni_files_holds">%1$d dentro</string>
     <string name="omni_files_needs_name">Escribe primero un nombre.</string>
     <string name="omni_editor_saved">%1$s guardado</string>
+    <string name="omni_editor_changed_elsewhere">Este archivo cambió en otro lugar desde que se abrió. Guardar de nuevo sobrescribe ese cambio.</string>
     <string name="omni_created">PROYECTO CREADO</string>
     <string name="omni_refused">NO SE PRODUJO NINGÚN PAQUETE</string>
     <string name="omni_build_title">Construir</string>

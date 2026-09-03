@@ -66,6 +66,7 @@
     <string name="omni_files_holds">بداخله %1$d</string>
     <string name="omni_files_needs_name">اكتب اسمًا أولًا.</string>
     <string name="omni_editor_saved">حُفظ %1$s</string>
+    <string name="omni_editor_changed_elsewhere">تغيّر هذا الملف في مكان آخر منذ فتحه. الحفظ مرة أخرى يكتب فوق ذلك التغيير.</string>
     <string name="omni_created">أُنشئ المشروع</string>
     <string name="omni_refused">لم تُنتَج أي حزمة</string>
     <string name="omni_build_title">البناء</string>

@@ -66,6 +66,7 @@
     <string name="omni_files_holds">içinde %1$d</string>
     <string name="omni_files_needs_name">Önce bir ad yaz.</string>
     <string name="omni_editor_saved">%1$s kaydedildi</string>
+    <string name="omni_editor_changed_elsewhere">Bu dosya açıldığından beri başka bir yerde değişti. Yeniden kaydetmek o değişikliğin üzerine yazar.</string>
     <string name="omni_created">PROJE OLUŞTURULDU</string>
     <string name="omni_refused">PAKET ÜRETİLMEDİ</string>
     <string name="omni_build_title">Derle</string>

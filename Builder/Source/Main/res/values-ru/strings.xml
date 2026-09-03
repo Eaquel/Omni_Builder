@@ -66,6 +66,7 @@
     <string name="omni_files_holds">внутри: %1$d</string>
     <string name="omni_files_needs_name">Сначала введите имя.</string>
     <string name="omni_editor_saved">%1$s сохранён</string>
+    <string name="omni_editor_changed_elsewhere">Этот файл изменился в другом месте с момента открытия. Повторное сохранение перезапишет это изменение.</string>
     <string name="omni_created">ПРОЕКТ СОЗДАН</string>
     <string name="omni_refused">ПАКЕТ НЕ СОЗДАН</string>
     <string name="omni_build_title">Сборка</string>

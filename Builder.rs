@@ -26132,11 +26132,28 @@ pub mod workspace {
                     .with_context(format!("Reason: {why}"))
             })?;
         }
-        std::fs::write(&path, contents.as_bytes()).map_err(|why| {
-            fail("EW122", "That file could not be saved.")
+        let Some(name) = path
+            .file_name()
+            .map(|held| held.to_string_lossy().to_string())
+        else {
+            return Err(
+                fail("EW123", "That path names no file.").with_context(format!("Path: {relative}"))
+            );
+        };
+        let beside = path.with_file_name(format!("{name}.part"));
+        let written = std::fs::File::create(&beside)
+            .and_then(|mut file| {
+                use std::io::Write;
+                file.write_all(contents.as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|()| std::fs::rename(&beside, &path));
+        if let Err(why) = written {
+            std::fs::remove_file(&beside).ok();
+            return Err(fail("EW122", "That file could not be saved.")
                 .with_context(format!("Path: {relative}"))
-                .with_context(format!("Reason: {why}"))
-        })?;
+                .with_context(format!("Reason: {why}")));
+        }
         Ok(contents.len() as u64)
     }
 
@@ -44546,6 +44563,38 @@ public final class MainActivity extends Activity {
                 .code,
             "EW153"
         );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_save_that_cannot_finish_leaves_what_was_there_before() {
+        let directory = temp_directory("omni-atomic-save");
+        let root = directory.join("Held");
+        let text = root.to_str().unwrap().to_string();
+        super::scaffold::create(&text, &super::scaffold::Spec::default()).unwrap();
+
+        let held = "Java/Kept.java";
+        super::workspace::write_text(&text, held, "the first version\n").unwrap();
+        let beside = root.join("Java").join("Kept.java.part");
+        std::fs::create_dir(&beside).expect("something in the way of the temporary name");
+
+        let refused = super::workspace::write_text(&text, held, "the second version\n")
+            .expect_err("the save cannot finish");
+        assert_eq!(refused.code, "EW122");
+        assert_eq!(
+            super::workspace::read_text(&text, held).unwrap(),
+            "the first version\n",
+            "a save that could not finish took the file with it"
+        );
+
+        std::fs::remove_dir(&beside).unwrap();
+        super::workspace::write_text(&text, held, "the second version\n").unwrap();
+        assert_eq!(
+            super::workspace::read_text(&text, held).unwrap(),
+            "the second version\n"
+        );
+        assert!(!beside.exists(), "a save left its temporary file behind");
 
         std::fs::remove_dir_all(&directory).ok();
     }

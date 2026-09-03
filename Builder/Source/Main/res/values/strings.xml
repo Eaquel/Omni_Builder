@@ -66,6 +66,7 @@
     <string name="omni_files_holds">%1$d inside</string>
     <string name="omni_files_needs_name">Type a name first.</string>
     <string name="omni_editor_saved">Saved %1$s</string>
+    <string name="omni_editor_changed_elsewhere">This file changed somewhere else since it was opened. Saving again writes over that change.</string>
     <string name="omni_created">PROJECT CREATED</string>
     <string name="omni_refused">NO PACKAGE PRODUCED</string>
     <string name="omni_build_title">Build</string>
