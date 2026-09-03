@@ -119,6 +119,17 @@
     <string name="omni_form_image_set">GÖRSEL AYARLANDI</string>
     <string name="omni_form_image_unreadable">O görsel okunamadı.</string>
     <string name="omni_install_allow">Bir uygulamanın başka bir uygulamayı kurabilmesi için Android bir kez izin ister. Az önce açılan ekranda bu uygulamaya izin ver, sonra kur tuşuna yeniden bas.</string>
+    <string name="omni_install_working">Paket Android\'e veriliyor…</string>
+    <string name="omni_install_done">%1$s kuruldu.</string>
+    <string name="omni_install_failed">Kurulmadı: %1$s</string>
+    <string name="omni_install_ok">kuruldu</string>
+    <string name="omni_install_aborted">kurulum iptal edildi</string>
+    <string name="omni_install_blocked">bu cihazda bir şey engelledi</string>
+    <string name="omni_install_conflict">bu paket adı başka bir uygulamanın</string>
+    <string name="omni_install_incompatible">bu cihaz çalıştıramıyor</string>
+    <string name="omni_install_invalid">Android paketi okuyamadı</string>
+    <string name="omni_install_storage">yeterli yer yok</string>
+    <string name="omni_install_refused">Android reddetti</string>
     <string name="omni_settings_logs_empty">Bu çalışmada henüz bir şey kaydedilmedi.</string>
     <string name="omni_settings_logs_copied">KOPYALANDI</string>
     <string name="omni_settings_logs_note">Günlük yalnızca bu uygulamanın kendi deposunda durur, başka hiçbir yerde. Okuyabileceğin bir yere taşımak istersen buradan kopyala.</string>

@@ -119,6 +119,17 @@
     <string name="omni_form_image_set">IMAGEN PUESTA</string>
     <string name="omni_form_image_unreadable">Esa imagen no se pudo leer.</string>
     <string name="omni_install_allow">Android pregunta una vez antes de que una aplicación pueda instalar otra. Permíteselo a esta en la pantalla que se acaba de abrir y vuelve a pulsar instalar.</string>
+    <string name="omni_install_working">Entregando el paquete a Android…</string>
+    <string name="omni_install_done">%1$s está instalado.</string>
+    <string name="omni_install_failed">No se instaló: %1$s</string>
+    <string name="omni_install_ok">instalado</string>
+    <string name="omni_install_aborted">se canceló la instalación</string>
+    <string name="omni_install_blocked">algo en este dispositivo lo bloqueó</string>
+    <string name="omni_install_conflict">otra aplicación ya tiene ese nombre de paquete</string>
+    <string name="omni_install_incompatible">este dispositivo no puede ejecutarlo</string>
+    <string name="omni_install_invalid">Android no pudo leer el paquete</string>
+    <string name="omni_install_storage">no hay espacio suficiente</string>
+    <string name="omni_install_refused">Android lo rechazó</string>
     <string name="omni_settings_logs_empty">Nada se ha registrado en esta ejecución.</string>
     <string name="omni_settings_logs_copied">COPIADO</string>
     <string name="omni_settings_logs_note">El registro vive en el almacenamiento propio de esta aplicación y en ningún otro sitio. Cópialo desde aquí si lo quieres donde puedas leerlo.</string>

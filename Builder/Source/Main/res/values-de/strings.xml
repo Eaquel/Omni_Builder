@@ -119,6 +119,17 @@
     <string name="omni_form_image_set">BILD GESETZT</string>
     <string name="omni_form_image_unreadable">Dieses Bild konnte nicht gelesen werden.</string>
     <string name="omni_install_allow">Android fragt einmal, bevor eine Anwendung eine andere installieren darf. Erlaube es dieser auf dem eben geöffneten Bildschirm und drücke dann erneut auf Installieren.</string>
+    <string name="omni_install_working">Das Paket wird an Android übergeben…</string>
+    <string name="omni_install_done">%1$s ist installiert.</string>
+    <string name="omni_install_failed">Nicht installiert: %1$s</string>
+    <string name="omni_install_ok">installiert</string>
+    <string name="omni_install_aborted">die Installation wurde abgebrochen</string>
+    <string name="omni_install_blocked">etwas auf diesem Gerät hat es blockiert</string>
+    <string name="omni_install_conflict">eine andere Anwendung hat diesen Paketnamen</string>
+    <string name="omni_install_incompatible">dieses Gerät kann es nicht ausführen</string>
+    <string name="omni_install_invalid">Android konnte das Paket nicht lesen</string>
+    <string name="omni_install_storage">es ist nicht genug Platz</string>
+    <string name="omni_install_refused">Android hat es abgelehnt</string>
     <string name="omni_settings_logs_empty">In diesem Lauf wurde noch nichts aufgezeichnet.</string>
     <string name="omni_settings_logs_copied">KOPIERT</string>
     <string name="omni_settings_logs_note">Das Protokoll liegt im eigenen Speicher dieser Anwendung und sonst nirgends. Kopiere es von hier, wenn du es woanders lesen willst.</string>

@@ -119,6 +119,17 @@
     <string name="omni_form_image_set">IMAGE POSÉE</string>
     <string name="omni_form_image_unreadable">Cette image n\'a pas pu être lue.</string>
     <string name="omni_install_allow">Android demande une fois avant qu\'une application puisse en installer une autre. Autorise celle-ci sur l\'écran qui vient de s\'ouvrir, puis appuie de nouveau sur installer.</string>
+    <string name="omni_install_working">Remise du paquet à Android…</string>
+    <string name="omni_install_done">%1$s est installé.</string>
+    <string name="omni_install_failed">Non installé : %1$s</string>
+    <string name="omni_install_ok">installé</string>
+    <string name="omni_install_aborted">l\'installation a été annulée</string>
+    <string name="omni_install_blocked">quelque chose sur cet appareil l\'a bloqué</string>
+    <string name="omni_install_conflict">une autre application porte déjà ce nom de paquet</string>
+    <string name="omni_install_incompatible">cet appareil ne peut pas l\'exécuter</string>
+    <string name="omni_install_invalid">Android n\'a pas pu lire le paquet</string>
+    <string name="omni_install_storage">il n\'y a pas assez de place</string>
+    <string name="omni_install_refused">Android l\'a refusé</string>
     <string name="omni_settings_logs_empty">Rien n\'a été enregistré durant cette exécution.</string>
     <string name="omni_settings_logs_copied">COPIÉ</string>
     <string name="omni_settings_logs_note">Le journal reste dans l\'espace propre de cette application et nulle part ailleurs. Copie-le d\'ici si tu le veux quelque part où le lire.</string>

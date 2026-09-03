@@ -403,6 +403,23 @@ def check_strings() -> str:
     unused = sorted(set(base) - used - fromXml)
     if unused:
         raise AssertionError(f"strings nothing uses: {unused}")
+
+    loose: list[str] = []
+    for path in [RESOURCES / "values/strings.xml"] + translations:
+        for number, line in enumerate(path.read_text(encoding="utf-8").split("\n"), 1):
+            body = re.search(r">(.*)</string>", line)
+            if not body:
+                continue
+            text = body.group(1)
+            for at, letter in enumerate(text):
+                if letter == "'" and (at == 0 or text[at - 1] != "\\"):
+                    loose.append(f"{path.parent.name}:{number}")
+                    break
+    if loose:
+        raise AssertionError(
+            "an apostrophe in a string resource has to be escaped, or aapt2 "
+            "refuses the whole file: " + ", ".join(loose[:12])
+        )
     return f"{len(base)} strings in {len(translations) + 1} languages, none spare"
 
 def release_apk() -> Path:

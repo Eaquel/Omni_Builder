@@ -119,6 +119,17 @@
     <string name="omni_form_image_set">ضُبطت الصورة</string>
     <string name="omni_form_image_unreadable">تعذّر قراءة تلك الصورة.</string>
     <string name="omni_install_allow">يسأل أندرويد مرة واحدة قبل أن يتمكن تطبيق من تثبيت آخر. اسمح لهذا التطبيق في الشاشة التي فُتحت للتو، ثم اضغط تثبيت مرة أخرى.</string>
+    <string name="omni_install_working">يجري تسليم الحزمة إلى أندرويد…</string>
+    <string name="omni_install_done">تم تثبيت %1$s.</string>
+    <string name="omni_install_failed">لم يتم التثبيت: %1$s</string>
+    <string name="omni_install_ok">مثبّت</string>
+    <string name="omni_install_aborted">أُلغي التثبيت</string>
+    <string name="omni_install_blocked">منعه شيء على هذا الجهاز</string>
+    <string name="omni_install_conflict">اسم الحزمة هذا يخص تطبيقًا آخر</string>
+    <string name="omni_install_incompatible">هذا الجهاز لا يستطيع تشغيله</string>
+    <string name="omni_install_invalid">لم يتمكن أندرويد من قراءة الحزمة</string>
+    <string name="omni_install_storage">لا توجد مساحة كافية</string>
+    <string name="omni_install_refused">رفضه أندرويد</string>
     <string name="omni_settings_logs_empty">لم يُسجَّل شيء في هذا التشغيل.</string>
     <string name="omni_settings_logs_copied">نُسخ</string>
     <string name="omni_settings_logs_note">السجل يبقى في مخزن هذا التطبيق وحده ولا مكان آخر. انسخه من هنا إن أردته حيث تستطيع قراءته.</string>

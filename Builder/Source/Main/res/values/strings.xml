@@ -119,6 +119,17 @@
     <string name="omni_form_image_set">IMAGE SET</string>
     <string name="omni_form_image_unreadable">That picture could not be read.</string>
     <string name="omni_install_allow">Android asks once before an application may install another. Allow it for this one on the screen that just opened, then press install again.</string>
+    <string name="omni_install_working">Handing the package to Android…</string>
+    <string name="omni_install_done">%1$s is installed.</string>
+    <string name="omni_install_failed">Not installed: %1$s</string>
+    <string name="omni_install_ok">installed</string>
+    <string name="omni_install_aborted">the install was cancelled</string>
+    <string name="omni_install_blocked">something on this device blocked it</string>
+    <string name="omni_install_conflict">another application already owns that package name</string>
+    <string name="omni_install_incompatible">this device cannot run it</string>
+    <string name="omni_install_invalid">Android would not read the package</string>
+    <string name="omni_install_storage">there is not enough room</string>
+    <string name="omni_install_refused">Android refused it</string>
     <string name="omni_settings_logs_empty">Nothing has been recorded this run.</string>
     <string name="omni_settings_logs_copied">COPIED</string>
     <string name="omni_settings_logs_note">The log lives in this application\'s own storage and nowhere else. Copy it from here if you want it somewhere you can read it.</string>

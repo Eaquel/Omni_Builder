@@ -119,6 +119,17 @@
     <string name="omni_form_image_set">ИЗОБРАЖЕНИЕ ЗАДАНО</string>
     <string name="omni_form_image_unreadable">Это изображение не удалось прочитать.</string>
     <string name="omni_install_allow">Android спрашивает один раз, прежде чем приложение сможет установить другое. Разрешите это ему на только что открывшемся экране и нажмите установить снова.</string>
+    <string name="omni_install_working">Пакет передаётся Android…</string>
+    <string name="omni_install_done">%1$s установлен.</string>
+    <string name="omni_install_failed">Не установлен: %1$s</string>
+    <string name="omni_install_ok">установлен</string>
+    <string name="omni_install_aborted">установка отменена</string>
+    <string name="omni_install_blocked">что-то на этом устройстве заблокировало её</string>
+    <string name="omni_install_conflict">это имя пакета уже занято другим приложением</string>
+    <string name="omni_install_incompatible">это устройство не может его запустить</string>
+    <string name="omni_install_invalid">Android не смог прочитать пакет</string>
+    <string name="omni_install_storage">не хватает места</string>
+    <string name="omni_install_refused">Android отклонил его</string>
     <string name="omni_settings_logs_empty">За этот запуск ничего не записано.</string>
     <string name="omni_settings_logs_copied">СКОПИРОВАНО</string>
     <string name="omni_settings_logs_note">Журнал лежит в собственном хранилище этого приложения и больше нигде. Скопируйте его отсюда, если он нужен там, где его можно прочесть.</string>

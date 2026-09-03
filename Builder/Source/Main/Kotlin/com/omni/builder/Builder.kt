@@ -4,10 +4,12 @@ import android.animation.LayoutTransition
 import android.app.Activity
 import android.app.AlertDialog
 import android.app.Application
+import android.app.PendingIntent
 import android.app.job.JobInfo
 import android.app.job.JobParameters
 import android.app.job.JobScheduler
 import android.app.job.JobService
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
@@ -16,6 +18,8 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageInstaller
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.content.res.Resources
@@ -1473,6 +1477,8 @@ class BuilderActivity : Activity() {
     private companion object {
         const val IMAGE_REQUEST = 2
 
+        const val INSTALL_ANSWER = "com.omni.builder.INSTALL_ANSWER"
+
         const val LOOK_MILLIS = 60L
 
         const val WATCH_MILLIS = 110L
@@ -1551,6 +1557,8 @@ class BuilderActivity : Activity() {
     private var screen: Screen = Screen.Projects
     private var navigating = false
     private var building = false
+    private var installing: File? = null
+    private var askedToInstall = false
     private var standing = "UNKNOWN"
     private var openProject: String? = null
 
@@ -1678,6 +1686,7 @@ class BuilderActivity : Activity() {
         standing = examine()
         provisionSharedKey()
         answerBackTheWayThisScreenWants()
+        listenForTheInstaller()
         fitTheColumn()
         render(false)
     }
@@ -1782,6 +1791,14 @@ class BuilderActivity : Activity() {
     override fun onResume() {
         super.onResume()
         aurora.resumeDrawing()
+        val waiting = installing
+        if (askedToInstall && waiting != null &&
+            (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                packageManager.canRequestPackageInstalls())
+        ) {
+            askedToInstall = false
+            installPackage(waiting)
+        }
         if (Sentry.refused(this)) {
             if (standing != "TAMPERED") {
                 standing = "TAMPERED"
@@ -1819,6 +1836,7 @@ class BuilderActivity : Activity() {
     override fun onDestroy() {
         keepTheDraft()
         stopTheBuild()
+        runCatching { unregisterReceiver(installAnswer) }
         OmniLog.flushSession()
         super.onDestroy()
     }
@@ -4632,11 +4650,13 @@ class BuilderActivity : Activity() {
         if (!file.isFile) {
             return
         }
+        installing = file
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             !packageManager.canRequestPackageInstalls()
         ) {
             results.removeAllViews()
             results.addView(notice(getString(R.string.omni_install_allow), palette.warning))
+            askedToInstall = true
             hand(
                 Intent(
                     Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
@@ -4645,13 +4665,130 @@ class BuilderActivity : Activity() {
             )
             return
         }
-        val (uri, type) = handleFor(file)
-        hand(
-            Intent(Intent.ACTION_VIEW)
-                .setDataAndType(uri, type)
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        askedToInstall = false
+        results.removeAllViews()
+        results.addView(notice(getString(R.string.omni_install_working), palette.accent))
+        OmniLog.event(LogLevel.INFO, "install", "Handing ${file.name} to the installer.")
+
+        Thread {
+            val answer = runCatching { handToTheInstaller(file) }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                answer.onFailure { why ->
+                    val said = why.message ?: why.javaClass.simpleName
+                    OmniLog.event(LogLevel.ERROR, "install", "${file.name}: $said")
+                    results.removeAllViews()
+                    results.addView(
+                        notice(getString(R.string.omni_install_failed, said), palette.error)
+                    )
+                }
+            }
+        }.start()
+    }
+
+    private fun handToTheInstaller(file: File) {
+        val installer = packageManager.packageInstaller
+        val params = PackageInstaller.SessionParams(
+            PackageInstaller.SessionParams.MODE_FULL_INSTALL
         )
+        params.setSize(file.length())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            params.setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_UNSPECIFIED)
+        }
+        val id = installer.createSession(params)
+        installer.openSession(id).use { session ->
+            session.openWrite(file.name, 0, file.length()).use { into ->
+                file.inputStream().use { from ->
+                    from.copyTo(into, 128 * 1024)
+                }
+                session.fsync(into)
+            }
+            val asked = Intent(INSTALL_ANSWER).setPackage(packageName)
+            val waiting = PendingIntent.getBroadcast(
+                this,
+                id,
+                asked,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+            )
+            session.commit(waiting.intentSender)
+        }
+    }
+
+    private fun listenForTheInstaller() {
+        val filter = IntentFilter(INSTALL_ANSWER)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(installAnswer, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(installAnswer, filter)
+        }
+    }
+
+    private val installAnswer = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val status = intent?.getIntExtra(
+                PackageInstaller.EXTRA_STATUS,
+                PackageInstaller.STATUS_FAILURE,
+            ) ?: return
+            val said = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE).orEmpty()
+            val named = intent.getStringExtra(PackageInstaller.EXTRA_PACKAGE_NAME)
+                ?: installing?.name.orEmpty()
+
+            if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                val next = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_INTENT, Intent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra<Intent>(Intent.EXTRA_INTENT)
+                }
+                if (next != null) {
+                    hand(next.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+                return
+            }
+
+            val why = whyTheInstallEnded(status, said)
+            val level = if (status == PackageInstaller.STATUS_SUCCESS) {
+                LogLevel.INFO
+            } else {
+                LogLevel.WARN
+            }
+            OmniLog.event(level, "install", "$named: $why")
+            if (isFinishing || isDestroyed) {
+                return
+            }
+            results.removeAllViews()
+            results.addView(
+                notice(
+                    if (status == PackageInstaller.STATUS_SUCCESS) {
+                        getString(R.string.omni_install_done, named)
+                    } else {
+                        getString(R.string.omni_install_failed, why)
+                    },
+                    if (status == PackageInstaller.STATUS_SUCCESS) palette.ok else palette.error,
+                )
+            )
+            installing = null
+        }
+    }
+
+    private fun whyTheInstallEnded(status: Int, said: String): String {
+        val named = when (status) {
+            PackageInstaller.STATUS_SUCCESS -> getString(R.string.omni_install_ok)
+            PackageInstaller.STATUS_FAILURE_ABORTED ->
+                getString(R.string.omni_install_aborted)
+            PackageInstaller.STATUS_FAILURE_BLOCKED -> getString(R.string.omni_install_blocked)
+            PackageInstaller.STATUS_FAILURE_CONFLICT ->
+                getString(R.string.omni_install_conflict)
+            PackageInstaller.STATUS_FAILURE_INCOMPATIBLE ->
+                getString(R.string.omni_install_incompatible)
+            PackageInstaller.STATUS_FAILURE_INVALID -> getString(R.string.omni_install_invalid)
+            PackageInstaller.STATUS_FAILURE_STORAGE -> getString(R.string.omni_install_storage)
+            else -> getString(R.string.omni_install_refused)
+        }
+        return if (said.isBlank()) named else "$named — $said"
     }
 
     private fun actionsFor(file: File, into: LinearLayout) {
