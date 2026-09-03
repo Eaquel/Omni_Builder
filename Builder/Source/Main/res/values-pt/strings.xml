@@ -76,6 +76,14 @@
     <string name="omni_refused">NENHUM PACOTE PRODUZIDO</string>
     <string name="omni_build_title">Construir</string>
     <string name="omni_build_no_key">Escolhe primeiro uma chave de assinatura.</string>
+    <string name="omni_device_key">A chave do próprio dispositivo</string>
+    <string name="omni_device_hardware">Guardada no hardware seguro deste dispositivo</string>
+    <string name="omni_device_software">Guardada pelo Android, não por hardware seguro</string>
+    <string name="omni_device_none">Ainda não criada</string>
+    <string name="omni_device_sealed">SELADA</string>
+    <string name="omni_device_note">A chave nunca sai do Android. Esta compilação entrega ao dispositivo os bytes a assinar e recebe a assinatura de volta, por isso o pacote é assinado por uma chave que nada aqui consegue ler ou copiar. Assina um pacote, não um bundle.</string>
+    <string name="omni_device_build">COMPILAR E ASSINAR COM ESTE DISPOSITIVO</string>
+    <string name="omni_device_refused">Este dispositivo não criou uma chave de assinatura.</string>
     <string name="omni_build_password">Senha da chave</string>
     <string name="omni_build_needs_password">Escreve primeiro a senha da chave.</string>
     <string name="omni_build_shared_password">A chave partilhada abre com %1$s. Está escrita nesta aplicação: é um ponto de partida, não um segredo.</string>

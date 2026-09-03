@@ -76,6 +76,14 @@
     <string name="omni_refused">لم تُنتَج أي حزمة</string>
     <string name="omni_build_title">البناء</string>
     <string name="omni_build_no_key">اختر مفتاح توقيع أولًا.</string>
+    <string name="omni_device_key">مفتاح هذا الجهاز نفسه</string>
+    <string name="omni_device_hardware">محفوظ في العتاد الآمن لهذا الجهاز</string>
+    <string name="omni_device_software">يحفظه أندرويد، لا العتاد الآمن</string>
+    <string name="omni_device_none">لم يُنشأ بعد</string>
+    <string name="omni_device_sealed">مختوم</string>
+    <string name="omni_device_note">المفتاح لا يغادر أندرويد أبدًا. يسلّم هذا البناء البايتات المطلوب توقيعها إلى الجهاز ويستعيد التوقيع، فتُوقَّع الحزمة بمفتاح لا يستطيع شيء هنا قراءته أو نسخه. يوقّع حزمة، لا حزمة تطبيق.</string>
+    <string name="omni_device_build">ابنِ ووقّع بهذا الجهاز</string>
+    <string name="omni_device_refused">لم يُنشئ هذا الجهاز مفتاح توقيع.</string>
     <string name="omni_build_password">كلمة سر المفتاح</string>
     <string name="omni_build_needs_password">اكتب كلمة سر المفتاح أولًا.</string>
     <string name="omni_build_shared_password">يُفتح المفتاح المشترك بـ %1$s. وهي مكتوبة في هذا التطبيق: بداية للعمل، لا سر.</string>

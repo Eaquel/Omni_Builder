@@ -76,6 +76,14 @@
     <string name="omni_refused">NESSUN PACCHETTO PRODOTTO</string>
     <string name="omni_build_title">Costruisci</string>
     <string name="omni_build_no_key">Scegli prima una chiave di firma.</string>
+    <string name="omni_device_key">La chiave propria di questo dispositivo</string>
+    <string name="omni_device_hardware">Custodita nell\'hardware sicuro di questo dispositivo</string>
+    <string name="omni_device_software">Custodita da Android, non da hardware sicuro</string>
+    <string name="omni_device_none">Non ancora creata</string>
+    <string name="omni_device_sealed">SIGILLATA</string>
+    <string name="omni_device_note">La chiave non lascia mai Android. Questa build consegna al dispositivo i byte da firmare e riprende la firma, quindi il pacchetto è firmato con una chiave che nulla qui può leggere o copiare. Firma un pacchetto, non un bundle.</string>
+    <string name="omni_device_build">COMPILA E FIRMA CON QUESTO DISPOSITIVO</string>
+    <string name="omni_device_refused">Questo dispositivo non ha creato una chiave di firma.</string>
     <string name="omni_build_password">Password della chiave</string>
     <string name="omni_build_needs_password">Scrivi prima la password della chiave.</string>
     <string name="omni_build_shared_password">La chiave condivisa si apre con %1$s. È scritta in questa applicazione: è un punto di partenza, non un segreto.</string>

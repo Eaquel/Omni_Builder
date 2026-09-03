@@ -76,6 +76,14 @@
     <string name="omni_refused">ПАКЕТ НЕ СОЗДАН</string>
     <string name="omni_build_title">Сборка</string>
     <string name="omni_build_no_key">Сначала выберите ключ подписи.</string>
+    <string name="omni_device_key">Собственный ключ этого устройства</string>
+    <string name="omni_device_hardware">Хранится в защищённом оборудовании устройства</string>
+    <string name="omni_device_software">Хранится Android, а не защищённым оборудованием</string>
+    <string name="omni_device_none">Ещё не создан</string>
+    <string name="omni_device_sealed">ЗАПЕЧАТАН</string>
+    <string name="omni_device_note">Ключ никогда не покидает Android. Эта сборка передаёт устройству байты для подписи и забирает подпись обратно, поэтому пакет подписан ключом, который здесь нельзя ни прочитать, ни скопировать. Подписывается пакет, а не бандл.</string>
+    <string name="omni_device_build">СОБРАТЬ И ПОДПИСАТЬ ЭТИМ УСТРОЙСТВОМ</string>
+    <string name="omni_device_refused">Это устройство не создало ключ подписи.</string>
     <string name="omni_build_password">Пароль ключа</string>
     <string name="omni_build_needs_password">Сначала введите пароль ключа.</string>
     <string name="omni_build_shared_password">Общий ключ открывается паролем %1$s. Он записан в этом приложении: это способ начать, а не секрет.</string>

@@ -47,6 +47,9 @@ import android.graphics.drawable.StateListDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
+import android.security.keystore.KeyProperties
 import android.os.Environment
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
@@ -84,7 +87,12 @@ import android.window.OnBackInvokedDispatcher
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.KeyFactory
+import java.security.KeyPairGenerator
+import java.security.KeyStore
+import java.security.Signature
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.PI
@@ -557,6 +565,22 @@ object Builder {
     external fun nativeRenamePath(root: String, from: String, to: String): String
 
     external fun nativeCopyPath(root: String, from: String, to: String): String
+
+    external fun nativeBuildUnsigned(
+        root: String,
+        packagePath: String,
+        certificate: String,
+    ): String
+
+    external fun nativeSealPackage(
+        packagePath: String,
+        sealedPath: String,
+        certificate: String,
+        signatureV2: String,
+        signatureV3: String,
+        minSdk: Int,
+        maxSdk: Int,
+    ): String
 
     external fun nativeListBuilt(directory: String): String
 
@@ -4461,6 +4485,35 @@ class BuilderActivity : Activity() {
         })
         content.addView(signing)
 
+        val sealed = card()
+        sealed.addView(
+            keyValue(
+                getString(R.string.omni_device_key),
+                if (DeviceKey.present()) {
+                    if (DeviceKey.inHardware()) {
+                        getString(R.string.omni_device_hardware)
+                    } else {
+                        getString(R.string.omni_device_software)
+                    }
+                } else {
+                    getString(R.string.omni_device_none)
+                },
+                if (DeviceKey.present() && DeviceKey.inHardware()) {
+                    getString(R.string.omni_device_sealed)
+                } else {
+                    ""
+                },
+                if (DeviceKey.inHardware()) palette.ok else palette.muted,
+            )
+        )
+        sealed.addView(quiet(getString(R.string.omni_device_note)))
+        sealed.addView(
+            subtle(getString(R.string.omni_device_build), palette.accent) {
+                buildWithTheDeviceKey(root)
+            }
+        )
+        content.addView(sealed)
+
         content.addView(primary(getString(R.string.omni_action_build_both)) { buildProject(root) })
         content.addView(quiet(getString(R.string.omni_build_both_note)))
 
@@ -5045,6 +5098,100 @@ class BuilderActivity : Activity() {
                 }
             }
         }.start()
+    }
+
+    private fun buildWithTheDeviceKey(root: String) {
+        results.removeAllViews()
+        if (!DeviceKey.present() && !DeviceKey.make()) {
+            results.addView(notice(getString(R.string.omni_device_refused), palette.error))
+            return
+        }
+        val certificate = DeviceKey.certificate()
+        if (certificate == null) {
+            results.addView(notice(getString(R.string.omni_device_refused), palette.error))
+            return
+        }
+        val held = DeviceKey.hex(certificate)
+
+        val name = File(root).name
+        val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+        val here = builtFolder()
+        val apk = File(here, "$name-$stamp.apk")
+        val raw = File(here, "$name-$stamp-unsigned.apk")
+        val started = System.nanoTime()
+
+        val learned = Preferences.timings(this)
+        Builder.nativeBuildExpect(learned.ifEmpty { null })
+        val stage = BuildStageView(this, palette).apply {
+            title = getString(R.string.omni_stage_title)
+            stages = STAGE_NAMES.map { getString(it) }
+            note = getString(R.string.omni_device_note)
+        }
+        building = true
+        showCeremony(stage) { stopTheBuild() }
+        stage.begin()
+        watchTheBuild(stage)
+
+        Thread {
+            val answer = runCatching { sealWithTheDevice(root, held, raw, apk) }
+            raw.delete()
+            runOnUiThread {
+                building = false
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                answer.fold({ document ->
+                    settle(stage) { buildEnded(document, apk, apk, started) }
+                }) { error ->
+                    OmniLog.recordCrash(Thread.currentThread(), error)
+                    settle(stage) {
+                        results.addView(
+                            notice(error.message ?: error.javaClass.simpleName, palette.error)
+                        )
+                    }
+                }
+            }
+        }.start()
+    }
+
+    private fun sealWithTheDevice(
+        root: String,
+        certificate: String,
+        raw: File,
+        apk: File,
+    ): String {
+        val prepared = JSONObject(
+            Builder.nativeBuildUnsigned(root, raw.absolutePath, certificate)
+        )
+        if (!prepared.optBoolean("prepared", false)) {
+            return prepared.toString()
+        }
+        val first = DeviceKey.bytes(prepared.optString("toSignV2"))
+            ?: throw IOException("the Core asked for a signature over nothing")
+        val signedFirst = DeviceKey.sign(first)
+            ?: throw IOException("the device would not sign with its own key")
+
+        val secondText = prepared.optString("toSignV3")
+        val signedSecond = if (secondText.isEmpty()) {
+            ""
+        } else {
+            val second = DeviceKey.bytes(secondText)
+                ?: throw IOException("the Core asked for a signature over nothing")
+            DeviceKey.hex(
+                DeviceKey.sign(second)
+                    ?: throw IOException("the device would not sign with its own key")
+            )
+        }
+
+        return Builder.nativeSealPackage(
+            raw.absolutePath,
+            apk.absolutePath,
+            certificate,
+            DeviceKey.hex(signedFirst),
+            signedSecond,
+            prepared.optInt("minSdk"),
+            prepared.optInt("maxSdk"),
+        )
     }
 
     private fun stopTheBuild() {
@@ -7803,6 +7950,109 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     override fun onDetachedFromWindow() {
         removeCallbacks(readAgain)
         super.onDetachedFromWindow()
+    }
+}
+
+internal object DeviceKey {
+
+    const val ALIAS = "omni_builder_signing"
+
+    const val STORE = "AndroidKeyStore"
+
+    const val YEARS = 30
+
+    private fun store(): KeyStore = KeyStore.getInstance(STORE).apply { load(null) }
+
+    fun present(): Boolean = runCatching { store().containsAlias(ALIAS) }.getOrDefault(false)
+
+    fun make(): Boolean = runCatching {
+        val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, STORE)
+        val from = Calendar.getInstance()
+        val until = Calendar.getInstance().apply { add(Calendar.YEAR, YEARS) }
+        val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
+            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+            .setKeySize(4096)
+            .setCertificateSubject(javax.security.auth.x500.X500Principal("CN=Omni Builder"))
+            .setCertificateNotBefore(from.time)
+            .setCertificateNotAfter(until.time)
+            .setUserAuthenticationRequired(false)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching { spec.setIsStrongBoxBacked(true) }
+        }
+        generator.initialize(spec.build())
+        generator.generateKeyPair()
+        true
+    }.getOrElse {
+        runCatching {
+            val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, STORE)
+            val from = Calendar.getInstance()
+            val until = Calendar.getInstance().apply { add(Calendar.YEAR, YEARS) }
+            generator.initialize(
+                KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
+                    .setDigests(KeyProperties.DIGEST_SHA256)
+                    .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
+                    .setKeySize(2048)
+                    .setCertificateSubject(
+                        javax.security.auth.x500.X500Principal("CN=Omni Builder")
+                    )
+                    .setCertificateNotBefore(from.time)
+                    .setCertificateNotAfter(until.time)
+                    .setUserAuthenticationRequired(false)
+                    .build()
+            )
+            generator.generateKeyPair()
+            true
+        }.getOrDefault(false)
+    }
+
+    fun certificate(): ByteArray? = runCatching {
+        store().getCertificate(ALIAS)?.encoded
+    }.getOrNull()
+
+    fun inHardware(): Boolean = runCatching {
+        val entry = store().getEntry(ALIAS, null) as? KeyStore.PrivateKeyEntry ?: return false
+        val factory = KeyFactory.getInstance(entry.privateKey.algorithm, STORE)
+        val info = factory.getKeySpec(entry.privateKey, KeyInfo::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            info.securityLevel != KeyProperties.SECURITY_LEVEL_SOFTWARE
+        } else {
+            @Suppress("DEPRECATION")
+            info.isInsideSecureHardware
+        }
+    }.getOrDefault(false)
+
+    fun sign(what: ByteArray): ByteArray? = runCatching {
+        val entry = store().getEntry(ALIAS, null) as? KeyStore.PrivateKeyEntry ?: return null
+        Signature.getInstance("SHA256withRSA").run {
+            initSign(entry.privateKey)
+            update(what)
+            sign()
+        }
+    }.getOrNull()
+
+    fun forget(): Boolean = runCatching {
+        store().deleteEntry(ALIAS)
+        true
+    }.getOrDefault(false)
+
+    fun hex(bytes: ByteArray): String {
+        val out = StringBuilder(bytes.size * 2)
+        for (byte in bytes) {
+            out.append("0123456789ABCDEF"[(byte.toInt() shr 4) and 0x0f])
+            out.append("0123456789ABCDEF"[byte.toInt() and 0x0f])
+        }
+        return out.toString()
+    }
+
+    fun bytes(text: String): ByteArray? {
+        if (text.length % 2 != 0) return null
+        val out = ByteArray(text.length / 2)
+        for (index in out.indices) {
+            val held = text.substring(index * 2, index * 2 + 2).toIntOrNull(16) ?: return null
+            out[index] = held.toByte()
+        }
+        return out
     }
 }
 

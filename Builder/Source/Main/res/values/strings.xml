@@ -76,6 +76,14 @@
     <string name="omni_refused">NO PACKAGE PRODUCED</string>
     <string name="omni_build_title">Build</string>
     <string name="omni_build_no_key">Choose a signing key first.</string>
+    <string name="omni_device_key">This device\'s own key</string>
+    <string name="omni_device_hardware">Held in this device\'s secure hardware</string>
+    <string name="omni_device_software">Held by Android, not by secure hardware</string>
+    <string name="omni_device_none">Not made yet</string>
+    <string name="omni_device_sealed">SEALED</string>
+    <string name="omni_device_note">The key never leaves Android. This build hands the bytes to be signed to the device and takes the signature back, so the package is signed by a key nothing here can read or copy. It signs a package, not a bundle.</string>
+    <string name="omni_device_build">BUILD AND SIGN WITH THIS DEVICE</string>
+    <string name="omni_device_refused">This device would not make a signing key.</string>
     <string name="omni_build_password">Key password</string>
     <string name="omni_build_needs_password">Type the key password first.</string>
     <string name="omni_build_shared_password">The shared key opens with %1$s. It is written in this application, so it is a way to get started and not a secret.</string>

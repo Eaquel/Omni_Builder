@@ -653,6 +653,45 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeCopyPath(
                                         to_text.c_str()));
 }
 
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildUnsigned(
+    JNIEnv *env, jobject , jstring root, jstring packagePath,
+    jstring certificate) {
+  std::string rootHeld;
+  std::string pathHeld;
+  std::string certificateHeld;
+  if (!JavaStringToUtf8(env, root, &rootHeld) ||
+      !JavaStringToUtf8(env, packagePath, &pathHeld) ||
+      !JavaStringToUtf8(env, certificate, &certificateHeld)) {
+    return nullptr;
+  }
+  return HandBack(env, omni_build_unsigned(rootHeld.c_str(), pathHeld.c_str(),
+                                           certificateHeld.c_str()));
+}
+
+JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeSealPackage(
+    JNIEnv *env, jobject , jstring packagePath, jstring sealedPath,
+    jstring certificate, jstring signatureV2, jstring signatureV3,
+    jint minSdk, jint maxSdk) {
+  std::string pathHeld;
+  std::string sealedHeld;
+  std::string certificateHeld;
+  std::string firstHeld;
+  std::string secondHeld;
+  if (!JavaStringToUtf8(env, packagePath, &pathHeld) ||
+      !JavaStringToUtf8(env, sealedPath, &sealedHeld) ||
+      !JavaStringToUtf8(env, certificate, &certificateHeld) ||
+      !JavaStringToUtf8(env, signatureV2, &firstHeld) ||
+      !JavaStringToUtf8(env, signatureV3, &secondHeld)) {
+    return nullptr;
+  }
+  return HandBack(env, omni_seal_package(
+                           pathHeld.c_str(), sealedHeld.c_str(),
+                           certificateHeld.c_str(), firstHeld.c_str(),
+                           secondHeld.c_str(),
+                           static_cast<uint32_t>(minSdk),
+                           static_cast<uint32_t>(maxSdk)));
+}
+
 JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeListBuilt(
     JNIEnv *env, jobject , jstring directory) {
   std::string directory_text;

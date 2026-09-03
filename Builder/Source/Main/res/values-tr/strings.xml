@@ -76,6 +76,14 @@
     <string name="omni_refused">PAKET ÜRETİLMEDİ</string>
     <string name="omni_build_title">Derle</string>
     <string name="omni_build_no_key">Önce bir imza anahtarı seç.</string>
+    <string name="omni_device_key">Bu cihazın kendi anahtarı</string>
+    <string name="omni_device_hardware">Bu cihazın güvenli donanımında tutuluyor</string>
+    <string name="omni_device_software">Android tutuyor, güvenli donanım değil</string>
+    <string name="omni_device_none">Henüz oluşturulmadı</string>
+    <string name="omni_device_sealed">MÜHÜRLÜ</string>
+    <string name="omni_device_note">Anahtar Android\'den hiç çıkmıyor. Bu derleme imzalanacak baytları cihaza verip imzayı geri alıyor, yani paket buradan okunamayan ve kopyalanamayan bir anahtarla imzalanıyor. Paket imzalar, paket dosyası (AAB) imzalamaz.</string>
+    <string name="omni_device_build">BU CİHAZLA DERLE VE İMZALA</string>
+    <string name="omni_device_refused">Bu cihaz imzalama anahtarı oluşturmadı.</string>
     <string name="omni_build_password">Anahtar parolası</string>
     <string name="omni_build_needs_password">Önce anahtar parolasını yaz.</string>
     <string name="omni_build_shared_password">Ortak anahtar %1$s ile açılır. Bu uygulamanın içinde yazılıdır; başlangıç kolaylığıdır, sır değildir.</string>

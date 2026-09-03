@@ -76,6 +76,14 @@
     <string name="omni_refused">AUCUN PAQUET PRODUIT</string>
     <string name="omni_build_title">Construire</string>
     <string name="omni_build_no_key">Choisis d\'abord une clé de signature.</string>
+    <string name="omni_device_key">La clé propre à cet appareil</string>
+    <string name="omni_device_hardware">Conservée dans le matériel sécurisé de cet appareil</string>
+    <string name="omni_device_software">Conservée par Android, pas par du matériel sécurisé</string>
+    <string name="omni_device_none">Pas encore créée</string>
+    <string name="omni_device_sealed">SCELLÉE</string>
+    <string name="omni_device_note">La clé ne quitte jamais Android. Cette compilation remet à l\'appareil les octets à signer et récupère la signature, donc le paquet est signé par une clé que rien ici ne peut lire ni copier. Elle signe un paquet, pas un bundle.</string>
+    <string name="omni_device_build">COMPILER ET SIGNER AVEC CET APPAREIL</string>
+    <string name="omni_device_refused">Cet appareil n\'a pas créé de clé de signature.</string>
     <string name="omni_build_password">Mot de passe de la clé</string>
     <string name="omni_build_needs_password">Saisis d\'abord le mot de passe de la clé.</string>
     <string name="omni_build_shared_password">La clé partagée s\'ouvre avec %1$s. Il est écrit dans cette application : c\'est un point de départ, pas un secret.</string>

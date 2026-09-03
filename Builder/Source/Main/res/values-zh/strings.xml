@@ -76,6 +76,14 @@
     <string name="omni_refused">未生成任何安装包</string>
     <string name="omni_build_title">构建</string>
     <string name="omni_build_no_key">请先选择一个签名密钥。</string>
+    <string name="omni_device_key">本机自己的密钥</string>
+    <string name="omni_device_hardware">保存在本机的安全硬件中</string>
+    <string name="omni_device_software">由 Android 保管，而非安全硬件</string>
+    <string name="omni_device_none">尚未创建</string>
+    <string name="omni_device_sealed">已封存</string>
+    <string name="omni_device_note">密钥从不离开 Android。本次构建把待签名的字节交给设备并取回签名，因此安装包由这里无法读取也无法复制的密钥签名。它签名的是安装包，不是 bundle。</string>
+    <string name="omni_device_build">用本机构建并签名</string>
+    <string name="omni_device_refused">本机没有创建签名密钥。</string>
     <string name="omni_build_password">密钥密码</string>
     <string name="omni_build_needs_password">请先输入密钥密码。</string>
     <string name="omni_build_shared_password">共享密钥用 %1$s 打开。它写在这个应用里：是让你上手的起点，不是秘密。</string>

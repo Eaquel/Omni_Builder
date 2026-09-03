@@ -320,7 +320,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Package signer",
         status: Status::Partial,
         directive_section: 25,
-        summary: "Writes APK Signature Scheme v2 and v3 blocks: signed data, signatures and public key, with the platform range in the v3 block, spliced ahead of the central directory with the end record repointed. apksigner verifies the v3 block at API 28 and the v2 block at API 27.",
+        summary: "Writes APK Signature Scheme v2 and v3 blocks: signed data, signatures and public key, with the platform range in the v3 block, spliced ahead of the central directory with the end record repointed. apksigner verifies the v3 block at API 28 and the v2 block at API 27. Signing is in two halves that can be split apart: what has to be signed is handed out, and a signature made by something else entirely -- a key in Android's own keystore, or in this suite openssl -- is taken back and sealed in, which apksigner verifies just the same.",
         missing: &[
             "No v1 JAR signature, so a package this build signs does not install below API 24.",
             "No v3.1 and no key rotation: one signer, one certificate, for the whole platform range.",
@@ -345,7 +345,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "A signing key the developer makes, named, dated and sealed under their own password as PBES2 (PBKDF2-HMAC-SHA256 at 210000 iterations, AES-256-CBC). OpenSSL opens what this writes and refuses the wrong password. The container carries a tag over every byte of itself, taken with a key derived from the one the sealed blob is encrypted under, and the tag is checked between the derivation and the decryption so that an altered file never reaches a decryption at all. It also carries a plain digest, which proves nothing against anybody but tells a mistyped password apart from a damaged file. Listing a key needs no password; the certificate inside is checked against the key before either is used. A shared 4096-bit key is written once on first use so a package can be built without making one first, and it is sealed to the device it was made on as well as to its password.",
         missing: &[
             "The shared key's password is a constant in this source and is meant to be: it is a way to start, not a secret. What keeps the file worth having is the device it is bound to, and that binding is only as good as the identifier Android gives an installation. Anything published belongs under a key the developer made and only they know the password to.",
-            "The password and the device protect the file and nothing more: the key is in ordinary memory while a package is signed, and Android's hardware-backed keystore is not used.",
+            "A key made here is in ordinary memory while a package is signed. A key that never can be is the other path: Android holds it, this build hands over the bytes to be signed and takes the signature back, and the package is signed by something nothing here can read. That path signs a package and not a bundle, and it cannot be exported or backed up, which is the point of it and also its cost.",
             "No import and no export: a key made elsewhere cannot be brought in, and one made here cannot be taken out.",
             "Somebody who alters a file and recomputes its plain digest is reported as a wrong password rather than as an altered file. Nothing is decrypted for them either way, so this costs a message and not a guarantee.",
         ],
@@ -12501,6 +12501,20 @@ pub mod der {
         }
     }
 
+    pub fn from_hex(text: &str) -> Option<Vec<u8>> {
+        if !text.len().is_multiple_of(2) {
+            return None;
+        }
+        let held = text.as_bytes();
+        let mut out = Vec::with_capacity(text.len() / 2);
+        for pair in held.chunks_exact(2) {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            out.push(((high << 4) | low) as u8);
+        }
+        Some(out)
+    }
+
     pub fn to_hex(bytes: &[u8]) -> String {
         const HEX: &[u8; 16] = b"0123456789ABCDEF";
         let mut out = String::with_capacity(bytes.len() * 2);
@@ -13530,36 +13544,42 @@ pub mod signing {
         }
     }
 
-    fn one_signer(
+    pub fn signed_data(
         algorithm_id: u32,
         digest: &[u8],
         certificate: &[u8],
-        key: &crate::rsa::PrivateKey,
-        algorithm: crate::rsa::DigestAlgorithm,
         sdk_range: Option<(u32, u32)>,
-    ) -> Result<Vec<u8>, Diagnostic> {
+    ) -> Vec<u8> {
         let mut one_digest = Vec::new();
         one_digest.extend_from_slice(&algorithm_id.to_le_bytes());
         one_digest.extend_from_slice(&prefixed(digest));
 
-        let mut signed_data = Vec::new();
-        signed_data.extend_from_slice(&prefixed(&prefixed(&one_digest)));
-        signed_data.extend_from_slice(&prefixed(&prefixed(certificate)));
+        let mut out = Vec::new();
+        out.extend_from_slice(&prefixed(&prefixed(&one_digest)));
+        out.extend_from_slice(&prefixed(&prefixed(certificate)));
         if let Some((minimum, maximum)) = sdk_range {
-            signed_data.extend_from_slice(&minimum.to_le_bytes());
-            signed_data.extend_from_slice(&maximum.to_le_bytes());
+            out.extend_from_slice(&minimum.to_le_bytes());
+            out.extend_from_slice(&maximum.to_le_bytes());
         }
-        signed_data.extend_from_slice(&prefixed(&[]));
+        out.extend_from_slice(&prefixed(&[]));
+        out
+    }
 
-        let signature = crate::rsa::sign(key, algorithm, &signed_data)?;
+    pub fn one_signer_signed(
+        algorithm_id: u32,
+        signed_data: &[u8],
+        signature: &[u8],
+        certificate: &[u8],
+        sdk_range: Option<(u32, u32)>,
+    ) -> Result<Vec<u8>, Diagnostic> {
         let mut one_signature = Vec::new();
         one_signature.extend_from_slice(&algorithm_id.to_le_bytes());
-        one_signature.extend_from_slice(&prefixed(&signature));
+        one_signature.extend_from_slice(&prefixed(signature));
 
         let public_key = crate::x509::Certificate::public_key_info(certificate)?;
 
         let mut signer = Vec::new();
-        signer.extend_from_slice(&prefixed(&signed_data));
+        signer.extend_from_slice(&prefixed(signed_data));
         if let Some((minimum, maximum)) = sdk_range {
             signer.extend_from_slice(&minimum.to_le_bytes());
             signer.extend_from_slice(&maximum.to_le_bytes());
@@ -13569,27 +13589,62 @@ pub mod signing {
         Ok(prefixed(&prefixed(&signer)))
     }
 
-    pub fn sign_v2(
-        package: &[u8],
-        key: &crate::rsa::PrivateKey,
-        certificate: &[u8],
-        algorithm: crate::rsa::DigestAlgorithm,
-    ) -> Result<Vec<u8>, Diagnostic> {
-        sign(package, key, certificate, algorithm, None)
+    #[derive(Clone, Debug)]
+    pub struct ToSign {
+        pub algorithm_id: u32,
+        pub v2: Vec<u8>,
+        pub v3: Option<Vec<u8>>,
     }
 
-    pub fn sign(
+    pub fn to_sign(
         package: &[u8],
-        key: &crate::rsa::PrivateKey,
         certificate: &[u8],
         algorithm: crate::rsa::DigestAlgorithm,
         sdk_range: Option<(u32, u32)>,
+    ) -> Result<ToSign, Diagnostic> {
+        let (algorithm_id, digest) = content_of(package, algorithm)?;
+        Ok(ToSign {
+            algorithm_id,
+            v2: signed_data(algorithm_id, &digest, certificate, None),
+            v3: sdk_range.map(|range| signed_data(algorithm_id, &digest, certificate, Some(range))),
+        })
+    }
+
+    pub fn with_signatures(
+        package: &[u8],
+        certificate: &[u8],
+        held: &ToSign,
+        v2: &[u8],
+        v3: Option<&[u8]>,
+        sdk_range: Option<(u32, u32)>,
     ) -> Result<Vec<u8>, Diagnostic> {
+        let mut block = Vec::new();
+        let one = one_signer_signed(held.algorithm_id, &held.v2, v2, certificate, None)?;
+        add_pair(&mut block, V2_BLOCK_ID, &one);
+
+        if let (Some(data), Some(signature), Some(range)) = (&held.v3, v3, sdk_range) {
+            let three =
+                one_signer_signed(held.algorithm_id, data, signature, certificate, Some(range))?;
+            add_pair(&mut block, V3_BLOCK_ID, &three);
+        }
+        spliced(package, block)
+    }
+
+    fn add_pair(block: &mut Vec<u8>, id: u32, signer: &[u8]) {
+        let pair_length = 4u64 + signer.len() as u64;
+        block.extend_from_slice(&pair_length.to_le_bytes());
+        block.extend_from_slice(&id.to_le_bytes());
+        block.extend_from_slice(signer);
+    }
+
+    fn content_of(
+        package: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+    ) -> Result<(u32, Vec<u8>), Diagnostic> {
         let (central_directory_offset, end_record_offset) = locate(package)?;
         let block_offset = central_directory_offset;
-
-        let (algorithm_id, digest) = match algorithm {
-            crate::rsa::DigestAlgorithm::Sha256 => (
+        match algorithm {
+            crate::rsa::DigestAlgorithm::Sha256 => Ok((
                 0x0103u32,
                 content_digest_sha256(
                     package,
@@ -13599,8 +13654,8 @@ pub mod signing {
                 )?
                 .as_bytes()
                 .to_vec(),
-            ),
-            crate::rsa::DigestAlgorithm::Sha512 => (
+            )),
+            crate::rsa::DigestAlgorithm::Sha512 => Ok((
                 0x0104u32,
                 content_digest_sha512(
                     package,
@@ -13610,41 +13665,21 @@ pub mod signing {
                 )?
                 .as_bytes()
                 .to_vec(),
-            ),
-            crate::rsa::DigestAlgorithm::Sha384 => {
-                return Err(fail(
-                    "ES040",
-                    "APK Signature Scheme v2 and v3 define no SHA-384 algorithm.",
-                )
-                .with_suggestion(
-                    "Sign with SHA-256 or SHA-512. SHA-384 is read here because \
-                     certificates are signed with it, not because a package can be.",
-                ));
-            }
-        };
-
-        let mut block = Vec::new();
-
-        let v2 = one_signer(algorithm_id, &digest, certificate, key, algorithm, None)?;
-        let pair_length = 4u64 + v2.len() as u64;
-        block.extend_from_slice(&pair_length.to_le_bytes());
-        block.extend_from_slice(&V2_BLOCK_ID.to_le_bytes());
-        block.extend_from_slice(&v2);
-
-        if let Some(range) = sdk_range {
-            let v3 = one_signer(
-                algorithm_id,
-                &digest,
-                certificate,
-                key,
-                algorithm,
-                Some(range),
-            )?;
-            let pair_length = 4u64 + v3.len() as u64;
-            block.extend_from_slice(&pair_length.to_le_bytes());
-            block.extend_from_slice(&V3_BLOCK_ID.to_le_bytes());
-            block.extend_from_slice(&v3);
+            )),
+            crate::rsa::DigestAlgorithm::Sha384 => Err(fail(
+                "ES040",
+                "APK Signature Scheme v2 and v3 define no SHA-384 algorithm.",
+            )
+            .with_suggestion(
+                "Sign with SHA-256 or SHA-512. SHA-384 is read here because \
+                 certificates are signed with it, not because a package can be.",
+            )),
         }
+    }
+
+    fn spliced(package: &[u8], mut block: Vec<u8>) -> Result<Vec<u8>, Diagnostic> {
+        let (central_directory_offset, end_record_offset) = locate(package)?;
+        let block_offset = central_directory_offset;
 
         let mut padding = 0usize;
         while !(24 + block.len() + padding + 8 + 4).is_multiple_of(4096) {
@@ -13674,6 +13709,31 @@ pub mod signing {
         let end = end_record_offset as usize + whole.len();
         out[end + 16..end + 20].copy_from_slice(&(moved as u32).to_le_bytes());
         Ok(out)
+    }
+
+    pub fn sign_v2(
+        package: &[u8],
+        key: &crate::rsa::PrivateKey,
+        certificate: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        sign(package, key, certificate, algorithm, None)
+    }
+
+    pub fn sign(
+        package: &[u8],
+        key: &crate::rsa::PrivateKey,
+        certificate: &[u8],
+        algorithm: crate::rsa::DigestAlgorithm,
+        sdk_range: Option<(u32, u32)>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let held = to_sign(package, certificate, algorithm, sdk_range)?;
+        let v2 = crate::rsa::sign(key, algorithm, &held.v2)?;
+        let v3 = match &held.v3 {
+            Some(data) => Some(crate::rsa::sign(key, algorithm, data)?),
+            None => None,
+        };
+        with_signatures(package, certificate, &held, &v2, v3.as_deref(), sdk_range)
     }
 
     pub fn verify_signer(signer: &Signer, sink: &mut Sink) -> SignerCheck {
@@ -30528,12 +30588,15 @@ public final class R {{
         })
     }
 
-    pub fn assemble(
-        project: &Project,
-        key: &rsa::PrivateKey,
-        certificate_der: &[u8],
-        sink: &mut Sink,
-    ) -> Result<Outcome, Diagnostic> {
+    #[derive(Clone, Debug)]
+    pub struct Unsigned {
+        pub package: Vec<u8>,
+        pub guard: guard::Report,
+        pub entries: usize,
+        pub minimum_sdk: u32,
+    }
+
+    pub fn unsigned(project: &Project, sink: &mut Sink) -> Result<Unsigned, Diagnostic> {
         let Prepared {
             root,
             icons,
@@ -30586,9 +30649,30 @@ public final class R {{
             .and_then(|element| element.attribute("android:minSdkVersion"))
             .and_then(|text| text.parse::<u32>().ok())
             .unwrap_or(guard::MINIMUM_SDK as u32);
+        Ok(Unsigned {
+            package: unsigned,
+            guard: report,
+            entries,
+            minimum_sdk,
+        })
+    }
+
+    pub fn assemble(
+        project: &Project,
+        key: &rsa::PrivateKey,
+        certificate_der: &[u8],
+        sink: &mut Sink,
+    ) -> Result<Outcome, Diagnostic> {
+        let Unsigned {
+            package: made,
+            guard: report,
+            entries,
+            minimum_sdk,
+        } = unsigned(project, sink)?;
+
         crate::progress::enter_checked("signing")?;
         let package = crate::signing::sign(
-            &unsigned,
+            &made,
             key,
             certificate_der,
             rsa::DigestAlgorithm::Sha256,
@@ -34574,6 +34658,227 @@ pub mod ffi {
             hand_back(w)
         });
         result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_build_unsigned(
+        root: *const c_char,
+        package_path: *const c_char,
+        certificate: *const c_char,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(root), Some(package_path), Some(certificate)) = (
+                text_from(root),
+                text_from(package_path),
+                text_from(certificate),
+            ) else {
+                return std::ptr::null_mut();
+            };
+
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            crate::progress::begin();
+            let mut sink = crate::diag::Sink::new();
+
+            let outcome = crate::der::from_hex(&certificate)
+                .ok_or_else(|| {
+                    crate::diag::Diagnostic::new(
+                        "EB060",
+                        crate::diag::Severity::Error,
+                        crate::FailureClass::UserError,
+                        "core.builder",
+                        "The certificate is not written as hexadecimal.",
+                    )
+                })
+                .and_then(|held| {
+                    crate::x509::Certificate::parse(&held)?;
+                    let project = crate::builder::from_project(&root)?;
+                    let made = crate::builder::unsigned(&project, &mut sink)?;
+                    let asked = crate::signing::to_sign(
+                        &made.package,
+                        &held,
+                        crate::rsa::DigestAlgorithm::Sha256,
+                        Some((made.minimum_sdk, crate::builder::NEWEST_PLATFORM)),
+                    )?;
+                    Ok((project, made, asked))
+                });
+
+            let mut ready = false;
+            match outcome {
+                Ok((project, made, asked)) => {
+                    match write_both(&package_path, &made.package, &package_path, &made.package) {
+                        Ok(()) => {
+                            ready = true;
+                            w.field_bool("prepared", true);
+                            w.field_str("path", &package_path);
+                            w.field_u64("entries", made.entries as u64);
+                            w.field_u64("minSdk", u64::from(made.minimum_sdk));
+                            w.field_u64("maxSdk", u64::from(crate::builder::NEWEST_PLATFORM));
+                            w.field_bool("carriesCode", !project.code.is_empty());
+                            w.field_str("toSignV2", &crate::der::to_hex(&asked.v2));
+                            match &asked.v3 {
+                                Some(three) => {
+                                    w.field_str("toSignV3", &crate::der::to_hex(three));
+                                }
+                                None => w.field_str("toSignV3", ""),
+                            }
+                            made.guard.write_json(&mut w, "policy");
+                        }
+                        Err(why) => {
+                            w.field_bool("prepared", false);
+                            w.field_str(
+                                "error",
+                                &format!("what was built could not be written: {why}"),
+                            );
+                        }
+                    }
+                }
+                Err(error) => write_failure(&mut w, "prepared", &error),
+            }
+            crate::progress::finish(ready);
+            sink.write_json(&mut w, "diagnostics");
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_seal_package(
+        package_path: *const c_char,
+        sealed_path: *const c_char,
+        certificate: *const c_char,
+        signature_v2: *const c_char,
+        signature_v3: *const c_char,
+        min_sdk: u32,
+        max_sdk: u32,
+    ) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let (Some(package_path), Some(sealed_path), Some(certificate), Some(v2)) = (
+                text_from(package_path),
+                text_from(sealed_path),
+                text_from(certificate),
+                text_from(signature_v2),
+            ) else {
+                return std::ptr::null_mut();
+            };
+            let three = text_from(signature_v3).unwrap_or_default();
+
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            let sink = crate::diag::Sink::new();
+
+            let outcome = sealed(&package_path, &certificate, &v2, &three, (min_sdk, max_sdk));
+            let mut sealed_ok = false;
+            match outcome {
+                Ok((package, report, fingerprint)) => {
+                    match std::fs::write(&sealed_path, &package) {
+                        Ok(()) => {
+                            sealed_ok = true;
+                            w.field_bool("sealed", true);
+                            w.field_str("path", &sealed_path);
+                            w.field_u64("bytes", package.len() as u64);
+                            w.field_str("fingerprint", &fingerprint);
+                            report.write_json(&mut w, "signature");
+                        }
+                        Err(why) => {
+                            w.field_bool("sealed", false);
+                            w.field_str("error", &format!("it could not be written: {why}"));
+                        }
+                    }
+                }
+                Err(error) => write_failure(&mut w, "sealed", &error),
+            }
+            let _ = sealed_ok;
+            sink.write_json(&mut w, "diagnostics");
+            w.end_object();
+            hand_back(w)
+        });
+        result.unwrap_or(std::ptr::null_mut())
+    }
+
+    type Sealed = (Vec<u8>, crate::signing::Report, String);
+
+    fn sealed(
+        package_path: &str,
+        certificate: &str,
+        v2: &str,
+        v3: &str,
+        range: (u32, u32),
+    ) -> Result<Sealed, crate::diag::Diagnostic> {
+        let named = |code: &str, said: &str| {
+            crate::diag::Diagnostic::new(
+                code,
+                crate::diag::Severity::Error,
+                crate::FailureClass::UserError,
+                "core.builder",
+                said.to_string(),
+            )
+        };
+        let held = crate::der::from_hex(certificate)
+            .ok_or_else(|| named("EB060", "The certificate is not written as hexadecimal."))?;
+        let parsed = crate::x509::Certificate::parse(&held)?;
+        let first = crate::der::from_hex(v2)
+            .ok_or_else(|| named("EB061", "The signature is not written as hexadecimal."))?;
+        let second =
+            if v3.is_empty() {
+                None
+            } else {
+                Some(crate::der::from_hex(v3).ok_or_else(|| {
+                    named("EB061", "The signature is not written as hexadecimal.")
+                })?)
+            };
+
+        let package = std::fs::read(package_path).map_err(|why| {
+            named("EB062", "The package to seal could not be read.")
+                .with_context(format!("Path: {package_path}"))
+                .with_context(format!("Reason: {why}"))
+        })?;
+
+        let range = Some(range);
+        let asked =
+            crate::signing::to_sign(&package, &held, crate::rsa::DigestAlgorithm::Sha256, range)?;
+        let out = crate::signing::with_signatures(
+            &package,
+            &held,
+            &asked,
+            &first,
+            second.as_deref(),
+            range,
+        )?;
+
+        let mut checking = crate::diag::Sink::new();
+        let report = match crate::archive::read(&out, &mut checking) {
+            Some(archive) => crate::signing::examine(
+                &out,
+                archive.central_directory_offset(),
+                archive.end_record_offset(),
+                &mut checking,
+            ),
+            None => {
+                return Err(named(
+                    "EB063",
+                    "The sealed package does not read back as an archive.",
+                ))
+            }
+        };
+        if !report.everything_checkable_passed() {
+            let mut refusal = named(
+                "EB064",
+                "The signature the device made does not verify against its own certificate.",
+            )
+            .with_suggestion(
+                "Nothing was written. A package that does not verify here would be \
+                 refused at install time.",
+            );
+            for entry in checking.entries() {
+                if entry.severity.is_blocking() {
+                    refusal = refusal.with_context(entry.message.clone());
+                }
+            }
+            return Err(refusal);
+        }
+        Ok((out, report, parsed.fingerprint_display()))
     }
 
     #[no_mangle]
@@ -41201,6 +41506,193 @@ public final class MainActivity extends Activity {
 
     fn sign_with_apksigner(label: &str) -> Option<(Vec<u8>, std::path::PathBuf)> {
         sign_with_apksigner_using(label, 2048)
+    }
+
+    #[test]
+    fn a_key_this_build_never_sees_can_still_sign_what_it_makes() {
+        let Some(openssl) = openssl() else {
+            eprintln!("device signing: openssl is not available here");
+            return;
+        };
+
+        let directory = temp_directory("omni-device-signing");
+        std::fs::create_dir_all(&directory).unwrap();
+        let key = directory.join("key.pem");
+        let certificate = directory.join("cert.pem");
+        let der = directory.join("cert.der");
+
+        let made = std::process::Command::new(&openssl)
+            .args([
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "3650",
+                "-subj",
+                "/CN=Omni Device/O=Omni/C=TR",
+                "-keyout",
+                key.to_str().unwrap(),
+                "-out",
+                certificate.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        if !made.status.success() {
+            eprintln!("device signing: openssl would not make a key");
+            std::fs::remove_dir_all(&directory).ok();
+            return;
+        }
+        assert!(std::process::Command::new(&openssl)
+            .args([
+                "x509",
+                "-in",
+                certificate.to_str().unwrap(),
+                "-outform",
+                "DER",
+                "-out",
+                der.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let certificate_der = std::fs::read(&der).unwrap();
+
+        let mut builder = ArchiveBuilder::for_android();
+        builder
+            .add("AndroidManifest.xml", b"<manifest/>".to_vec())
+            .unwrap();
+        builder.add("classes.dex", vec![0x2a; 4_000]).unwrap();
+        let unsigned = builder.finish().unwrap();
+
+        let range = (30u32, 37u32);
+        let asked = signing::to_sign(
+            &unsigned,
+            &certificate_der,
+            super::rsa::DigestAlgorithm::Sha256,
+            Some(range),
+        )
+        .expect("this build says what has to be signed");
+        assert!(!asked.v2.is_empty());
+        assert!(
+            asked.v3.is_some(),
+            "a platform range asks for a v3 signer too"
+        );
+
+        let outside = |what: &[u8], name: &str| -> Vec<u8> {
+            let payload = directory.join(format!("{name}.bin"));
+            let signature = directory.join(format!("{name}.sig"));
+            std::fs::write(&payload, what).unwrap();
+            let done = std::process::Command::new(&openssl)
+                .args([
+                    "dgst",
+                    "-sha256",
+                    "-sign",
+                    key.to_str().unwrap(),
+                    "-out",
+                    signature.to_str().unwrap(),
+                    payload.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                done.status.success(),
+                "openssl would not sign:\n{}",
+                String::from_utf8_lossy(&done.stderr)
+            );
+            std::fs::read(&signature).unwrap()
+        };
+
+        let first = outside(&asked.v2, "v2");
+        let second = outside(asked.v3.as_ref().unwrap(), "v3");
+
+        let package = signing::with_signatures(
+            &unsigned,
+            &certificate_der,
+            &asked,
+            &first,
+            Some(&second),
+            Some(range),
+        )
+        .expect("a signature made elsewhere seals the package");
+
+        let mut sink = Sink::new();
+        let archive = archive::read(&package, &mut sink).expect("it reads back");
+        let report = signing::examine(
+            &package,
+            archive.central_directory_offset(),
+            archive.end_record_offset(),
+            &mut sink,
+        );
+        assert!(report.has_block);
+        assert_eq!(report.digests_failed, 0, "{:?}", sink.entries());
+        assert!(report.digests_verified > 0);
+        assert_eq!(report.signatures_failed, 0, "{:?}", sink.entries());
+        assert!(report.signatures_verified >= 2, "v2 and v3 both signed");
+        assert!(report.key_matches_certificate);
+        assert!(report.certificates_hold);
+        assert!(report.everything_checkable_passed());
+
+        let wrong = outside(b"not what was asked for", "wrong");
+        let mut own = Sink::new();
+        let bad = signing::with_signatures(
+            &unsigned,
+            &certificate_der,
+            &asked,
+            &wrong,
+            Some(&second),
+            Some(range),
+        )
+        .expect("the block is still built");
+        let held = archive::read(&bad, &mut own).unwrap();
+        let refused = signing::examine(
+            &bad,
+            held.central_directory_offset(),
+            held.end_record_offset(),
+            &mut own,
+        );
+        assert!(
+            !refused.everything_checkable_passed(),
+            "a signature over the wrong bytes must not pass"
+        );
+        assert!(refused.signatures_failed > 0);
+
+        let mut checked = "not checked";
+        if let Some(apksigner) = find_apksigner() {
+            let path = directory.join("device.apk");
+            std::fs::write(&path, &package).unwrap();
+            let out = std::process::Command::new(&apksigner)
+                .args([
+                    "verify",
+                    "--min-sdk-version",
+                    "30",
+                    "--max-sdk-version",
+                    "37",
+                    "--print-certs",
+                    path.to_str().unwrap(),
+                ])
+                .output()
+                .unwrap();
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.status.success(),
+                "apksigner refused a package signed by a key this build never saw:\n{said}"
+            );
+            assert!(said.contains("CN=Omni Device"), "{said}");
+            checked = "apksigner verified it";
+        }
+
+        eprintln!(
+            "device signing: the private key stayed in openssl, this build never \
+             read it, and the package it sealed verifies -- {checked}"
+        );
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     fn sign_with_apksigner_using(
@@ -51220,6 +51712,7 @@ class Screen
         const RETIRED: &[&str] = &[
             "there is no multidex",
             "The certificate's own signature is never checked",
+            "hardware-backed keystore is not used",
             "No adaptive icon",
             "No monochrome icon for themed launchers",
             "No extensions: no basic constraints",

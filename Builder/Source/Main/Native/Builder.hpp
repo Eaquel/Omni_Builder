@@ -82,6 +82,14 @@ char *omni_rename_path(const char *root, const char *from, const char *to);
 
 char *omni_copy_path(const char *root, const char *from, const char *to);
 
+char *omni_build_unsigned(const char *root, const char *package_path,
+                          const char *certificate);
+
+char *omni_seal_package(const char *package_path, const char *sealed_path,
+                        const char *certificate, const char *signature_v2,
+                        const char *signature_v3, uint32_t min_sdk,
+                        uint32_t max_sdk);
+
 char *omni_list_built(const char *directory);
 
 char *omni_trash_send(const char *trash_root, const char *path);

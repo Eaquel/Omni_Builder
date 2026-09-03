@@ -76,6 +76,14 @@
     <string name="omni_refused">KEIN PAKET ERZEUGT</string>
     <string name="omni_build_title">Bauen</string>
     <string name="omni_build_no_key">Wähle zuerst einen Signaturschlüssel.</string>
+    <string name="omni_device_key">Der eigene Schlüssel dieses Geräts</string>
+    <string name="omni_device_hardware">In der sicheren Hardware dieses Geräts</string>
+    <string name="omni_device_software">Von Android gehalten, nicht von sicherer Hardware</string>
+    <string name="omni_device_none">Noch nicht erstellt</string>
+    <string name="omni_device_sealed">VERSIEGELT</string>
+    <string name="omni_device_note">Der Schlüssel verlässt Android nie. Dieser Build übergibt die zu signierenden Bytes an das Gerät und nimmt die Signatur zurück, sodass das Paket mit einem Schlüssel signiert ist, den hier nichts lesen oder kopieren kann. Er signiert ein Paket, kein Bundle.</string>
+    <string name="omni_device_build">MIT DIESEM GERÄT BAUEN UND SIGNIEREN</string>
+    <string name="omni_device_refused">Dieses Gerät hat keinen Signaturschlüssel erstellt.</string>
     <string name="omni_build_password">Schlüsselpasswort</string>
     <string name="omni_build_needs_password">Gib zuerst das Schlüsselpasswort ein.</string>
     <string name="omni_build_shared_password">Der geteilte Schlüssel öffnet mit %1$s. Es steht in dieser Anwendung, ist also ein Anfang und kein Geheimnis.</string>
