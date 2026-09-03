@@ -19,7 +19,7 @@ pub mod compilers {
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const CORE_STATUS: Status = Status::Foundation;
+pub const CORE_STATUS: Status = Status::Partial;
 
 pub const BOOTSTRAP_DEPENDENCIES: &[&str] = &[
     "Gradle — drives the Android application build",
@@ -122,7 +122,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 44,
         summary: "Omni.toml parsed, validated and reduced to a configuration digest over a canonical encoding: every part length-prefixed so no value can be read as a separator, and every unordered part sorted so the same facts always come to the same bytes. What the encoding writes can be read back to what went in, which is the same claim as no two projects sharing a digest, said in a way a test can check.",
         missing: &[
-            "No dependency declarations; nothing resolves dependencies yet.",
+            "A dependency is a file dropped into the library folder and read there. The manifest declares none and nothing resolves one from a repository.",
             "The manifest is read from text, not from the virtual filesystem.",
         ],
     },
@@ -132,8 +132,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 58,
         summary: "CREATED to PUBLISHED as a state machine that refuses illegal steps, over a store that keeps what a build produced. Objects are named by what is in them, so identical output is kept once; they are written under a temporary name and moved over the final one, so a machine that stops leaves either nothing or the whole thing; and a read checks what came back against the name it asked for, removing and reporting anything that no longer matches. A sweep brings the store to a budget, taking what was wanted longest ago first and stepping around anything leased.",
         missing: &[
-            "Nothing signs an artifact, so SIGNED is reachable and unused; \
-             the signing module reads a signature, it does not produce one.",
+            "Nothing in the store moves an artifact to SIGNED. The build engine signs the package it writes and puts the signed bytes in whole, so the state is defined and no caller steps through it.",
             "A lease lives as long as the value holding it and no longer, which is right for a process that dies and wrong for two processes sharing one store: there is no lock between them, so two sweeps at once can both decide to take the same object.",
         ],
     },
@@ -176,7 +175,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Bounded readers, patched writers, sections, tables and the CRC-32 \
                   and Adler-32 checksums the ZIP and DEX formats use.",
         missing: &[
-            "No format is implemented on top of it yet.",
+            "Everything is read out of and written into a slice held whole in memory; nothing streams.",
             "Randomised robustness testing only; not coverage-guided fuzzing.",
             "The Validator trait has no implementations.",
         ],
@@ -201,11 +200,8 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
                   The binary table is written and aapt2 reads every type, name \
                   and value back out of it.",
         missing: &[
-            "Density and language are the qualifiers modelled. A region, a screen size, an \
-             orientation or a platform version in a folder name is refused rather than \
-             treated as the default, which would put the wrong file on every device.",
-            "Styles can be referred to but not declared, and a reference to a platform \
-             resource is refused because the platform's own table is not read.",
+            "A qualifier this build does not know is refused rather than treated as the default, which would put the wrong file on every device.",
+            "Nothing marks a name public or private, so every entry in the table is reachable from anywhere.",
             "The table carries one package and no overlays, libraries or staged aliases.",
             "Nothing reads resource files through the virtual filesystem yet.",
         ],
@@ -268,8 +264,9 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 23,
         summary: "A project becomes a signed package and a bundle with nothing borrowed: the security policy runs first, then the resource table is compiled from the project's launcher icons and values folders, the manifest encoded against it, the archive written and compressed, a certificate written, and the package signed. apksigner verifies the result and aapt2 reads the table back.",
         missing: &[
-            "No compiler. The dex a package carries holds a class and a constructor the engine emits itself; nothing compiles a method body, so an activity built here does nothing.",
-            "The table carries the launcher icons and what the values folders declare. A layout, a style or a drawable a project writes itself is not compiled into it.",
+            "Java is the only language compiled. Source in any other language is refused rather than dropped, so a package is never quietly built without it.",
+            "Nothing shrinks what it builds: no dead-code removal, no obfuscation and no resource stripping, so a package carries every class and every entry the project holds.",
+            "Every build starts from nothing. The incremental cache exists and the build engine does not ask it anything.",
             "The architectures a project names reach the manifest and nothing else, because nothing here produces a native library to place under them.",
         ],
     },
@@ -411,7 +408,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         directive_section: 22,
         summary: "The binary XML an APK carries, written from parsed text and read back out of it: string pool in either encoding the platform writes, resource map, namespaces, elements and typed attribute values. aapt2 reads what this writes and agrees on every value, and this reads what aapt2 writes.",
         missing: &[
-            "A resource reference by name is refused, not resolved: that needs the resource table, which is not written yet.",
+            "A reference by name is resolved before it reaches this writer, so the writer alone cannot encode one: what it takes is an identifier.",
             "The attribute identifier table covers what a manifest uses, not every android attribute.",
             "No CDATA nodes.",
         ],
@@ -425,26 +422,35 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
                   methods, attributes and Kotlin metadata -- checked field for \
                   field against javap on 50 classes this build produced.",
         missing: &[
-            "No Code attribute is decoded, so nothing here can say what a \
-             method does.",
+            "Attributes outside the set this build writes and reads back are located and left as bytes.",
             "The d1 and d2 arrays of kotlin.Metadata are not read: they are a \
              protobuf payload whose schema is a Kotlin implementation detail, \
              not a published format.",
-            "Nothing writes a class file, and nothing compiles Kotlin. Reading \
-             the upstream compiler's output is not evidence that anything here \
-             could produce it (directive section 16).",
+            "Nothing compiles Kotlin. Reading the upstream compiler's output is not evidence that anything here could produce it (directive section 16).",
             "Randomised robustness testing only; not coverage-guided fuzzing.",
+        ],
+    },
+    Subsystem {
+        name: "Java compiler",
+        status: Status::Partial,
+        directive_section: 16,
+        summary: "Java source becomes class files and then dex, with nothing borrowed: a lexer and parser for the Java 25 grammar, names and types resolved against the platform jar and against the project's own classes, generics with inference and capture, poly expressions and overload resolution, inner and anonymous classes with the locals they capture, records, enums, sealed types, switch expressions, text blocks and try with resources, and a bytecode writer that computes its own stack map frames. javac is given the same source with every warning turned on, javap reads back the class files, and dexdump reads back the dex.",
+        missing: &[
+            "A lambda and a method reference are refused by name rather than compiled: invokedynamic and the metafactory the platform bootstraps them with are not written.",
+            "Annotation processing does not run. An annotation is parsed, checked and written into the class file, and nothing is ever asked to generate anything from it.",
+            "No modules: a project is a flat set of packages, and module-info.java is not read.",
+            "Nothing optimises what it compiles beyond the folding the language itself requires.",
         ],
     },
     Subsystem {
         name: "DEX writer",
         status: Status::Partial,
         directive_section: 21,
-        summary: "Writes a classes.dex: sorted string, type, prototype and method pools, class definitions, class data and code items, with the checksum and signature the format defines. dexdump reads what this writes and the Core reads it back.",
+        summary: "Writes a classes.dex: sorted string, type, prototype, field and method pools, class definitions with their interfaces and annotations, static and instance fields, direct and virtual methods, code items with their exception handlers and register counts, and debug information carrying the line a bytecode address came from. More references than one dex can name become more than one dex. dexdump reads what this writes and the Core reads it back.",
         missing: &[
-            "It emits the instructions a default constructor needs and nothing else. There is no assembler and no compiler, so a method body cannot be given to it.",
-            "No fields, no virtual methods, no interfaces, no annotations, no debug information.",
-            "One dex per package; there is no multidex.",
+            "Splitting is by count and not by call graph: a class lands in the dex the order reached it in rather than beside the classes it calls.",
+            "No invokedynamic and no method handles, because nothing upstream produces one.",
+            "No local variable or parameter names in the debug information: a stack trace carries a line number and not the name of what was on it.",
         ],
     },
     Subsystem {
@@ -458,8 +464,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
             "No code item is read, so nothing here can say what a method does.",
             "Debug information, annotations and encoded arrays are located \
              through the map but not parsed.",
-            "Nothing writes a DEX; producing one is the DEX plugin's job and it \
-             stays PLANNED.",
+            "It reads a dex down to its class definitions and no further, so it cannot check the code the writer emitted; the round trip that does is the dex writer's own.",
             "Randomised robustness testing only; not coverage-guided fuzzing.",
         ],
     },
@@ -516,8 +521,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
              reporting a pass.",
             "A verity digest is reported as not recomputed: the fs-verity Merkle \
              tree is a different construction and is not implemented.",
-            "Nothing writes a signing block, so signing still belongs to the \
-             bootstrap toolchain.",
+            "It reads a block and says whether it holds; deciding whether the certificate behind it deserves to be trusted needs a chain and a trust store, and neither exists.",
         ],
     },
 ];
@@ -49627,6 +49631,63 @@ class Screen
                 );
             }
         }
+    }
+
+    #[test]
+    fn nothing_the_inventory_calls_missing_is_something_this_build_now_does() {
+        const RETIRED: &[&str] = &[
+            "there is no multidex",
+            "No fields, no virtual methods",
+            "Nothing writes a class file",
+            "Nothing writes a DEX",
+            "Nothing writes a signing block",
+            "No format is implemented on top of it",
+            "the resource table, which is not written yet",
+            "Styles can be referred to but not declared",
+            "the signing module reads a signature, it does not produce one",
+            "No Code attribute is decoded",
+            "nothing compiles a method body",
+        ];
+        for subsystem in super::SUBSYSTEMS {
+            for missing in subsystem.missing {
+                for retired in RETIRED {
+                    assert!(
+                        !missing.contains(retired),
+                        "{} still says {retired:?}, which this build has done since",
+                        subsystem.name
+                    );
+                }
+            }
+        }
+
+        type Dexes = Result<Vec<Vec<u8>>, Diagnostic>;
+        type Signed = Result<Vec<u8>, Diagnostic>;
+        type Classes = Result<Vec<(String, Vec<u8>)>, Diagnostic>;
+        type WriteAll =
+            fn(&[super::dexwrite::Class], &[super::dexwrite::MethodRef], usize) -> Dexes;
+        type SignV2 =
+            fn(&[u8], &super::rsa::PrivateKey, &[u8], super::rsa::DigestAlgorithm) -> Signed;
+        type CompileJava = fn(&str, &crate::compilers::java::Classpath) -> Classes;
+        let _: WriteAll = super::dexwrite::write_all_holding;
+        let _: SignV2 = signing::sign_v2;
+        let _: CompileJava = crate::compilers::java::compile;
+
+        let mut class = super::dexwrite::Class::named(
+            "Lcom/tr/yt/Held;",
+            "Ljava/lang/Object;",
+            super::dexwrite::ACC_PUBLIC,
+        );
+        class.interfaces.push("Ljava/lang/Runnable;".to_string());
+        assert!(class.annotations.is_empty());
+        assert!(class.virtual_methods.is_empty());
+        assert!(class.static_fields.is_empty());
+        assert!(class.instance_fields.is_empty());
+
+        assert_ne!(
+            super::CORE_STATUS,
+            Status::Foundation,
+            "the Core compiles Java to a signed package; FOUNDATION understates it"
+        );
     }
 
     #[test]
