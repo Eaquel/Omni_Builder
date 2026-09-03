@@ -1478,6 +1478,10 @@ class BuilderActivity : Activity() {
 
         const val TOUCH_UNITS = Motion.TOUCH_UNITS
 
+        const val WIDE_DP = 600
+
+        const val COLUMN_DP = 640
+
         val STAGE_NAMES = listOf(
             R.string.omni_stage_project,
             R.string.omni_stage_resources,
@@ -1538,6 +1542,7 @@ class BuilderActivity : Activity() {
     private lateinit var veil: BinaryVeil
     private lateinit var ceremony: FrameLayout
     private lateinit var bar: LinearLayout
+    private lateinit var rail: LinearLayout
     private lateinit var scroller: ScrollView
     private lateinit var content: LinearLayout
     private lateinit var results: LinearLayout
@@ -1625,12 +1630,29 @@ class BuilderActivity : Activity() {
             background = sheet(palette.surface, palette.divider)
             layoutTransition = LayoutTransition()
         }
+        rail = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = sheet(palette.surface, palette.divider)
+            visibility = View.GONE
+        }
+
+        val body = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(rail, LinearLayout.LayoutParams(WRAP_CONTENT, MATCH_PARENT))
+            addView(scroller, LinearLayout.LayoutParams(0, MATCH_PARENT, 1f))
+        }
+        scroller.addOnLayoutChangeListener { _, left, _, right, _, was, _, until, _ ->
+            if (right - left != until - was) {
+                fitTheColumn()
+            }
+        }
 
         val roof = View(this)
         val shell = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(roof, LinearLayout.LayoutParams(MATCH_PARENT, 0))
-            addView(scroller, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
+            addView(body, LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
             addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
         }
 
@@ -1655,6 +1677,7 @@ class BuilderActivity : Activity() {
         standing = examine()
         provisionSharedKey()
         answerBackTheWayThisScreenWants()
+        fitTheColumn()
         render(false)
     }
 
@@ -1712,8 +1735,10 @@ class BuilderActivity : Activity() {
                 above.height = top
                 roof.layoutParams = above
             }
-            bar.visibility = if (keyboard > 0) View.GONE else View.VISIBLE
+            val railed = wideEnoughForARail()
+            bar.visibility = if (keyboard > 0 || railed) View.GONE else View.VISIBLE
             bar.setPadding(gap(2), gap(2), gap(2), gap(2) + bottom)
+            rail.setPadding(gap(2), gap(2), gap(2), gap(2) + bottom)
             scroller.setPadding(0, 0, 0, keyboard)
             insets
         }
@@ -2046,8 +2071,25 @@ class BuilderActivity : Activity() {
         }
     }
 
+    private fun wideEnoughForARail(): Boolean =
+        resources.configuration.screenWidthDp >= WIDE_DP
+
+    private fun fitTheColumn() {
+        val room = scroller.width.takeIf { it > 0 } ?: resources.displayMetrics.widthPixels
+        val most = (COLUMN_DP * resources.displayMetrics.density).toInt()
+        val side = ((room - most) / 2).coerceAtLeast(0) + gap(4)
+        if (content.paddingLeft != side) {
+            content.setPadding(side, gap(3), side, gap(8))
+        }
+    }
+
     private fun drawBar() {
+        val wide = wideEnoughForARail()
+        val into = if (wide) rail else bar
+        rail.visibility = if (wide) View.VISIBLE else View.GONE
+        bar.visibility = if (wide) View.GONE else View.VISIBLE
         bar.removeAllViews()
+        rail.removeAllViews()
         val labels = mapOf(
             Tab.PROJECTS to R.string.omni_tab_projects,
             Tab.FILES to R.string.omni_tab_files,
@@ -2058,7 +2100,7 @@ class BuilderActivity : Activity() {
         for (tab in Tab.entries) {
             val active = screen.tab == tab
             val reachable = tab != Tab.FILES && tab != Tab.BUILD || openProject != null
-            bar.addView(
+            into.addView(
                 control().apply {
                     text = getString(labels.getValue(tab))
                     setTextColor(
@@ -2096,9 +2138,16 @@ class BuilderActivity : Activity() {
                         true
                     }
                 },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                    marginStart = gap(1) / 2
-                    marginEnd = gap(1) / 2
+                if (wide) {
+                    LinearLayout.LayoutParams(gap(22), WRAP_CONTENT).apply {
+                        topMargin = gap(1) / 2
+                        bottomMargin = gap(1) / 2
+                    }
+                } else {
+                    LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                        marginStart = gap(1) / 2
+                        marginEnd = gap(1) / 2
+                    }
                 },
             )
         }
