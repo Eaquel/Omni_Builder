@@ -137,6 +137,8 @@
     <string name="omni_stage_measuring">Первая сборка здесь, поэтому это лишь оценка.</string>
     <string name="omni_stage_learned">Рассчитано по собственным сборкам этого устройства.</string>
     <string name="omni_stage_built">ПАКЕТ ЗАПИСАН</string>
+    <string name="omni_stage_stop">ОСТАНОВИТЬ</string>
+    <string name="omni_stage_stopped">СБОРКА ОСТАНОВЛЕНА</string>
     <string name="omni_result_verified">Перепроверка</string>
     <string name="omni_result_verified_yes">Пакет проверяется собственным ключом</string>
     <string name="omni_result_verified_no">Пакет не проходит проверку</string>

@@ -26964,7 +26964,7 @@ pub mod bundle {
     }
 
     pub fn write(project: &crate::builder::Project) -> Result<Outcome, Diagnostic> {
-        crate::progress::enter("bundle");
+        crate::progress::enter_checked("bundle")?;
         let mut sink = crate::diag::Sink::new();
         let prepared = crate::builder::prepare(project, &mut sink).map_err(|error| {
             if error.code == "EB010" {
@@ -28403,7 +28403,7 @@ pub mod builder {
     }
 
     fn compile_resources(project: &Project, sink: &mut Sink) -> Result<Option<Icons>, Diagnostic> {
-        crate::progress::enter("resources");
+        crate::progress::enter_checked("resources")?;
         let set = launcher_icons(project)?;
         if set.is_empty() && project.values.is_empty() && project.resources.is_empty() {
             return Ok(None);
@@ -28864,7 +28864,7 @@ pub mod builder {
     }
 
     pub fn from_project(root: &str) -> Result<Project, Diagnostic> {
-        crate::progress::enter("project");
+        crate::progress::enter_checked("project")?;
         let manifest = crate::scaffold::read_manifest(root)?;
 
         let brought = brought_by_libraries(root)?;
@@ -29159,7 +29159,7 @@ public final class R {{
         root: &str,
         generated: Vec<(String, String)>,
     ) -> Result<Vec<crate::dexwrite::Class>, Diagnostic> {
-        crate::progress::enter("java");
+        crate::progress::enter_checked("java")?;
 
         let ignored = uncompiled_source(root);
         if !ignored.is_empty() {
@@ -29210,9 +29210,11 @@ public final class R {{
         read.extend(generated);
 
         let classpath = what_it_may_call_into(root)?;
+        crate::progress::keep_going()?;
         let produced = crate::compilers::java::compile_together(&read, &classpath)?;
         let mut out = Vec::new();
         for (name, bytes) in produced {
+            crate::progress::keep_going()?;
             let class = crate::jvm::read(&bytes)
                 .map_err(|error| error.with_context(format!("Class: {name}")))?;
             out.extend(
@@ -29807,10 +29809,10 @@ public final class R {{
             guard: report,
         } = prepare(project, sink)?;
 
-        crate::progress::enter("manifest");
+        crate::progress::enter_checked("manifest")?;
         let manifest = crate::axml::encode(&root)?;
 
-        crate::progress::enter("package");
+        crate::progress::enter_checked("package")?;
         let mut archive = ArchiveBuilder::for_android();
         archive.add("AndroidManifest.xml", manifest)?;
         if let Some(made) = &icons {
@@ -29820,7 +29822,7 @@ public final class R {{
             }
         }
         if !project.code.is_empty() {
-            crate::progress::enter("dex");
+            crate::progress::enter_checked("dex")?;
             for (which, held) in crate::dexwrite::write_all(&project.code, &project.references)?
                 .into_iter()
                 .enumerate()
@@ -29828,7 +29830,7 @@ public final class R {{
                 archive.add(crate::dexwrite::dex_named(which), held)?;
             }
         }
-        crate::progress::enter("package");
+        crate::progress::enter_checked("package")?;
         for (name, bytes) in &project.files {
             if name == "AndroidManifest.xml" {
                 return Err(fail(
@@ -29852,7 +29854,7 @@ public final class R {{
             .and_then(|element| element.attribute("android:minSdkVersion"))
             .and_then(|text| text.parse::<u32>().ok())
             .unwrap_or(guard::MINIMUM_SDK as u32);
-        crate::progress::enter("signing");
+        crate::progress::enter_checked("signing")?;
         let package = crate::signing::sign(
             &unsigned,
             key,
@@ -29861,7 +29863,7 @@ public final class R {{
             Some((minimum_sdk, NEWEST_PLATFORM)),
         )?;
 
-        crate::progress::enter("verify");
+        crate::progress::enter_checked("verify")?;
         let parsed = crate::x509::Certificate::parse(certificate_der)?;
 
         let mut checking = Sink::new();
@@ -32550,6 +32552,10 @@ pub mod health {
 }
 
 pub mod progress {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::FailureClass;
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
@@ -32588,6 +32594,7 @@ pub mod progress {
         Building,
         Built,
         Refused,
+        Stopped,
     }
 
     impl Outcome {
@@ -32597,6 +32604,7 @@ pub mod progress {
                 Outcome::Building => "building",
                 Outcome::Built => "built",
                 Outcome::Refused => "refused",
+                Outcome::Stopped => "stopped",
             }
         }
     }
@@ -32686,10 +32694,10 @@ pub mod progress {
                 });
             }
             self.running = false;
-            self.outcome = if built {
-                Outcome::Built
-            } else {
-                Outcome::Refused
+            self.outcome = match () {
+                _ if built => Outcome::Built,
+                _ if stopped() => Outcome::Stopped,
+                _ => Outcome::Refused,
             };
             if built {
                 self.learned = self.measured.clone();
@@ -32713,7 +32721,7 @@ pub mod progress {
             let total = (so_far as f64 + pace * ahead as f64).max(1.0);
 
             let (percent, left) = match self.outcome {
-                Outcome::Built | Outcome::Refused => (100.0, 0.0),
+                Outcome::Built | Outcome::Refused | Outcome::Stopped => (100.0, 0.0),
                 Outcome::Waiting => (0.0, total),
                 Outcome::Building => (
                     ((elapsed as f64 / total) * 100.0).clamp(0.0, 99.0),
@@ -32741,6 +32749,7 @@ pub mod progress {
                     "state",
                     match () {
                         _ if self.outcome == Outcome::Refused && at == self.at => "refused",
+                        _ if self.outcome == Outcome::Stopped && at == self.at => "stopped",
                         _ if at < self.at || self.outcome == Outcome::Built => "done",
                         _ if at == self.at && self.outcome == Outcome::Building => "running",
                         _ => "waiting",
@@ -32778,8 +32787,57 @@ pub mod progress {
         }
     }
 
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    static LIVE: AtomicU64 = AtomicU64::new(0);
+    static ASKED: AtomicU64 = AtomicU64::new(0);
+
+    thread_local! {
+        static MINE: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub const STOPPED_CODE: &str = "EB059";
+
+    pub fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        static TURN: Mutex<()> = Mutex::new(());
+        TURN.lock().unwrap_or_else(|held| held.into_inner())
+    }
+
     pub fn begin() {
+        let token = NEXT.fetch_add(1, Ordering::SeqCst) + 1;
+        MINE.with(|held| held.set(token));
+        LIVE.store(token, Ordering::SeqCst);
         with(|channel| channel.begin());
+    }
+
+    pub fn stop() {
+        ASKED.store(LIVE.load(Ordering::SeqCst), Ordering::SeqCst);
+    }
+
+    pub fn stopped() -> bool {
+        let mine = MINE.with(Cell::get);
+        mine != 0 && ASKED.load(Ordering::SeqCst) == mine
+    }
+
+    pub fn keep_going() -> Result<(), Diagnostic> {
+        if !stopped() {
+            return Ok(());
+        }
+        Err(Diagnostic::new(
+            STOPPED_CODE,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.progress",
+            "The build was stopped.",
+        )
+        .with_suggestion(
+            "Nothing was written. A build is stopped between stages, so what it \
+             had done so far is thrown away rather than left half finished.",
+        ))
+    }
+
+    pub fn enter_checked(stage: &str) -> Result<(), Diagnostic> {
+        enter(stage);
+        keep_going()
     }
 
     pub fn enter(stage: &str) {
@@ -32858,6 +32916,28 @@ pub mod ffi {
             .unwrap_or(0)
     }
 
+    pub(crate) fn write_both(
+        first_path: &str,
+        first: &[u8],
+        second_path: &str,
+        second: &[u8],
+    ) -> std::io::Result<()> {
+        let beside = |path: &str| format!("{path}.part");
+        let clear = |path: &str| {
+            std::fs::remove_file(path).ok();
+        };
+        let done = std::fs::write(beside(first_path), first)
+            .and_then(|()| std::fs::write(beside(second_path), second))
+            .and_then(|()| std::fs::rename(beside(first_path), first_path))
+            .and_then(|()| std::fs::rename(beside(second_path), second_path));
+        if done.is_err() {
+            clear(&beside(first_path));
+            clear(&beside(second_path));
+            clear(first_path);
+        }
+        done
+    }
+
     fn hand_back(w: crate::json::Writer) -> *mut c_char {
         match CString::new(w.finish()) {
             Ok(report) => report.into_raw(),
@@ -32872,6 +32952,11 @@ pub mod ffi {
             Err(_) => std::ptr::null_mut(),
         });
         result.unwrap_or(std::ptr::null_mut())
+    }
+
+    #[no_mangle]
+    pub extern "C" fn omni_build_stop() {
+        let _ = catch_unwind(crate::progress::stop);
     }
 
     #[no_mangle]
@@ -33176,9 +33261,12 @@ pub mod ffi {
             let mut built = false;
             match outcome {
                 Ok((package, bundle)) => {
-                    match std::fs::write(&package_path, &package.package)
-                        .and_then(|()| std::fs::write(&bundle_path, &bundle.bundle))
-                    {
+                    match write_both(
+                        &package_path,
+                        &package.package,
+                        &bundle_path,
+                        &bundle.bundle,
+                    ) {
                         Ok(()) => {
                             built = true;
                             w.field_bool("built", true);
@@ -36525,7 +36613,69 @@ mod tests {
 "####;
 
     #[test]
+    fn a_build_stops_when_it_is_asked_to_and_leaves_nothing_behind() {
+        let _turn = super::progress::one_at_a_time();
+        let directory = temp_directory("omni-stopped");
+        let root = directory.join("Stopped");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt".to_string(),
+                label: "Stopped".to_string(),
+                languages: vec!["java".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        super::progress::begin();
+        assert!(super::progress::keep_going().is_ok());
+        let project = super::builder::from_project(&folder).expect("it reads to begin with");
+
+        super::progress::stop();
+        assert!(super::progress::stopped());
+        let refused = super::progress::keep_going().expect_err("it is stopped now");
+        assert_eq!(refused.code, super::progress::STOPPED_CODE);
+
+        let mut sink = Sink::new();
+        let (key, _) = super::builder::signing_key(directory.join("key").to_str().unwrap())
+            .expect("a key to sign with");
+        let stopped = super::builder::build(&project, &key, 0, &mut sink)
+            .expect_err("a stopped build produces nothing");
+        assert_eq!(stopped.code, super::progress::STOPPED_CODE);
+        assert!(
+            stopped.suggestion.is_some(),
+            "a refusal has to say what it left behind"
+        );
+
+        super::progress::finish(false);
+        let said = super::progress::report();
+        assert!(said.contains("\"state\":\"stopped\""), "{said}");
+
+        super::progress::begin();
+        assert!(!super::progress::stopped());
+        assert!(super::builder::build(&project, &key, 0, &mut sink).is_ok());
+        super::progress::finish(true);
+
+        let package = directory.join("held.apk");
+        let bundle = directory.join("nowhere").join("held.aab");
+        assert!(super::ffi::write_both(
+            package.to_str().unwrap(),
+            b"a package",
+            bundle.to_str().unwrap(),
+            b"a bundle",
+        )
+        .is_err());
+        assert!(!package.exists(), "a package was left without its bundle");
+        assert!(!package.with_extension("apk.part").exists());
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn a_build_says_where_it_is_and_how_long_is_left() {
+        let _turn = super::progress::one_at_a_time();
         use super::progress::{Channel, STAGES};
 
         let read = |held: &str, key: &str| -> String {
@@ -36601,6 +36751,7 @@ mod tests {
 
     #[test]
     fn every_stage_a_build_reports_is_one_it_really_went_through() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-progress");
         let root = directory.join("Watched");
         super::scaffold::create(

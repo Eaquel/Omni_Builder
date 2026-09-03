@@ -137,6 +137,8 @@
     <string name="omni_stage_measuring">هذا أول بناء هنا، لذا فهذا تقدير.</string>
     <string name="omni_stage_learned">مُقدَّر من عمليات البناء على هذا الجهاز.</string>
     <string name="omni_stage_built">كُتبت الحزمة</string>
+    <string name="omni_stage_stop">إيقاف</string>
+    <string name="omni_stage_stopped">تم إيقاف البناء</string>
     <string name="omni_result_verified">إعادة التحقق</string>
     <string name="omni_result_verified_yes">تتحقق الحزمة بمفتاحها الخاص</string>
     <string name="omni_result_verified_no">لا تتحقق الحزمة</string>

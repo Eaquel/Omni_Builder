@@ -63,12 +63,15 @@ import android.view.WindowInsetsController
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
 import android.view.inputmethod.EditorInfo
+import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -484,6 +487,8 @@ object Builder {
     external fun nativeBuildProgress(): String
 
     external fun nativeBuildExpect(timings: String?)
+
+    external fun nativeBuildStop()
 
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
@@ -1319,7 +1324,9 @@ class BuilderActivity : Activity() {
 
         const val LOOK_MILLIS = 60L
 
-        const val WATCH_MILLIS = 40L
+        const val WATCH_MILLIS = 110L
+
+        const val TOUCH_UNITS = 12
 
         const val SETTLE_MILLIS = 620L
 
@@ -1391,6 +1398,8 @@ class BuilderActivity : Activity() {
     private lateinit var results: LinearLayout
 
     private var screen: Screen = Screen.Projects
+    private var navigating = false
+    private var building = false
     private var standing = "UNKNOWN"
     private var openProject: String? = null
 
@@ -1498,6 +1507,7 @@ class BuilderActivity : Activity() {
 
         standing = examine()
         provisionSharedKey()
+        answerBackTheWayThisScreenWants()
         render(false)
     }
 
@@ -1575,7 +1585,7 @@ class BuilderActivity : Activity() {
                 ?.optJSONObject("key")
                 ?: return@Thread
             runOnUiThread {
-                if (isFinishing) {
+                if (isFinishing || isDestroyed) {
                     return@runOnUiThread
                 }
                 Preferences.setSigningKey(this, key.optString("path"))
@@ -1602,7 +1612,7 @@ class BuilderActivity : Activity() {
         Thread {
             val found = runCatching { Sentry.check(this) }.getOrDefault("UNKNOWN")
             runOnUiThread {
-                if (!isFinishing && found != standing) {
+                if (!isFinishing && !isDestroyed && found != standing) {
                     standing = found
                     render(false)
                 }
@@ -1628,6 +1638,7 @@ class BuilderActivity : Activity() {
 
     override fun onDestroy() {
         keepTheDraft()
+        stopTheBuild()
         OmniLog.flushSession()
         super.onDestroy()
     }
@@ -1636,10 +1647,15 @@ class BuilderActivity : Activity() {
         if (Sentry.refused(this)) "TAMPERED" else Sentry.check(this)
 
     private fun go(next: Screen) {
-        if (next == screen) {
+        if (next == screen && !navigating) {
             return
         }
         screen = next
+        answerBackTheWayThisScreenWants()
+        if (navigating) {
+            return
+        }
+        navigating = true
         content.animate()
             .alpha(0f)
             .translationY(-gap(RISE_DP / 6).toFloat())
@@ -1647,14 +1663,27 @@ class BuilderActivity : Activity() {
             .setInterpolator(AccelerateInterpolator())
             .start()
         veil.sweep(palette.accent) {
+            navigating = false
+            if (isFinishing || isDestroyed) {
+                return@sweep
+            }
             render(true)
             scroller.scrollTo(0, 0)
         }
     }
 
-    private fun showCeremony(view: View) {
+    private fun showCeremony(view: View, stop: (() -> Unit)? = null) {
         ceremony.removeAllViews()
         ceremony.addView(view, FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
+        if (stop != null) {
+            ceremony.addView(
+                stopControl(stop),
+                FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+                    bottomMargin = gap(8)
+                },
+            )
+        }
         ceremony.alpha = 0f
         ceremony.visibility = View.VISIBLE
         ceremony.animate().alpha(1f).setDuration(ENTER_MILLIS).start()
@@ -1673,6 +1702,25 @@ class BuilderActivity : Activity() {
     }
 
     private fun ceremonyIsUp(): Boolean = ceremony.visibility == View.VISIBLE
+
+    private fun stopControl(stop: () -> Unit) = Button(this).apply {
+        text = getString(R.string.omni_stage_stop)
+        isAllCaps = false
+        stateListAnimator = null
+        setTextColor(palette.foreground)
+        typeface = Type.strong
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+        letterSpacing = Type.TRACKING
+        minimumWidth = gap(30)
+        minimumHeight = gap(TOUCH_UNITS)
+        setPadding(gap(6), gap(3), gap(6), gap(3))
+        background = touchable(pill(palette.raised, gap(5).toFloat()), palette.error)
+        setOnClickListener {
+            isEnabled = false
+            alpha = 0.5f
+            stop()
+        }
+    }
 
     private fun render(animated: Boolean) {
         keepTheDraft()
@@ -1740,8 +1788,43 @@ class BuilderActivity : Activity() {
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
     override fun onBackPressed() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            super.onBackPressed()
+            return
+        }
+        stepBack()
+    }
+
+    private var backHere: Any? = null
+    private var backRegistered = false
+
+    private fun answerBackTheWayThisScreenWants() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        val wanted = screen !is Screen.Projects
+        if (wanted == backRegistered) {
+            return
+        }
+        val callback = backHere as? OnBackInvokedCallback
+            ?: OnBackInvokedCallback { stepBack() }.also { backHere = it }
+        if (wanted) {
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                callback,
+            )
+        } else {
+            onBackInvokedDispatcher.unregisterOnBackInvokedCallback(callback)
+        }
+        backRegistered = wanted
+    }
+
+    private fun stepBack() {
+        if (ceremonyIsUp()) {
+            return
+        }
         when (val here = screen) {
-            is Screen.Projects -> super.onBackPressed()
+            is Screen.Projects -> finish()
             is Screen.NewProject -> go(Screen.Projects)
             is Screen.Editor -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
             is Screen.Picture -> go(Screen.Files(here.root, here.path.substringBeforeLast('/', "")))
@@ -3950,6 +4033,9 @@ class BuilderActivity : Activity() {
                 first.fill(' ')
                 keyPasswordView?.text?.clear()
                 keyPasswordAgainView?.text?.clear()
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
                 answer.fold({ document -> keyForged(forge, document) }) { error ->
                     OmniLog.recordCrash(Thread.currentThread(), error)
                     keyRefused(forge, error.message ?: error.javaClass.simpleName, null)
@@ -4031,7 +4117,8 @@ class BuilderActivity : Activity() {
                 else R.string.omni_stage_learned
             )
         }
-        showCeremony(stage)
+        building = true
+        showCeremony(stage) { stopTheBuild() }
         stage.begin()
         watchTheBuild(stage)
 
@@ -4048,6 +4135,10 @@ class BuilderActivity : Activity() {
             runOnUiThread {
                 password.fill(' ')
                 buildPasswordView?.text?.clear()
+                building = false
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
                 answer.fold({ document ->
                     settle(stage) { buildEnded(document, apk, aab, started) }
                 }) { error ->
@@ -4062,24 +4153,38 @@ class BuilderActivity : Activity() {
         }.start()
     }
 
+    private fun stopTheBuild() {
+        if (!building) {
+            return
+        }
+        OmniLog.event(LogLevel.INFO, "build", "Stop asked for.")
+        Builder.nativeBuildStop()
+    }
+
     private fun watchTheBuild(view: BuildStageView) {
+        var lastSaid = ""
         val look = object : Runnable {
             override fun run() {
                 if (!ceremonyIsUp()) return
-                val report = runCatching { JSONObject(Builder.nativeBuildProgress()) }.getOrNull()
-                if (report != null) {
-                    val state = report.optString("state")
-                    view.observe(
-                        percent = report.optInt("percent"),
-                        stage = report.optInt("step", 1) - 1,
-                        count = report.optInt("steps", 1),
-                        finished = state == "built",
-                        refused = state == "refused",
-                    )
-                    view.remaining = when {
-                        state == "built" -> getString(R.string.omni_stage_built)
-                        state == "refused" -> getString(R.string.omni_refused)
-                        else -> left(report.optLong("leftMillis") / 1000L)
+                val said = runCatching { Builder.nativeBuildProgress() }.getOrDefault("")
+                if (said != lastSaid) {
+                    lastSaid = said
+                    val report = runCatching { JSONObject(said) }.getOrNull()
+                    if (report != null) {
+                        val state = report.optString("state")
+                        view.observe(
+                            percent = report.optInt("percent"),
+                            stage = report.optInt("step", 1) - 1,
+                            count = report.optInt("steps", 1),
+                            finished = state == "built",
+                            refused = state == "refused" || state == "stopped",
+                        )
+                        view.remaining = when (state) {
+                            "built" -> getString(R.string.omni_stage_built)
+                            "stopped" -> getString(R.string.omni_stage_stopped)
+                            "refused" -> getString(R.string.omni_refused)
+                            else -> left(report.optLong("leftMillis") / 1000L)
+                        }
                     }
                 }
                 view.postDelayed(this, WATCH_MILLIS)
@@ -4394,6 +4499,9 @@ class BuilderActivity : Activity() {
         Thread {
             val answer = runCatching(work)
             runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
                 results.removeAllViews()
                 answer.fold(finished) { error ->
                     OmniLog.recordCrash(Thread.currentThread(), error)
@@ -4847,6 +4955,8 @@ class BinaryVeil(context: Context) : View(context) {
         const val ROWS = 44
         const val SWEEP_MILLIS = 420f
 
+        const val LATEST_MILLIS = 400L
+
         const val EDGE = 0.22f
     }
 
@@ -4870,7 +4980,14 @@ class BinaryVeil(context: Context) : View(context) {
         }
     }
 
+    private val deadline = Runnable {
+        running = false
+        visibility = GONE
+        swapNow()
+    }
+
     fun sweep(colour: Int, swap: () -> Unit) {
+        swapNow()
         accent = colour
         whenDone = swap
         began = SystemClock.uptimeMillis()
@@ -4878,6 +4995,8 @@ class BinaryVeil(context: Context) : View(context) {
         swapped = false
         visibility = VISIBLE
         alpha = 1f
+        removeCallbacks(deadline)
+        postDelayed(deadline, SWEEP_MILLIS.toLong() + LATEST_MILLIS)
         postOnAnimation(step)
     }
 
@@ -4892,6 +5011,7 @@ class BinaryVeil(context: Context) : View(context) {
     override fun onDetachedFromWindow() {
         running = false
         removeCallbacks(step)
+        removeCallbacks(deadline)
         super.onDetachedFromWindow()
     }
 
@@ -4905,6 +5025,7 @@ class BinaryVeil(context: Context) : View(context) {
         if (t >= 1f) {
             running = false
             visibility = GONE
+            removeCallbacks(deadline)
             swapNow()
             return
         }

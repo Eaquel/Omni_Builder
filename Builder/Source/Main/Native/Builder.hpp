@@ -23,6 +23,8 @@ char *omni_build_progress(void);
 
 void omni_build_expect(const char *timings);
 
+void omni_build_stop(void);
+
 char *omni_verify_self(const char *package_path,
                        const char *expected_certificate);
 

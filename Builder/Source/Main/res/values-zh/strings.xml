@@ -137,6 +137,8 @@
     <string name="omni_stage_measuring">这是此处的首次构建，因此只是估计。</string>
     <string name="omni_stage_learned">根据本设备自己的构建记录估算。</string>
     <string name="omni_stage_built">安装包已写入</string>
+    <string name="omni_stage_stop">停止</string>
+    <string name="omni_stage_stopped">构建已停止</string>
     <string name="omni_result_verified">回读校验</string>
     <string name="omni_result_verified_yes">安装包通过自身密钥校验</string>
     <string name="omni_result_verified_no">安装包未通过校验</string>

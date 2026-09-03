@@ -137,6 +137,8 @@
     <string name="omni_stage_measuring">Prima costruzione qui, quindi questa è una stima.</string>
     <string name="omni_stage_learned">Calcolato dalle costruzioni di questo dispositivo.</string>
     <string name="omni_stage_built">PACCHETTO SCRITTO</string>
+    <string name="omni_stage_stop">INTERROMPI</string>
+    <string name="omni_stage_stopped">BUILD INTERROTTA</string>
     <string name="omni_result_verified">Ricontrollato</string>
     <string name="omni_result_verified_yes">Il pacchetto si verifica con la propria chiave</string>
     <string name="omni_result_verified_no">Il pacchetto non si verifica</string>

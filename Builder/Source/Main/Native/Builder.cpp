@@ -714,6 +714,11 @@ JNIEXPORT jstring JNICALL Java_com_omni_builder_Builder_nativeBuildProgress(
   return HandBack(env, omni_build_progress());
 }
 
+JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildStop(
+    JNIEnv *, jobject ) {
+  omni_build_stop();
+}
+
 JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildExpect(
     JNIEnv *env, jobject , jstring timings) {
   if (timings == nullptr) {

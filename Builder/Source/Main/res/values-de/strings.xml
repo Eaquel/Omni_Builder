@@ -137,6 +137,8 @@
     <string name="omni_stage_measuring">Erster Build hier, das ist also eine Schätzung.</string>
     <string name="omni_stage_learned">Aus den eigenen Builds dieses Geräts berechnet.</string>
     <string name="omni_stage_built">PAKET GESCHRIEBEN</string>
+    <string name="omni_stage_stop">STOPP</string>
+    <string name="omni_stage_stopped">BUILD ANGEHALTEN</string>
     <string name="omni_result_verified">Nachgeprüft</string>
     <string name="omni_result_verified_yes">Das Paket verifiziert gegen seinen eigenen Schlüssel</string>
     <string name="omni_result_verified_no">Das Paket verifiziert nicht</string>
