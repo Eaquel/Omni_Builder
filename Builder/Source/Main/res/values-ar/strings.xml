@@ -65,6 +65,8 @@
     <string name="omni_action_more">المزيد</string>
     <string name="omni_files_root">المشروع</string>
     <string name="omni_files_empty">هذا المجلد فارغ.</string>
+    <string name="omni_files_config">الإعداد</string>
+    <string name="omni_files_tools">أدوات</string>
     <string name="omni_files_holds">بداخله %1$d</string>
     <string name="omni_files_needs_name">اكتب اسمًا أولًا.</string>
     <string name="omni_editor_saved">حُفظ %1$s</string>

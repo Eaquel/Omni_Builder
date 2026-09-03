@@ -65,6 +65,8 @@
     <string name="omni_action_more">Mais</string>
     <string name="omni_files_root">Projeto</string>
     <string name="omni_files_empty">Esta pasta está vazia.</string>
+    <string name="omni_files_config">CONFIGURAÇÃO</string>
+    <string name="omni_files_tools">FERRAMENTAS</string>
     <string name="omni_files_holds">%1$d dentro</string>
     <string name="omni_files_needs_name">Escreve primeiro um nome.</string>
     <string name="omni_editor_saved">%1$s guardado</string>

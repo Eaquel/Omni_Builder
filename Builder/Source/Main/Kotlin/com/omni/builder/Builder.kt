@@ -2545,6 +2545,12 @@ class BuilderActivity : Activity() {
         identity.addView(face)
         content.addView(identity)
 
+        if (folder.isEmpty()) {
+            content.addView(primary(getString(R.string.omni_action_build)) {
+                go(Screen.Build(root))
+            })
+        }
+
         content.addView(breadcrumb(root, folder))
 
         val entries = runCatching {
@@ -2604,22 +2610,34 @@ class BuilderActivity : Activity() {
             })
         }
 
-        content.addView(subtle(getString(R.string.omni_manifest_title), palette.accent) {
-            go(Screen.Manifest(root))
-        })
-        content.addView(subtle(getString(R.string.omni_depends_title), palette.accent) {
-            go(Screen.Depends(root))
-        })
-        content.addView(subtle(getString(R.string.omni_health_title), palette.accent) {
-            go(Screen.Health(root))
-        })
-        content.addView(subtle(getString(R.string.omni_check_title), palette.accent) {
-            checkProject(root)
-        })
-        content.addView(subtle(getString(R.string.omni_search_title), palette.accent) {
-            go(Screen.Search(root))
-        })
-        content.addView(primary(getString(R.string.omni_action_build)) { go(Screen.Build(root)) })
+        if (folder.isEmpty()) {
+            content.addView(label(getString(R.string.omni_files_config)))
+            val settings = FlowLayout(this, gap(2), gap(2)).apply {
+                setPadding(0, gap(1), 0, gap(1))
+            }
+            settings.addView(tool(getString(R.string.omni_manifest_title), palette.accent) {
+                go(Screen.Manifest(root))
+            })
+            settings.addView(tool(getString(R.string.omni_depends_title), palette.accent) {
+                go(Screen.Depends(root))
+            })
+            content.addView(settings)
+
+            content.addView(label(getString(R.string.omni_files_tools)))
+            val tools = FlowLayout(this, gap(2), gap(2)).apply {
+                setPadding(0, gap(1), 0, gap(1))
+            }
+            tools.addView(tool(getString(R.string.omni_health_title), palette.accent) {
+                go(Screen.Health(root))
+            })
+            tools.addView(tool(getString(R.string.omni_check_title), palette.warning) {
+                checkProject(root)
+            })
+            tools.addView(tool(getString(R.string.omni_search_title), palette.accent) {
+                go(Screen.Search(root))
+            })
+            content.addView(tools)
+        }
         content.addView(quiet(getString(R.string.omni_trash_note)))
     }
 

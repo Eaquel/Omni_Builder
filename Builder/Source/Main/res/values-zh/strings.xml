@@ -65,6 +65,8 @@
     <string name="omni_action_more">更多</string>
     <string name="omni_files_root">项目</string>
     <string name="omni_files_empty">这个文件夹是空的。</string>
+    <string name="omni_files_config">配置</string>
+    <string name="omni_files_tools">工具</string>
     <string name="omni_files_holds">内有 %1$d 项</string>
     <string name="omni_files_needs_name">请先输入名称。</string>
     <string name="omni_editor_saved">已保存 %1$s</string>

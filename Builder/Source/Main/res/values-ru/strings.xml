@@ -65,6 +65,8 @@
     <string name="omni_action_more">Ещё</string>
     <string name="omni_files_root">Проект</string>
     <string name="omni_files_empty">Эта папка пуста.</string>
+    <string name="omni_files_config">НАСТРОЙКА</string>
+    <string name="omni_files_tools">ИНСТРУМЕНТЫ</string>
     <string name="omni_files_holds">внутри: %1$d</string>
     <string name="omni_files_needs_name">Сначала введите имя.</string>
     <string name="omni_editor_saved">%1$s сохранён</string>
