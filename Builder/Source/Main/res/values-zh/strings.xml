@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">撤销</string>
     <string name="omni_editor_redo">重做</string>
     <string name="omni_editor_paste">粘贴</string>
+    <string name="omni_editor_check">检查</string>
+    <string name="omni_editor_check_clear">此项目中没有被拒绝的内容。</string>
     <string name="omni_editor_find">查找</string>
     <string name="omni_editor_find_ask">在此文件中查找的文本</string>
     <string name="omni_editor_find_none">此文件中没有。</string>

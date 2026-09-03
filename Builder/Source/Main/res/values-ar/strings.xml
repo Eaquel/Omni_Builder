@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">تراجع</string>
     <string name="omni_editor_redo">إعادة</string>
     <string name="omni_editor_paste">لصق</string>
+    <string name="omni_editor_check">فحص</string>
+    <string name="omni_editor_check_clear">لا شيء في هذا المشروع مرفوض.</string>
     <string name="omni_editor_find">بحث</string>
     <string name="omni_editor_find_ask">نص للبحث عنه في هذا الملف</string>
     <string name="omni_editor_find_none">ليس في هذا الملف.</string>

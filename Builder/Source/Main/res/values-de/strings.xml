@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">ZURÜCK</string>
     <string name="omni_editor_redo">VOR</string>
     <string name="omni_editor_paste">EINFÜGEN</string>
+    <string name="omni_editor_check">PRÜFEN</string>
+    <string name="omni_editor_check_clear">In diesem Projekt wird nichts abgelehnt.</string>
     <string name="omni_editor_find">SUCHEN</string>
     <string name="omni_editor_find_ask">Text in dieser Datei suchen</string>
     <string name="omni_editor_find_none">Nicht in dieser Datei.</string>

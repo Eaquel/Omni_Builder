@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">GERİ AL</string>
     <string name="omni_editor_redo">İLERİ AL</string>
     <string name="omni_editor_paste">YAPIŞTIR</string>
+    <string name="omni_editor_check">DENETLE</string>
+    <string name="omni_editor_check_clear">Bu projede reddedilen bir şey yok.</string>
     <string name="omni_editor_find">BUL</string>
     <string name="omni_editor_find_ask">Bu dosyada aranacak metin</string>
     <string name="omni_editor_find_none">Bu dosyada yok.</string>

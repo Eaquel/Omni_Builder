@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">UNDO</string>
     <string name="omni_editor_redo">REDO</string>
     <string name="omni_editor_paste">PASTE</string>
+    <string name="omni_editor_check">CHECK</string>
+    <string name="omni_editor_check_clear">Nothing in this project is refused.</string>
     <string name="omni_editor_find">FIND</string>
     <string name="omni_editor_find_ask">Text to find in this file</string>
     <string name="omni_editor_find_none">Not in this file.</string>

@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">ОТМЕНИТЬ</string>
     <string name="omni_editor_redo">ВЕРНУТЬ</string>
     <string name="omni_editor_paste">ВСТАВИТЬ</string>
+    <string name="omni_editor_check">ПРОВЕРИТЬ</string>
+    <string name="omni_editor_check_clear">В этом проекте ничего не отклонено.</string>
     <string name="omni_editor_find">НАЙТИ</string>
     <string name="omni_editor_find_ask">Что искать в этом файле</string>
     <string name="omni_editor_find_none">В этом файле этого нет.</string>

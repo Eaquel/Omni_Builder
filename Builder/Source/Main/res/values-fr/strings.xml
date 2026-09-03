@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">ANNULER</string>
     <string name="omni_editor_redo">RÉTABLIR</string>
     <string name="omni_editor_paste">COLLER</string>
+    <string name="omni_editor_check">VÉRIFIER</string>
+    <string name="omni_editor_check_clear">Rien dans ce projet n\'est refusé.</string>
     <string name="omni_editor_find">CHERCHER</string>
     <string name="omni_editor_find_ask">Texte à chercher dans ce fichier</string>
     <string name="omni_editor_find_none">Pas dans ce fichier.</string>

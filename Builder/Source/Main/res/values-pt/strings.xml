@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">DESFAZER</string>
     <string name="omni_editor_redo">REFAZER</string>
     <string name="omni_editor_paste">COLAR</string>
+    <string name="omni_editor_check">VERIFICAR</string>
+    <string name="omni_editor_check_clear">Nada neste projeto é recusado.</string>
     <string name="omni_editor_find">PROCURAR</string>
     <string name="omni_editor_find_ask">Texto a procurar neste ficheiro</string>
     <string name="omni_editor_find_none">Não está neste ficheiro.</string>

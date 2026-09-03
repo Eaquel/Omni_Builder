@@ -147,6 +147,8 @@
     <string name="omni_editor_undo">DESHACER</string>
     <string name="omni_editor_redo">REHACER</string>
     <string name="omni_editor_paste">PEGAR</string>
+    <string name="omni_editor_check">REVISAR</string>
+    <string name="omni_editor_check_clear">Nada en este proyecto queda rechazado.</string>
     <string name="omni_editor_find">BUSCAR</string>
     <string name="omni_editor_find_ask">Texto que buscar en este archivo</string>
     <string name="omni_editor_find_none">No está en este archivo.</string>

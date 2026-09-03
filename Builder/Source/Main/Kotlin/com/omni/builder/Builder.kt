@@ -3382,6 +3382,38 @@ class BuilderActivity : Activity() {
             pasteInto(editor)
             mark()
         })
+        tools.addView(tool(getString(R.string.omni_editor_check), palette.warning) {
+            working({ Builder.nativeCheckProject(root) }) finished@{ answer ->
+                val checked = runCatching { CodeCheck.parse(answer) }.getOrElse {
+                    results.addView(notice(it.message ?: it.javaClass.simpleName, palette.error))
+                    return@finished
+                }
+                if (checked.clear) {
+                    editor.fault(-1)
+                    results.addView(
+                        notice(getString(R.string.omni_editor_check_clear), palette.ok)
+                    )
+                    return@finished
+                }
+                checked.refusal?.let { showRefusal(it, results) }
+                if (checked.file == path && checked.line > 0) {
+                    editor.fault(checked.line)
+                } else if (checked.file.isNotEmpty()) {
+                    editor.fault(-1)
+                    results.addView(
+                        row(
+                            checked.file,
+                            getString(R.string.omni_check_open),
+                            if (checked.line > 0) "${'$'}{checked.line}:${'$'}{checked.column}" else "",
+                            palette.error,
+                        ) {
+                            editorLine = checked.line
+                            go(Screen.Editor(root, checked.file))
+                        }
+                    )
+                }
+            }
+        })
         tools.addView(tool(getString(R.string.omni_editor_find), palette.accent) {
             askForName(getString(R.string.omni_editor_find_ask), findHere) { asked ->
                 findHere = asked
@@ -6339,6 +6371,8 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
     private var typedOne = '\u0000'
     private var matchHere = -1
     private var matchThere = -1
+    private var faultLine = -1
+    private val squiggle = Path()
 
     private val history = History()
 
@@ -6384,6 +6418,9 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             }
 
             override fun afterTextChanged(s: Editable?) {
+                if (!helping) {
+                    faultLine = -1
+                }
                 if (s != null && !helping && !replaying && typedOne != '\u0000') {
                     val typed = typedOne
                     typedOne = '\u0000'
@@ -6514,6 +6551,14 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             }
             walk += if (forward) 1 else -1
         }
+    }
+
+    fun fault(line: Int) {
+        faultLine = line
+        if (line > 0) {
+            showLine(line)
+        }
+        invalidate()
     }
 
     fun findFrom(needle: String, from: Int): Int {
@@ -6653,11 +6698,16 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
                 rule,
             )
 
+            val faulty = faultLine - 1
+            if (faulty in first..min(last, layout.lineCount - 1)) {
+                drawFault(canvas, layout, faulty)
+            }
+
             for (line in first..min(last, layout.lineCount - 1)) {
-                gutter.color = if (line == caretLine) {
-                    palette.accent
-                } else {
-                    Ink.fade(palette.muted, 0.55f)
+                gutter.color = when (line) {
+                    faulty -> palette.error
+                    caretLine -> palette.accent
+                    else -> Ink.fade(palette.muted, 0.55f)
                 }
                 canvas.drawText(
                     (line + 1).toString(),
@@ -6694,6 +6744,34 @@ class CodeEditor(context: Context, private var palette: Palette) : EditText(cont
             matchThere = -1
         }
         invalidate()
+    }
+
+    private fun drawFault(canvas: Canvas, layout: android.text.Layout, row: Int) {
+        val from = layout.getLineLeft(row)
+        val to = max(layout.getLineRight(row), from + textSize)
+        val base = layout.getLineBaseline(row) + textSize * 0.18f
+        val wave = textSize * 0.16f
+        squiggle.rewind()
+        squiggle.moveTo(from, base)
+        var x = from
+        var up = true
+        while (x < to) {
+            val next = min(x + wave * 2f, to)
+            squiggle.quadTo(
+                (x + next) / 2f,
+                if (up) base - wave else base + wave,
+                next,
+                base,
+            )
+            up = !up
+            x = next
+        }
+        rule.style = Paint.Style.STROKE
+        rule.strokeWidth = max(1f, textSize * 0.05f)
+        rule.color = palette.error
+        canvas.drawPath(squiggle, rule)
+        rule.style = Paint.Style.FILL
+        rule.strokeWidth = 1f
     }
 
     private fun drawMatch(canvas: Canvas, layout: android.text.Layout, at: Int) {
