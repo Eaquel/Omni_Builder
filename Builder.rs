@@ -386,11 +386,11 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "Launcher icons",
         status: Status::Beta,
         directive_section: 22,
-        summary: "One image becomes ten: five densities from 48 to 192 pixels, each in a square and a round shape with an anti-aliased circular mask, written into the resource table and pointed at by android:icon and android:roundIcon. aapt2 reports every density back.",
+        summary: "One image becomes twenty-three files: five densities from 48 to 192 pixels in a square and a round shape with an anti-aliased circular mask, an adaptive icon whose foreground sits inside the safe zone at five densities from 108 to 432, a monochrome layer of the same shape for a themed launcher, a background taken from the colour around the edge of the image, and the two XML drawables that put them together. aapt2 reports the adaptive icon as the application icon and reads back every layer.",
         missing: &[
-            "No adaptive icon: no foreground and background layers and no XML drawable, so the launcher cannot animate or mask it the way the platform can since API 26.",
+            "The background is one flat colour, taken from the edge of the image rather than drawn: an adaptive icon whose background is meant to be a picture needs that picture supplied.",
             "The round shape is a circle cut out of the square one, not a separately composed image.",
-            "No monochrome icon for themed launchers.",
+            "Nothing animates: the layers are still images, so a launcher can move them but this cannot describe how.",
         ],
     },
     Subsystem {
@@ -23420,7 +23420,11 @@ pub mod scaffold {
                     .with_context(format!("Path: {folder}"))
                     .with_context(format!("Reason: {why}"))
             })?;
-            let path = format!("{folder}/{}.png", made.name);
+            let path = if made.name.ends_with(".xml") {
+                format!("{folder}/{}", made.name)
+            } else {
+                format!("{folder}/{}.png", made.name)
+            };
             std::fs::write(&path, &made.bytes).map_err(|why| {
                 fail("EP045", "A launcher icon could not be written.")
                     .with_context(format!("Path: {path}"))
@@ -23440,21 +23444,28 @@ pub mod scaffold {
     pub fn launcher_files(root: &str) -> Vec<Supplied> {
         let base = format!("{}/{RES_FOLDER}", root.trim_end_matches('/'));
         let mut found = Vec::new();
-        for (folder, _) in crate::image::LAUNCHER_SIZES {
-            for name in [crate::builder::ICON_NAME, crate::builder::ROUND_ICON_NAME] {
-                let path = format!("{base}/{folder}/{name}.png");
-                let Ok(bytes) = std::fs::read(&path) else {
-                    continue;
-                };
-                if crate::image::read_png(&bytes).is_err() {
+        for (folder, file) in crate::image::launcher_files_expected() {
+            let path = format!("{base}/{folder}/{file}");
+            let Ok(bytes) = std::fs::read(&path) else {
+                continue;
+            };
+            let drawn = file.ends_with(".xml");
+            if drawn {
+                if bytes.is_empty() {
                     continue;
                 }
-                found.push(Supplied {
-                    folder: (*folder).to_string(),
-                    name: name.to_string(),
-                    bytes,
-                });
+            } else if crate::image::read_png(&bytes).is_err() {
+                continue;
             }
+            found.push(Supplied {
+                folder,
+                name: if drawn {
+                    file
+                } else {
+                    file.trim_end_matches(".png").to_string()
+                },
+                bytes,
+            });
         }
         found
     }
@@ -25560,30 +25571,178 @@ pub mod image {
         ("mipmap-xxxhdpi", 192),
     ];
 
+    pub const ADAPTIVE_SIZES: &[(&str, u32)] = &[
+        ("mipmap-mdpi", 108),
+        ("mipmap-hdpi", 162),
+        ("mipmap-xhdpi", 216),
+        ("mipmap-xxhdpi", 324),
+        ("mipmap-xxxhdpi", 432),
+    ];
+
+    pub const ADAPTIVE_FOLDER: &str = "mipmap-anydpi-v26";
+
+    pub const SAFE_NUMERATOR: u32 = 72;
+    pub const SAFE_DENOMINATOR: u32 = 108;
+
+    pub const FOREGROUND_NAME: &str = "ic_launcher_foreground";
+    pub const BACKGROUND_NAME: &str = "ic_launcher_background";
+    pub const MONOCHROME_NAME: &str = "ic_launcher_monochrome";
+
+    pub fn adaptive_icon() -> String {
+        format!(
+            "<adaptive-icon xmlns:android=\"http://schemas.android.com/apk/res/android\">\n\
+             \x20 <background android:drawable=\"@mipmap/{BACKGROUND_NAME}\" />\n\
+             \x20 <foreground android:drawable=\"@mipmap/{FOREGROUND_NAME}\" />\n\
+             \x20 <monochrome android:drawable=\"@mipmap/{MONOCHROME_NAME}\" />\n\
+             </adaptive-icon>\n"
+        )
+    }
+
+    pub fn ground_colour(raster: &Raster) -> [u8; 4] {
+        let mut red = 0u64;
+        let mut green = 0u64;
+        let mut blue = 0u64;
+        let mut weight = 0u64;
+        let edge = (raster.width.min(raster.height) / 8).max(1);
+        for y in 0..raster.height {
+            for x in 0..raster.width {
+                let border =
+                    x < edge || y < edge || x + edge >= raster.width || y + edge >= raster.height;
+                if !border {
+                    continue;
+                }
+                let pixel = raster.at(x, y);
+                let alpha = u64::from(pixel[3]);
+                red += u64::from(pixel[0]) * alpha;
+                green += u64::from(pixel[1]) * alpha;
+                blue += u64::from(pixel[2]) * alpha;
+                weight += alpha;
+            }
+        }
+        if weight == 0 {
+            return [0xff, 0xff, 0xff, 0xff];
+        }
+        [
+            (red / weight) as u8,
+            (green / weight) as u8,
+            (blue / weight) as u8,
+            0xff,
+        ]
+    }
+
+    pub fn inside_the_safe_zone(raster: &Raster, layer: u32) -> Raster {
+        let mut out = Raster::new(layer, layer);
+        let inner = (layer * SAFE_NUMERATOR / SAFE_DENOMINATOR).max(1);
+        let art = resize(raster, inner, inner);
+        let offset = (layer - inner) / 2;
+        for y in 0..inner {
+            for x in 0..inner {
+                out.put(x + offset, y + offset, art.at(x, y));
+            }
+        }
+        out
+    }
+
+    fn filled(edge: u32, colour: [u8; 4]) -> Raster {
+        let mut out = Raster::new(edge, edge);
+        for y in 0..edge {
+            for x in 0..edge {
+                out.put(x, y, colour);
+            }
+        }
+        out
+    }
+
+    fn silhouette(raster: &Raster) -> Raster {
+        let mut out = Raster::new(raster.width, raster.height);
+        for y in 0..raster.height {
+            for x in 0..raster.width {
+                let pixel = raster.at(x, y);
+                out.put(x, y, [0, 0, 0, pixel[3]]);
+            }
+        }
+        out
+    }
+
     #[derive(Clone, Debug)]
     pub struct Launcher {
-        pub folder: &'static str,
-        pub name: &'static str,
+        pub folder: String,
+        pub name: String,
         pub edge: u32,
         pub bytes: Vec<u8>,
     }
 
+    pub fn launcher_files_expected() -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (folder, _) in LAUNCHER_SIZES {
+            out.push(((*folder).to_string(), "ic_launcher.png".to_string()));
+            out.push(((*folder).to_string(), "ic_launcher_round.png".to_string()));
+        }
+        for (folder, _) in ADAPTIVE_SIZES {
+            out.push(((*folder).to_string(), format!("{FOREGROUND_NAME}.png")));
+            out.push(((*folder).to_string(), format!("{MONOCHROME_NAME}.png")));
+        }
+        out.push((
+            ADAPTIVE_SIZES[0].0.to_string(),
+            format!("{BACKGROUND_NAME}.png"),
+        ));
+        out.push((ADAPTIVE_FOLDER.to_string(), "ic_launcher.xml".to_string()));
+        out.push((
+            ADAPTIVE_FOLDER.to_string(),
+            "ic_launcher_round.xml".to_string(),
+        ));
+        out
+    }
+
     pub fn launcher_set(source: &[u8]) -> Result<Vec<Launcher>, Diagnostic> {
         let raster = decode(source)?;
-        let mut out = Vec::with_capacity(LAUNCHER_SIZES.len() * 2);
+        let mut out = Vec::with_capacity(LAUNCHER_SIZES.len() * 2 + ADAPTIVE_SIZES.len() * 2 + 3);
         for (folder, edge) in LAUNCHER_SIZES {
             let square = resize(&raster, *edge, *edge);
             out.push(Launcher {
-                folder,
-                name: "ic_launcher",
+                folder: (*folder).to_string(),
+                name: "ic_launcher".to_string(),
                 edge: *edge,
                 bytes: encode_smallest(&square)?,
             });
             out.push(Launcher {
-                folder,
-                name: "ic_launcher_round",
+                folder: (*folder).to_string(),
+                name: "ic_launcher_round".to_string(),
                 edge: *edge,
                 bytes: encode_smallest(&rounded(&square))?,
+            });
+        }
+
+        for (folder, layer) in ADAPTIVE_SIZES {
+            let front = inside_the_safe_zone(&raster, *layer);
+            out.push(Launcher {
+                folder: (*folder).to_string(),
+                name: FOREGROUND_NAME.to_string(),
+                edge: *layer,
+                bytes: encode_smallest(&front)?,
+            });
+            out.push(Launcher {
+                folder: (*folder).to_string(),
+                name: MONOCHROME_NAME.to_string(),
+                edge: *layer,
+                bytes: encode_smallest(&silhouette(&front))?,
+            });
+        }
+
+        let (ground_folder, ground_edge) = ADAPTIVE_SIZES[0];
+        out.push(Launcher {
+            folder: ground_folder.to_string(),
+            name: BACKGROUND_NAME.to_string(),
+            edge: ground_edge,
+            bytes: encode_smallest(&filled(ground_edge, ground_colour(&raster)))?,
+        });
+
+        for name in ["ic_launcher.xml", "ic_launcher_round.xml"] {
+            out.push(Launcher {
+                folder: ADAPTIVE_FOLDER.to_string(),
+                name: name.to_string(),
+                edge: 0,
+                bytes: adaptive_icon().into_bytes(),
             });
         }
         Ok(out)
@@ -28613,6 +28772,9 @@ pub mod builder {
     }
 
     fn entry_for(folder: &str, name: &str) -> String {
+        if name.ends_with(".xml") {
+            return format!("res/{folder}/{name}");
+        }
         format!("res/{folder}/{name}.png")
     }
 
@@ -28626,8 +28788,8 @@ pub mod builder {
         Ok(crate::image::launcher_set(source)?
             .into_iter()
             .map(|made| crate::scaffold::Supplied {
-                folder: made.folder.to_string(),
-                name: made.name.to_string(),
+                folder: made.folder,
+                name: made.name,
                 bytes: made.bytes,
             })
             .collect())
@@ -28681,23 +28843,33 @@ pub mod builder {
             crate::resources::Table::for_package(crate::resources::APPLICATION_PACKAGE_ID);
         let mut files = Vec::with_capacity(set.len() + project.resources.len());
 
+        let mut compiling: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
         for made in &set {
             let entry = entry_for(&made.folder, &made.name);
-            if !table.read_file(&made.folder, &format!("{}.png", made.name), &entry, sink) {
+            let drawn = made.name.ends_with(".xml");
+            let named = if drawn {
+                made.name.clone()
+            } else {
+                format!("{}.png", made.name)
+            };
+            if !table.read_file(&made.folder, &named, &entry, sink) {
                 return Err(fail(
                     "EB040",
                     "The application image could not be given an identifier.",
                 )
                 .with_context(format!("Entry: {entry}")));
             }
-            files.push((entry, made.bytes.clone()));
+            if drawn {
+                compiling.push((entry, made.clone()));
+            } else {
+                files.push((entry, made.bytes.clone()));
+            }
         }
 
-        let mut compiling: Vec<(String, crate::scaffold::Supplied)> = Vec::new();
         for held in &project.resources {
-            if files
-                .iter()
-                .any(|(entry, _)| *entry == format!("res/{}/{}", held.folder, held.name))
+            let already = format!("res/{}/{}", held.folder, held.name);
+            if files.iter().any(|(entry, _)| *entry == already)
+                || compiling.iter().any(|(entry, _)| *entry == already)
             {
                 continue;
             }
@@ -44732,9 +44904,21 @@ public final class MainActivity extends Activity {
 
         let bytes = std::fs::read(&source).unwrap();
         let set = super::image::launcher_set(&bytes).expect("a launcher set must be produced");
-        assert_eq!(set.len(), super::image::LAUNCHER_SIZES.len() * 2);
+        assert_eq!(
+            set.len(),
+            super::image::launcher_files_expected().len(),
+            "what is written and what is read back have to be the same list"
+        );
 
         for made in &set {
+            if made.name.ends_with(".xml") {
+                let text = String::from_utf8(made.bytes.clone()).expect("the icon is text");
+                assert!(text.contains("<adaptive-icon"), "{text}");
+                assert!(text.contains(super::image::FOREGROUND_NAME), "{text}");
+                assert!(text.contains(super::image::BACKGROUND_NAME), "{text}");
+                assert!(text.contains(super::image::MONOCHROME_NAME), "{text}");
+                continue;
+            }
             let header = super::image::read_png(&made.bytes)
                 .unwrap_or_else(|error| panic!("{} {}", error.code, error.message));
             assert_eq!(header.width, made.edge, "{} {}", made.folder, made.name);
@@ -44746,6 +44930,53 @@ public final class MainActivity extends Activity {
             assert_eq!(back.width, made.edge, "{} {}", made.folder, made.name);
             assert_eq!(back.height, made.edge);
         }
+
+        for (folder, layer) in super::image::ADAPTIVE_SIZES {
+            let front = set
+                .iter()
+                .find(|made| made.folder == *folder && made.name == super::image::FOREGROUND_NAME)
+                .expect("every density carries a foreground");
+            let pixels = super::image::decode(&front.bytes).unwrap();
+            assert_eq!(pixels.width, *layer);
+            assert_eq!(pixels.at(0, 0)[3], 0, "{folder}: the corner must be clear");
+            assert_eq!(
+                pixels.at(layer / 2, 1)[3],
+                0,
+                "{folder}: the top edge is outside the safe zone"
+            );
+
+            let mono = set
+                .iter()
+                .find(|made| made.folder == *folder && made.name == super::image::MONOCHROME_NAME)
+                .expect("and a monochrome layer beside it");
+            let flat = super::image::decode(&mono.bytes).unwrap();
+            for (x, y) in [(layer / 2, layer / 2), (layer / 3, layer / 2)] {
+                let held = flat.at(x, y);
+                assert_eq!(
+                    [held[0], held[1], held[2]],
+                    [0, 0, 0],
+                    "{folder}: a monochrome layer carries shape and no colour"
+                );
+                assert_eq!(
+                    held[3],
+                    pixels.at(x, y)[3],
+                    "{folder}: and the shape is the foreground's own"
+                );
+            }
+        }
+
+        let ground = set
+            .iter()
+            .find(|made| made.name == super::image::BACKGROUND_NAME)
+            .expect("a background to put it on");
+        let filled = super::image::decode(&ground.bytes).unwrap();
+        let corner = filled.at(0, 0);
+        assert_eq!(corner[3], 255, "the background is opaque");
+        assert_eq!(
+            corner,
+            filled.at(filled.width - 1, filled.height - 1),
+            "and one colour throughout"
+        );
 
         for (folder, edge) in super::image::LAUNCHER_SIZES {
             let square = set
@@ -45233,12 +45464,12 @@ public final class MainActivity extends Activity {
         let outcome = super::bundle::write(&project).expect("a compliant project must bundle");
         assert!(outcome.carries_code);
         assert_eq!(outcome.carries_image, project.icon.is_some());
-        let images = super::image::LAUNCHER_SIZES.len() * 2;
+        let images = super::image::launcher_files_expected().len();
         assert_eq!(
             outcome.entries,
             if outcome.carries_image { 6 + images } else { 5 },
             "config, manifest, dex, a native library, a root file, and when there is an image \
-             the resource table and {images} launcher images"
+             the resource table and {images} launcher files"
         );
 
         let directory = temp_directory("omni-bundle");
@@ -45784,7 +46015,7 @@ public final class MainActivity extends Activity {
         assert!(project.icon.is_some(), "the stored image must be read back");
         assert_eq!(
             project.launcher.len(),
-            super::image::LAUNCHER_SIZES.len() * 2,
+            super::image::launcher_files_expected().len(),
             "choosing the image wrote the launcher icons into the project's own folders"
         );
 
@@ -45842,19 +46073,23 @@ public final class MainActivity extends Activity {
             String::from_utf8_lossy(&badging.stderr)
         );
         assert!(badging.status.success(), "{report}");
-        for (folder, density) in [
-            ("mipmap-mdpi", 160),
-            ("mipmap-hdpi", 240),
-            ("mipmap-xhdpi", 320),
-            ("mipmap-xxhdpi", 480),
-            ("mipmap-xxxhdpi", 640),
-        ] {
-            let wanted = format!("application-icon-{density}:'res/{folder}/ic_launcher.png'");
+        for density in [160, 240, 320, 480, 640] {
+            let wanted = format!(
+                "application-icon-{density}:'res/{}/ic_launcher.xml'",
+                super::image::ADAPTIVE_FOLDER
+            );
             assert!(
                 report.contains(&wanted),
                 "aapt2 must report {wanted}:\n{report}"
             );
         }
+        assert!(
+            report.contains(&format!(
+                "application: label='My App' icon='res/{}/ic_launcher.xml'",
+                super::image::ADAPTIVE_FOLDER
+            )),
+            "aapt2 must name the adaptive icon as the application icon:\n{report}"
+        );
 
         let tree = std::process::Command::new(&aapt2)
             .args([
@@ -45872,17 +46107,49 @@ public final class MainActivity extends Activity {
             manifest.contains("android:icon(0x01010002)=@0x7f010000"),
             "the manifest must point at the identifier the table assigned:\n{manifest}"
         );
+        let round = manifest
+            .split("android:roundIcon(0x0101052c)=@0x")
+            .nth(1)
+            .map(|rest| rest.split_whitespace().next().unwrap_or("").to_string())
+            .expect("the round icon must be pointed at as well");
         assert!(
-            manifest.contains("android:roundIcon(0x0101052c)=@0x7f010001"),
-            "the round icon must be pointed at as well:\n{manifest}"
+            round.starts_with("7f01") && round != "7f010000",
+            "the round icon points at {round}, which is not a mipmap of its own"
         );
+
+        let anydpi = format!("res/{}/ic_launcher.xml", super::image::ADAPTIVE_FOLDER);
+        assert!(
+            archive.entries().iter().any(|entry| entry.name == anydpi),
+            "the package must carry {anydpi}"
+        );
+        let drawn = std::process::Command::new(&aapt2)
+            .args(["dump", "xmltree", path.to_str().unwrap(), "--file", &anydpi])
+            .output()
+            .unwrap();
+        let layers = String::from_utf8_lossy(&drawn.stdout).to_string();
+        assert!(drawn.status.success(), "{layers}");
+        for element in ["adaptive-icon", "background", "foreground", "monochrome"] {
+            assert!(
+                layers.contains(&format!("E: {element} ")),
+                "aapt2 does not report {element}:\n{layers}"
+            );
+        }
+        for (folder, _) in super::image::ADAPTIVE_SIZES {
+            for name in [super::image::FOREGROUND_NAME, super::image::MONOCHROME_NAME] {
+                let wanted = format!("res/{folder}/{name}.png");
+                assert!(
+                    archive.entries().iter().any(|entry| entry.name == wanted),
+                    "the package must carry {wanted}"
+                );
+            }
+        }
 
         std::fs::remove_dir_all(&directory).ok();
         eprintln!(
-            "icon: one {} byte image became {} launcher images across {} densities, square and \
-             round, and aapt2 reports them as the application icon",
+            "icon: one {} byte image became {} launcher files across {} densities -- square, \
+             round, and an adaptive icon with its three layers -- and aapt2 reports them",
             project.icon.as_ref().map(|png| png.len()).unwrap_or(0),
-            super::image::LAUNCHER_SIZES.len() * 2,
+            super::image::launcher_files_expected().len(),
             super::image::LAUNCHER_SIZES.len(),
         );
     }
@@ -50225,6 +50492,8 @@ class Screen
         const RETIRED: &[&str] = &[
             "there is no multidex",
             "The certificate's own signature is never checked",
+            "No adaptive icon",
+            "No monochrome icon for themed launchers",
             "No extensions: no basic constraints",
             "No fields, no virtual methods",
             "Nothing writes a class file",
