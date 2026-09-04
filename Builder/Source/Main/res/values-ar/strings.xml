@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">كلمتا السر غير متطابقتين.</string>
     <string name="omni_key_password_warning">لا شيء هنا يستعيد هذا المفتاح إن ضاعت كلمة سره، وكل تطبيق موقَّع به سيتوقف عن قبول التحديث.</string>
     <string name="omni_action_create">أنشئ</string>
-    <string name="omni_action_build">ابنِ</string>
     <string name="omni_action_build_both">ابنِ APK و AAB</string>
     <string name="omni_action_save">احفظ</string>
     <string name="omni_action_delete">احذف</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">المشروع</string>
     <string name="omni_files_empty">هذا المجلد فارغ.</string>
     <string name="omni_files_split">تقسيم</string>
+    <string name="omni_defaults_title">مشاريع جديدة</string>
+    <string name="omni_defaults_seal">كل حزمة تُبنى هنا تحمل ختمًا مرتبطًا بالمفتاح الذي وقّعها. النسخة المعاد تغليفها تقدّم شهادة أخرى، فيرفض الختم البدء.</string>
     <string name="omni_debugging_title">تصحيح الأخطاء</string>
     <string name="omni_debugging_permission">الإعدادات المحمية</string>
     <string name="omni_debugging_held">ممنوح</string>

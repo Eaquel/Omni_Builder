@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">Die beiden Passwörter sind nicht gleich.</string>
     <string name="omni_key_password_warning">Nichts hier kann diesen Schlüssel wiederherstellen, wenn das Passwort verloren geht, und jede damit signierte Anwendung wäre nicht mehr aktualisierbar.</string>
     <string name="omni_action_create">ERSTELLEN</string>
-    <string name="omni_action_build">BAUEN</string>
     <string name="omni_action_build_both">APK UND AAB BAUEN</string>
     <string name="omni_action_save">SPEICHERN</string>
     <string name="omni_action_delete">LÖSCHEN</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Projekt</string>
     <string name="omni_files_empty">Dieser Ordner ist leer.</string>
     <string name="omni_files_split">TEILEN</string>
+    <string name="omni_defaults_title">Neue Projekte</string>
+    <string name="omni_defaults_seal">Jedes Paket, das hier entsteht, trägt ein Siegel gegen den Schlüssel, der es signiert hat. Eine neu verpackte Kopie zeigt ein anderes Zertifikat, und das Siegel verweigert den Start.</string>
     <string name="omni_debugging_title">Fehlersuche</string>
     <string name="omni_debugging_permission">Sichere Einstellungen</string>
     <string name="omni_debugging_held">erteilt</string>

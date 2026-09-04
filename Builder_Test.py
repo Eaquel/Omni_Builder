@@ -605,6 +605,20 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
                     lines.add(plain(said.group(2)))
                 break
 
+        if path == CORE:
+            policy = text[text.index("pub mod guard {"):text.index("\npub mod axml {")]
+            for rule in re.finditer(
+                r'\(\s*"E[A-Z]\d{3}",\s*"[a-z-]+",\s*"((?:[^"\\]|\\.)*)",\s*\)', policy, re.S
+            ):
+                lines.add(plain(rule.group(1)))
+            for said in re.finditer(
+                r'(?:why|remedy):\s*"((?:[^"\\]|\\.)*)"', policy, re.S
+            ):
+                lines.add(plain(said.group(1)))
+            for built in re.finditer(r'(?:why|remedy):\s*format!', policy):
+                woven.append("the policy builds a finding from parts")
+                del built
+
         for said in re.finditer(r'with_suggestion\(\s*(format!\(\s*)?"((?:[^"\\]|\\.)*)"', text, re.S):
             if said.group(1):
                 woven.append(f"{path.name}: a suggestion is built from parts")

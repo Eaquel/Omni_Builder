@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">İki parola aynı değil.</string>
     <string name="omni_key_password_warning">Parola kaybolursa buradaki hiçbir şey bu anahtarı geri getiremez ve onunla imzalanmış her uygulama güncellenemez hale gelir.</string>
     <string name="omni_action_create">OLUŞTUR</string>
-    <string name="omni_action_build">DERLE</string>
     <string name="omni_action_build_both">APK VE AAB DERLE</string>
     <string name="omni_action_save">KAYDET</string>
     <string name="omni_action_delete">SİL</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Proje</string>
     <string name="omni_files_empty">Bu klasör boş.</string>
     <string name="omni_files_split">BÖL</string>
+    <string name="omni_defaults_title">Yeni projeler</string>
+    <string name="omni_defaults_seal">Bu yapının ürettiği her paket, onu imzalayan anahtara karşı bir mühür taşır. Yeniden paketlenmiş bir kopya başka bir sertifika sunar ve mühür başlamayı reddeder.</string>
     <string name="omni_debugging_title">Hata ayıklama</string>
     <string name="omni_debugging_permission">Güvenli ayarlar</string>
     <string name="omni_debugging_held">verildi</string>

@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">Las dos contraseñas no son iguales.</string>
     <string name="omni_key_password_warning">Nada de aquí puede recuperar esta clave si se pierde la contraseña, y toda aplicación firmada con ella dejaría de poder actualizarse.</string>
     <string name="omni_action_create">CREAR</string>
-    <string name="omni_action_build">CONSTRUIR</string>
     <string name="omni_action_build_both">CONSTRUIR APK Y AAB</string>
     <string name="omni_action_save">GUARDAR</string>
     <string name="omni_action_delete">BORRAR</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Proyecto</string>
     <string name="omni_files_empty">Esta carpeta está vacía.</string>
     <string name="omni_files_split">DIVIDIR</string>
+    <string name="omni_defaults_title">Proyectos nuevos</string>
+    <string name="omni_defaults_seal">Cada paquete que se construye aquí lleva un sello contra la clave que lo firmó. Una copia reempaquetada presenta otro certificado, y el sello se niega a arrancar.</string>
     <string name="omni_debugging_title">Depuración</string>
     <string name="omni_debugging_permission">Ajustes seguros</string>
     <string name="omni_debugging_held">concedido</string>

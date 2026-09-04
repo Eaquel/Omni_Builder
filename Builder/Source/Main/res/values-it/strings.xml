@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">Le due password non sono uguali.</string>
     <string name="omni_key_password_warning">Niente qui può recuperare questa chiave se la password va persa, e ogni applicazione firmata con essa non sarebbe più aggiornabile.</string>
     <string name="omni_action_create">CREA</string>
-    <string name="omni_action_build">COSTRUISCI</string>
     <string name="omni_action_build_both">COSTRUISCI APK E AAB</string>
     <string name="omni_action_save">SALVA</string>
     <string name="omni_action_delete">ELIMINA</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Progetto</string>
     <string name="omni_files_empty">Questa cartella è vuota.</string>
     <string name="omni_files_split">DIVIDI</string>
+    <string name="omni_defaults_title">Nuovi progetti</string>
+    <string name="omni_defaults_seal">Ogni pacchetto prodotto qui porta un sigillo legato alla chiave che lo ha firmato. Una copia riconfezionata presenta un altro certificato, e il sigillo rifiuta di avviarsi.</string>
     <string name="omni_debugging_title">Debug</string>
     <string name="omni_debugging_permission">Impostazioni protette</string>
     <string name="omni_debugging_held">concesso</string>

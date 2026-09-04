@@ -1105,6 +1105,9 @@ object Preferences {
     private const val SIGNING_KEY = "signing_key"
     private const val TIMINGS = "build_timings"
     private const val WIRELESS = "wireless_debugging"
+    private const val NEW_PACKAGE = "new_package"
+    private const val NEW_MIN_SDK = "new_min_sdk"
+    private const val NEW_TARGET_SDK = "new_target_sdk"
 
     val LANGUAGES: List<Pair<String, String>> = listOf(
         "en" to "English",
@@ -1126,6 +1129,23 @@ object Preferences {
 
     fun setLanguage(context: Context, tag: String) {
         store(context).edit().putString(LANGUAGE, tag).apply()
+    }
+
+    fun newPackage(context: Context, fallback: String): String =
+        store(context).getString(NEW_PACKAGE, "").orEmpty().ifEmpty { fallback }
+
+    fun setNewPackage(context: Context, value: String) {
+        store(context).edit().putString(NEW_PACKAGE, value).apply()
+    }
+
+    fun newMinSdk(context: Context, fallback: Int): Int =
+        store(context).getInt(NEW_MIN_SDK, fallback)
+
+    fun newTargetSdk(context: Context, fallback: Int): Int =
+        store(context).getInt(NEW_TARGET_SDK, fallback)
+
+    fun setNewPlatforms(context: Context, minimum: Int, target: Int) {
+        store(context).edit().putInt(NEW_MIN_SDK, minimum).putInt(NEW_TARGET_SDK, target).apply()
     }
 
     fun keepsWirelessDebugging(context: Context): Boolean =
@@ -2964,6 +2984,9 @@ class BuilderActivity : Activity() {
 
         val ONLY_ABI = listOf("arm64-v8a")
 
+        const val OLDEST_PLATFORM = 30
+        const val NEWEST_PLATFORM = 37
+
         val ANDROID_RELEASES = listOf(
             30 to "11", 31 to "12", 32 to "12L", 33 to "13",
             34 to "14", 35 to "15", 36 to "16", 37 to "17",
@@ -3042,8 +3065,8 @@ class BuilderActivity : Activity() {
     private var formVersionName = "1.0.0"
     private var formVersionCode = "1"
     private var formStep = 0
-    private var formMinSdk = 30
-    private var formTargetSdk = 37
+    private var formMinSdk = OLDEST_PLATFORM
+    private var formTargetSdk = NEWEST_PLATFORM
     private val formLanguages = linkedSetOf("java")
     private val formLocales = linkedSetOf<String>()
     private var formImage: String? = null
@@ -3381,6 +3404,9 @@ class BuilderActivity : Activity() {
         }
         if (next is Screen.NewProject && screen !is Screen.NewProject) {
             formStep = 0
+            formPackage = Preferences.newPackage(this, DEFAULT_PACKAGE)
+            formMinSdk = Preferences.newMinSdk(this, OLDEST_PLATFORM)
+            formTargetSdk = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
         }
         screen = next
         answerBackTheWayThisScreenWants()
@@ -3954,65 +3980,6 @@ class BuilderActivity : Activity() {
     }
 
     private fun renderFiles(root: String, folder: String) {
-        val summary = summaryOf(root)
-        content.addView(heading(summary?.label?.ifEmpty { null } ?: File(root).name))
-
-        val identity = card()
-        val face = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, gap(1), 0, gap(1))
-            isClickable = true
-            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
-            setOnClickListener { chooseImage(root) }
-        }
-        face.addView(
-            thumbnail(File(root, "${PROJECT_RES}/${PROJECT_ICON}").absolutePath, gap(12)),
-            LinearLayout.LayoutParams(gap(12), gap(12)).apply { marginEnd = gap(3) },
-        )
-        face.addView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(
-                    TextView(context).apply {
-                        text = getString(R.string.omni_form_image)
-                        setTextColor(palette.foreground)
-                        typeface = Type.strong
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                    }
-                )
-                addView(
-                    TextView(context).apply {
-                        text = summary?.let {
-                            "${it.packageName}  ·  ${it.versionName}  ·  " +
-                                "API ${it.minSdk}–${it.targetSdk}"
-                        } ?: getString(R.string.omni_form_image_choose)
-                        setTextColor(palette.muted)
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                        setLineSpacing(gap(1).toFloat(), 1f)
-                    }
-                )
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-        )
-        face.addView(
-            TextView(this).apply {
-                text = getString(R.string.omni_action_change)
-                setTextColor(palette.accent)
-                typeface = Type.strong
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                letterSpacing = 0.08f
-            }
-        )
-        identity.addView(face)
-        content.addView(identity)
-
-        if (folder.isEmpty()) {
-            content.addView(primary(getString(R.string.omni_action_build)) {
-                go(Screen.Build(root))
-            })
-        }
-
         content.addView(breadcrumb(root, folder))
         content.addView(sortRow())
 
@@ -6330,6 +6297,49 @@ class BuilderActivity : Activity() {
             go(Screen.Keys)
         })
         content.addView(signing)
+
+        content.addView(heading(getString(R.string.omni_defaults_title)))
+        val defaults = card()
+        defaults.addView(
+            row(
+                getString(R.string.omni_form_package),
+                Preferences.newPackage(this, DEFAULT_PACKAGE),
+                getString(R.string.omni_action_change),
+                palette.accent,
+            ) {
+                askForName(
+                    getString(R.string.omni_form_package),
+                    Preferences.newPackage(this, DEFAULT_PACKAGE),
+                ) { named ->
+                    Preferences.setNewPackage(this, named.trim())
+                    render(false)
+                }
+            }
+        )
+        content.addView(defaults)
+
+        content.addView(label(getString(R.string.omni_form_min_sdk)))
+        val chosenMin = Preferences.newMinSdk(this, OLDEST_PLATFORM)
+        val chosenTarget = Preferences.newTargetSdk(this, NEWEST_PLATFORM)
+        content.addView(
+            chips(ANDROID_RELEASES.map { it.second }, { ANDROID_RELEASES[it].first == chosenMin }) {
+                val picked = ANDROID_RELEASES[it].first
+                Preferences.setNewPlatforms(this, picked, maxOf(picked, chosenTarget))
+                render(false)
+            }
+        )
+        content.addView(label(getString(R.string.omni_form_target_sdk)))
+        content.addView(
+            chips(
+                ANDROID_RELEASES.map { it.second },
+                { ANDROID_RELEASES[it].first == chosenTarget },
+            ) {
+                val picked = ANDROID_RELEASES[it].first
+                Preferences.setNewPlatforms(this, minOf(picked, chosenMin), picked)
+                render(false)
+            }
+        )
+        content.addView(quiet(getString(R.string.omni_defaults_seal)))
 
         content.addView(heading(getString(R.string.omni_debugging_title)))
         val debugging = card()

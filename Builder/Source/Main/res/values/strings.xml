@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">The two passwords are not the same.</string>
     <string name="omni_key_password_warning">Nothing here can recover this key if the password is lost, and every application signed with it would stop being updatable.</string>
     <string name="omni_action_create">CREATE</string>
-    <string name="omni_action_build">BUILD</string>
     <string name="omni_action_build_both">BUILD APK AND AAB</string>
     <string name="omni_action_save">SAVE</string>
     <string name="omni_action_delete">DELETE</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Project</string>
     <string name="omni_files_empty">This folder is empty.</string>
     <string name="omni_files_split">SPLIT</string>
+    <string name="omni_defaults_title">New projects</string>
+    <string name="omni_defaults_seal">Every package this builds carries a seal against the key that signed it. A repackaged copy presents a different certificate, and the seal refuses to start.</string>
     <string name="omni_debugging_title">Debugging</string>
     <string name="omni_debugging_permission">Secure settings</string>
     <string name="omni_debugging_held">granted</string>

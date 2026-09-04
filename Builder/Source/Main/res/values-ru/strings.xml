@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">Два пароля не совпадают.</string>
     <string name="omni_key_password_warning">Ничто здесь не восстановит этот ключ, если пароль потерян, и каждое подписанное им приложение перестанет обновляться.</string>
     <string name="omni_action_create">СОЗДАТЬ</string>
-    <string name="omni_action_build">СОБРАТЬ</string>
     <string name="omni_action_build_both">СОБРАТЬ APK И AAB</string>
     <string name="omni_action_save">СОХРАНИТЬ</string>
     <string name="omni_action_delete">УДАЛИТЬ</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Проект</string>
     <string name="omni_files_empty">Эта папка пуста.</string>
     <string name="omni_files_split">РАЗДЕЛИТЬ</string>
+    <string name="omni_defaults_title">Новые проекты</string>
+    <string name="omni_defaults_seal">Каждый пакет, собранный здесь, несёт печать, привязанную к ключу, которым он подписан. Переупакованная копия предъявляет другой сертификат, и печать отказывается запускаться.</string>
     <string name="omni_debugging_title">Отладка</string>
     <string name="omni_debugging_permission">Защищённые настройки</string>
     <string name="omni_debugging_held">выдано</string>

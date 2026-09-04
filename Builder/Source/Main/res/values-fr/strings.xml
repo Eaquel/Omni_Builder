@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">Les deux mots de passe ne sont pas les mêmes.</string>
     <string name="omni_key_password_warning">Rien ici ne peut récupérer cette clé si le mot de passe est perdu, et toute application signée avec elle cesserait de pouvoir être mise à jour.</string>
     <string name="omni_action_create">CRÉER</string>
-    <string name="omni_action_build">CONSTRUIRE</string>
     <string name="omni_action_build_both">CONSTRUIRE APK ET AAB</string>
     <string name="omni_action_save">ENREGISTRER</string>
     <string name="omni_action_delete">SUPPRIMER</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Projet</string>
     <string name="omni_files_empty">Ce dossier est vide.</string>
     <string name="omni_files_split">DIVISER</string>
+    <string name="omni_defaults_title">Nouveaux projets</string>
+    <string name="omni_defaults_seal">Chaque paquet produit ici porte un sceau lié à la clé qui l\'a signé. Une copie réempaquetée présente un autre certificat, et le sceau refuse de démarrer.</string>
     <string name="omni_debugging_title">Débogage</string>
     <string name="omni_debugging_permission">Réglages protégés</string>
     <string name="omni_debugging_held">accordée</string>

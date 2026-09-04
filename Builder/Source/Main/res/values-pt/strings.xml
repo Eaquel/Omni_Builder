@@ -48,7 +48,6 @@
     <string name="omni_key_password_mismatch">As duas senhas não são iguais.</string>
     <string name="omni_key_password_warning">Nada aqui recupera esta chave se a senha se perder, e toda aplicação assinada com ela deixaria de poder ser atualizada.</string>
     <string name="omni_action_create">CRIAR</string>
-    <string name="omni_action_build">CONSTRUIR</string>
     <string name="omni_action_build_both">CONSTRUIR APK E AAB</string>
     <string name="omni_action_save">GUARDAR</string>
     <string name="omni_action_delete">APAGAR</string>
@@ -66,6 +65,8 @@
     <string name="omni_files_root">Projeto</string>
     <string name="omni_files_empty">Esta pasta está vazia.</string>
     <string name="omni_files_split">DIVIDIR</string>
+    <string name="omni_defaults_title">Projetos novos</string>
+    <string name="omni_defaults_seal">Cada pacote produzido aqui traz um selo ligado à chave que o assinou. Uma cópia reempacotada apresenta outro certificado, e o selo recusa-se a arrancar.</string>
     <string name="omni_debugging_title">Depuração</string>
     <string name="omni_debugging_permission">Definições protegidas</string>
     <string name="omni_debugging_held">concedida</string>

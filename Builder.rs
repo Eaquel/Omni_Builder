@@ -1044,6 +1044,8 @@ pub mod speech {
         ("A class reference points at no class.", "Bir sınıf başvurusu hiçbir sınıfı göstermiyor."),
         ("A code length symbol is outside the alphabet.", "Bir kod uzunluğu simgesi alfabenin dışında."),
         ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Bir kurucu, ne kendi sınıfına ne de üst sınıfına ait olan bir kurucuya devrediyor."),
+        ("A content provider does not hand out access to everything it holds.", "İçerik sağlayıcı, taşıdığı her şeye erişim dağıtmaz."),
+        ("A debuggable application lets any process on the device attach a debugger, read its memory and run code as it.", "Hata ayıklanabilir bir uygulama, cihazdaki herhangi bir sürecin ona hata ayıklayıcı bağlamasına, belleğini okumasına ve onun adına kod çalıştırmasına izin verir."),
         ("A dependency could not be read.", "Bir bağımlılık okunamadı."),
         ("A dependency holds something squeezed in a way this does not read.", "Bir bağımlılık, buranın okumadığı bir yöntemle sıkıştırılmış içerik taşıyor."),
         ("A dependency is a jar, which is a zip of class files.", "Bir bağımlılık jar'dır; jar da sınıf dosyalarından oluşan bir zip'tir."),
@@ -1230,11 +1232,13 @@ pub mod speech {
         ("An Android library holds no code.", "Bir Android kütüphanesi hiç kod taşımıyor."),
         ("An XML document has exactly one.", "Bir XML belgesinde tam olarak bir tane bulunur."),
         ("An aar carries its classes in `classes.jar`, and any more under `libs`. One with neither is not a library.", "Bir aar sınıflarını `classes.jar` içinde, varsa gerisini `libs` altında taşır. İkisi de olmayan bir dosya kütüphane değildir."),
+        ("An activity another application can start, in a task of its own, can have that task taken over: a malicious application declares the same affinity, gets placed in front, and what the person types next goes to it instead. This is task hijacking, and it looks exactly like the real screen.", "Başka bir uygulamanın başlatabildiği ve kendi görevinde açılan bir etkinliğin görevi ele geçirilebilir: kötü niyetli bir uygulama aynı yakınlığı bildirir, öne geçer ve kişinin sonra yazdığı şey ona gider. Buna görev kaçırma denir ve tıpatıp gerçek ekran gibi görünür."),
         ("An annotation value points at a pool entry that is not an integer.", "Bir açıklama değeri, tamsayı olmayan bir havuz girdisini gösteriyor."),
         ("An annotation value points outside the constant pool.", "Bir açıklama değeri sabit havuzunun dışını gösteriyor."),
         ("An annotation value uses a tag the format does not define.", "Bir açıklama değeri, biçimin tanımlamadığı bir etiket kullanıyor."),
         ("An application cannot target a release it refuses to run on.", "Bir uygulama, üzerinde çalışmayı reddettiği bir sürümü hedefleyemez."),
         ("An application targeting API 30 or later is refused at install time without one.", "API 30 ya da sonrasını hedefleyen bir uygulama, bu olmadan kurulum sırasında reddedilir."),
+        ("An application targeting API 37 or later has this ignored on any display wider than 600dp: the window fills the screen whatever the attribute says. A restriction that looks like it is in force and is not is worse than one that was never written.", "API 37 ve sonrasını hedefleyen bir uygulamada bu, 600dp'den geniş her ekranda yok sayılır: öznitelik ne derse desin pencere ekranı kaplar. Yürürlükte görünüp de olmayan bir kısıtlama, hiç yazılmamış olandan kötüdür."),
         ("An architecture is not one this build knows.", "Bu, bu yapının bildiği bir mimari değil."),
         ("An archive with one name twice is ambiguous, so it is refused here rather than produced and refused later.", "Aynı adı iki kez taşıyan bir arşiv belirsizdir; bu yüzden üretilip sonradan reddedilmektense burada reddedilir."),
         ("An array is asked for in more dimensions than it has.", "Bir dizi, sahip olduğundan çok boyutta isteniyor."),
@@ -1271,6 +1275,7 @@ pub mod speech {
         ("An entry's two headers disagree about compression.", "Bir girdinin iki başlığı sıkıştırma konusunda uyuşmuyor."),
         ("An entry's two headers disagree about its checksum.", "Bir girdinin iki başlığı sağlama toplamı konusunda uyuşmuyor."),
         ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Sabitlerinin tamamı adlandırılmış bir enum ya da alt türlerinin tamamı adlandırılmış bir `sealed` tür zaten her durumu karşılar ve `default` gerektirmez."),
+        ("An exported provider that hands out URI grants can be made to give a caller access to files it should not reach.", "URI yetkisi dağıtan, dışa açık bir sağlayıcıya, çağıranın erişmemesi gereken dosyaları verdirtilebilir."),
         ("An identifier a library declares could not be added.", "Bir kütüphanenin bildirdiği tanımlayıcı eklenemedi."),
         ("An identifier could not be declared.", "Bir tanımlayıcı bildirilemedi."),
         ("An identifier holds 65536 entries per type.", "Bir tanımlayıcı, tür başına 65536 girdi taşır."),
@@ -1288,6 +1293,9 @@ pub mod speech {
         ("An object identifier is empty.", "Bir nesne tanımlayıcısı boş."),
         ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Bilinmeyen bir bölüm yok sayılmak yerine raporlanır; çünkü yürürlükte görünüp de olmayan ayarlar, eksik ayarlardan kötüdür."),
         ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android bugüne dek yalnızca küçük sonlu DEX dosyaları yayımladı. Büyük sonlu olan ya başka bir platforma aittir ya da bozuktur."),
+        ("Another application cannot place its own screen inside this one's task.", "Başka bir uygulama kendi ekranını bunun görevinin içine yerleştiremez."),
+        ("Any application on the device can reach an exported component that no permission guards.", "Hiçbir iznin korumadığı, dışa açık bir bileşene cihazdaki her uygulama erişebilir."),
+        ("Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.", "API 30'un altında platform v2 imza şart koşmaz, varsayılan olarak açık metne izin verir ve yukarıdaki kuralların varsaydığı kapsamlı depolama ile donanım destekli anahtar korumalarından yoksundur."),
         ("Break the loop by giving one of them a real value.", "Birine gerçek bir değer vererek döngüyü kırın."),
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Başka bir takma ad seçin. Bu yapı bir imza anahtarının üzerine yazmaz; çünkü eskisiyle imzalanmış her uygulama artık güncellenemezdi."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Başka bir ad seçin. Üzerine kopyalamak, oradakini sormadan değiştirirdi."),
@@ -1303,6 +1311,7 @@ pub mod speech {
         ("DER requires one encoding per value.", "DER her değer için tek bir kodlama gerektirir."),
         ("Dalvik has no instruction for this, so it has to be written out as the instructions it stands for. Nothing is skipped: a call that ran as something else would be worse than one that does not build.", "Dalvik'te bunun karşılığı bir komut yok; bu yüzden temsil ettiği komutlar olarak açıkça yazılmalı. Hiçbir şey atlanmaz: başka bir şey olarak çalışan bir çağrı, hiç derlenmeyenden kötüdür."),
         ("Debug output carries paths and timestamps that reproducibility cannot survive. The request is honoured as far as the build can, and reported here because it may not be fully met.", "Hata ayıklama çıktısı, yeniden üretilebilirliğin kaldıramayacağı yollar ve zaman damgaları taşır. İstek yapının elverdiği ölçüde karşılanır ve tam karşılanamayabileceği için burada bildirilir."),
+        ("Declare a minimum platform that still receives fixes.", "Hâlâ düzeltme alan bir en düşük platform bildirin."),
         ("Declare it, or correct the reference.", "Bildirin ya da başvuruyu düzeltin."),
         ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Ölçüler bir sayı ve bir birimden oluşur, örneğin 16dp ya da 14sp."),
         ("Drop the leading zero, or write it as 0x for hexadecimal.", "Baştaki sıfırı kaldırın ya da onaltılık için 0x biçiminde yazın."),
@@ -1315,6 +1324,7 @@ pub mod speech {
         ("Empty it, or restore what is worth keeping. Nothing is removed to make room, because that would delete the oldest thing without asking.", "Boşaltın ya da saklamaya değer olanı geri alın. Yer açmak için hiçbir şey silinmez; bu, en eskisini sormadan silmek olurdu."),
         ("Encrypted archives are not read.", "Şifreli arşivler okunmaz."),
         ("Escapes are not part of this grammar. Choose a value without a quote in it.", "Kaçış dizileri bu dil bilgisinin parçası değildir. İçinde tırnak olmayan bir değer seçin."),
+        ("Every application signed with the same key and naming the same identity runs as one user: they read each other's files, databases and keys with no check of any kind. One weak application among them is a way into all of them, and Android has deprecated the whole idea.", "Aynı anahtarla imzalanıp aynı kimliği adlandıran her uygulama tek bir kullanıcı olarak çalışır: birbirlerinin dosyalarını, veritabanlarını ve anahtarlarını hiçbir denetim olmadan okurlar. Aralarındaki zayıf tek bir uygulama hepsine açılan bir kapıdır ve Android bu fikri tümüyle kullanımdan kaldırmıştır."),
         ("Every arm has to produce the same type. A cast settles it.", "Her dal aynı türü üretmek zorundadır. Bir tür dönüşümü bunu çözer."),
         ("Every attribute a resource carries is written with the identifier the platform gives it. One this build cannot name would be dropped by Android without a word, so it is refused instead.", "Bir kaynağın taşıdığı her öznitelik, platformun verdiği tanımlayıcıyla yazılır. Bu yapının adlandıramadığı bir öznitelik Android tarafından sessizce atılırdı; bu yüzden reddedilir."),
         ("Every attribute this build writes carries the identifier the platform gives it. One that is not in the table would be dropped by Android without a word, so it is refused instead.", "Bu yapının yazdığı her öznitelik, platformun verdiği tanımlayıcıyı taşır. Tabloda olmayan biri Android tarafından sessizce atılırdı; bu yüzden reddedilir."),
@@ -1338,6 +1348,11 @@ pub mod speech {
         ("Indefinite lengths let one value be written two ways, and a verifier that accepts both can be shown something a parser does not display.", "Belirsiz uzunluklar tek bir değerin iki biçimde yazılmasına izin verir; ikisini de kabul eden bir doğrulayıcıya, ayrıştırıcının göstermediği bir şey gösterilebilir."),
         ("Inline markup inside a resource is not modelled. Its text is taken as written, so anything nested would be silently lost.", "Bir kaynağın içindeki satır içi biçimlendirme modellenmez. Metni yazıldığı gibi alınır; iç içe konan her şey sessizce kaybolurdu."),
         ("Install the pinned version, or change the pin in the toolchain lock together with an architectural decision record.", "Sabitlenen sürümü kurun ya da araç zinciri kilidindeki sabiti, bir mimari karar kaydıyla birlikte değiştirin."),
+        ("It does not ask for a permission that reads everything a person does.", "Kişinin yaptığı her şeyi okuyan bir izin istemez."),
+        ("It does not ask to see every application installed.", "Kurulu her uygulamayı görmeyi istemez."),
+        ("It does not carry a restriction the platform it targets ignores.", "Hedeflediği platformun yok saydığı bir kısıtlamayı taşımaz."),
+        ("It does not opt out of the storage rules the platform put there.", "Platformun koyduğu depolama kurallarının dışına çıkmaz."),
+        ("It does not share a user with another application.", "Başka bir uygulamayla aynı kullanıcıyı paylaşmaz."),
         ("It has been removed, so the next build makes it again rather than reading it. Nothing that came out of it should be trusted.", "Kaldırıldı; bu yüzden sonraki yapı onu okumak yerine yeniden üretir. Ondan çıkan hiçbir şeye güvenilmemeli."),
         ("It is declared <declare-styleable name=\"MyView\">, and that name is what R.styleable calls the array.", "<declare-styleable name=\"MyView\"> olarak bildirilir ve R.styleable dizisini bu adla anar."),
         ("It is declared by the file that holds it.", "Onu taşıyan dosya tarafından bildirilir."),
@@ -1347,10 +1362,14 @@ pub mod speech {
         ("It is spelled the way android.R.attr spells it, without the android: in front.", "android.R.attr'ın yazdığı gibi, başında android: olmadan yazılır."),
         ("It is written <item type=\"id\" name=\"save\"/>. An <item> without a type is only meaningful inside a style, an array or a plural.", "<item type=\"id\" name=\"save\"/> olarak yazılır. Türü olmayan bir <item> yalnızca bir stil, dizi ya da çoğul içinde anlamlıdır."),
         ("It names an attribute: android:textColor for the framework's, or a bare name for one declared here.", "Bir özniteliği adlandırır: çatıya ait olan için android:textColor, burada bildirilen için yalın ad."),
+        ("It runs on platforms that still receive fixes.", "Hâlâ düzeltme alan platformlarda çalışır."),
         ("It was emptied, or the day it is held for has passed. Nothing here keeps a copy after that.", "Boşaltıldı ya da tutulduğu gün geçti. Bundan sonra burada hiçbir şey kopya saklamaz."),
+        ("Its data is not copied off the device by the backup service.", "Verisi yedekleme servisiyle cihaz dışına kopyalanmaz."),
+        ("Its traffic is not carried in the open.", "Trafiği açıkta taşınmaz."),
         ("Java compiles through the compiler contract, not through this one.", "Java, bu sözleşmeyle değil, derleyici sözleşmesiyle derlenir."),
         ("Keep one of them. A package holding two classes of one name loads whichever the runtime reaches first, which is not something a build should decide by accident.", "Birini tutun. Aynı adı taşıyan iki sınıfı barındıran bir paket, çalışma zamanının önce ulaştığını yükler; bu, bir yapının kazara karar vereceği bir şey değildir."),
         ("Known settings: alias, commonName, organisation, country, validityDays, validityYears, bits.", "Bilinen ayarlar: alias, commonName, organisation, country, validityDays, validityYears, bits."),
+        ("Legacy external storage lets the application read and write everything on shared storage, including what every other application has left there. It is what scoped storage exists to end.", "Eski dış depolama, uygulamanın paylaşılan depolamadaki her şeyi -diğer bütün uygulamaların oraya bıraktıkları dâhil- okumasına ve yazmasına izin verir. Kapsamlı depolama tam da buna son vermek için vardır."),
         ("Letters, digits, dots, hyphens and underscores.", "Harf, rakam, nokta, kısa çizgi ve alt çizgi."),
         ("Letters, digits, underscore and hyphen, at most 64 characters. The alias becomes the file name, so it may not contain a path.", "Harf, rakam, alt çizgi ve kısa çizgi; en çok 64 karakter. Takma ad dosya adına dönüşür, bu yüzden yol içeremez."),
         ("Merging what the libraries ask for needs it read first.", "Kütüphanelerin istediklerini birleştirmek, önce bunun okunmasını gerektirir."),
@@ -1375,6 +1394,7 @@ pub mod speech {
         ("Nothing is skipped. An instruction this does not understand would become a method that runs and does the wrong thing, which is worse than one that does not build.", "Hiçbir şey atlanmaz. Buranın anlamadığı bir komut, çalışıp yanlış işi yapan bir yönteme dönüşürdü; bu, hiç derlenmeyenden kötüdür."),
         ("Nothing it had produced was published, so nothing downstream can read half of it.", "Ürettiği hiçbir şey yayımlanmadı; böylece sonraki hiçbir adım yarısını okuyamaz."),
         ("Nothing it had produced was published. A build on a device shares that device with whatever the person is actually doing.", "Ürettiği hiçbir şey yayımlanmadı. Cihaz üzerinde çalışan bir yapı, o cihazı kişinin o an yaptığı işle paylaşır."),
+        ("Nothing on the device may attach a debugger to it.", "Cihazdaki hiçbir şey ona hata ayıklayıcı bağlayamaz."),
         ("Nothing that needs randomness may proceed without it. A key made from a guessable source is worse than no key.", "Rastgeleliğe ihtiyaç duyan hiçbir şey onsuz ilerleyemez. Tahmin edilebilir bir kaynaktan üretilen anahtar, hiç anahtarı olmamaktan kötüdür."),
         ("Nothing was handed back. A package that does not verify here would be refused at install time.", "Hiçbir şey geri verilmedi. Burada doğrulanmayan bir paket kurulum sırasında reddedilirdi."),
         ("Nothing was handed back. This is a fault in this build, not in the project.", "Hiçbir şey geri verilmedi. Bu, projenin değil bu yapının hatasıdır."),
@@ -1400,13 +1420,23 @@ pub mod speech {
         ("Putting something else there would leave a folder nothing here recognises as a project.", "Oraya başka bir şey koymak, burada hiçbir şeyin proje olarak tanımadığı bir klasör bırakırdı."),
         ("Raise the limit deliberately if the artifact really is this large; an unbounded writer is a way to run a device out of memory.", "Ürün gerçekten bu kadar büyükse sınırı bilerek yükseltin; sınırsız bir yazıcı, cihazın belleğini tüketmenin bir yoludur."),
         ("Raise the quota deliberately if the file really is this large.", "Dosya gerçekten bu kadar büyükse kotayı bilerek yükseltin."),
+        ("Remove android:debuggable, or set it to false.", "android:debuggable özniteliğini kaldırın ya da false yapın."),
+        ("Remove android:requestLegacyExternalStorage. Use the media store for what is shared, and the application's own folders for what is not.", "android:requestLegacyExternalStorage özniteliğini kaldırın. Paylaşılanlar için medya deposunu, paylaşılmayanlar için uygulamanın kendi klasörlerini kullanın."),
+        ("Remove android:sharedUserId. Where two applications must exchange something, let one expose it deliberately through a provider or a service and guard it with a signature permission.", "android:sharedUserId özniteliğini kaldırın. İki uygulamanın bir şey alışverişi yapması gerekiyorsa, biri bunu bir sağlayıcı ya da servis üzerinden bilerek açsın ve imza iznine bağlasın."),
         ("Remove one. Keeping the last would make the build depend on which file was read first.", "Birini kaldırın. Sonuncuyu tutmak, yapının hangi dosyanın önce okunduğuna bağlı olmasına yol açardı."),
         ("Remove one. Keeping the last would make the file depend on attribute order.", "Birini kaldırın. Sonuncuyu tutmak, dosyanın öznitelik sırasına bağlı olmasına yol açardı."),
         ("Remove one. Silently keeping the last value would make the build depend on line order.", "Birini kaldırın. Son değeri sessizce tutmak, yapının satır sırasına bağlı olmasına yol açardı."),
+        ("Remove the attribute, and lay the screen out for whatever size it is given. Games are exempt, and say so with android:appCategory=\"game\".", "Özniteliği kaldırın ve ekranı kendisine verilen boyuta göre düzenleyin. Oyunlar bunun dışındadır ve bunu android:appCategory=\"game\" ile belirtir."),
+        ("Remove the permission and declare a <queries> element naming the few applications or intents this one genuinely needs to find.", "İzni kaldırın ve bu uygulamanın gerçekten bulması gereken birkaç uygulamayı ya da niyeti adlandıran bir <queries> öğesi bildirin."),
+        ("Remove the permission. If the application genuinely needs it, it is not something this build engine will produce without the request being made deliberately and reviewed.", "İzni kaldırın. Uygulamanın gerçekten ihtiyacı varsa, bu istek bilerek yapılıp gözden geçirilmeden bu derleme motorunun üreteceği bir şey değildir."),
         ("Report a version string, not a full tool banner.", "Tam bir araç başlığı değil, bir sürüm dizesi bildirin."),
         ("Report each key once. The first value was kept and this entry was ignored.", "Her anahtarı bir kez bildirin. İlk değer tutuldu ve bu girdi yok sayıldı."),
         ("Report only the keys listed in the toolchain lock.", "Yalnızca araç zinciri kilidinde listelenen anahtarları bildirin."),
         ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Bir argümanı, istediğiniz aşırı yüklemenin aldığı türe dönüştürerek hangisi olduğunu belirtin. Dil bunu seçmek yerine belirsiz sayar; burası da öyle."),
+        ("Set android:allowBackup to false, or declare rules that exclude anything sensitive.", "android:allowBackup değerini false yapın ya da hassas olan her şeyi dışarıda bırakan kurallar bildirin."),
+        ("Set android:exported to false, or require a permission with android:permission.", "android:exported değerini false yapın ya da android:permission ile bir izin şart koşun."),
+        ("Set android:exported to false; a content provider is reachable through grants without being exported.", "android:exported değerini false yapın; içerik sağlayıcıya dışa açık olmadan da yetkiler yoluyla erişilebilir."),
+        ("Set android:usesCleartextTraffic to false, or configure a network security policy that allows it for named hosts only.", "android:usesCleartextTraffic değerini false yapın ya da yalnızca adı verilen sunucular için izin veren bir ağ güvenliği ilkesi tanımlayın."),
         ("Sign with SHA-256 or SHA-512. SHA-384 is read here because certificates are signed with it, not because a package can be.", "SHA-256 ya da SHA-512 ile imzalayın. SHA-384 burada okunur çünkü sertifikalar onunla imzalanır, paketler onunla imzalanabildiği için değil."),
         ("Something is already at that name.", "O adda zaten bir şey var."),
         ("Something is already where that came from, so it is not put back.", "Geldiği yerde zaten bir şey var; bu yüzden geri konmuyor."),
@@ -1572,6 +1602,7 @@ pub mod speech {
         ("The key size is not a number of bits.", "Anahtar boyutu bit sayısı değil."),
         ("The key size is not one this build will produce.", "Anahtar boyutu, bu yapının üreteceklerinden değil."),
         ("The keys folder could not be made.", "Anahtarlar klasörü oluşturulamadı."),
+        ("The list of what somebody has installed says a great deal about them, and reading all of it is how tracking libraries build a profile. Android narrowed this deliberately in API 30.", "Birinin neleri kurduğunun listesi, o kişi hakkında çok şey söyler; bunun tamamını okumak, izleme kütüphanelerinin profil çıkarma yöntemidir. Android bunu API 30'da bilerek daralttı."),
         ("The locale a device falls back to was not chosen.", "Cihazın geri düştüğü yerel ayar seçilmedi."),
         ("The magic is not terminated.", "İmza dizisi sonlandırılmamış."),
         ("The manifest could not be read.", "Bildirim okunamadı."),
@@ -1666,8 +1697,10 @@ pub mod speech {
         ("This is a build-host component. It is verified where the build actually runs, not on the device.", "Bu bir yapı ana bileşenidir. Cihazda değil, yapının gerçekten çalıştığı yerde doğrulanır."),
         ("This is not the format it was read as.", "Bu, okunduğu biçim değil."),
         ("This is the file's own description of itself, not evidence of who wrote it.", "Bu, dosyanın kendisini kendi tanımlamasıdır; onu kimin yazdığının kanıtı değildir."),
+        ("This permission reaches far beyond what a build tool's output needs, and is the usual shape of an abusive application.", "Bu izin, bir derleme aracının ürettiğinin ihtiyaç duyduğunun çok ötesine uzanır ve kötüye kullanan uygulamaların alışıldık biçimidir."),
         ("This project holds source in a language this build does not compile.", "Bu proje, bu yapının derlemediği bir dilde kaynak taşıyor."),
         ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Bu altsistem bildirilmiştir, kurulmuş değildir. Hiçbir ürün üretilmedi ve durumu EXPERIMENTAL olana dek beklenmemelidir."),
+        ("Traffic without TLS can be read and rewritten by anything on the path.", "TLS'siz trafik, yol üzerindeki her şey tarafından okunabilir ve değiştirilebilir."),
         ("Two dependencies declare the same class.", "İki bağımlılık aynı sınıfı bildiriyor."),
         ("Two or more parts separated by dots, each starting with a lower-case letter, for example com.tr.yt.", "Noktayla ayrılmış, her biri küçük harfle başlayan iki ya da daha çok parça, örneğin com.tr.yt."),
         ("Two upper-case letters, for example TR.", "İki büyük harf, örneğin TR."),
@@ -1676,14 +1709,17 @@ pub mod speech {
         ("Use letters, digits, '.', '-' and '_', for example 'compile.kotlin'.", "Harf, rakam, '.', '-' ve '_' kullanın, örneğin 'compile.kotlin'."),
         ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "En çok 128 karakter olacak şekilde harf, rakam, '.', '-' ve '_' kullanın, örneğin 'dex.classes'."),
         ("Use the form key=value, separated by ';'.", "';' ile ayrılmış anahtar=değer biçimini kullanın."),
+        ("Use the standard launch mode for anything exported, or set android:taskAffinity to an empty string so no other application can join its task.", "Dışa açık her şeyde standart başlatma kipini kullanın ya da başka hiçbir uygulamanın görevine katılamaması için android:taskAffinity değerini boş dize yapın."),
         ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Burada yazılan bir sınıfın çevresinden okuduğu içeri kopyalanır; bu yüzden bir yazma dışarıdan görülmezdi. Bir alan ya da tek elemanlı bir dizi kullanın."),
         ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Bir özniteliğin aldığı, çatının aldığını söylediğidir; almadığı bir değer cihaz tarafından değil burada reddedilir."),
+        ("What other applications may start is said, and what they must hold to start it.", "Başka uygulamaların neyi başlatabileceği ve bunun için neye sahip olmaları gerektiği açıkça yazılır."),
         ("Whatever produced this package did not have the private key it claims. Do not install it.", "Bu paketi ne ürettiyse, iddia ettiği özel anahtara sahip değildi. Kurmayın."),
         ("Which name a reader uses decides which file it gets. An archive that gives two answers is refused.", "Bir okuyucunun hangi adı kullandığı, hangi dosyayı alacağını belirler. İki yanıt veren bir arşiv reddedilir."),
         ("Which of the two a reader uses is not defined, so the archive is refused rather than guessed at.", "Okuyucunun ikisinden hangisini kullanacağı tanımlı değildir; bu yüzden arşiv tahmin edilmektense reddedilir."),
         ("Which of the two a verifier reads is not defined, so the block is refused rather than guessed at.", "Doğrulayıcının ikisinden hangisini okuyacağı tanımlı değildir; bu yüzden blok tahmin edilmektense reddedilir."),
         ("Which of the two the device would read is not something to leave to the order they were written in.", "Cihazın ikisinden hangisini okuyacağı, yazılma sırasına bırakılacak bir şey değildir."),
         ("Which quantities a language uses is the platform's to decide; a name it does not know would never be read.", "Bir dilin hangi nicelikleri kullandığına platform karar verir; bilmediği bir ad hiç okunmazdı."),
+        ("With backup enabled, application data can be copied off the device over adb without unlocking it.", "Yedekleme açıkken uygulama verisi, cihaz kilidi açılmadan adb üzerinden dışarı kopyalanabilir."),
         ("Without a stored key every build is a different application to Android, so an update would not install over the previous one.", "Saklanmış bir anahtar olmadan her yapı Android için farklı bir uygulamadır; bu yüzden bir güncelleme öncekinin üzerine kurulmazdı."),
         ("Wrap it in \" or '.", "\" ya da ' içine alın."),
         ("Wrap the entries in <resources> … </resources>.", "Girdileri <resources> … </resources> içine alın."),
@@ -17820,6 +17856,20 @@ pub mod guard {
             "no-task-hijacking",
             "Another application cannot place its own screen inside this one's task.",
         ),
+        (
+            "EG012",
+            "no-ignored-restriction",
+            "It does not carry a restriction the platform it targets ignores.",
+        ),
+    ];
+
+    pub const ADAPTIVE_FROM_API: i64 = 37;
+
+    const IGNORED_AT_37: &[(&str, Option<&str>)] = &[
+        ("android:screenOrientation", None),
+        ("android:resizeableActivity", Some("false")),
+        ("android:minAspectRatio", None),
+        ("android:maxAspectRatio", None),
     ];
 
     pub fn fired(report: &Report, code: &str) -> bool {
@@ -17941,7 +17991,7 @@ pub mod guard {
                 code: "EG006",
                 what: format!("The package does not require API {MINIMUM_SDK} or later."),
                 why: "Below API 30 the platform does not require a v2 signature, permits cleartext by default, and lacks the scoped storage and hardware-backed key protections the rules above assume.".to_string(),
-                remedy: format!("Declare android:minSdkVersion at {MINIMUM_SDK} or above."),
+                remedy: "Declare a minimum platform that still receives fixes.".to_string(),
             }),
         }
 
@@ -17973,8 +18023,10 @@ pub mod guard {
                 report.findings.push(Finding {
                     rule: "high-risk-permission",
                     code: "EG007",
-                    what: format!("The package requests {name}."),
-                    why: format!("This permission grants {what}, which is far beyond what a build tool's output needs and is the usual shape of an abusive application."),
+                    what: format!("The package requests {name}, which grants {what}."),
+                    why: "This permission reaches far beyond what a build tool's output needs, \
+                           and is the usual shape of an abusive application."
+                        .to_string(),
                     remedy: "Remove the permission. If the application genuinely needs it, it is not something this build engine will produce without the request being made deliberately and reviewed.".to_string(),
                 });
             }
@@ -18044,7 +18096,56 @@ pub mod guard {
             }
         }
 
+        report.rules_applied += 1;
+        let targets = elements
+            .iter()
+            .find(|element| element.name == "uses-sdk")
+            .and_then(|element| attribute(element, "android:targetSdkVersion"))
+            .and_then(|held| held.parse::<i64>().ok())
+            .unwrap_or(0);
+        let a_game = application
+            .map(|held| attribute(held, "android:appCategory") == Some("game"))
+            .unwrap_or(false);
+        if targets >= ADAPTIVE_FROM_API && !a_game {
+            for element in &elements {
+                if element.name != "application" && element.name != "activity" {
+                    continue;
+                }
+                for (name, refused) in IGNORED_AT_37 {
+                    let Some(value) = attribute(element, name) else {
+                        continue;
+                    };
+                    if refused.is_some_and(|held| held != value) {
+                        continue;
+                    }
+                    let named = attribute(element, "android:name").unwrap_or(&element.name);
+                    report.findings.push(Finding {
+                        rule: "no-ignored-restriction",
+                        code: "EG012",
+                        what: format!("{named} sets {name}=\"{value}\"."),
+                        why: "An application targeting API 37 or later has this ignored on \
+                              any display wider than 600dp: the window fills the screen whatever \
+                              the attribute says. A restriction that looks like it is in force \
+                              and is not is worse than one that was never written."
+                            .to_string(),
+                        remedy: "Remove the attribute, and lay the screen out for whatever size \
+                                 it is given. Games are exempt, and say so with \
+                                 android:appCategory=\"game\"."
+                            .to_string(),
+                    });
+                }
+            }
+        }
+
         report
+    }
+
+    pub fn said(code: &str) -> &'static str {
+        RULES
+            .iter()
+            .find(|(held, _, _)| *held == code)
+            .map(|(_, _, sentence)| *sentence)
+            .unwrap_or("The project does not meet the security policy.")
     }
 
     pub fn emit(report: &Report, sink: &mut Sink) {
@@ -18055,8 +18156,9 @@ pub mod guard {
                     Severity::Fatal,
                     FailureClass::SecurityFailure,
                     "core.guard",
-                    finding.what.clone(),
+                    said(finding.code),
                 )
+                .with_context(format!("Found: {}", finding.what))
                 .with_context(finding.why.clone())
                 .with_suggestion(finding.remedy.clone()),
             );
@@ -46487,6 +46589,56 @@ public final class MainActivity extends Activity {
             project.code.len(),
             outcome.package.len()
         );
+    }
+
+    #[test]
+    fn a_restriction_android_17_ignores_is_refused_rather_than_written() {
+        let ignored = r#"<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.tr.yt">
+    <uses-sdk android:minSdkVersion="30" android:targetSdkVersion="37" />
+    <application android:label="Held" android:allowBackup="false">
+        <activity android:name=".MainActivity" android:exported="false"
+            android:screenOrientation="portrait" />
+    </application>
+</manifest>
+"#;
+        let mut sink = Sink::new();
+        let root = super::xml::parse(ignored, "AndroidManifest.xml", &mut sink).unwrap();
+        let report = super::guard::inspect_manifest(&root);
+        assert!(
+            super::guard::fired(&report, "EG012"),
+            "{:?}",
+            report.findings
+        );
+        let said = report
+            .findings
+            .iter()
+            .find(|held| held.code == "EG012")
+            .unwrap();
+        assert!(said.what.contains("screenOrientation"), "{}", said.what);
+
+        let older = ignored.replace("targetSdkVersion=\"37\"", "targetSdkVersion=\"36\"");
+        let root = super::xml::parse(&older, "AndroidManifest.xml", &mut sink).unwrap();
+        assert!(
+            !super::guard::fired(&super::guard::inspect_manifest(&root), "EG012"),
+            "a platform that still honours it is left alone"
+        );
+
+        let game = ignored.replace(
+            "<application android:label=\"Held\"",
+            "<application android:appCategory=\"game\" android:label=\"Held\"",
+        );
+        let root = super::xml::parse(&game, "AndroidManifest.xml", &mut sink).unwrap();
+        assert!(
+            !super::guard::fired(&super::guard::inspect_manifest(&root), "EG012"),
+            "games keep the restriction, and the platform keeps honouring it"
+        );
+
+        let adaptive = ignored.replace("\n            android:screenOrientation=\"portrait\"", "");
+        let root = super::xml::parse(&adaptive, "AndroidManifest.xml", &mut sink).unwrap();
+        let clean = super::guard::inspect_manifest(&root);
+        assert_eq!(clean.verdict(), super::guard::Verdict::Passed, "{clean:?}");
+        assert!(clean.rules_applied >= super::guard::RULES.len());
     }
 
     #[test]
