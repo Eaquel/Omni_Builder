@@ -675,7 +675,12 @@ def check_speech() -> str:
             "a message assembled by format! cannot be looked up: " + "; ".join(woven[:8])
         )
     trouble = []
-    for name, wanted in (("TURKISH_LINES", lines), ("TURKISH_WORDS", words)):
+    spoken = [
+        (name, wanted)
+        for language in ("TURKISH", "GERMAN")
+        for name, wanted in ((f"{language}_LINES", lines), (f"{language}_WORDS", words))
+    ]
+    for name, wanted in spoken:
         said = spoken_table(name)
         missing = sorted(wanted - set(said))
         spare = sorted(set(said) - wanted)
@@ -689,7 +694,10 @@ def check_speech() -> str:
             ))
     if trouble:
         raise AssertionError(" | ".join(trouble))
-    return f"{len(lines)} sentences and {len(words)} labels in every language spoken"
+    return (
+        f"{len(lines)} sentences and {len(words)} labels "
+        f"in each of {len(spoken) // 2} languages spoken"
+    )
 
 CHECKS: dict[str, tuple[str, object]] = {
     "layout": ("the tree is the agreed one", check_layout),
