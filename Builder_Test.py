@@ -648,15 +648,22 @@ def spoken_table(name: str) -> dict[str, str]:
     text = CORE.read_text(encoding="utf-8")
     opened = text.index(f"const {name}: &[(&str, &str)] = &[")
     closed = text.index("\n    ];", opened)
+    body = text[text.index("\n", opened):closed]
+    pair = re.compile(r'\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)\s*,')
     said: dict[str, str] = {}
-    for line in text[opened:closed].split("\n")[1:]:
-        pair = re.match(r'\s*\("((?:[^"\\]|\\.)*)", "((?:[^"\\]|\\.)*)"\),\s*$', line)
-        if not pair:
-            raise AssertionError(f"{name} holds a line that is not a pair: {line.strip()[:60]}")
-        english = pair.group(1).replace('\\"', '"').replace("\\\\", "\\")
+    at = 0
+    for found in pair.finditer(body):
+        loose = body[at:found.start()].strip()
+        if loose:
+            raise AssertionError(f"{name} holds something that is not a pair: {loose[:60]}")
+        english = found.group(1).replace('\\"', '"').replace("\\\\", "\\")
         if english in said:
             raise AssertionError(f"{name} holds {english!r} twice")
-        said[english] = pair.group(2)
+        said[english] = found.group(2)
+        at = found.end()
+    loose = body[at:].strip()
+    if loose:
+        raise AssertionError(f"{name} ends in something that is not a pair: {loose[:60]}")
     if list(said) != sorted(said):
         raise AssertionError(f"{name} is not in order, so a lookup would miss")
     return said
@@ -677,7 +684,17 @@ def check_speech() -> str:
     trouble = []
     spoken = [
         (name, wanted)
-        for language in ("TURKISH", "GERMAN")
+        for language in (
+            "TURKISH",
+            "GERMAN",
+            "SPANISH",
+            "FRENCH",
+            "ITALIAN",
+            "PORTUGUESE",
+            "RUSSIAN",
+            "ARABIC",
+            "CHINESE",
+        )
         for name, wanted in ((f"{language}_LINES", lines), (f"{language}_WORDS", words))
     ]
     for name, wanted in spoken:
