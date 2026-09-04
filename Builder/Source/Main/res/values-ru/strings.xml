@@ -66,6 +66,10 @@
     <string name="omni_files_root">Проект</string>
     <string name="omni_files_empty">Эта папка пуста.</string>
     <string name="omni_files_split">РАЗДЕЛИТЬ</string>
+    <string name="omni_files_by_name">ИМЯ</string>
+    <string name="omni_files_by_size">РАЗМЕР</string>
+    <string name="omni_files_by_changed">ДАТА</string>
+    <string name="omni_files_by_kind">ТИП</string>
     <string name="omni_files_copy_across">Копировать в другую панель</string>
     <string name="omni_files_move_across">Переместить в другую панель</string>
     <string name="omni_files_config">НАСТРОЙКА</string>

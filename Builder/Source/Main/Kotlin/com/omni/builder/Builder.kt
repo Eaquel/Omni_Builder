@@ -826,7 +826,12 @@ data class ProjectSummary(
     }
 }
 
-data class FileEntry(val path: String, val folder: Boolean, val bytes: Long) {
+data class FileEntry(
+    val path: String,
+    val folder: Boolean,
+    val bytes: Long,
+    val changed: Long = 0L,
+) {
     companion object {
         fun list(document: String): List<FileEntry> {
             val array = JSONObject(document).optJSONArray("entries") ?: return emptyList()
@@ -836,6 +841,7 @@ data class FileEntry(val path: String, val folder: Boolean, val bytes: Long) {
                     path = item.getString("path"),
                     folder = item.optBoolean("folder", false),
                     bytes = item.optLong("bytes"),
+                    changed = item.optLong("changed"),
                 )
             }
         }
@@ -1004,81 +1010,63 @@ data class Palette(
     val glowThird: Int,
 ) {
     companion object {
-        val FORGE = Palette(
-            key = "forge",
-            label = "Forge",
-            background = 0xFF04070C.toInt(),
-            surface = 0xFF0A0F17.toInt(),
-            raised = 0xFF101724.toInt(),
-            foreground = 0xFFDCE9F5.toInt(),
-            muted = 0xFF6F7F94.toInt(),
-            accent = 0xFF35B7FF.toInt(),
-            ok = 0xFF2FE0B0.toInt(),
-            warning = 0xFFF2B441.toInt(),
-            error = 0xFFFF5C6C.toInt(),
-            divider = 0xFF16202E.toInt(),
-            glowFirst = 0xFF0B3F6E.toInt(),
-            glowSecond = 0xFF0A5646.toInt(),
-            glowThird = 0xFF2A1B4E.toInt(),
+        val DARK = Palette(
+            key = "dark",
+            label = "Dark",
+            background = 0xFF1E1F22.toInt(),
+            surface = 0xFF2B2D30.toInt(),
+            raised = 0xFF35373B.toInt(),
+            foreground = 0xFFDFE1E5.toInt(),
+            muted = 0xFF9DA0A8.toInt(),
+            accent = 0xFF4A88C7.toInt(),
+            ok = 0xFF4C9F5B.toInt(),
+            warning = 0xFFD9A343.toInt(),
+            error = 0xFFCF5B56.toInt(),
+            divider = 0xFF393B40.toInt(),
+            glowFirst = 0xFF2F3238.toInt(),
+            glowSecond = 0xFF2A2D33.toInt(),
+            glowThird = 0xFF26292E.toInt(),
         )
 
-        val EMBER = Palette(
-            key = "ember",
-            label = "Ember",
-            background = 0xFF0B0705.toInt(),
-            surface = 0xFF150E09.toInt(),
-            raised = 0xFF1F1610.toInt(),
-            foreground = 0xFFF5E3CE.toInt(),
-            muted = 0xFF9A8064.toInt(),
-            accent = 0xFFFFA53A.toInt(),
-            ok = 0xFFB8D14A.toInt(),
-            warning = 0xFFFFD166.toInt(),
-            error = 0xFFF2593F.toInt(),
-            divider = 0xFF2A1E14.toInt(),
-            glowFirst = 0xFF6B3A0E.toInt(),
-            glowSecond = 0xFF4A2A05.toInt(),
-            glowThird = 0xFF33160A.toInt(),
+        val HACKER = Palette(
+            key = "hacker",
+            label = "Hacker",
+            background = 0xFF000904.toInt(),
+            surface = 0xFF03150B.toInt(),
+            raised = 0xFF062011.toInt(),
+            foreground = 0xFF9BFFB4.toInt(),
+            muted = 0xFF3F8256.toInt(),
+            accent = 0xFF00FF66.toInt(),
+            ok = 0xFF5BFF9C.toInt(),
+            warning = 0xFFD6FF3B.toInt(),
+            error = 0xFFFF4D4D.toInt(),
+            divider = 0xFF0B3019.toInt(),
+            glowFirst = 0xFF0B7A38.toInt(),
+            glowSecond = 0xFF045C2A.toInt(),
+            glowThird = 0xFF073C1E.toInt(),
         )
 
-        val PHOSPHOR = Palette(
-            key = "phosphor",
-            label = "Phosphor",
-            background = 0xFF060A07.toInt(),
-            surface = 0xFF0C120D.toInt(),
-            raised = 0xFF131B15.toInt(),
-            foreground = 0xFFD8F2DC.toInt(),
-            muted = 0xFF6B8570.toInt(),
-            accent = 0xFF4CE86A.toInt(),
-            ok = 0xFF8FFFA8.toInt(),
-            warning = 0xFFE8D24C.toInt(),
-            error = 0xFFFF6B5B.toInt(),
-            divider = 0xFF17231A.toInt(),
-            glowFirst = 0xFF0C4A1E.toInt(),
-            glowSecond = 0xFF06381E.toInt(),
-            glowThird = 0xFF1E3D12.toInt(),
+        val ANIME = Palette(
+            key = "anime",
+            label = "Anime",
+            background = 0xFF1A1430.toInt(),
+            surface = 0xFF241C42.toInt(),
+            raised = 0xFF2F2455.toInt(),
+            foreground = 0xFFF7ECFF.toInt(),
+            muted = 0xFFA893CC.toInt(),
+            accent = 0xFFFF7EB6.toInt(),
+            ok = 0xFF7BE8C8.toInt(),
+            warning = 0xFFFFD37E.toInt(),
+            error = 0xFFFF6584.toInt(),
+            divider = 0xFF3A2D66.toInt(),
+            glowFirst = 0xFF7A3E8C.toInt(),
+            glowSecond = 0xFF3E5AA8.toInt(),
+            glowThird = 0xFFA8506E.toInt(),
         )
 
-        val PAPER = Palette(
-            key = "paper",
-            label = "Paper",
-            background = 0xFFF2EDE3.toInt(),
-            surface = 0xFFFBF8F1.toInt(),
-            raised = 0xFFE8E1D3.toInt(),
-            foreground = 0xFF1A1613.toInt(),
-            muted = 0xFF6B6156.toInt(),
-            accent = 0xFFC4442E.toInt(),
-            ok = 0xFF2E6B4F.toInt(),
-            warning = 0xFFA5701A.toInt(),
-            error = 0xFF97231A.toInt(),
-            divider = 0xFFD8CFBE.toInt(),
-            glowFirst = 0xFFE8C9B8.toInt(),
-            glowSecond = 0xFFCFDDCB.toInt(),
-            glowThird = 0xFFDCD2C0.toInt(),
-        )
+        val ALL: List<Palette> = listOf(DARK, HACKER, ANIME)
 
-        val ALL: List<Palette> = listOf(FORGE, EMBER, PHOSPHOR, PAPER)
-
-        fun of(key: String): Palette = ALL.firstOrNull { it.key == key } ?: FORGE
+        fun of(key: String): Palette = ALL.firstOrNull { it.key == key } ?: DARK
     }
 }
 
@@ -1123,7 +1111,7 @@ object Preferences {
     }
 
     fun palette(context: Context): Palette =
-        Palette.of(store(context).getString(THEME, Palette.FORGE.key).orEmpty())
+        Palette.of(store(context).getString(THEME, Palette.DARK.key).orEmpty())
 
     fun setPalette(context: Context, key: String) {
         store(context).edit().putString(THEME, key).apply()
@@ -1155,17 +1143,22 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
 
     private companion object {
         const val PERIOD_MILLIS = 24_000f
-        const val BLOB_ALPHA = 190
         const val FRAME_MILLIS = 32L
+        const val COLUMN_DP = 15f
+        const val RAIN_ROWS = 26
+        const val PETALS = 22
+        const val SPARKS = 30
     }
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val place = Matrix()
+    private val petal = Path()
     private val started = SystemClock.uptimeMillis()
     private var running = false
 
     private var glows: Array<RadialGradient>? = null
     private var fade: LinearGradient? = null
+    private var sky: LinearGradient? = null
     private var madeAt = 0
     private var madeFor = 0
 
@@ -1183,6 +1176,7 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
         palette = next
         glows = null
         fade = null
+        sky = null
         invalidate()
     }
 
@@ -1215,25 +1209,138 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
             return
         }
         canvas.drawColor(palette.background)
+        val life = (SystemClock.uptimeMillis() - started) / 1000f
+        when (palette.key) {
+            Palette.HACKER.key -> rain(canvas, w, h, life)
+            Palette.ANIME.key -> petals(canvas, w, h, life)
+            else -> quiet(canvas, w, h)
+        }
+    }
+
+    private fun quiet(canvas: Canvas, w: Float, h: Float) {
         ready(height)
-
-        val phase = ((SystemClock.uptimeMillis() - started) % PERIOD_MILLIS.toLong()) /
-            PERIOD_MILLIS
-        val turn = (phase * 2.0 * Math.PI).toFloat()
-        val radius = maxOf(w, h) * 0.72f
-        val held = glows ?: return
-
-        blob(canvas, held[0], w * (0.22f + 0.16f * sin(turn)),
-            h * (0.18f + 0.10f * cos(turn * 0.8f)), radius)
-        blob(canvas, held[1], w * (0.82f + 0.12f * cos(turn * 1.3f)),
-            h * (0.34f + 0.12f * sin(turn * 1.1f)), radius * 0.85f)
-        blob(canvas, held[2], w * (0.48f + 0.20f * sin(turn * 0.7f + 1.4f)),
-            h * (0.86f + 0.08f * cos(turn * 0.9f)), radius * 0.95f)
-
-        paint.shader = fade
+        val edge = fade ?: return
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        paint.color = Ink.fade(palette.divider, 0.5f)
+        paint.shader = null
+        val gap = COLUMN_DP * resources.displayMetrics.density * 3f
+        var x = gap
+        while (x < w) {
+            canvas.drawLine(x, 0f, x, h, paint)
+            x += gap
+        }
+        var y = gap
+        while (y < h) {
+            canvas.drawLine(0f, y, w, y, paint)
+            y += gap
+        }
+        paint.style = Paint.Style.FILL
+        paint.shader = edge
         paint.alpha = 255
         canvas.drawRect(0f, 0f, w, h, paint)
         paint.shader = null
+    }
+
+    private fun rain(canvas: Canvas, w: Float, h: Float, life: Float) {
+        val density = resources.displayMetrics.density
+        val column = COLUMN_DP * density
+        val columns = (w / column).toInt().coerceAtLeast(1)
+        val row = h / RAIN_ROWS
+        paint.shader = null
+        paint.style = Paint.Style.FILL
+        paint.typeface = Type.data
+        paint.textSize = column * 0.86f
+        for (index in 0 until columns) {
+            val seed = index * 2654435761L.toInt()
+            val speed = 2.2f + ((seed ushr 3) and 7) * 0.55f
+            val drop = ((life * speed + (seed and 63) * 0.37f) % (RAIN_ROWS + 8f))
+            for (back in 0 until 12) {
+                val at = drop - back
+                if (at < 0f || at > RAIN_ROWS) {
+                    continue
+                }
+                val bit = ((seed + at.toInt() * 31 + (life / 3f).toInt() * 7) and 1)
+                val head = back == 0
+                paint.color = if (head) palette.ok else palette.accent
+                paint.alpha = if (head) 255 else (170 - back * 14).coerceAtLeast(18)
+                canvas.drawText(
+                    if (bit == 0) "0" else "1",
+                    index * column + column * 0.1f,
+                    at * row,
+                    paint,
+                )
+            }
+        }
+        paint.alpha = 255
+        paint.color = Ink.fade(palette.background, 0.55f)
+        var y = 0f
+        while (y < h) {
+            canvas.drawRect(0f, y, w, y + 1f, paint)
+            y += 3f * density
+        }
+    }
+
+    private fun petals(canvas: Canvas, w: Float, h: Float, life: Float) {
+        ready(height)
+        sky?.let {
+            paint.shader = it
+            paint.alpha = 255
+            canvas.drawRect(0f, 0f, w, h, paint)
+            paint.shader = null
+        }
+        val held = glows
+        if (held != null) {
+            val turn = ((life * 1000f % PERIOD_MILLIS) / PERIOD_MILLIS * 2.0 * Math.PI).toFloat()
+            val radius = maxOf(w, h) * 0.62f
+            blob(canvas, held[0], w * (0.24f + 0.14f * sin(turn)), h * 0.16f, radius)
+            blob(canvas, held[1], w * (0.80f + 0.10f * cos(turn * 1.2f)), h * 0.30f, radius * 0.8f)
+            blob(canvas, held[2], w * 0.5f, h * (0.88f + 0.06f * sin(turn * 0.8f)), radius * 0.9f)
+        }
+        paint.style = Paint.Style.FILL
+        for (index in 0 until PETALS) {
+            val seed = index * 1103515245 + 12345
+            val across = ((seed ushr 5) and 1023) / 1023f
+            val speed = 0.10f + ((seed ushr 9) and 7) * 0.035f
+            val drift = sin(life * (0.5f + (seed and 3) * 0.2f) + index.toFloat()) * w * 0.06f
+            val down = ((life * speed + across) % 1.2f) - 0.1f
+            val x = across * w + drift
+            val y = down * h
+            val size = 5f + ((seed ushr 13) and 3) * 2.4f
+            val spin = (life * (24f + (seed and 15) * 3f) + index * 37f) % 360f
+            paint.color = if ((seed and 1) == 0) palette.accent else palette.error
+            paint.alpha = 120 + ((seed ushr 17) and 63)
+            canvas.save()
+            canvas.translate(x, y)
+            canvas.rotate(spin)
+            leaf(canvas, size * resources.displayMetrics.density * 0.5f)
+            canvas.restore()
+        }
+        paint.alpha = 255
+        for (index in 0 until SPARKS) {
+            val seed = index * 2246822519L.toInt()
+            val x = (((seed ushr 7) and 2047) / 2047f) * w
+            val y = (((seed ushr 17) and 2047) / 2047f) * h
+            val beat = (sin(life * (1.4f + (seed and 7) * 0.3f) + index.toFloat()) + 1f) * 0.5f
+            paint.color = palette.foreground
+            paint.alpha = (30 + beat * 150f).toInt().coerceIn(0, 255)
+            canvas.drawCircle(x, y, 1.2f * resources.displayMetrics.density * (0.4f + beat), paint)
+        }
+        paint.alpha = 255
+        fade?.let {
+            paint.shader = it
+            canvas.drawRect(0f, 0f, w, h, paint)
+            paint.shader = null
+        }
+    }
+
+    private fun leaf(canvas: Canvas, radius: Float) {
+        petal.reset()
+        petal.moveTo(0f, -radius)
+        petal.cubicTo(radius * 0.9f, -radius * 0.5f, radius * 0.7f, radius * 0.7f, 0f, radius)
+        petal.cubicTo(-radius * 0.7f, radius * 0.7f, -radius * 0.9f, -radius * 0.5f, 0f, -radius)
+        petal.close()
+        canvas.drawPath(petal, paint)
     }
 
     private fun ready(tall: Int) {
@@ -1255,11 +1362,17 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
                 Color.blue(palette.background)),
             Shader.TileMode.CLAMP,
         )
+        sky = LinearGradient(
+            0f, 0f, 0f, tall.toFloat(),
+            Ink.hot(palette.glowFirst, 0.25f),
+            palette.background,
+            Shader.TileMode.CLAMP,
+        )
     }
 
     private fun unit(colour: Int) = RadialGradient(
         0f, 0f, 1f,
-        Color.argb(BLOB_ALPHA, Color.red(colour), Color.green(colour), Color.blue(colour)),
+        Color.argb(150, Color.red(colour), Color.green(colour), Color.blue(colour)),
         Color.argb(0, Color.red(colour), Color.green(colour), Color.blue(colour)),
         Shader.TileMode.CLAMP,
     )
@@ -1303,6 +1416,216 @@ internal object Motion {
     fun of(millis: Long): Long = if (still()) 0L else (millis * scale).toLong().coerceAtLeast(1L)
 }
 
+internal class Chibi(private val who: Face, private val palette: Palette) : Drawable() {
+
+    enum class Face {
+        SPARK,
+        CALM,
+        WINK,
+        RIBBON,
+    }
+
+    private companion object {
+        const val GRID = 24f
+    }
+
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val path = Path()
+
+    private val skin = 0xFFFFE0CE.toInt()
+    private val ink = 0xFF2A1F3A.toInt()
+
+    private fun hair(): Int = when (who) {
+        Face.SPARK -> palette.accent
+        Face.CALM -> palette.glowSecond
+        Face.WINK -> palette.warning
+        Face.RIBBON -> palette.glowThird
+    }
+
+    override fun draw(canvas: Canvas) {
+        val edge = min(bounds.width(), bounds.height()).toFloat()
+        if (edge <= 0f) return
+        val unit = edge / GRID
+        val left = bounds.left + (bounds.width() - edge) / 2f
+        val top = bounds.top + (bounds.height() - edge) / 2f
+        canvas.save()
+        canvas.translate(left, top)
+
+        body(canvas, unit)
+        head(canvas, unit)
+        fringe(canvas, unit)
+        eyes(canvas, unit)
+        mouth(canvas, unit)
+        blush(canvas, unit)
+        crown(canvas, unit)
+
+        canvas.restore()
+    }
+
+    private fun body(canvas: Canvas, unit: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = Ink.fade(hair(), 0.85f)
+        path.reset()
+        path.moveTo(7f * unit, 24f * unit)
+        path.cubicTo(7.4f * unit, 18.6f * unit, 9.6f * unit, 16.8f * unit, 12f * unit, 16.8f * unit)
+        path.cubicTo(14.4f * unit, 16.8f * unit, 16.6f * unit, 18.6f * unit, 17f * unit, 24f * unit)
+        path.close()
+        canvas.drawPath(path, paint)
+    }
+
+    private fun head(canvas: Canvas, unit: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = skin
+        canvas.drawRoundRect(
+            5.4f * unit, 4.2f * unit, 18.6f * unit, 17.6f * unit,
+            6.4f * unit, 6.4f * unit, paint,
+        )
+        paint.color = hair()
+        path.reset()
+        path.moveTo(5.2f * unit, 11.4f * unit)
+        path.cubicTo(4.6f * unit, 4.2f * unit, 9f * unit, 1.6f * unit, 12f * unit, 1.6f * unit)
+        path.cubicTo(15f * unit, 1.6f * unit, 19.4f * unit, 4.2f * unit, 18.8f * unit, 11.4f * unit)
+        path.cubicTo(18.2f * unit, 8.6f * unit, 17.4f * unit, 7.4f * unit, 16.4f * unit, 6.8f * unit)
+        path.cubicTo(14.6f * unit, 8.8f * unit, 9.4f * unit, 8.8f * unit, 7.6f * unit, 6.8f * unit)
+        path.cubicTo(6.6f * unit, 7.4f * unit, 5.8f * unit, 8.6f * unit, 5.2f * unit, 11.4f * unit)
+        path.close()
+        canvas.drawPath(path, paint)
+    }
+
+    private fun fringe(canvas: Canvas, unit: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = hair()
+        canvas.drawRoundRect(
+            4.4f * unit, 7.4f * unit, 6.6f * unit, 15.4f * unit,
+            1.1f * unit, 1.1f * unit, paint,
+        )
+        canvas.drawRoundRect(
+            17.4f * unit, 7.4f * unit, 19.6f * unit, 15.4f * unit,
+            1.1f * unit, 1.1f * unit, paint,
+        )
+    }
+
+    private fun eyes(canvas: Canvas, unit: Float) {
+        paint.style = Paint.Style.FILL
+        if (who == Face.CALM) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.9f * unit
+            paint.color = ink
+            arc(canvas, 9.4f * unit, 12.4f * unit, 1.5f * unit)
+            arc(canvas, 14.6f * unit, 12.4f * unit, 1.5f * unit)
+            paint.style = Paint.Style.FILL
+            return
+        }
+        eye(canvas, unit, 9.4f * unit)
+        if (who == Face.WINK) {
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 0.9f * unit
+            paint.color = ink
+            arc(canvas, 14.6f * unit, 12.4f * unit, 1.5f * unit)
+            paint.style = Paint.Style.FILL
+            return
+        }
+        eye(canvas, unit, 14.6f * unit)
+    }
+
+    private fun eye(canvas: Canvas, unit: Float, x: Float) {
+        paint.color = ink
+        canvas.drawRoundRect(
+            x - 1.6f * unit, 10.6f * unit, x + 1.6f * unit, 14.2f * unit,
+            1.6f * unit, 1.8f * unit, paint,
+        )
+        paint.color = palette.accent
+        canvas.drawCircle(x, 13.1f * unit, 0.95f * unit, paint)
+        paint.color = 0xFFFFFFFF.toInt()
+        canvas.drawCircle(x - 0.55f * unit, 11.5f * unit, 0.62f * unit, paint)
+        canvas.drawCircle(x + 0.7f * unit, 13.6f * unit, 0.3f * unit, paint)
+    }
+
+    private fun arc(canvas: Canvas, x: Float, y: Float, radius: Float) {
+        path.reset()
+        path.moveTo(x - radius, y + radius * 0.45f)
+        path.quadTo(x, y - radius * 0.75f, x + radius, y + radius * 0.45f)
+        canvas.drawPath(path, paint)
+    }
+
+    private fun mouth(canvas: Canvas, unit: Float) {
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 0.75f * unit
+        paint.color = ink
+        path.reset()
+        if (who == Face.SPARK) {
+            path.moveTo(10.9f * unit, 15.2f * unit)
+            path.quadTo(12f * unit, 16.8f * unit, 13.1f * unit, 15.2f * unit)
+        } else {
+            path.moveTo(11.1f * unit, 15.7f * unit)
+            path.quadTo(12f * unit, 15.1f * unit, 12.9f * unit, 15.7f * unit)
+        }
+        canvas.drawPath(path, paint)
+        paint.style = Paint.Style.FILL
+    }
+
+    private fun blush(canvas: Canvas, unit: Float) {
+        paint.style = Paint.Style.FILL
+        paint.color = Ink.fade(palette.error, 0.42f)
+        canvas.drawOval(6.6f * unit, 13.6f * unit, 9f * unit, 15.2f * unit, paint)
+        canvas.drawOval(15f * unit, 13.6f * unit, 17.4f * unit, 15.2f * unit, paint)
+    }
+
+    private fun crown(canvas: Canvas, unit: Float) {
+        paint.style = Paint.Style.FILL
+        when (who) {
+            Face.SPARK -> {
+                paint.color = hair()
+                path.reset()
+                path.moveTo(12.2f * unit, 2.2f * unit)
+                path.cubicTo(
+                    13.4f * unit, 0.2f * unit,
+                    15.6f * unit, 0.4f * unit,
+                    15.2f * unit, 2.2f * unit,
+                )
+                path.cubicTo(
+                    14.6f * unit, 1.2f * unit,
+                    13.4f * unit, 1.4f * unit,
+                    12.9f * unit, 2.9f * unit,
+                )
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Face.RIBBON -> {
+                paint.color = palette.accent
+                path.reset()
+                path.moveTo(16.6f * unit, 5.4f * unit)
+                path.lineTo(19.4f * unit, 3.4f * unit)
+                path.lineTo(19.4f * unit, 7.4f * unit)
+                path.close()
+                canvas.drawPath(path, paint)
+                path.reset()
+                path.moveTo(16.6f * unit, 5.4f * unit)
+                path.lineTo(13.8f * unit, 3.4f * unit)
+                path.lineTo(13.8f * unit, 7.4f * unit)
+                path.close()
+                canvas.drawPath(path, paint)
+                canvas.drawCircle(16.6f * unit, 5.4f * unit, 0.9f * unit, paint)
+            }
+            else -> Unit
+        }
+    }
+
+    override fun setAlpha(alpha: Int) {
+        paint.alpha = alpha
+    }
+
+    override fun setColorFilter(filter: ColorFilter?) {
+        paint.colorFilter = filter
+    }
+
+    @Deprecated("Drawable declares it", ReplaceWith("PixelFormat.TRANSLUCENT"))
+    override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+}
+
 internal class Mark(private val shape: Shape, private val colour: Int) : Drawable() {
 
     enum class Shape {
@@ -1324,6 +1647,13 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
         NOTE,
         PACKAGE,
         SPLIT,
+        ARCHIVE,
+        SOUND,
+        FILM,
+        BINARY,
+        FONT,
+        TABLE,
+        SORT,
     }
 
     private companion object {
@@ -1558,6 +1888,106 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 path.lineTo(12f, 18.6f)
                 canvas.drawPath(path, paint)
             }
+            Shape.ARCHIVE -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(4.5f, 5.5f, 19.5f, 18.5f, 1.6f, 1.6f, Path.Direction.CW)
+                path.moveTo(4.5f, 9.5f)
+                path.lineTo(19.5f, 9.5f)
+                canvas.drawPath(path, paint)
+                path.rewind()
+                path.moveTo(11f, 5.5f)
+                path.lineTo(13f, 5.5f)
+                path.lineTo(13f, 9.5f)
+                path.lineTo(11f, 9.5f)
+                path.close()
+                path.addRect(11.2f, 11.5f, 12.8f, 14.5f, Path.Direction.CW)
+                paint.style = Paint.Style.FILL
+                canvas.drawPath(path, paint)
+            }
+            Shape.SOUND -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(9f, 17f)
+                path.lineTo(9f, 6.5f)
+                path.lineTo(18f, 4.8f)
+                path.lineTo(18f, 15f)
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.FILL
+                canvas.drawCircle(7f, 17.4f, 2.4f, paint)
+                canvas.drawCircle(16f, 15.4f, 2.4f, paint)
+            }
+            Shape.FILM -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(3.5f, 6.5f, 20.5f, 17.5f, 1.4f, 1.4f, Path.Direction.CW)
+                canvas.drawPath(path, paint)
+                path.rewind()
+                paint.style = Paint.Style.FILL
+                var at = 5f
+                while (at < 20f) {
+                    path.addRect(at, 7.6f, at + 1.4f, 9f, Path.Direction.CW)
+                    path.addRect(at, 15f, at + 1.4f, 16.4f, Path.Direction.CW)
+                    at += 3f
+                }
+                canvas.drawPath(path, paint)
+                path.rewind()
+                path.moveTo(10.6f, 10.4f)
+                path.lineTo(15f, 12.4f)
+                path.lineTo(10.6f, 14.4f)
+                path.close()
+                canvas.drawPath(path, paint)
+            }
+            Shape.BINARY -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(6.5f, 6.5f, 17.5f, 17.5f, 1.2f, 1.2f, Path.Direction.CW)
+                var at = 8.6f
+                while (at < 17f) {
+                    path.moveTo(4.4f, at)
+                    path.lineTo(6.5f, at)
+                    path.moveTo(17.5f, at)
+                    path.lineTo(19.6f, at)
+                    path.moveTo(at, 4.4f)
+                    path.lineTo(at, 6.5f)
+                    path.moveTo(at, 17.5f)
+                    path.lineTo(at, 19.6f)
+                    at += 3f
+                }
+                canvas.drawPath(path, paint)
+            }
+            Shape.FONT -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(6f, 18.5f)
+                path.lineTo(11.6f, 5.5f)
+                path.lineTo(13.4f, 5.5f)
+                path.lineTo(19f, 18.5f)
+                path.moveTo(8.4f, 14f)
+                path.lineTo(16.6f, 14f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.TABLE -> {
+                paint.style = Paint.Style.STROKE
+                path.addRoundRect(4.5f, 5.5f, 19.5f, 18.5f, 1.4f, 1.4f, Path.Direction.CW)
+                path.moveTo(4.5f, 9.6f)
+                path.lineTo(19.5f, 9.6f)
+                path.moveTo(4.5f, 14.2f)
+                path.lineTo(19.5f, 14.2f)
+                path.moveTo(11f, 9.6f)
+                path.lineTo(11f, 18.5f)
+                canvas.drawPath(path, paint)
+            }
+            Shape.SORT -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(4.5f, 7f)
+                path.lineTo(15f, 7f)
+                path.moveTo(4.5f, 12f)
+                path.lineTo(12f, 12f)
+                path.moveTo(4.5f, 17f)
+                path.lineTo(9f, 17f)
+                path.moveTo(17.5f, 5.5f)
+                path.lineTo(17.5f, 18.5f)
+                path.moveTo(15f, 16f)
+                path.lineTo(17.5f, 18.5f)
+                path.lineTo(20f, 16f)
+                canvas.drawPath(path, paint)
+            }
         }
         canvas.restore()
     }
@@ -1631,6 +2061,13 @@ class FlowLayout(
 }
 
 private enum class Tab { PROJECTS, FILES, BUILD, TRASH, SETTINGS }
+
+private enum class Order(val label: Int) {
+    NAME(R.string.omni_files_by_name),
+    SIZE(R.string.omni_files_by_size),
+    CHANGED(R.string.omni_files_by_changed),
+    KIND(R.string.omni_files_by_kind),
+}
 
 private sealed interface Screen {
     val tab: Tab
@@ -1775,10 +2212,22 @@ class BuilderActivity : Activity() {
             ".java", ".kt", ".kts", ".rs", ".cpp", ".hpp", ".c", ".h", ".py", ".gradle",
         )
 
-        val PACKAGE_SUFFIXES = listOf(".apk", ".aab", ".jar", ".aar", ".zip", ".so")
+        val PACKAGE_SUFFIXES = listOf(".apk", ".aab")
+
+        val ARCHIVE_SUFFIXES = listOf(".jar", ".aar", ".zip", ".tar", ".gz", ".7z", ".rar")
+
+        val SOUND_SUFFIXES = listOf(".mp3", ".ogg", ".wav", ".m4a", ".flac", ".aac", ".opus")
+
+        val FILM_SUFFIXES = listOf(".mp4", ".mkv", ".webm", ".avi", ".mov", ".3gp")
+
+        val BINARY_SUFFIXES = listOf(".so", ".dex", ".bin", ".arsc", ".o", ".a", ".keystore")
+
+        val FONT_SUFFIXES = listOf(".ttf", ".otf", ".ttc")
+
+        val TABLE_SUFFIXES = listOf(".json", ".csv", ".db", ".sqlite", ".toml", ".yaml", ".yml")
 
         val NOTE_SUFFIXES = listOf(
-            ".txt", ".md", ".json", ".toml", ".properties", ".cfg", ".pro",
+            ".txt", ".md", ".properties", ".cfg", ".pro", ".ini", ".log",
         )
 
         val KEY_SIZES = listOf(2048, 3072, 4096)
@@ -1819,6 +2268,8 @@ class BuilderActivity : Activity() {
     private var formImage: String? = null
     private var imageForProject: String? = null
     private var secondFolder: String? = null
+    private var filesOrder = Order.NAME
+    private var filesReversed = false
 
     private var keyAlias = DEFAULT_KEY_ALIAS
     private var keyCommonName = DEFAULT_KEY_COMMON_NAME
@@ -2772,13 +3223,12 @@ class BuilderActivity : Activity() {
         }
 
         content.addView(breadcrumb(root, folder))
+        content.addView(sortRow())
 
         val entries = runCatching {
             FileEntry.list(Builder.nativeProjectTree(root))
         }.getOrDefault(emptyList())
-        val here = entries
-            .filter { it.path.substringBeforeLast('/', "") == folder }
-            .sortedWith(compareBy({ !it.folder }, { it.path.lowercase(Locale.getDefault()) }))
+        val here = arranged(entries.filter { it.path.substringBeforeLast('/', "") == folder })
 
         val beside = secondFolder
         if (beside == null) {
@@ -3543,9 +3993,7 @@ class BuilderActivity : Activity() {
                 }
             )
         }
-        val here = entries
-            .filter { it.path.substringBeforeLast('/', "") == folder }
-            .sortedWith(compareBy({ !it.folder }, { it.path.lowercase(Locale.getDefault()) }))
+        val here = arranged(entries.filter { it.path.substringBeforeLast('/', "") == folder })
         val tree = card()
         if (here.isEmpty()) {
             tree.addView(quiet(getString(R.string.omni_files_empty)))
@@ -3558,6 +4006,70 @@ class BuilderActivity : Activity() {
         }
         holder.addView(tree)
         return holder
+    }
+
+    private fun sortRow(): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(1), 0, gap(1))
+        }
+        row.addView(
+            View(this).apply {
+                background = Mark(Mark.Shape.SORT, palette.muted)
+                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+            },
+            LinearLayout.LayoutParams(gap(5), gap(5)).apply { marginEnd = gap(2) },
+        )
+        for (order in Order.entries) {
+            val chosen = order == filesOrder
+            row.addView(
+                TextView(this).apply {
+                    text = getString(order.label)
+                    typeface = Type.label
+                    setTextColor(if (chosen) palette.background else palette.muted)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    letterSpacing = Type.TRACKING
+                    setPadding(gap(2), gap(1), gap(2), gap(1))
+                    background = touchable(
+                        pill(if (chosen) palette.accent else palette.raised, gap(3).toFloat()),
+                        palette.accent,
+                    )
+                    isClickable = true
+                    readAs(Button::class.java.name)
+                    setOnClickListener {
+                        if (filesOrder == order) {
+                            filesReversed = !filesReversed
+                        } else {
+                            filesOrder = order
+                            filesReversed = false
+                        }
+                        render(false)
+                    }
+                },
+                LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT).apply {
+                    marginEnd = gap(1)
+                },
+            )
+        }
+        row.addView(
+            TextView(this).apply {
+                text = if (filesReversed) "\u2191" else "\u2193"
+                typeface = Type.label
+                setTextColor(palette.accent)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                setPadding(gap(2), gap(1), gap(2), gap(1))
+                isClickable = true
+                readAs(Button::class.java.name)
+                background = touchable(pill(palette.raised, gap(3).toFloat()), palette.accent)
+                setOnClickListener {
+                    filesReversed = !filesReversed
+                    render(false)
+                }
+            },
+            LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT),
+        )
+        return row
     }
 
     private fun stepPane(root: String, pane: String, into: String) {
@@ -3575,13 +4087,61 @@ class BuilderActivity : Activity() {
         }
         val name = entry.path.substringAfterLast('/').lowercase(Locale.US)
         return when {
+            PACKAGE_SUFFIXES.any { name.endsWith(it) } ->
+                Mark.Shape.PACKAGE to Ink.hot(palette.ok, 0.15f)
+            ARCHIVE_SUFFIXES.any { name.endsWith(it) } ->
+                Mark.Shape.ARCHIVE to palette.warning
             CODE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.CODE to palette.accent
-            name.endsWith(".xml") -> Mark.Shape.MARKUP to palette.warning
-            PICTURE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.IMAGE to palette.ok
-            PACKAGE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.PACKAGE to palette.ok
+            name.endsWith(".xml") -> Mark.Shape.MARKUP to Ink.hot(palette.warning, -0.1f)
+            PICTURE_SUFFIXES.any { name.endsWith(it) } ->
+                Mark.Shape.IMAGE to Ink.hot(palette.error, 0.3f)
+            SOUND_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.SOUND to palette.ok
+            FILM_SUFFIXES.any { name.endsWith(it) } ->
+                Mark.Shape.FILM to Ink.hot(palette.glowThird, 0.55f)
+            FONT_SUFFIXES.any { name.endsWith(it) } ->
+                Mark.Shape.FONT to Ink.hot(palette.accent, -0.2f)
+            BINARY_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.BINARY to palette.error
+            TABLE_SUFFIXES.any { name.endsWith(it) } ->
+                Mark.Shape.TABLE to Ink.hot(palette.ok, -0.25f)
             NOTE_SUFFIXES.any { name.endsWith(it) } -> Mark.Shape.NOTE to palette.muted
             else -> Mark.Shape.FILE to palette.muted
         }
+    }
+
+    private fun kindOrder(entry: FileEntry): Int {
+        if (entry.folder) {
+            return 0
+        }
+        val name = entry.path.substringAfterLast('/').lowercase(Locale.US)
+        return when {
+            PACKAGE_SUFFIXES.any { name.endsWith(it) } -> 1
+            ARCHIVE_SUFFIXES.any { name.endsWith(it) } -> 2
+            CODE_SUFFIXES.any { name.endsWith(it) } -> 3
+            name.endsWith(".xml") -> 4
+            PICTURE_SUFFIXES.any { name.endsWith(it) } -> 5
+            SOUND_SUFFIXES.any { name.endsWith(it) } -> 6
+            FILM_SUFFIXES.any { name.endsWith(it) } -> 7
+            FONT_SUFFIXES.any { name.endsWith(it) } -> 8
+            BINARY_SUFFIXES.any { name.endsWith(it) } -> 9
+            TABLE_SUFFIXES.any { name.endsWith(it) } -> 10
+            NOTE_SUFFIXES.any { name.endsWith(it) } -> 11
+            else -> 12
+        }
+    }
+
+    private fun arranged(here: List<FileEntry>): List<FileEntry> {
+        val byName = compareBy<FileEntry> { it.path.lowercase(Locale.getDefault()) }
+        val within: Comparator<FileEntry> = when (filesOrder) {
+            Order.NAME -> byName
+            Order.SIZE -> compareByDescending<FileEntry> { it.bytes }.then(byName)
+            Order.CHANGED -> compareByDescending<FileEntry> { it.changed }.then(byName)
+            Order.KIND -> compareBy<FileEntry> { kindOrder(it) }.then(byName)
+        }
+        val ordered = here.sortedWith(compareBy<FileEntry> { !it.folder }.then(within))
+        if (!filesReversed) {
+            return ordered
+        }
+        return ordered.filter { it.folder }.reversed() + ordered.filter { !it.folder }.reversed()
     }
 
     private fun looksLikeAPicture(path: String): Boolean {
@@ -3709,9 +4269,14 @@ class BuilderActivity : Activity() {
     }
 
     private fun openEntry(root: String, entry: FileEntry) {
+        val name = entry.path.lowercase(Locale.US)
         when {
             entry.folder -> go(Screen.Files(root, entry.path))
             looksLikeAPicture(entry.path) -> go(Screen.Picture(root, entry.path))
+            PACKAGE_SUFFIXES.any { name.endsWith(it) } -> {
+                results.removeAllViews()
+                inspectPackage(File(root, entry.path).absolutePath)
+            }
             else -> {
                 editorText = ""
                 go(Screen.Editor(root, entry.path))
@@ -5825,13 +6390,43 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun heading(value: String) = TextView(this).apply {
-        text = value.uppercase(Locale.getDefault())
-        setTextColor(palette.foreground)
-        typeface = Type.heading
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
-        letterSpacing = 0.06f
-        setPadding(0, gap(4), 0, gap(1))
+    private fun heading(value: String): View {
+        val written = TextView(this).apply {
+            text = value.uppercase(Locale.getDefault())
+            setTextColor(palette.foreground)
+            typeface = Type.heading
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+            letterSpacing = 0.06f
+            setPadding(0, gap(4), 0, gap(1))
+        }
+        if (palette.key != Palette.ANIME.key) {
+            return written
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.BOTTOM
+        }
+        row.addView(written, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        row.addView(
+            ImageView(this).apply {
+                setImageDrawable(Chibi(companion(value), palette))
+                alpha = 0.92f
+            },
+            LinearLayout.LayoutParams(gap(9), gap(9)).apply {
+                marginStart = gap(2)
+                bottomMargin = gap(1)
+            },
+        )
+        return row
+    }
+
+    private fun companion(of: String): Chibi.Face {
+        val faces = Chibi.Face.entries
+        var seed = 7
+        for (letter in of) {
+            seed = seed * 31 + letter.code
+        }
+        return faces[((seed % faces.size) + faces.size) % faces.size]
     }
 
     private fun label(value: String) = TextView(this).apply {

@@ -66,6 +66,10 @@
     <string name="omni_files_root">项目</string>
     <string name="omni_files_empty">这个文件夹是空的。</string>
     <string name="omni_files_split">分屏</string>
+    <string name="omni_files_by_name">名称</string>
+    <string name="omni_files_by_size">大小</string>
+    <string name="omni_files_by_changed">日期</string>
+    <string name="omni_files_by_kind">类型</string>
     <string name="omni_files_copy_across">复制到另一侧</string>
     <string name="omni_files_move_across">移动到另一侧</string>
     <string name="omni_files_config">配置</string>

@@ -66,6 +66,10 @@
     <string name="omni_files_root">Project</string>
     <string name="omni_files_empty">This folder is empty.</string>
     <string name="omni_files_split">SPLIT</string>
+    <string name="omni_files_by_name">NAME</string>
+    <string name="omni_files_by_size">SIZE</string>
+    <string name="omni_files_by_changed">CHANGED</string>
+    <string name="omni_files_by_kind">KIND</string>
     <string name="omni_files_copy_across">Copy to the other pane</string>
     <string name="omni_files_move_across">Move to the other pane</string>
     <string name="omni_files_config">CONFIGURATION</string>

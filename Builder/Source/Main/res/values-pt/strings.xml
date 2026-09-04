@@ -66,6 +66,10 @@
     <string name="omni_files_root">Projeto</string>
     <string name="omni_files_empty">Esta pasta está vazia.</string>
     <string name="omni_files_split">DIVIDIR</string>
+    <string name="omni_files_by_name">NOME</string>
+    <string name="omni_files_by_size">TAMANHO</string>
+    <string name="omni_files_by_changed">DATA</string>
+    <string name="omni_files_by_kind">TIPO</string>
     <string name="omni_files_copy_across">Copiar para o outro painel</string>
     <string name="omni_files_move_across">Mover para o outro painel</string>
     <string name="omni_files_config">CONFIGURAÇÃO</string>

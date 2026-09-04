@@ -66,6 +66,10 @@
     <string name="omni_files_root">Projekt</string>
     <string name="omni_files_empty">Dieser Ordner ist leer.</string>
     <string name="omni_files_split">TEILEN</string>
+    <string name="omni_files_by_name">NAME</string>
+    <string name="omni_files_by_size">GRÖSSE</string>
+    <string name="omni_files_by_changed">DATUM</string>
+    <string name="omni_files_by_kind">ART</string>
     <string name="omni_files_copy_across">In den anderen Bereich kopieren</string>
     <string name="omni_files_move_across">In den anderen Bereich verschieben</string>
     <string name="omni_files_config">KONFIGURATION</string>

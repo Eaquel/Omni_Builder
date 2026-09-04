@@ -66,6 +66,10 @@
     <string name="omni_files_root">المشروع</string>
     <string name="omni_files_empty">هذا المجلد فارغ.</string>
     <string name="omni_files_split">تقسيم</string>
+    <string name="omni_files_by_name">الاسم</string>
+    <string name="omni_files_by_size">الحجم</string>
+    <string name="omni_files_by_changed">التاريخ</string>
+    <string name="omni_files_by_kind">النوع</string>
     <string name="omni_files_copy_across">نسخ إلى اللوحة الأخرى</string>
     <string name="omni_files_move_across">نقل إلى اللوحة الأخرى</string>
     <string name="omni_files_config">الإعداد</string>

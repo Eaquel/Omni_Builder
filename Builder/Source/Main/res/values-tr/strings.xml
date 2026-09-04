@@ -66,6 +66,10 @@
     <string name="omni_files_root">Proje</string>
     <string name="omni_files_empty">Bu klasör boş.</string>
     <string name="omni_files_split">BÖL</string>
+    <string name="omni_files_by_name">AD</string>
+    <string name="omni_files_by_size">BOYUT</string>
+    <string name="omni_files_by_changed">TARİH</string>
+    <string name="omni_files_by_kind">TÜR</string>
     <string name="omni_files_copy_across">Diğer bölmeye kopyala</string>
     <string name="omni_files_move_across">Diğer bölmeye taşı</string>
     <string name="omni_files_config">YAPILANDIRMA</string>

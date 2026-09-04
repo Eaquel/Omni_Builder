@@ -27413,6 +27413,7 @@ pub mod workspace {
         pub path: String,
         pub folder: bool,
         pub bytes: u64,
+        pub changed: u64,
     }
 
     impl Entry {
@@ -27421,6 +27422,7 @@ pub mod workspace {
             w.field_str("path", &self.path);
             w.field_bool("folder", self.folder);
             w.field_u64("bytes", self.bytes);
+            w.field_u64("changed", self.changed);
             w.end_object();
         }
     }
@@ -27565,17 +27567,21 @@ pub mod workspace {
             };
             let path = path.replace('\\', "/");
             let folder = child.is_dir();
-            let bytes = if folder {
-                0
-            } else {
-                std::fs::metadata(&child)
-                    .map(|data| data.len())
-                    .unwrap_or(0)
+            let known = std::fs::metadata(&child).ok();
+            let bytes = match &known {
+                Some(data) if !folder => data.len(),
+                _ => 0,
             };
+            let changed = known
+                .and_then(|data| data.modified().ok())
+                .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|since| since.as_secs())
+                .unwrap_or(0);
             into.push(Entry {
                 path,
                 folder,
                 bytes,
+                changed,
             });
             if folder {
                 walk(base, &child, depth + 1, into)?;
@@ -37863,6 +37869,7 @@ mod tests {
 
     #[test]
     fn a_layout_and_a_menu_become_what_aapt2_makes_of_them() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-layout");
         let res = directory.join("Res");
         for folder in ["layout", "menu", "values", "drawable", "mipmap-anydpi-v26"] {
@@ -38088,6 +38095,7 @@ mod tests {
 
     #[test]
     fn every_qualifier_a_folder_can_carry_means_the_same_to_aapt2() {
+        let _turn = super::progress::one_at_a_time();
         const QUALIFIERS: &[&str] = &[
             "",
             "ldltr",
@@ -38319,6 +38327,7 @@ mod tests {
 
     #[test]
     fn styles_arrays_and_plurals_are_the_table_aapt2_writes() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-bags");
         let res = directory.join("Res");
         std::fs::create_dir_all(res.join("values")).unwrap();
@@ -38485,6 +38494,7 @@ mod tests {
 
     #[test]
     fn attributes_and_styleables_are_what_aapt2_makes_of_them() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-attrs");
         let res = directory.join("Res");
         std::fs::create_dir_all(res.join("values")).unwrap();
@@ -40898,6 +40908,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_library_somebody_else_published_compiles_into_a_package() {
+        let _turn = super::progress::one_at_a_time();
         let corpus = library_corpus();
         if corpus.is_empty() {
             assert!(
@@ -41024,6 +41035,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_library_a_project_depends_on_is_in_the_package() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-library");
         let made = directory.join("made");
         std::fs::create_dir_all(&made).unwrap();
@@ -44849,6 +44861,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_build_engine_produces_a_package_apksigner_accepts() {
+        let _turn = super::progress::one_at_a_time();
         let Some(apksigner) = find_apksigner() else {
             assert!(
                 std::env::var("OMNI_REQUIRE_SELF_BUILT_APK").is_err(),
@@ -45450,6 +45463,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_security_policy_refuses_to_produce_a_weak_package() {
+        let _turn = super::progress::one_at_a_time();
         let key = super::rsa::generate(1024).unwrap();
         let cases: &[(&str, &str, &str)] = &[
             (
@@ -46090,6 +46104,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_java_somebody_wrote_is_the_code_the_package_carries() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-java-end-to-end");
         let root = directory.join("Written");
         let spec =
@@ -46255,6 +46270,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_whole_application_written_in_java_25_becomes_a_package_a_device_takes() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-whole-application");
         let root = directory.join("Whole");
         let spec =
@@ -47642,6 +47658,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_project_keeps_the_image_the_developer_chose() {
+        let _turn = super::progress::one_at_a_time();
         let mut files = Vec::new();
         for candidate in [
             std::env::var("ANDROID_HOME").ok(),
@@ -48245,6 +48262,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_name_a_project_carries_is_translated_in_every_language_it_chose() {
+        let _turn = super::progress::one_at_a_time();
         let directory = temp_directory("omni-locales");
         let root = directory.join("Spoken");
         let text = root.to_str().unwrap().to_string();
@@ -48335,6 +48353,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_image_the_developer_chose_becomes_the_icon_aapt2_reports() {
+        let _turn = super::progress::one_at_a_time();
         let mut files = Vec::new();
         for candidate in [
             std::env::var("ANDROID_HOME").ok(),
@@ -48507,6 +48526,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_package_this_build_writes_is_compressed_where_compressing_is_allowed() {
+        let _turn = super::progress::one_at_a_time();
         let mut files = Vec::new();
         for candidate in [
             std::env::var("ANDROID_HOME").ok(),
@@ -48635,6 +48655,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_resource_table_sits_where_the_installer_needs_it() {
+        let _turn = super::progress::one_at_a_time();
         let mut files = Vec::new();
         for candidate in [
             std::env::var("ANDROID_HOME").ok(),
@@ -48703,6 +48724,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn a_manifest_that_names_a_resource_this_build_has_no_table_for_is_refused() {
+        let _turn = super::progress::one_at_a_time();
         let key = super::rsa::generate(2048).unwrap();
         let mut sink = Sink::new();
         let mut project = super::builder::starter("com.tr.yt", "Named");
@@ -48861,6 +48883,7 @@ public final class MainActivity extends Activity {
 
     #[test]
     fn the_version_the_developer_chose_reaches_the_package() {
+        let _turn = super::progress::one_at_a_time();
         let spec = super::scaffold::Spec {
             package: "com.tr.yt".to_string(),
             label: "Versioned".to_string(),
