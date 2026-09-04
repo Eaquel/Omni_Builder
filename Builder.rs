@@ -23925,6 +23925,146 @@ pub mod integrity {
     }
 }
 
+pub mod seal {
+
+    pub const CLASS: &str = "OmniSeal";
+
+    pub const AUTHORITY_SUFFIX: &str = ".omniseal";
+
+    pub fn class_name(package: &str) -> String {
+        format!("{package}.{CLASS}")
+    }
+
+    pub fn authority(package: &str) -> String {
+        format!("{package}{AUTHORITY_SUFFIX}")
+    }
+
+    pub fn source(package: &str, fingerprint: &str) -> String {
+        let plain: String = fingerprint
+            .chars()
+            .filter(|held| held.is_ascii_hexdigit())
+            .flat_map(char::to_uppercase)
+            .collect();
+        format!(
+            r####"package {package};
+
+import android.content.ContentProvider;
+import android.content.ContentValues;
+import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+import android.content.pm.SigningInfo;
+import android.database.Cursor;
+import android.net.Uri;
+import android.os.Process;
+import android.util.Log;
+
+import java.security.MessageDigest;
+
+public final class {class_name} extends ContentProvider {{
+
+    public static final String MADE_BY = "{plain}";
+
+    private static final String TAG = "{class_name}";
+
+    private static final char[] FIGURES = "0123456789ABCDEF".toCharArray();
+
+    public static String written(byte[] bytes) {{
+        char[] out = new char[bytes.length * 2];
+        for (int at = 0; at < bytes.length; at++) {{
+            int held = bytes[at] & 0xFF;
+            out[at * 2] = FIGURES[held >>> 4];
+            out[at * 2 + 1] = FIGURES[held & 0x0F];
+        }}
+        return new String(out);
+    }}
+
+    public static boolean signedByTheSameHand(Context context) {{
+        try {{
+            PackageManager packages = context.getPackageManager();
+            PackageInfo info = packages.getPackageInfo(
+                context.getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
+            SigningInfo signing = info.signingInfo;
+            if (signing == null) {{
+                return false;
+            }}
+            Signature[] held = signing.getApkContentsSigners();
+            if (held == null || held.length == 0) {{
+                return false;
+            }}
+            for (int at = 0; at < held.length; at++) {{
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                String seen = written(digest.digest(held[at].toByteArray()));
+                if (MADE_BY.equals(seen)) {{
+                    return true;
+                }}
+            }}
+            return false;
+        }} catch (Exception why) {{
+            return false;
+        }}
+    }}
+
+    public static boolean builtForDebugging(Context context) {{
+        ApplicationInfo about = context.getApplicationInfo();
+        return (about.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    }}
+
+    public static boolean namedAsItWasBuilt(Context context) {{
+        return "{package}".equals(context.getPackageName());
+    }}
+
+    public static boolean intact(Context context) {{
+        return signedByTheSameHand(context)
+            && namedAsItWasBuilt(context)
+            && !builtForDebugging(context);
+    }}
+
+    @Override
+    public boolean onCreate() {{
+        Context context = getContext();
+        if (context != null && !intact(context)) {{
+            Log.e(TAG, "This package is not the one that was built and signed here.");
+            Process.killProcess(Process.myPid());
+        }}
+        return true;
+    }}
+
+    @Override
+    public Cursor query(Uri uri, String[] wanted, String where, String[] values, String order) {{
+        return null;
+    }}
+
+    @Override
+    public String getType(Uri uri) {{
+        return null;
+    }}
+
+    @Override
+    public Uri insert(Uri uri, ContentValues values) {{
+        return null;
+    }}
+
+    @Override
+    public int delete(Uri uri, String where, String[] values) {{
+        return 0;
+    }}
+
+    @Override
+    public int update(Uri uri, ContentValues values, String where, String[] held) {{
+        return 0;
+    }}
+}}
+"####,
+            package = package,
+            class_name = CLASS,
+            plain = plain,
+        )
+    }
+}
+
 pub mod scaffold {
     use crate::diag::{Diagnostic, Severity};
     use crate::json::Writer;
@@ -30117,6 +30257,8 @@ pub mod builder {
         pub library_resources: Vec<crate::scaffold::Supplied>,
 
         pub library_packages: Vec<String>,
+
+        pub sealed: Option<String>,
     }
 
     pub struct Icons {
@@ -30563,6 +30705,7 @@ pub mod builder {
             library_values: Vec::new(),
             library_resources: Vec::new(),
             library_packages: Vec::new(),
+            sealed: None,
         }
     }
 
@@ -30680,6 +30823,7 @@ pub mod builder {
             library_values: Vec::new(),
             library_resources: Vec::new(),
             library_packages: Vec::new(),
+            sealed: None,
         })
     }
 
@@ -30690,6 +30834,10 @@ pub mod builder {
     }
 
     pub fn from_project(root: &str) -> Result<Project, Diagnostic> {
+        sealed_project(root, None)
+    }
+
+    pub fn sealed_project(root: &str, fingerprint: Option<&str>) -> Result<Project, Diagnostic> {
         crate::progress::enter_checked("project")?;
         let manifest = crate::scaffold::read_manifest(root)?;
 
@@ -30734,6 +30882,19 @@ pub mod builder {
                     continue;
                 }
                 sources.push((format!("{held}/R.java"), r_source(held, &icons.compiled)));
+            }
+        }
+
+        if let Some(made_by) = fingerprint {
+            let mut named = crate::diag::Sink::new();
+            let parsed = crate::xml::parse(&project.manifest, "AndroidManifest.xml", &mut named);
+            let package = parsed.as_ref().map(package_name).unwrap_or_default();
+            if !package.is_empty() {
+                sources.push((
+                    format!("{}.java", crate::seal::CLASS),
+                    crate::seal::source(&package, made_by),
+                ));
+                project.sealed = Some(crate::seal::class_name(&package));
             }
         }
 
@@ -31570,11 +31731,52 @@ public final class R {{
         assemble(project, key, &certificate_der, sink)
     }
 
+    pub fn made_by(certificate_der: &[u8]) -> Result<String, Diagnostic> {
+        Ok(crate::x509::Certificate::parse(certificate_der)?
+            .fingerprint
+            .to_hex()
+            .to_uppercase())
+    }
+
     pub struct Prepared {
         pub root: crate::xml::Element,
         pub icons: Option<Icons>,
         pub package: String,
         pub guard: guard::Report,
+    }
+
+    fn declare_the_seal(root: &mut crate::xml::Element, class: &str, authority: &str) {
+        let Some(application) = root
+            .children
+            .iter_mut()
+            .find(|child| child.name == "application")
+        else {
+            return;
+        };
+        let already = application.children.iter().any(|child| {
+            child.name == "provider" && child.attribute("android:name") == Some(class)
+        });
+        if already {
+            return;
+        }
+        let where_at = application.position;
+        let said = |name: &str, value: &str| crate::xml::Attribute {
+            name: name.to_string(),
+            value: value.to_string(),
+            position: where_at,
+        };
+        application.children.push(crate::xml::Element {
+            name: "provider".to_string(),
+            attributes: vec![
+                said("android:name", class),
+                said("android:authorities", authority),
+                said("android:exported", "false"),
+                said("android:initOrder", "2147483647"),
+            ],
+            children: Vec::new(),
+            text: String::new(),
+            position: where_at,
+        });
     }
 
     pub fn prepare(project: &Project, sink: &mut Sink) -> Result<Prepared, Diagnostic> {
@@ -31593,6 +31795,14 @@ public final class R {{
             }
         }
         resolve_references(&mut root, icons.as_ref().map(|made| &made.compiled))?;
+
+        if let Some(class) = &project.sealed {
+            let package = class
+                .rsplit_once('.')
+                .map(|(held, _)| held.to_string())
+                .unwrap_or_default();
+            declare_the_seal(&mut root, class, &crate::seal::authority(&package));
+        }
 
         let report = guard::inspect_manifest(&root);
         if report.verdict() == guard::Verdict::Refused {
@@ -34798,6 +35008,29 @@ pub mod ffi {
         }
     }
 
+    type SigningPair = (crate::rsa::PrivateKey, Vec<u8>);
+
+    fn signing_pair(
+        key_path: &str,
+        password: &str,
+        now: i64,
+        w: &mut crate::json::Writer,
+    ) -> Result<SigningPair, crate::diag::Diagnostic> {
+        if password.is_empty() {
+            let (key, reused) = crate::builder::signing_key(key_path)?;
+            w.field_bool("reusedKey", reused);
+            w.field_bool("developerKey", false);
+            let made =
+                crate::builder::signing_identity(&key, &crate::builder::Identity::default(), now)?;
+            return Ok((key, made));
+        }
+        let opened = crate::keystore::unlock(key_path, password)?;
+        w.field_bool("reusedKey", true);
+        w.field_bool("developerKey", true);
+        opened.record.write_json_field(w, "signedBy");
+        Ok((opened.key, opened.certificate))
+    }
+
     #[no_mangle]
     pub extern "C" fn omni_build_progress() -> *mut c_char {
         let result = catch_unwind(|| match CString::new(crate::progress::report()) {
@@ -34904,21 +35137,14 @@ pub mod ffi {
             let mut sink = crate::diag::Sink::new();
             let now = now_seconds();
 
-            let outcome = crate::builder::from_project(&root).and_then(|project| {
+            let outcome = (|| {
+                let (key, certificate) = signing_pair(&key_path, &password, now, &mut w)?;
+                let made_by = crate::builder::made_by(&certificate)?;
+                let project = crate::builder::sealed_project(&root, Some(&made_by))?;
                 w.field_bool("carriesImage", project.icon.is_some());
-                if password.is_empty() {
-                    let (key, reused) = crate::builder::signing_key(&key_path)?;
-                    w.field_bool("reusedKey", reused);
-                    w.field_bool("developerKey", false);
-                    crate::builder::build(&project, &key, now, &mut sink)
-                } else {
-                    let opened = crate::keystore::unlock(&key_path, &password)?;
-                    w.field_bool("reusedKey", true);
-                    w.field_bool("developerKey", true);
-                    opened.record.write_json_field(&mut w, "signedBy");
-                    crate::builder::assemble(&project, &opened.key, &opened.certificate, &mut sink)
-                }
-            });
+                w.field_bool("sealed", project.sealed.is_some());
+                crate::builder::assemble(&project, &key, &certificate, &mut sink)
+            })();
 
             let mut built = false;
             match outcome {
@@ -35113,24 +35339,17 @@ pub mod ffi {
             let mut sink = crate::diag::Sink::new();
             let now = now_seconds();
 
-            let outcome = crate::builder::from_project(&root).and_then(|project| {
+            let outcome = (|| {
+                let (key, certificate) = signing_pair(&key_path, &password, now, &mut w)?;
+                let made_by = crate::builder::made_by(&certificate)?;
+                let project = crate::builder::sealed_project(&root, Some(&made_by))?;
                 w.field_bool("carriesImage", project.icon.is_some());
+                w.field_bool("sealed", project.sealed.is_some());
                 w.field_u64("locales", project.values.len() as u64);
-                let package = if password.is_empty() {
-                    let (key, reused) = crate::builder::signing_key(&key_path)?;
-                    w.field_bool("reusedKey", reused);
-                    w.field_bool("developerKey", false);
-                    crate::builder::build(&project, &key, now, &mut sink)?
-                } else {
-                    let opened = crate::keystore::unlock(&key_path, &password)?;
-                    w.field_bool("reusedKey", true);
-                    w.field_bool("developerKey", true);
-                    opened.record.write_json_field(&mut w, "signedBy");
-                    crate::builder::assemble(&project, &opened.key, &opened.certificate, &mut sink)?
-                };
+                let package = crate::builder::assemble(&project, &key, &certificate, &mut sink)?;
                 let bundle = crate::bundle::write(&project)?;
                 Ok((package, bundle))
-            });
+            })();
 
             #[allow(unused_assignments)]
             let mut built = false;
@@ -44856,6 +45075,7 @@ public final class MainActivity extends Activity {
             library_values: Vec::new(),
             library_resources: Vec::new(),
             library_packages: Vec::new(),
+            sealed: None,
         }
     }
 
@@ -45520,6 +45740,7 @@ public final class MainActivity extends Activity {
                 library_values: Vec::new(),
                 library_resources: Vec::new(),
                 library_packages: Vec::new(),
+                sealed: None,
             };
             let mut sink = Sink::new();
             let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
@@ -46266,6 +46487,93 @@ public final class MainActivity extends Activity {
             project.code.len(),
             outcome.package.len()
         );
+    }
+
+    #[test]
+    fn what_this_builds_carries_a_seal_against_the_key_that_signed_it() {
+        let _turn = super::progress::one_at_a_time();
+        let directory = temp_directory("omni-sealed");
+        let root = directory.join("Sealed");
+        let spec =
+            "package=com.tr.yt;label=Sealed;abis=arm64-v8a;minSdk=30;targetSdk=37;languages=java";
+        super::scaffold::create(
+            root.to_str().unwrap(),
+            &super::scaffold::Spec::parse(spec).unwrap(),
+        )
+        .expect("the project must be created");
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let certificate = super::builder::signing_identity(
+            &key,
+            &super::builder::Identity::default(),
+            1_787_000_000,
+        )
+        .expect("a certificate");
+        let made_by = super::builder::made_by(&certificate).expect("a fingerprint");
+        assert_eq!(made_by.len(), 64, "{made_by}");
+
+        let project =
+            super::builder::sealed_project(root.to_str().unwrap(), Some(&made_by)).expect("reads");
+        assert_eq!(project.sealed.as_deref(), Some("com.tr.yt.OmniSeal"));
+
+        let sealed = project
+            .code
+            .iter()
+            .find(|held| held.descriptor == "Lcom/tr/yt/OmniSeal;")
+            .expect("the seal is compiled into the package");
+        assert_eq!(sealed.superclass, "Landroid/content/ContentProvider;");
+        assert!(
+            sealed
+                .virtual_methods
+                .iter()
+                .any(|method| method.reference.name == "onCreate"),
+            "the seal runs before anything else in the application"
+        );
+        assert!(
+            sealed
+                .static_fields
+                .iter()
+                .any(|field| field.reference.name == "MADE_BY"),
+            "the fingerprint is carried in the class, not alongside it"
+        );
+
+        let mut sink = Sink::new();
+        let outcome = super::builder::assemble(&project, &key, &certificate, &mut sink)
+            .expect("a sealed project still builds");
+        assert!(outcome.signed);
+        assert_eq!(
+            outcome.certificate_fingerprint.replace(':', ""),
+            made_by,
+            "the seal was written against the key the package was signed with"
+        );
+
+        let mut own = Sink::new();
+        let archive =
+            super::archive::read(&outcome.package, &mut own).expect("the package reads back");
+        let manifest = archive
+            .entries()
+            .iter()
+            .find(|entry| entry.name == "AndroidManifest.xml")
+            .expect("a manifest");
+        let bytes =
+            super::builder::entry_bytes(&outcome.package, manifest, "package").expect("its bytes");
+        let read = super::axml::decode(&bytes).expect("the manifest decodes");
+        let application = read
+            .children_named("application")
+            .next()
+            .expect("an application");
+        let provider = application
+            .children_named("provider")
+            .next()
+            .expect("the seal is declared, or nothing would start it");
+        assert_eq!(provider.attribute("name"), Some("com.tr.yt.OmniSeal"));
+        assert_eq!(provider.attribute("exported"), Some("false"));
+        assert_eq!(
+            provider.attribute("authorities"),
+            Some("com.tr.yt.omniseal")
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
