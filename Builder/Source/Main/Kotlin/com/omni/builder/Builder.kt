@@ -67,6 +67,7 @@ import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -1193,6 +1194,7 @@ internal class Screenful(var rows: Int, var columns: Int) {
         const val FAINT = 2
         const val UNDERLINE = 4
         const val REVERSE = 8
+        const val SCROLLBACK = 4000
     }
 
     class Cell {
@@ -1210,6 +1212,12 @@ internal class Screenful(var rows: Int, var columns: Int) {
     }
 
     var lines: Array<Array<Cell>> = Array(rows) { Array(columns) { Cell() } }
+    val history = ArrayDeque<Array<Cell>>()
+    var onAlternate = false
+    var applicationKeys = false
+    private var kept: Array<Array<Cell>>? = null
+    private var keptRow = 0
+    private var keptColumn = 0
     var row = 0
     var column = 0
     var ink = DEFAULT_INK
@@ -1304,7 +1312,33 @@ internal class Screenful(var rows: Int, var columns: Int) {
         pending = false
     }
 
+    fun useAlternate(wanted: Boolean) {
+        if (wanted == onAlternate) {
+            return
+        }
+        if (wanted) {
+            kept = lines
+            keptRow = row
+            keptColumn = column
+            lines = Array(rows) { Array(columns) { Cell().apply { clear(ink, ground) } } }
+            place(0, 0)
+        } else {
+            lines = kept ?: Array(rows) { Array(columns) { Cell() } }
+            kept = null
+            place(keptRow, keptColumn)
+        }
+        onAlternate = wanted
+        scrollTop = 0
+        scrollBottom = rows - 1
+    }
+
     fun scrollUp() {
+        if (!onAlternate && scrollTop == 0) {
+            history.addLast(lines[scrollTop])
+            while (history.size > SCROLLBACK) {
+                history.removeFirst()
+            }
+        }
         for (r in scrollTop until scrollBottom) {
             lines[r] = lines[r + 1]
         }
@@ -1423,7 +1457,7 @@ internal class Screenful(var rows: Int, var columns: Int) {
     }
 }
 
-internal class Sequences(private val screen: Screenful) {
+internal class Sequences(private val screen: Screenful, private val reply: (String) -> Unit) {
 
     private enum class Where { GROUND, ESCAPE, CSI, OSC, CHARSET }
 
@@ -1583,6 +1617,10 @@ internal class Sequences(private val screen: Screenful) {
             'u' -> screen.restore()
             'm' -> paint(numbers())
             'h', 'l' -> mode(letter == 'h')
+            'n' -> if (numbers().firstOrNull() == 6) {
+                reply("\u001B[${screen.row + 1};${screen.column + 1}R")
+            }
+            'c' -> reply("\u001B[?6c")
             else -> Unit
         }
     }
@@ -1593,12 +1631,19 @@ internal class Sequences(private val screen: Screenful) {
         }
         for (one in numbers()) {
             when (one) {
+                1 -> screen.applicationKeys = on
                 7 -> screen.wrapping = on
                 25 -> screen.showCursor = on
-                1049, 1047, 47 -> {
-                    screen.eraseInDisplay(2)
-                    screen.place(0, 0)
+                1049 -> {
+                    if (on) {
+                        screen.save()
+                    }
+                    screen.useAlternate(on)
+                    if (!on) {
+                        screen.restore()
+                    }
                 }
+                1047, 47 -> screen.useAlternate(on)
             }
         }
     }
@@ -1666,7 +1711,10 @@ internal class TerminalView(
 ) : View(context) {
 
     val screen = Screenful(24, 80)
-    private val reader = Sequences(screen)
+    private val reader = Sequences(screen) { said -> onKey(said.toByteArray(Charsets.UTF_8)) }
+    private var lookingBack = 0
+    private var dragFrom = 0f
+    private var dragged = 0f
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Type.data }
     private var cellWidth = 0f
     private var cellHeight = 0f
@@ -1706,7 +1754,54 @@ internal class TerminalView(
 
     fun accept(bytes: ByteArray, length: Int) {
         reader.feed(bytes, length)
+        lookingBack = 0
         postInvalidate()
+    }
+
+    private fun rowAt(r: Int): Array<Screenful.Cell>? {
+        val back = lookingBack
+        if (back == 0) {
+            return screen.lines.getOrNull(r)
+        }
+        val from = screen.history.size - back
+        val at = from + r
+        return if (at < screen.history.size) {
+            screen.history.getOrNull(at)
+        } else {
+            screen.lines.getOrNull(at - screen.history.size)
+        }
+    }
+
+    @Suppress("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                dragFrom = event.y
+                dragged = 0f
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (screen.onAlternate || cellHeight <= 0f) {
+                    return true
+                }
+                val moved = event.y - dragFrom
+                dragged += kotlin.math.abs(moved)
+                val steps = (moved / cellHeight).toInt()
+                if (steps != 0) {
+                    dragFrom = event.y
+                    lookingBack = (lookingBack + steps).coerceIn(0, screen.history.size)
+                    invalidate()
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (dragged < cellHeight) {
+                    performClick()
+                }
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
     }
 
     private fun measureCell() {
@@ -1760,12 +1855,13 @@ internal class TerminalView(
         paint.textSize = lettering
         val word = StringBuilder()
         for (r in 0 until screen.rows) {
+            val line = rowAt(r) ?: continue
             var c = 0
             while (c < screen.columns) {
-                val cell = screen.at(r, c)
+                val cell = line.getOrNull(c) ?: break
                 var run = c
                 while (run < screen.columns) {
-                    val next = screen.at(r, run)
+                    val next = line.getOrNull(run) ?: break
                     if (next.ground != cell.ground || next.style != cell.style ||
                         next.ink != cell.ink
                     ) {
@@ -1785,7 +1881,7 @@ internal class TerminalView(
                 }
                 word.setLength(0)
                 for (at in c until run) {
-                    word.append(screen.at(r, at).letter)
+                    word.append(line.getOrNull(at)?.letter ?: ' ')
                 }
                 paint.color = if ((cell.style and Screenful.FAINT) != 0) {
                     Ink.fade(ink, 0.6f)
@@ -1808,7 +1904,7 @@ internal class TerminalView(
                 c = run
             }
         }
-        if (screen.showCursor) {
+        if (screen.showCursor && lookingBack == 0) {
             paint.style = Paint.Style.FILL
             paint.color = Ink.fade(palette.accent, 0.55f)
             canvas.drawRect(
@@ -1853,10 +1949,10 @@ internal class TerminalView(
             KeyEvent.KEYCODE_ENTER -> byteArrayOf(0x0D)
             KeyEvent.KEYCODE_TAB -> byteArrayOf(0x09)
             KeyEvent.KEYCODE_ESCAPE -> byteArrayOf(0x1B)
-            KeyEvent.KEYCODE_DPAD_UP -> "\u001B[A".toByteArray()
-            KeyEvent.KEYCODE_DPAD_DOWN -> "\u001B[B".toByteArray()
-            KeyEvent.KEYCODE_DPAD_RIGHT -> "\u001B[C".toByteArray()
-            KeyEvent.KEYCODE_DPAD_LEFT -> "\u001B[D".toByteArray()
+            KeyEvent.KEYCODE_DPAD_UP -> arrow('A')
+            KeyEvent.KEYCODE_DPAD_DOWN -> arrow('B')
+            KeyEvent.KEYCODE_DPAD_RIGHT -> arrow('C')
+            KeyEvent.KEYCODE_DPAD_LEFT -> arrow('D')
             KeyEvent.KEYCODE_MOVE_HOME -> "\u001B[H".toByteArray()
             KeyEvent.KEYCODE_MOVE_END -> "\u001B[F".toByteArray()
             else -> {
@@ -1872,6 +1968,13 @@ internal class TerminalView(
         onKey(said)
         return true
     }
+
+    fun arrow(which: Char): ByteArray =
+        if (screen.applicationKeys) {
+            "\u001BO$which".toByteArray()
+        } else {
+            "\u001B[$which".toByteArray()
+        }
 
     private companion object {
         val STEPS = intArrayOf(0, 95, 135, 175, 215, 255)

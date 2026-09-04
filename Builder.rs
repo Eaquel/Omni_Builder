@@ -87,6 +87,42 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         missing: &["Related-diagnostic graphs are modelled but never populated."],
     },
     Subsystem {
+        name: "The language of refusals",
+        status: Status::Partial,
+        directive_section: 33,
+        summary: "Every sentence and every context label a diagnostic can carry is \
+                  looked up in the language the caller asked for, with the English \
+                  kept beside it, and a gate check refuses a new diagnostic that \
+                  has no line in a language this speaks.",
+        missing: &[
+            "Two languages: English, which needs no table, and Turkish. The other \
+             eight the interface is written in read as they were written.",
+            "The interface's own strings are Android resources and are translated \
+             separately; only what Core says goes through here.",
+            "A context line's value is left as it was written: a path, a number or \
+             a name is not a sentence and is not looked up.",
+        ],
+    },
+    Subsystem {
+        name: "Package seal",
+        status: Status::Partial,
+        directive_section: 26,
+        summary: "A class carrying the signing certificate's fingerprint is compiled \
+                  into every package this builds and declared as a provider, so it \
+                  runs before the application does and refuses to start a copy that \
+                  a different key signed.",
+        missing: &[
+            "The seal sits in the dex like everything else. It raises the cost of \
+             repackaging; it does not prevent it, and anything that can edit a dex \
+             and sign again can remove it.",
+            "It checks the certificate, the package name and the debuggable flag. It \
+             does not verify the package's own digests, and nothing is attested to \
+             anything off the device.",
+            "A project cannot turn it off, add to it, or say what should happen \
+             instead of stopping.",
+        ],
+    },
+    Subsystem {
         name: "Capability security",
         status: Status::Partial,
         directive_section: 7,
@@ -400,7 +436,9 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         summary: "Lists the projects on the device, walks a project's folders within bounds, reads and writes its text files, and moves and deletes what is in them through the same path rules the virtual filesystem uses, so nothing an edit does leaves the project folder. What is deleted goes to a trash that holds it for a day, with the path it came from written beside it, and is put back only where nothing has taken its place.",
         missing: &[
             "Text files only, UTF-8 only, and up to four megabytes: anything else is refused rather than risked.",
-            "No undo, no history and no concurrent-edit detection: the last save wins.",
+            "The workspace keeps no history: a save replaces what was there, and the \
+             undo the editor offers lives in the editor for as long as the file is \
+             open. Nothing detects two edits to one file.",
             "Nothing watches the folder, so a change made by another application is seen only when the list is read again. The trash is swept when it is listed, not on a timer, so what expired while the application was closed goes at the next look.",
         ],
     },
