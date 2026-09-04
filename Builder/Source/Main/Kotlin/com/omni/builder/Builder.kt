@@ -3920,11 +3920,22 @@ class BuilderActivity : Activity() {
                         getString(R.string.omni_projects_files, project.files),
                     if (open) getString(R.string.omni_projects_open_now) else "",
                     palette.ok,
-                ) { openHere(project.root) }
-            )
-            card.addView(
-                subtle(getString(R.string.omni_action_delete), palette.error) {
-                    deleteProject(project)
+                ) { openHere(project.root) }.apply {
+                    setOnLongClickListener {
+                        AlertDialog.Builder(this@BuilderActivity)
+                            .setTitle(project.label.ifEmpty { project.name })
+                            .setItems(
+                                arrayOf(
+                                    getString(R.string.omni_action_open),
+                                    getString(R.string.omni_action_delete),
+                                )
+                            ) { _, which ->
+                                if (which == 0) openHere(project.root) else deleteProject(project)
+                            }
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .show()
+                        true
+                    }
                 }
             )
         }
@@ -4414,6 +4425,38 @@ class BuilderActivity : Activity() {
         }
 
         val identity = card()
+        val face = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, gap(1), 0, gap(2))
+            isClickable = true
+            readAs(Button::class.java.name)
+            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
+            setOnClickListener { chooseImage(root) }
+        }
+        face.addView(
+            thumbnail(File(root, "$PROJECT_RES/$PROJECT_ICON").absolutePath, gap(11)),
+            LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
+        )
+        face.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_form_image)
+                setTextColor(palette.foreground)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            },
+            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
+        )
+        face.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_action_change)
+                setTextColor(palette.accent)
+                typeface = Type.strong
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                letterSpacing = 0.08f
+            }
+        )
+        identity.addView(face)
         identity.addView(
             keyValue(
                 getString(R.string.omni_form_package),
@@ -6016,7 +6059,9 @@ class BuilderActivity : Activity() {
     private fun renderShell(root: String?) {
         val home = filesDir.absolutePath
         val folder = root ?: home
-        val view = TerminalView(this, palette) { bytes -> sendToTheShell(bytes) }
+        val view = shellView?.also { it.repaint(palette) }
+            ?: TerminalView(this, palette) { bytes -> sendToTheShell(bytes) }
+        (view.parent as? ViewGroup)?.removeView(view)
         shellView = view
         shellFolder = folder
 
