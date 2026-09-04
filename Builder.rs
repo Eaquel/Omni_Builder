@@ -59104,6 +59104,115 @@ class Screen
         std::fs::remove_dir_all(&directory).ok();
     }
 
+    #[test]
+    fn a_game_written_in_one_file_becomes_a_package_that_verifies() {
+        let example = std::path::Path::new("Examples/Bricks");
+        assert!(example.is_dir(), "the example project must be in the tree");
+
+        let directory = temp_directory("omni-bricks");
+        let root = directory.join("Bricks");
+        copy_tree(example, &root);
+        let folder = root.to_str().unwrap().to_string();
+
+        let sources = super::workspace::tree(&folder)
+            .unwrap()
+            .into_iter()
+            .filter(|entry| entry.path.ends_with(".java"))
+            .count();
+        assert_eq!(sources, 1, "the game is one file");
+
+        let project = super::builder::from_project(&folder)
+            .unwrap_or_else(|error| panic!("the game did not compile: {error}"));
+        let named: Vec<&str> = project
+            .code
+            .iter()
+            .map(|held| held.descriptor.as_str())
+            .collect();
+        for wanted in [
+            "Lcom/tr/yt/brick/MainActivity;",
+            "Lcom/tr/yt/brick/MainActivity$Wall;",
+            "Lcom/tr/yt/brick/MainActivity$Table;",
+        ] {
+            assert!(
+                named.contains(&wanted),
+                "{wanted} is missing from {named:?}"
+            );
+        }
+
+        let key = super::rsa::generate(2048).expect("a key");
+        let certificate = super::certificate::self_signed(
+            &key,
+            "Bricks",
+            "Omni",
+            "TR",
+            super::certificate::moment_from_epoch(1_700_000_000),
+            super::certificate::moment_from_epoch(2_000_000_000),
+        )
+        .expect("a certificate");
+        let mut sink = Sink::new();
+        let outcome = super::builder::assemble(&project, &key, &certificate, &mut sink)
+            .expect("the game must package");
+        assert!(outcome.carries_code);
+        assert!(outcome.verified.everything_checkable_passed());
+
+        let path = directory.join("bricks.apk");
+        std::fs::write(&path, &outcome.package).unwrap();
+        let found = super::inspect::package(path.to_str().unwrap()).expect("it must open");
+        assert_eq!(found.package, "com.tr.yt.brick");
+        assert_eq!(found.dex_files, 1);
+        assert!(found.sound);
+        assert!(
+            found
+                .activities
+                .iter()
+                .any(|one| one.contains("MainActivity")),
+            "{:?}",
+            found.activities
+        );
+
+        let mut agreed = "not checked";
+        if let (Some(javac), Some(jar)) = (find_javac(), android_jar()) {
+            let out = directory.join("javac");
+            std::fs::create_dir_all(&out).unwrap();
+            let done = std::process::Command::new(&javac)
+                .args([
+                    "--release",
+                    crate::compilers::java::LANGUAGE_RELEASE,
+                    "-classpath",
+                    jar.to_str().unwrap(),
+                    "-d",
+                    out.to_str().unwrap(),
+                    "-Xlint:all",
+                    "-Werror",
+                ])
+                .arg(example.join("Java/com/tr/yt/brick/MainActivity.java"))
+                .output()
+                .unwrap();
+            assert!(
+                done.status.success(),
+                "javac refused the game this build compiled:\n{}",
+                String::from_utf8_lossy(&done.stderr)
+            );
+            let written = std::fs::read_dir(out.join("com/tr/yt/brick"))
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|held| held == "class"))
+                .count();
+            assert_eq!(written, 3, "javac wrote {written} classes");
+            agreed = "and javac takes the same source with every warning on";
+        }
+
+        eprintln!(
+            "bricks: one file became {} classes and {} methods in a {} KB package \
+             that verifies, {agreed}",
+            found.classes,
+            found.methods,
+            found.bytes / 1024
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
     fn find_javac() -> Option<std::path::PathBuf> {
         let wanted: u32 = crate::compilers::java::LANGUAGE_RELEASE.parse().ok()?;
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
