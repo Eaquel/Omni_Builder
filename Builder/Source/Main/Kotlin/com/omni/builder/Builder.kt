@@ -501,6 +501,8 @@ object Builder {
 
     external fun nativeBuildStop()
 
+    external fun nativeSpeak(tag: String): String
+
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
     external fun nativeCreateKey(directory: String, spec: String, keyPassword: CharArray): String
@@ -1708,7 +1710,7 @@ class BuilderActivity : Activity() {
 
         const val COLUMN_DP = 640
 
-        const val WIZARD_STEPS = 4
+        const val WIZARD_STEPS = 3
 
         const val WATCH_CODE_MILLIS = 1_200L
 
@@ -1811,9 +1813,9 @@ class BuilderActivity : Activity() {
     private var formVersionCode = "1"
     private var formStep = 0
     private var formMinSdk = 30
-    private var formTargetSdk = 36
+    private var formTargetSdk = 37
     private val formLanguages = linkedSetOf("java")
-    private val formLocales = Preferences.LANGUAGES.mapTo(linkedSetOf()) { it.first }
+    private val formLocales = linkedSetOf<String>()
     private var formImage: String? = null
     private var imageForProject: String? = null
     private var secondFolder: String? = null
@@ -1865,6 +1867,7 @@ class BuilderActivity : Activity() {
         OmniLog.event(LogLevel.INFO, "lifecycle", "Activity created.")
 
         Motion.readWhatTheDeviceAsksFor(this)
+        speakTheDeviceLanguage()
         palette = Preferences.palette(this)
         aurora = AuroraView(this, palette)
         content = LinearLayout(this).apply {
@@ -2566,8 +2569,7 @@ class BuilderActivity : Activity() {
         when (formStep) {
             0 -> newProjectIdentity()
             1 -> newProjectPicture()
-            2 -> newProjectAndroid()
-            else -> newProjectLanguages()
+            else -> newProjectAndroid()
         }
 
         val onwards = LinearLayout(this).apply {
@@ -2707,21 +2709,6 @@ class BuilderActivity : Activity() {
                 if (formMinSdk > formTargetSdk) formMinSdk = formTargetSdk
             }
         )
-    }
-
-    private fun newProjectLanguages() {
-        content.addView(label(getString(R.string.omni_form_locales)))
-        content.addView(
-            chips(
-                Preferences.LANGUAGES.map { it.second },
-                { formLocales.contains(Preferences.LANGUAGES[it].first) },
-            ) { index ->
-                val tag = Preferences.LANGUAGES[index].first
-                if (!formLocales.remove(tag)) formLocales.add(tag)
-                if (formLocales.isEmpty()) formLocales.add(BASE_LOCALE)
-            }
-        )
-        content.addView(quiet(getString(R.string.omni_form_locales_note)))
     }
 
     private fun renderFiles(root: String, folder: String) {
@@ -4938,6 +4925,13 @@ class BuilderActivity : Activity() {
             )
         )
         content.addView(about)
+    }
+
+    private fun speakTheDeviceLanguage() {
+        if (Builder.load() !is Builder.LoadState.Loaded) return
+        val tag = Preferences.language(this).ifEmpty { deviceLanguage() }
+        runCatching { Builder.nativeSpeak(tag) }
+            .onFailure { OmniLog.event(LogLevel.WARN, "native", "The language was not carried over.") }
     }
 
     private fun deviceLanguage(): String {

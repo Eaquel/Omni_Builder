@@ -32,8 +32,6 @@
     <string name="omni_form_version_code">Code de version</string>
     <string name="omni_form_min_sdk">Android le plus ancien</string>
     <string name="omni_form_target_sdk">Android le plus récent</string>
-    <string name="omni_form_locales">Langues que parle l\'application</string>
-    <string name="omni_form_locales_note">Un dossier de mots est écrit pour chacune, et le nom de l\'application y est lu. L\'anglais est toujours écrit, car un appareil réglé sur aucune des autres s\'y rabat.</string>
     <string name="omni_form_image">Image de l\'application</string>
     <string name="omni_form_image_choose">CHOISIR UNE IMAGE</string>
     <string name="omni_form_image_none">Aucune image choisie.</string>

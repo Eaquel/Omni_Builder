@@ -550,6 +550,133 @@ def check_interpolation() -> str:
         )
     return f"no escaped template in {len(text.split(chr(10)))} lines of interface"
 
+DIAGNOSTIC_MAKERS = ("fail", "problem", "reject", "diagnostic", "io_failure", "new")
+
+def spoken_surface() -> tuple[set[str], set[str], list[str]]:
+    """Every sentence and every context label a diagnostic can carry.
+
+    A diagnostic is built with a code and a fixed sentence, and everything that
+    varies goes into a context line written Label: value. That shape is what
+    makes the whole surface translatable: the sentence is looked up whole, and
+    the label is looked up on its own with the value left alone.
+    """
+    label = re.compile(r"^([^:{}]{1,40}): ")
+    lead = re.compile(r"^([A-Za-z][A-Za-z]*(?: [a-z]+){0,3})[ ]\{")
+    lines: set[str] = set()
+    words: set[str] = set()
+    woven: list[str] = []
+
+    def plain(text: str) -> str:
+        return re.sub(r"\\\n\s*", "", text).replace('\\"', '"').replace("\\'", "'").strip()
+
+    for path in [CORE] + sorted(COMPILERS.glob("*.rs")):
+        text = path.read_text(encoding="utf-8")
+        for found in re.finditer(r'"(E[A-Z]\d{3})"', text):
+            opened = text.rfind("(", max(0, found.start() - 400), found.start())
+            if opened < 0:
+                continue
+            named = re.search(r"([A-Za-z_][A-Za-z_0-9:]*)\s*$", text[max(0, opened - 20):opened])
+            if not named or named.group(1).split("::")[-1] not in DIAGNOSTIC_MAKERS:
+                continue
+            if text[opened + 1:found.start()].strip(" \n\t") not in ("", ","):
+                continue
+            rest = text[found.end():]
+            at = 0
+            while True:
+                step = re.match(
+                    r"\s*,\s*(?:[A-Za-z_][A-Za-z_0-9]*::)*[A-Za-z_][A-Za-z_0-9]*\s*(?=,)",
+                    rest[at:],
+                )
+                if not step:
+                    break
+                at += step.end()
+            while True:
+                said = re.match(r'\s*,\s*(format!\s*\(\s*)?"((?:[^"\\]|\\.)*)"', rest[at:], re.S)
+                if not said:
+                    break
+                if not said.group(1) and re.fullmatch(
+                    r"[a-z][a-z0-9]*(?:\.[a-z][a-z0-9]*)+", said.group(2)
+                ):
+                    at += said.end()
+                    continue
+                if said.group(1):
+                    woven.append(f"{path.name}: {found.group(1)} builds its sentence from parts")
+                else:
+                    lines.add(plain(said.group(2)))
+                break
+
+        for said in re.finditer(r'with_suggestion\(\s*(format!\(\s*)?"((?:[^"\\]|\\.)*)"', text, re.S):
+            if said.group(1):
+                woven.append(f"{path.name}: a suggestion is built from parts")
+            else:
+                lines.add(plain(said.group(2)))
+
+        for said in re.finditer(
+            r'with_context\(\s*(?:format!\(\s*)?"((?:[^"\\]|\\.)*)"', text, re.S
+        ):
+            for part in plain(said.group(1)).split(", "):
+                head = label.match(part)
+                if head:
+                    if "{" not in head.group(1):
+                        words.add(head.group(1))
+                    continue
+                head = lead.match(part)
+                if head:
+                    words.add(head.group(1))
+                    continue
+                if "{" not in part:
+                    lines.add(part)
+
+    return lines, words, woven
+
+def spoken_table(name: str) -> dict[str, str]:
+    """One of the tables the speech module carries, read back out of it."""
+    text = CORE.read_text(encoding="utf-8")
+    opened = text.index(f"const {name}: &[(&str, &str)] = &[")
+    closed = text.index("\n    ];", opened)
+    said: dict[str, str] = {}
+    for line in text[opened:closed].split("\n")[1:]:
+        pair = re.match(r'\s*\("((?:[^"\\]|\\.)*)", "((?:[^"\\]|\\.)*)"\),\s*$', line)
+        if not pair:
+            raise AssertionError(f"{name} holds a line that is not a pair: {line.strip()[:60]}")
+        english = pair.group(1).replace('\\"', '"').replace("\\\\", "\\")
+        if english in said:
+            raise AssertionError(f"{name} holds {english!r} twice")
+        said[english] = pair.group(2)
+    if list(said) != sorted(said):
+        raise AssertionError(f"{name} is not in order, so a lookup would miss")
+    return said
+
+def check_speech() -> str:
+    """Every refusal this build can make is written in the languages it speaks.
+
+    Core knows nothing about Android resources, so the sentences live here with
+    the codes that raise them. This check is what keeps them honest: a new
+    diagnostic without a translation fails the gate by name, rather than
+    reaching a phone in English.
+    """
+    lines, words, woven = spoken_surface()
+    if woven:
+        raise AssertionError(
+            "a message assembled by format! cannot be looked up: " + "; ".join(woven[:8])
+        )
+    trouble = []
+    for name, wanted in (("TURKISH_LINES", lines), ("TURKISH_WORDS", words)):
+        said = spoken_table(name)
+        missing = sorted(wanted - set(said))
+        spare = sorted(set(said) - wanted)
+        if missing:
+            trouble.append(f"{name} is missing {len(missing)}: " + "; ".join(
+                repr(one[:70]) for one in missing[:6]
+            ))
+        if spare:
+            trouble.append(f"{name} holds {len(spare)} nothing says: " + "; ".join(
+                repr(one[:70]) for one in spare[:6]
+            ))
+    if trouble:
+        raise AssertionError(" | ".join(trouble))
+    return f"{len(lines)} sentences and {len(words)} labels in every language spoken"
+
 CHECKS: dict[str, tuple[str, object]] = {
     "layout": ("the tree is the agreed one", check_layout),
     "comments": ("no file explains itself", check_comments),
@@ -559,6 +686,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "core": ("the Core suite", check_core),
     "dependencies": ("no third-party dependency", check_dependencies),
     "strings": ("every language, every string", check_strings),
+    "speech": ("every refusal in the reader's language", check_speech),
     "release": ("the package and the bundle", check_release_apk),
     "bridge": ("the native bridge", check_bridge),
     "installable": ("what Android would accept", check_installable),
@@ -566,7 +694,7 @@ CHECKS: dict[str, tuple[str, object]] = {
 }
 
 DEFAULT = [
-    "layout", "comments", "templates", "format", "lint", "dependencies", "strings",
+    "layout", "comments", "templates", "format", "lint", "dependencies", "strings", "speech",
     "release", "core", "bridge", "installable",
 ]
 

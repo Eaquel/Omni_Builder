@@ -11814,7 +11814,8 @@ impl Emitter<'_> {
             ),
         )
         .with_suggestion(
-            "Put it in a `try` with a `catch` for it, or write `throws` on the method.              Anything under `RuntimeException` or `Error` needs neither.",
+            "Put it in a `try` with a `catch` for it, or write `throws` on the method. \
+                Anything under `RuntimeException` or `Error` needs neither.",
         ))
     }
 
@@ -16514,7 +16515,8 @@ impl Emitter<'_> {
                 ),
             )
             .with_suggestion(
-                "A lambda takes its type from what it is handed to. Name the interface                  it stands for, or write the class out.",
+                "A lambda takes its type from what it is handed to. Name the interface \
+                    it stands for, or write the class out.",
             ));
         }
 
@@ -19585,11 +19587,9 @@ impl Compiler for JavaCompiler {
         if !crate::compiler::api_is_supported(request.api_level) {
             return Err(fail(
                 "EJ301",
-                format!(
-                    "Android API {} is outside what this builds for.",
-                    request.api_level
-                ),
+                "The chosen Android API is outside what this builds for.",
             )
+            .with_context(format!("Chosen: API {}", request.api_level))
             .with_context(format!(
                 "Supported: {} to {}",
                 crate::compiler::OLDEST_API,
@@ -30260,9 +30260,9 @@ public class Screen extends Activity implements View.OnClickListener {
             .expect_err("an instruction it does not know must be refused");
         assert_eq!(refused.code, "ED900");
         assert!(
-            refused.message.contains("jsr"),
-            "the refusal has to name it: {}",
-            refused.message
+            refused.context.iter().any(|line| line.contains("jsr")),
+            "the refusal has to name it: {:?}",
+            refused.context
         );
         assert!(
             refused.context.iter().any(|line| line.contains("Offset 1")),

@@ -816,7 +816,8 @@ pub mod diag {
             w.field_str("severity", self.severity.as_str());
             w.field_str("class", self.class.as_str());
             w.field_str("origin", &self.origin);
-            w.field_str("message", &self.message);
+            w.field_str("message", &crate::speech::sentence(&self.message));
+            w.field_str("english", &self.message);
             if let Some(loc) = &self.location {
                 w.begin_object(Some("location"));
                 w.field_str("file", &loc.file);
@@ -826,11 +827,11 @@ pub mod diag {
             }
             w.begin_array(Some("context"));
             for line in &self.context {
-                w.element_str(line);
+                w.element_str(&crate::speech::detail(line));
             }
             w.end_array();
             if let Some(suggestion) = &self.suggestion {
-                w.field_str("suggestion", suggestion);
+                w.field_str("suggestion", &crate::speech::sentence(suggestion));
             }
             w.begin_array(Some("related"));
             for code in &self.related {
@@ -904,6 +905,1011 @@ pub mod diag {
     }
 }
 
+pub mod speech {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    pub const LANGUAGES: &[&str] = &["en", "tr"];
+
+    static CHOSEN: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn choose(tag: &str) -> &'static str {
+        let spoken = tag.split(['-', '_']).next().unwrap_or("");
+        let at = LANGUAGES
+            .iter()
+            .position(|known| *known == spoken)
+            .unwrap_or(0);
+        CHOSEN.store(at, Ordering::Relaxed);
+        LANGUAGES[at]
+    }
+
+    pub fn chosen() -> &'static str {
+        LANGUAGES[at_hand()]
+    }
+
+    fn at_hand() -> usize {
+        let at = CHOSEN.load(Ordering::Relaxed);
+        if at < LANGUAGES.len() {
+            at
+        } else {
+            0
+        }
+    }
+
+    fn lines(at: usize) -> &'static [(&'static str, &'static str)] {
+        match at {
+            1 => TURKISH_LINES,
+            _ => &[],
+        }
+    }
+
+    fn words(at: usize) -> &'static [(&'static str, &'static str)] {
+        match at {
+            1 => TURKISH_WORDS,
+            _ => &[],
+        }
+    }
+
+    fn found(table: &'static [(&'static str, &'static str)], key: &str) -> Option<&'static str> {
+        table
+            .binary_search_by(|(english, _)| (*english).cmp(key))
+            .ok()
+            .map(|at| table[at].1)
+    }
+
+    pub fn sentence(english: &str) -> String {
+        let at = at_hand();
+        match found(lines(at), english) {
+            Some(said) => said.to_string(),
+            None => english.to_string(),
+        }
+    }
+
+    fn chunk(at: usize, part: &str) -> String {
+        if let Some(cut) = part.find(": ") {
+            if let Some(said) = found(words(at), &part[..cut]) {
+                return format!("{said}{}", &part[cut..]);
+            }
+        }
+        let mut edge = part.len();
+        for _ in 0..4 {
+            match part[..edge].rfind(' ') {
+                Some(space) => edge = space,
+                None => break,
+            }
+            if let Some(said) = found(words(at), &part[..edge]) {
+                return format!("{said}{}", &part[edge..]);
+            }
+        }
+        match found(lines(at), part) {
+            Some(said) => said.to_string(),
+            None => part.to_string(),
+        }
+    }
+
+    pub fn detail(english: &str) -> String {
+        let at = at_hand();
+        if at == 0 {
+            return english.to_string();
+        }
+        let mut said = String::with_capacity(english.len());
+        for (index, part) in english.split(", ").enumerate() {
+            if index > 0 {
+                said.push_str(", ");
+            }
+            said.push_str(&chunk(at, part));
+        }
+        said
+    }
+
+    const TURKISH_LINES: &[(&str, &str)] = &[
+        ("A GeneralizedTime is not in the form a certificate uses.", "Bir GeneralizedTime, sertifikaların kullandığı biçimde değil."),
+        ("A Huffman code is longer than fifteen bits.", "Bir Huffman kodu on beş bitten uzun."),
+        ("A Huffman code names a symbol the table does not hold.", "Bir Huffman kodu, tabloda olmayan bir simgeyi gösteriyor."),
+        ("A Huffman table is over-subscribed.", "Bir Huffman tablosu kapasitesinin üzerinde dolu."),
+        ("A Java file could not be read.", "Bir Java dosyası okunamadı."),
+        ("A Java source file is not text.", "Bir Java kaynak dosyası metin değil."),
+        ("A PNG begins with the eight bytes the format reserves for it. Nothing else is accepted here, because nothing else is read.", "Bir PNG, biçimin kendisi için ayırdığı sekiz baytla başlar. Burada başka hiçbir şey kabul edilmez, çünkü başka hiçbir şey okunmaz."),
+        ("A PNG ends with IEND. A file without one was cut short.", "Bir PNG, IEND ile biter. Bunu taşımayan dosya yarıda kesilmiş demektir."),
+        ("A UTCTime is not in the form a certificate uses.", "Bir UTCTime, sertifikaların kullandığı biçimde değil."),
+        ("A `catch` needs a register a `move-exception` can name.", "Bir `catch`, `move-exception` komutunun adlandırabileceği bir yazmaca ihtiyaç duyar."),
+        ("A `switch` covers a range this cannot write.", "Bir `switch`, buranın yazamayacağı bir aralığı kapsıyor."),
+        ("A `switch` holds more cases than this can write.", "Bir `switch`, buranın yazabileceğinden çok durum taşıyor."),
+        ("A `switch` needs a register the instruction can name.", "Bir `switch`, komutun adlandırabileceği bir yazmaca ihtiyaç duyar."),
+        ("A `throw` needs a register the instruction can name.", "Bir `throw`, komutun adlandırabileceği bir yazmaca ihtiyaç duyar."),
+        ("A back reference points before the start of the data.", "Bir geri başvuru, verinin başlangıcından öncesini gösteriyor."),
+        ("A bag holds several values and has no one value of its own.", "Bir küme birden çok değer taşır; kendine ait tek bir değeri yoktur."),
+        ("A bag holds several values and is not written as one of them.", "Bir küme birden çok değer taşır ve bunlardan biri gibi yazılmaz."),
+        ("A bag still names what it holds rather than numbering it.", "Bir küme, taşıdığını numaralandırmak yerine hâlâ adlandırıyor."),
+        ("A binary XML document closes an element it never opened.", "İkili XML belgesi, hiç açmadığı bir öğeyi kapatıyor."),
+        ("A binary XML document ends in the middle of a chunk.", "İkili XML belgesi bir bloğun ortasında bitiyor."),
+        ("A binary XML document holds no element.", "İkili XML belgesi hiç öğe taşımıyor."),
+        ("A binary XML document is larger than this reads.", "İkili XML belgesi, buranın okuduğundan büyük."),
+        ("A binary XML document leaves an element unclosed.", "İkili XML belgesi bir öğeyi kapatmadan bırakıyor."),
+        ("A binary XML document names an element before its strings.", "İkili XML belgesi, dizelerinden önce bir öğe adlandırıyor."),
+        ("A block declares a type the format reserves.", "Bir blok, biçimin ayırdığı bir türü bildiriyor."),
+        ("A block whose size is written twice and differently is a block a reader and a verifier can be made to see differently.", "Boyutu iki kez ve farklı yazılmış bir blok, okuyucuya ve doğrulayıcıya farklı gösterilebilecek bir bloktur."),
+        ("A bootstrap method is not a method handle.", "Bir bootstrap yöntemi, yöntem tutamacı değil."),
+        ("A branch is not inside any instruction.", "Bir dallanma hiçbir komutun içinde değil."),
+        ("A branch points at no instruction.", "Bir dallanma hiçbir komutu göstermiyor."),
+        ("A branch reaches further than a Dalvik branch can.", "Bir dallanma, Dalvik dallanmasının ulaşabileceğinden uzağa gidiyor."),
+        ("A build that writes this much is usually looping; check before raising the quota.", "Bu kadar çok yazan bir yapı genelde döngüye girmiştir; kotayı yükseltmeden önce denetleyin."),
+        ("A bundle manifest must begin with a manifest element.", "Bir paket bildirimi, manifest öğesiyle başlamak zorundadır."),
+        ("A call has a descriptor that will not read.", "Bir çağrının tanımlayıcısı okunamıyor."),
+        ("A central directory record has the wrong signature.", "Bir merkezi dizin kaydının imzası yanlış."),
+        ("A certificate name is empty or too long.", "Bir sertifika adı boş ya da fazla uzun."),
+        ("A chunk claims a length the format does not allow.", "Bir blok, biçimin izin vermediği bir uzunluk bildiriyor."),
+        ("A chunk claims more bytes than the file holds.", "Bir blok, dosyanın taşıdığından çok bayt bildiriyor."),
+        ("A chunk does not match its own checksum.", "Bir blok kendi sağlama toplamıyla uyuşmuyor."),
+        ("A class reference names nothing.", "Bir sınıf başvurusu hiçbir şeyi adlandırmıyor."),
+        ("A class reference points at no class.", "Bir sınıf başvurusu hiçbir sınıfı göstermiyor."),
+        ("A code length symbol is outside the alphabet.", "Bir kod uzunluğu simgesi alfabenin dışında."),
+        ("A constructor hands off to one that is neither its own class's nor its superclass's.", "Bir kurucu, ne kendi sınıfına ne de üst sınıfına ait olan bir kurucuya devrediyor."),
+        ("A dependency could not be read.", "Bir bağımlılık okunamadı."),
+        ("A dependency holds something squeezed in a way this does not read.", "Bir bağımlılık, buranın okumadığı bir yöntemle sıkıştırılmış içerik taşıyor."),
+        ("A dependency is a jar, which is a zip of class files.", "Bir bağımlılık jar'dır; jar da sınıf dosyalarından oluşan bir zip'tir."),
+        ("A dependency is not an archive this reads.", "Bir bağımlılık, buranın okuduğu bir arşiv değil."),
+        ("A dependency stops before one of its entries ends.", "Bir bağımlılık, girdilerinden biri bitmeden sona eriyor."),
+        ("A derived key of that length is not produced here.", "Bu uzunlukta türetilmiş anahtar burada üretilmiyor."),
+        ("A dex file must define at least one class.", "Bir dex dosyası en az bir sınıf tanımlamak zorundadır."),
+        ("A digest uses an algorithm this build cannot recompute.", "Bir özet, bu yapının yeniden hesaplayamadığı bir algoritma kullanıyor."),
+        ("A distance symbol is outside the alphabet.", "Bir uzaklık simgesi alfabenin dışında."),
+        ("A division by zero was attempted.", "Sıfıra bölme girişimi oldu."),
+        ("A document holds more strings than the format allows.", "Bir belge, biçimin izin verdiğinden çok dize taşıyor."),
+        ("A drawable that is a picture is declared by the file that holds it. One written here is a colour, and Android makes a plain colour drawable of it.", "Resim olan bir çizim, onu taşıyan dosya tarafından bildirilir. Burada yazılan bir renktir ve Android bundan düz bir renk çizimi üretir."),
+        ("A dynamic block declares more codes than the format allows.", "Bir dinamik blok, biçimin izin verdiğinden çok kod bildiriyor."),
+        ("A dynamic call has a descriptor that will not read.", "Bir dinamik çağrının tanımlayıcısı okunamıyor."),
+        ("A dynamic call has no descriptor.", "Bir dinamik çağrının tanımlayıcısı yok."),
+        ("A dynamic call has no name and type.", "Bir dinamik çağrının adı ve türü yok."),
+        ("A dynamic call has no name.", "Bir dinamik çağrının adı yok."),
+        ("A dynamic call is arranged by something this does not know how to write out.", "Bir dinamik çağrı, buranın nasıl yazacağını bilmediği bir şey tarafından düzenleniyor."),
+        ("A dynamic call names a bootstrap method the class does not have.", "Bir dinamik çağrı, sınıfta bulunmayan bir bootstrap yöntemini adlandırıyor."),
+        ("A dynamic call points at no call site.", "Bir dinamik çağrı hiçbir çağrı noktasını göstermiyor."),
+        ("A field of the name is empty or too long.", "Addaki bir alan boş ya da fazla uzun."),
+        ("A field was never interned.", "Bir alan hiç havuza alınmamış."),
+        ("A file compiled here holds a class or an interface.", "Burada derlenen bir dosya, bir sınıf ya da arayüz taşır."),
+        ("A file compiled here holds classes, interfaces, enums, records and annotation types. What is and is not taken is written at the top of Compilers/Java.rs.", "Burada derlenen bir dosya sınıf, arayüz, enum, record ve açıklama türleri taşır. Neyin alınıp neyin alınmadığı Compilers/Java.rs dosyasının başında yazılıdır."),
+        ("A file is where that signing key belongs, and it is not a key this build can open unaided.", "İmza anahtarının yerinde bir dosya var ve bu, bu yapının yardımsız açabileceği bir anahtar değil."),
+        ("A file is where the shared key belongs, and it is not a key this build wrote.", "Paylaşılan anahtarın yerinde bir dosya var ve bu, bu yapının yazdığı bir anahtar değil."),
+        ("A folder cannot be copied inside itself.", "Bir klasör kendi içine kopyalanamaz."),
+        ("A folder cannot be moved inside itself.", "Bir klasör kendi içine taşınamaz."),
+        ("A folder inside the project could not be read.", "Projenin içindeki bir klasör okunamadı."),
+        ("A folder the store needs could not be made.", "Deponun gereksindiği bir klasör oluşturulamadı."),
+        ("A fraction is written 50% of the thing itself, or 50%p of whatever holds it.", "Kesir, şeyin kendisinin %50'si için 50%, onu taşıyanın %50'si için 50%p biçiminde yazılır."),
+        ("A handler covers a range that is not there.", "Bir işleyici, var olmayan bir aralığı kapsıyor."),
+        ("A joined string has no recipe.", "Birleştirilmiş bir dizenin tarifi yok."),
+        ("A joined string has nowhere to build itself.", "Birleştirilmiş bir dizenin kendini kuracak yeri yok."),
+        ("A joined string's constant is not text.", "Birleştirilmiş bir dizenin sabiti metin değil."),
+        ("A joined string's recipe asks for a constant that is not text.", "Birleştirilmiş bir dizenin tarifi, metin olmayan bir sabit istiyor."),
+        ("A joined string's recipe asks for more values than it was given.", "Birleştirilmiş bir dizenin tarifi, verilenden çok değer istiyor."),
+        ("A joined string's recipe is not text.", "Birleştirilmiş bir dizenin tarifi metin değil."),
+        ("A key carries CRT exponents but not its primes.", "Bir anahtar CRT üslerini taşıyor ama asallarını taşımıyor."),
+        ("A key derivation needs at least one iteration.", "Anahtar türetme en az bir tur gerektirir."),
+        ("A key file made by this build starts with OMNIKEY1.", "Bu yapının ürettiği anahtar dosyası OMNIKEY1 ile başlar."),
+        ("A key has no private exponent.", "Bir anahtarın özel üssü yok."),
+        ("A key is missing one of its numbers.", "Bir anahtarın sayılarından biri eksik."),
+        ("A key password shorter than eight characters is refused.", "Sekiz karakterden kısa anahtar parolası kabul edilmez."),
+        ("A key sealed under a password is opened with that password, not without one. Nothing here writes over it: every application signed with the key it replaced could no longer be updated.", "Parolayla mühürlenmiş bir anahtar o parolayla açılır, parolasız değil. Burada hiçbir şey üzerine yazmaz: değiştirdiği anahtarla imzalanmış her uygulama artık güncellenemezdi."),
+        ("A key size outside the accepted range was asked for.", "Kabul edilen aralığın dışında bir anahtar boyutu istendi."),
+        ("A key with no public exponent cannot be signed with.", "Açık üssü olmayan bir anahtarla imza atılamaz."),
+        ("A key with that alias is already here.", "Bu takma ada sahip bir anahtar zaten burada."),
+        ("A key's modulus is outside the accepted range.", "Bir anahtarın modülü kabul edilen aralığın dışında."),
+        ("A lambda cannot be read.", "Bir lambda okunamıyor."),
+        ("A lambda cannot be written out as a class.", "Bir lambda sınıf olarak yazılamıyor."),
+        ("A lambda takes its type from what it is handed to. Name the interface it stands for, or write the class out.", "Bir lambda türünü, verildiği yerden alır. Temsil ettiği arayüzü adlandırın ya da sınıfı açıkça yazın."),
+        ("A lambda takes its type from what it is handed to: an argument, a declared variable, or what a method returns. Write the type, or write the class out.", "Bir lambda türünü verildiği yerden alır: bir argüman, bildirilmiş bir değişken ya da bir yöntemin döndürdüğü. Türü yazın ya da sınıfı açıkça yazın."),
+        ("A lambda's value cannot be put where it is wanted.", "Bir lambdanın değeri istendiği yere konulamıyor."),
+        ("A language file could not be read.", "Bir dil dosyası okunamadı."),
+        ("A language file could not be written.", "Bir dil dosyası yazılamadı."),
+        ("A language folder could not be made.", "Bir dil klasörü oluşturulamadı."),
+        ("A language is not one this build knows.", "Bu, bu yapının bildiği bir dil değil."),
+        ("A launcher icon could not be written.", "Bir başlatıcı simgesi yazılamadı."),
+        ("A launcher icon folder could not be made.", "Bir başlatıcı simgesi klasörü oluşturulamadı."),
+        ("A launcher icon is drawn no larger than that.", "Bir başlatıcı simgesi bundan büyük çizilmez."),
+        ("A layout names an attribute nothing declares.", "Bir yerleşim, hiçbir yerde bildirilmeyen bir özniteliği adlandırıyor."),
+        ("A layout, a menu and an animation are XML, and one that does not parse would be written into the package as bytes no device can read.", "Yerleşim, menü ve animasyon birer XML'dir; ayrıştırılamayan biri pakete hiçbir cihazın okuyamayacağı baytlar olarak yazılırdı."),
+        ("A length has a leading zero, so it is not in its shortest form.", "Bir uzunluk başta sıfır taşıyor, yani en kısa biçiminde değil."),
+        ("A length is written in the indefinite form, which DER forbids.", "Bir uzunluk, DER'in yasakladığı belirsiz biçimde yazılmış."),
+        ("A length needs more than 64 bits.", "Bir uzunluk 64 bitten fazlasını gerektiriyor."),
+        ("A length repeat has nothing to repeat.", "Bir uzunluk tekrarının tekrarlayacağı bir şey yok."),
+        ("A length repeat runs past the table.", "Bir uzunluk tekrarı tablonun dışına taşıyor."),
+        ("A length symbol is outside the alphabet.", "Bir uzunluk simgesi alfabenin dışında."),
+        ("A library's manifest could not be read.", "Bir kütüphanenin bildirimi okunamadı."),
+        ("A library's resource could not be read.", "Bir kütüphanenin kaynağı okunamadı."),
+        ("A library's values file could not be read.", "Bir kütüphanenin değerler dosyası okunamadı."),
+        ("A link inside the mount points outside it. The build refuses to follow it rather than reading a file it was never given.", "Bağlama noktasının içindeki bir bağlantı dışarısını gösteriyor. Yapı, kendisine hiç verilmemiş bir dosyayı okumaktansa bağlantıyı izlemeyi reddeder."),
+        ("A local file header has the wrong signature.", "Bir yerel dosya başlığının imzası yanlış."),
+        ("A local is numbered past what the instruction that steps it can name.", "Bir yerel değişken, onu ilerleten komutun adlandırabileceğinin ötesinde numaralanmış."),
+        ("A locale is not one this build writes a folder for.", "Bu, bu yapının klasör yazdığı bir yerel ayar değil."),
+        ("A lock needs a register the instruction can name.", "Bir kilit, komutun adlandırabileceği bir yazmaca ihtiyaç duyar."),
+        ("A manifest describes a project; it is not a data file.", "Bildirim bir projeyi tanımlar; veri dosyası değildir."),
+        ("A member has no descriptor.", "Bir üyenin tanımlayıcısı yok."),
+        ("A member has no name.", "Bir üyenin adı yok."),
+        ("A member reference has no name and type.", "Bir üye başvurusunun adı ve türü yok."),
+        ("A member reference points at no member.", "Bir üye başvurusu hiçbir üyeyi göstermiyor."),
+        ("A method descriptor could not be read.", "Bir yöntem tanımlayıcısı okunamadı."),
+        ("A method needs more registers than its instructions can name.", "Bir yöntem, komutlarının adlandırabileceğinden çok yazmaç gerektiriyor."),
+        ("A method reference takes its type from what it is handed to: an argument, a declared variable, or what a method returns.", "Bir yöntem başvurusu türünü verildiği yerden alır: bir argüman, bildirilmiş bir değişken ya da bir yöntemin döndürdüğü."),
+        ("A method refers to a prototype that is not there.", "Bir yöntem, var olmayan bir prototipe başvuruyor."),
+        ("A method was never interned.", "Bir yöntem hiç havuza alınmamış."),
+        ("A modular exponentiation needs a modulus.", "Modüler üs alma bir modül gerektirir."),
+        ("A modular inverse needs a modulus above one.", "Modüler ters, birden büyük bir modül gerektirir."),
+        ("A modulus is larger than this build accepts.", "Bir modül, bu yapının kabul ettiğinden büyük."),
+        ("A multi-prime RSA key is not supported by this build.", "Çok asallı RSA anahtarı bu yapı tarafından desteklenmiyor."),
+        ("A nine-patch marks too many stretchable runs.", "Bir nine-patch fazla sayıda esneyen aralık işaretliyor."),
+        ("A nine-patch needs a one pixel border on every side.", "Bir nine-patch her kenarında bir piksellik çerçeve gerektirir."),
+        ("A number cannot be written in the format's fixed point.", "Bir sayı, biçimin sabit noktalı gösterimine yazılamıyor."),
+        ("A number, a character, or a `-` in front of one.", "Bir sayı, bir karakter ya da bunlardan birinin önünde `-`."),
+        ("A package is a zip. This one does not open as one.", "Paket bir zip'tir. Bu, zip olarak açılmıyor."),
+        ("A package that fails this check is not the one this build was made as. Install the original, or build it again from source.", "Bu denetimi geçemeyen paket, bu yapının üretildiği paket değildir. Aslını kurun ya da kaynaktan yeniden derleyin."),
+        ("A parent is written as a name, as package:name, or as @package:style/name.", "Üst öğe ad olarak, paket:ad olarak ya da @paket:style/ad olarak yazılır."),
+        ("A permission is named like android.permission.INTERNET: letters, digits, dots and underscores.", "İzinler android.permission.INTERNET gibi adlandırılır: harf, rakam, nokta ve alt çizgi."),
+        ("A pixel names a palette entry the image does not hold.", "Bir piksel, görüntüde bulunmayan bir palet girdisini gösteriyor."),
+        ("A place in the trash could not be made.", "Çöpte yer açılamadı."),
+        ("A plan is a promise about what will exist. Nothing is published from a compilation that did not keep it.", "Plan, neyin var olacağına dair bir sözdür. Sözünü tutmayan bir derlemeden hiçbir şey yayımlanmaz."),
+        ("A platform that has not shipped cannot be targeted. Nothing here will pretend otherwise.", "Henüz yayımlanmamış bir platform hedeflenemez. Burada aksi hiçbir şekilde varsayılmaz."),
+        ("A plural is for a quantity with no name.", "Çoğul, adı olmayan bir nicelik içindir."),
+        ("A pool declares too many entries.", "Bir havuz fazla sayıda girdi bildiriyor."),
+        ("A pool extends past the file.", "Bir havuz dosyanın dışına taşıyor."),
+        ("A project is already in that folder.", "O klasörde zaten bir proje var."),
+        ("A project may not supply its own binary AndroidManifest.xml.", "Bir proje kendi ikili AndroidManifest.xml dosyasını veremez."),
+        ("A project needs one activity so the package has something to launch.", "Paketin başlatacak bir şeyi olması için proje bir etkinliğe ihtiyaç duyar."),
+        ("A project path is relative, uses forward slashes, and never leaves the project folder.", "Proje yolu görecelidir, eğik çizgi kullanır ve proje klasörünün dışına asla çıkmaz."),
+        ("A prototype was never interned.", "Bir prototip hiç havuza alınmamış."),
+        ("A public key does not end on a whole byte.", "Bir açık anahtar tam bayt sınırında bitmiyor."),
+        ("A public key holds no bits.", "Bir açık anahtar hiç bit taşımıyor."),
+        ("A public key is not a SubjectPublicKeyInfo.", "Bir açık anahtar SubjectPublicKeyInfo değil."),
+        ("A public key is not an RSA key.", "Bir açık anahtar RSA anahtarı değil."),
+        ("A public key's bit string does not end on a byte.", "Bir açık anahtarın bit dizisi bayt sınırında bitmiyor."),
+        ("A public key's bit string is empty.", "Bir açık anahtarın bit dizisi boş."),
+        ("A public key's modulus is outside the accepted range.", "Bir açık anahtarın modülü kabul edilen aralığın dışında."),
+        ("A qualifier that is not modelled is refused rather than treated as the default, which would put the wrong file on every device.", "Modellenmemiş bir niteleyici, varsayılan sayılmak yerine reddedilir; aksi hâlde her cihaza yanlış dosya konurdu."),
+        ("A reference is written @type/name, for example @color/omni_accent.", "Başvuru @tür/ad biçiminde yazılır, örneğin @color/omni_accent."),
+        ("A reference names a resource this table does not hold.", "Bir başvuru, bu tabloda bulunmayan bir kaynağı adlandırıyor."),
+        ("A reference points at a pool entry that is not a class.", "Bir başvuru, sınıf olmayan bir havuz girdisini gösteriyor."),
+        ("A reference points at a pool entry that is not a string.", "Bir başvuru, dize olmayan bir havuz girdisini gösteriyor."),
+        ("A reference points at a string that is not there.", "Bir başvuru, var olmayan bir dizeyi gösteriyor."),
+        ("A reference points at a type that is not there.", "Bir başvuru, var olmayan bir türü gösteriyor."),
+        ("A reference points outside the constant pool.", "Bir başvuru sabit havuzunun dışını gösteriyor."),
+        ("A resource could not be given an identifier.", "Bir kaynağa tanımlayıcı verilemedi."),
+        ("A resource file could not be read as XML.", "Bir kaynak dosyası XML olarak okunamadı."),
+        ("A resource folder is not one this build reads.", "Bu, bu yapının okuduğu bir kaynak klasörü değil."),
+        ("A resource name becomes a field in generated code, so it must be usable as an identifier.", "Kaynak adı üretilen kodda bir alana dönüşür, bu yüzden tanımlayıcı olarak kullanılabilir olmalıdır."),
+        ("A resource reference by name is resolved before it reaches this writer.", "Ada göre kaynak başvurusu, bu yazıcıya ulaşmadan önce çözülür."),
+        ("A resource reference is not a 32-bit value.", "Bir kaynak başvurusu 32 bitlik bir değer değil."),
+        ("A resource reference reaches the bundle writer unresolved.", "Bir kaynak başvurusu paket yazıcısına çözülmemiş olarak ulaşıyor."),
+        ("A scanline uses a filter the format does not define.", "Bir tarama satırı, biçimin tanımlamadığı bir süzgeç kullanıyor."),
+        ("A search needs something to look for.", "Arama, aranacak bir şey gerektirir."),
+        ("A self-signed certificate whose own signature fails has been altered since it was made. Do not install it.", "Kendi imzası doğrulanmayan, kendinden imzalı bir sertifika üretildiğinden bu yana değiştirilmiştir. Kurmayın."),
+        ("A setting is not one this build knows.", "Bu, bu yapının bildiği bir ayar değil."),
+        ("A setting is not written as key=value.", "Bir ayar anahtar=değer biçiminde yazılmamış."),
+        ("A short length is written in the long form.", "Kısa bir uzunluk uzun biçimde yazılmış."),
+        ("A signature did not survive verification with the public exponent.", "Bir imza, açık üsle yapılan doğrulamadan geçemedi."),
+        ("A signature does not check out against the key that presents it.", "Bir imza, onu sunan anahtarla doğrulanmıyor."),
+        ("A signature made by one key and presented beside another key's certificate says nothing about who made the package. Do not install it.", "Bir anahtarla atılıp başka bir anahtarın sertifikasının yanında sunulan imza, paketi kimin ürettiği hakkında hiçbir şey söylemez. Kurmayın."),
+        ("A signature nobody can be identified by is not one.", "Kimsenin kimliğini belirlemeyen bir imza, imza değildir."),
+        ("A signature uses an algorithm this build cannot check.", "Bir imza, bu yapının denetleyemediği bir algoritma kullanıyor."),
+        ("A signer carries no certificate.", "Bir imzalayıcı hiç sertifika taşımıyor."),
+        ("A signing block entry has an impossible length.", "Bir imza bloğu girdisinin uzunluğu olanaksız."),
+        ("A signing block entry is too small to hold an id.", "Bir imza bloğu girdisi kimlik taşıyamayacak kadar küçük."),
+        ("A signing block entry runs past the end of the block.", "Bir imza bloğu girdisi bloğun sonunu aşıyor."),
+        ("A stack shuffle cuts a long or a double in half.", "Bir yığın karıştırması long ya da double değeri ikiye bölüyor."),
+        ("A staged object could not be put in place.", "Hazırlanan bir nesne yerine konulamadı."),
+        ("A starter file could not be written.", "Bir başlangıç dosyası yazılamadı."),
+        ("A stored block claims more bytes than the stream holds.", "Saklanan bir blok, akışın taşıdığından çok bayt bildiriyor."),
+        ("A stored block's length does not match its own complement.", "Saklanan bir bloğun uzunluğu kendi tümleyeniyle uyuşmuyor."),
+        ("A string constant points at no text.", "Bir dize sabiti hiçbir metni göstermiyor."),
+        ("A string is longer than the format allows.", "Bir dize, biçimin izin verdiğinden uzun."),
+        ("A string is not valid UTF-8.", "Bir dize geçerli UTF-8 değil."),
+        ("A string pool claims more strings than can be.", "Bir dize havuzu olabileceğinden çok dize bildiriyor."),
+        ("A string was never interned.", "Bir dize hiç havuza alınmamış."),
+        ("A string was not collected before it was written.", "Bir dize, yazılmadan önce toplanmamış."),
+        ("A styleable holds the attributes the view reads, each written <attr name=\"…\"/>.", "Bir stil kümesi, görünümün okuduğu öznitelikleri taşır; her biri <attr name=\"…\"/> olarak yazılır."),
+        ("A subtraction would go below zero.", "Bir çıkarma sıfırın altına inecekti."),
+        ("A table declares more entries than the file has bytes for.", "Bir tablo, dosyanın baytlarının yetmeyeceği kadar çok girdi bildiriyor."),
+        ("A tag uses the high-tag-number form, which nothing here needs.", "Bir etiket, burada hiçbir şeyin gereksinmediği yüksek etiket numarası biçimini kullanıyor."),
+        ("A theme attribute by name is resolved before it reaches this writer.", "Ada göre tema özniteliği, bu yazıcıya ulaşmadan önce çözülür."),
+        ("A theme attribute is not a 32-bit value.", "Bir tema özniteliği 32 bitlik bir değer değil."),
+        ("A time contains something that is not a digit.", "Bir zaman değeri rakam olmayan bir şey içeriyor."),
+        ("A time has a year that is not a number.", "Bir zaman değerinin yılı sayı değil."),
+        ("A time is not valid text.", "Bir zaman değeri geçerli metin değil."),
+        ("A type list is longer than the file.", "Bir tür listesi dosyadan uzun."),
+        ("A type was never interned.", "Bir tür hiç havuza alınmamış."),
+        ("A value does not fit the width asked for.", "Bir değer istenen genişliğe sığmıyor."),
+        ("A value has no inverse for this modulus.", "Bir değerin bu modüle göre tersi yok."),
+        ("A value of this kind has no place in a bundle.", "Bu türden bir değerin pakette yeri yok."),
+        ("A verity digest is the root of an fs-verity Merkle tree, which is a different construction from the chunked digest this build computes. The claim is neither confirmed nor disputed; it is not compared against anything.", "Verity özeti, bir fs-verity Merkle ağacının köküdür; bu yapının hesapladığı parçalı özetten farklı bir kurgudur. İddia ne doğrulanır ne çürütülür; hiçbir şeyle karşılaştırılmaz."),
+        ("A zlib header fails its own check.", "Bir zlib başlığı kendi denetiminden geçemiyor."),
+        ("A zlib stream is shorter than its own header and check.", "Bir zlib akışı kendi başlığı ve denetiminden kısa."),
+        ("A zlib stream names a preset dictionary, which this build does not carry.", "Bir zlib akışı, bu yapının taşımadığı bir hazır sözlüğü adlandırıyor."),
+        ("A zlib stream uses a compression method the format does not define.", "Bir zlib akışı, biçimin tanımlamadığı bir sıkıştırma yöntemi kullanıyor."),
+        ("APK Signature Scheme v2 and v3 define no SHA-384 algorithm.", "APK İmza Şeması v2 ve v3, SHA-384 algoritması tanımlamaz."),
+        ("Adam7 stores one image as seven, and nothing here needs it. Save the image without interlacing.", "Adam7 tek görüntüyü yedi olarak saklar ve burada hiçbir şey buna gerek duymaz. Görüntüyü geçmeli olmadan kaydedin."),
+        ("Add a quoted Name entry to [ Project ].", "[ Project ] bölümüne tırnaklı bir Name girdisi ekleyin."),
+        ("Add the node, or remove the edge. A build cannot wait for work nobody is going to do.", "Düğümü ekleyin ya da kenarı kaldırın. Bir yapı, kimsenin yapmayacağı bir işi bekleyemez."),
+        ("Alignment must be a power of two.", "Hizalama ikinin kuvveti olmalıdır."),
+        ("An Android library holds no code.", "Bir Android kütüphanesi hiç kod taşımıyor."),
+        ("An XML document has exactly one.", "Bir XML belgesinde tam olarak bir tane bulunur."),
+        ("An aar carries its classes in `classes.jar`, and any more under `libs`. One with neither is not a library.", "Bir aar sınıflarını `classes.jar` içinde, varsa gerisini `libs` altında taşır. İkisi de olmayan bir dosya kütüphane değildir."),
+        ("An annotation value points at a pool entry that is not an integer.", "Bir açıklama değeri, tamsayı olmayan bir havuz girdisini gösteriyor."),
+        ("An annotation value points outside the constant pool.", "Bir açıklama değeri sabit havuzunun dışını gösteriyor."),
+        ("An annotation value uses a tag the format does not define.", "Bir açıklama değeri, biçimin tanımlamadığı bir etiket kullanıyor."),
+        ("An application cannot target a release it refuses to run on.", "Bir uygulama, üzerinde çalışmayı reddettiği bir sürümü hedefleyemez."),
+        ("An application targeting API 30 or later is refused at install time without one.", "API 30 ya da sonrasını hedefleyen bir uygulama, bu olmadan kurulum sırasında reddedilir."),
+        ("An architecture is not one this build knows.", "Bu, bu yapının bildiği bir mimari değil."),
+        ("An archive with one name twice is ambiguous, so it is refused here rather than produced and refused later.", "Aynı adı iki kez taşıyan bir arşiv belirsizdir; bu yüzden üretilip sonradan reddedilmektense burada reddedilir."),
+        ("An array is asked for in more dimensions than it has.", "Bir dizi, sahip olduğundan çok boyutta isteniyor."),
+        ("An array of no dimensions was asked for.", "Boyutsuz bir dizi istendi."),
+        ("An array of no known type was asked for.", "Bilinen bir türü olmayan bir dizi istendi."),
+        ("An array works, and so does anything with an `iterator()`.", "Bir dizi uygundur; `iterator()` taşıyan her şey de uygundur."),
+        ("An attribute a styleable reads is declared with <attr name=\"…\" format=\"…\"/>, here or by the framework.", "Bir stil kümesinin okuduğu öznitelik, burada ya da çatı tarafından <attr name=\"…\" format=\"…\"/> ile bildirilir."),
+        ("An attribute declares what it accepts, not a value. What it accepts is written format=\"…\".", "Bir öznitelik değer değil, neyi kabul ettiğini bildirir. Kabul ettiği format=\"…\" ile yazılır."),
+        ("An attribute in the manifest is never closed.", "Bildirimdeki bir öznitelik hiç kapatılmamış."),
+        ("An attribute is either the framework's, written android:name, or one this project declares with <attr name=\"…\">.", "Bir öznitelik ya çatıya aittir ve android:ad biçiminde yazılır ya da bu projenin <attr name=\"…\"> ile bildirdiğidir."),
+        ("An attribute is named android:name for the framework's own, or by its bare name for one this project declares with <attr>.", "Öznitelik, çatıya ait olanlar için android:ad, bu projenin <attr> ile bildirdikleri için yalın adıyla adlandırılır."),
+        ("An attribute names a string that is not there.", "Bir öznitelik, var olmayan bir dizeyi adlandırıyor."),
+        ("An attribute names a value that is not a number.", "Bir öznitelik, sayı olmayan bir değeri adlandırıyor."),
+        ("An attribute names its values with <enum name=\"…\" value=\"…\"/> or <flag …/>.", "Bir öznitelik değerlerini <enum name=\"…\" value=\"…\"/> ya da <flag …/> ile adlandırır."),
+        ("An attribute was not collected before it was written.", "Bir öznitelik, yazılmadan önce toplanmamış."),
+        ("An element extends past the data it is in.", "Bir öğe, içinde bulunduğu verinin dışına taşıyor."),
+        ("An element names a string that is not there.", "Bir öğe, var olmayan bir dizeyi adlandırıyor."),
+        ("An element that is not modelled is reported rather than skipped: a resource that silently never existed is harder to find than one that was refused.", "Modellenmemiş bir öğe atlanmak yerine raporlanır: sessizce hiç var olmamış bir kaynağı bulmak, reddedilmiş olandan zordur."),
+        ("An entry does not match its checksum.", "Bir girdi kendi sağlama toplamıyla uyuşmuyor."),
+        ("An entry does not match the checksum the archive records for it.", "Bir girdi, arşivin onun için kaydettiği sağlama toplamıyla uyuşmuyor."),
+        ("An entry has no name.", "Bir girdinin adı yok."),
+        ("An entry is encrypted.", "Bir girdi şifrelenmiş."),
+        ("An entry is larger than the format's 32-bit size field.", "Bir girdi, biçimin 32 bitlik boyut alanından büyük."),
+        ("An entry is named differently in its two headers.", "Bir girdi iki başlığında farklı adlandırılmış."),
+        ("An entry name climbs out of the archive.", "Bir girdi adı arşivin dışına çıkıyor."),
+        ("An entry name contains a backslash.", "Bir girdi adı ters eğik çizgi içeriyor."),
+        ("An entry name is absolute.", "Bir girdi adı mutlak."),
+        ("An entry name is longer than the accepted limit.", "Bir girdi adı kabul edilen sınırdan uzun."),
+        ("An entry name is longer than the format's length field.", "Bir girdi adı, biçimin uzunluk alanından uzun."),
+        ("An entry name is not valid UTF-8.", "Bir girdi adı geçerli UTF-8 değil."),
+        ("An entry name names a drive.", "Bir girdi adı bir sürücüyü adlandırıyor."),
+        ("An entry uses a compression method this build does not read.", "Bir girdi, bu yapının okumadığı bir sıkıştırma yöntemi kullanıyor."),
+        ("An entry's size does not match its header.", "Bir girdinin boyutu başlığıyla uyuşmuyor."),
+        ("An entry's two headers disagree about compression.", "Bir girdinin iki başlığı sıkıştırma konusunda uyuşmuyor."),
+        ("An entry's two headers disagree about its checksum.", "Bir girdinin iki başlığı sağlama toplamı konusunda uyuşmuyor."),
+        ("An enum whose constants are all named, or a `sealed` type whose subtypes all are, answers for everything already and needs no `default`.", "Sabitlerinin tamamı adlandırılmış bir enum ya da alt türlerinin tamamı adlandırılmış bir `sealed` tür zaten her durumu karşılar ve `default` gerektirmez."),
+        ("An identifier a library declares could not be added.", "Bir kütüphanenin bildirdiği tanımlayıcı eklenemedi."),
+        ("An identifier could not be declared.", "Bir tanımlayıcı bildirilemedi."),
+        ("An identifier holds 65536 entries per type.", "Bir tanımlayıcı, tür başına 65536 girdi taşır."),
+        ("An image with no width or no height cannot be written.", "Genişliği ya da yüksekliği olmayan bir görüntü yazılamaz."),
+        ("An instruction is not translated to Dalvik here.", "Bir komut burada Dalvik'e çevrilmiyor."),
+        ("An instruction says to fill in a unit it does not have.", "Bir komut, sahip olmadığı bir birimi doldurmayı söylüyor."),
+        ("An integer has no content.", "Bir tamsayının içeriği yok."),
+        ("An integer is padded, so it is not in its shortest form.", "Bir tamsayı dolgulanmış, yani en kısa biçiminde değil."),
+        ("An interlaced image is not decoded by this build.", "Geçmeli bir görüntü bu yapı tarafından çözülmez."),
+        ("An object could not be removed.", "Bir nesne kaldırılamadı."),
+        ("An object could not be staged.", "Bir nesne hazırlanamadı."),
+        ("An object identifier arc has a leading zero byte.", "Bir nesne tanımlayıcısı basamağının başında sıfır bayt var."),
+        ("An object identifier arc is too large.", "Bir nesne tanımlayıcısı basamağı fazla büyük."),
+        ("An object identifier ends in the middle of an arc.", "Bir nesne tanımlayıcısı, bir basamağın ortasında bitiyor."),
+        ("An object identifier is empty.", "Bir nesne tanımlayıcısı boş."),
+        ("An unknown section is reported rather than ignored, because settings that look like they are in force but are not are worse than settings that are missing.", "Bilinmeyen bir bölüm yok sayılmak yerine raporlanır; çünkü yürürlükte görünüp de olmayan ayarlar, eksik ayarlardan kötüdür."),
+        ("Android has only ever shipped little-endian DEX files. A big-endian one is either a different platform's or damaged.", "Android bugüne dek yalnızca küçük sonlu DEX dosyaları yayımladı. Büyük sonlu olan ya başka bir platforma aittir ya da bozuktur."),
+        ("Break the loop by giving one of them a real value.", "Birine gerçek bir değer vererek döngüyü kırın."),
+        ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Başka bir takma ad seçin. Bu yapı bir imza anahtarının üzerine yazmaz; çünkü eskisiyle imzalanmış her uygulama artık güncellenemezdi."),
+        ("Choose another name. Copying over it would replace what is there without asking.", "Başka bir ad seçin. Üzerine kopyalamak, oradakini sormadan değiştirirdi."),
+        ("Choose another name. Moving over it would delete what is there without asking.", "Başka bir ad seçin. Üzerine taşımak, oradakini sormadan silerdi."),
+        ("Close it with -->.", "--> ile kapatın."),
+        ("Close it with ]]>.", "]]> ile kapatın."),
+        ("Close it.", "Kapatın."),
+        ("Close the quote.", "Tırnağı kapatın."),
+        ("Colours are written #rgb, #argb, #rrggbb or #aarrggbb.", "Renkler #rgb, #argb, #rrggbb ya da #aarrggbb biçiminde yazılır."),
+        ("Convert the expression to Int.", "İfadeyi Int'e dönüştürün."),
+        ("Create the project before giving it an image.", "Görsel vermeden önce projeyi oluşturun."),
+        ("Create the project first; a project is a manifest and its language folders.", "Önce projeyi oluşturun; proje, bir bildirim ve dil klasörlerinden oluşur."),
+        ("DER requires one encoding per value.", "DER her değer için tek bir kodlama gerektirir."),
+        ("Dalvik has no instruction for this, so it has to be written out as the instructions it stands for. Nothing is skipped: a call that ran as something else would be worse than one that does not build.", "Dalvik'te bunun karşılığı bir komut yok; bu yüzden temsil ettiği komutlar olarak açıkça yazılmalı. Hiçbir şey atlanmaz: başka bir şey olarak çalışan bir çağrı, hiç derlenmeyenden kötüdür."),
+        ("Debug output carries paths and timestamps that reproducibility cannot survive. The request is honoured as far as the build can, and reported here because it may not be fully met.", "Hata ayıklama çıktısı, yeniden üretilebilirliğin kaldıramayacağı yollar ve zaman damgaları taşır. İstek yapının elverdiği ölçüde karşılanır ve tam karşılanamayabileceği için burada bildirilir."),
+        ("Declare it, or correct the reference.", "Bildirin ya da başvuruyu düzeltin."),
+        ("Dimensions are a number and a unit, for example 16dp or 14sp.", "Ölçüler bir sayı ve bir birimden oluşur, örneğin 16dp ya da 14sp."),
+        ("Drop the leading zero, or write it as 0x for hexadecimal.", "Baştaki sıfırı kaldırın ya da onaltılık için 0x biçiminde yazın."),
+        ("Each line above names what is wrong and what to change. A bundle is produced only when none of them is left.", "Yukarıdaki her satır neyin yanlış olduğunu ve neyin değişeceğini söyler. Paket, bunların hiçbiri kalmadığında üretilir."),
+        ("Each one is written <enum name=\"…\" value=\"…\"/>.", "Her biri <enum name=\"…\" value=\"…\"/> olarak yazılır."),
+        ("Each one is written as <item name=\"android:textSize\">.", "Her biri <item name=\"android:textSize\"> olarak yazılır."),
+        ("Each one is written as <item quantity=\"one\">.", "Her biri <item quantity=\"one\"> olarak yazılır."),
+        ("Each value inside one is written as <item>.", "İçindeki her değer <item> olarak yazılır."),
+        ("Edit it instead. A project folder without a manifest is not a project, and nothing here would find it again.", "Onun yerine düzenleyin. Bildirimi olmayan bir proje klasörü proje değildir ve burada hiçbir şey onu bir daha bulamaz."),
+        ("Empty it, or restore what is worth keeping. Nothing is removed to make room, because that would delete the oldest thing without asking.", "Boşaltın ya da saklamaya değer olanı geri alın. Yer açmak için hiçbir şey silinmez; bu, en eskisini sormadan silmek olurdu."),
+        ("Encrypted archives are not read.", "Şifreli arşivler okunmaz."),
+        ("Escapes are not part of this grammar. Choose a value without a quote in it.", "Kaçış dizileri bu dil bilgisinin parçası değildir. İçinde tırnak olmayan bir değer seçin."),
+        ("Every arm has to produce the same type. A cast settles it.", "Her dal aynı türü üretmek zorundadır. Bir tür dönüşümü bunu çözer."),
+        ("Every attribute a resource carries is written with the identifier the platform gives it. One this build cannot name would be dropped by Android without a word, so it is refused instead.", "Bir kaynağın taşıdığı her öznitelik, platformun verdiği tanımlayıcıyla yazılır. Bu yapının adlandıramadığı bir öznitelik Android tarafından sessizce atılırdı; bu yüzden reddedilir."),
+        ("Every attribute this build writes carries the identifier the platform gives it. One that is not in the table would be dropped by Android without a word, so it is refused instead.", "Bu yapının yazdığı her öznitelik, platformun verdiği tanımlayıcıyı taşır. Tabloda olmayan biri Android tarafından sessizce atılırdı; bu yüzden reddedilir."),
+        ("Every byte had its continuation bit set.", "Her baytın devam biti işaretliydi."),
+        ("Every dependency edge points at work that must finish first, so a cycle asks for something to happen before itself. Break it by removing an edge or by splitting a node.", "Her bağımlılık kenarı önce bitmesi gereken bir işi gösterir; dolayısıyla bir döngü, bir şeyin kendisinden önce olmasını ister. Bir kenarı kaldırarak ya da bir düğümü bölerek kırın."),
+        ("Every entry has the form Key = value.", "Her girdi Anahtar = değer biçimindedir."),
+        ("Every finding above names what is wrong and what to change. A package is produced only when none of them is left.", "Yukarıdaki her bulgu neyin yanlış olduğunu ve neyin değişeceğini söyler. Paket, bunların hiçbiri kalmadığında üretilir."),
+        ("Every identifier the platform hands out is written into this build. A name that is not among them is one no device has.", "Platformun dağıttığı her tanımlayıcı bu yapıya yazılıdır. Bunların arasında olmayan bir ad, hiçbir cihazda bulunmayan bir addır."),
+        ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Diğer her yerel ayar, geri düşülen ayarın çevirisidir. Dili seçilenlerden hiçbiri olmayan bir cihaz o klasörü okur; dolayısıyla onu dışarıda bırakmak, dünyadaki telefonların çoğunda adsız bir uygulama yayımlamak olurdu."),
+        ("Every resource is declared as <type name=\"…\">.", "Her kaynak <tür name=\"…\"> olarak bildirilir."),
+        ("Fix what those nodes reported. This node has no problem of its own.", "O düğümlerin bildirdiklerini giderin. Bu düğümün kendine ait bir sorunu yok."),
+        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Buna başka bir ad verin. Buraya yazmak, ikinci bir projenin dosyalarını birincininkilerin arasına koyar ve birinciyi adlandıran bildirimin üzerine yazılırdı."),
+        ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play, sürüm kodu bir öncekinden büyük olmayan yüklemeleri reddeder; bu yüzden bu sayı yalnızca artar."),
+        ("Google Play requires a key valid until at least 22 October 2033.", "Google Play, en az 22 Ekim 2033'e kadar geçerli bir anahtar ister."),
+        ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Bu eklentinin gerçekten ihtiyacı varsa yetkiyi ona açıkça verin."),
+        ("Hand the class file that declares it over as a dependency, or write the method here.", "Onu bildiren sınıf dosyasını bağımlılık olarak verin ya da yöntemi burada yazın."),
+        ("Hand the class file that declares it over as a dependency.", "Onu bildiren sınıf dosyasını bağımlılık olarak verin."),
+        ("Hand the class file that declares it over as a dependency. Nothing is emitted for a field nobody has seen.", "Onu bildiren sınıf dosyasını bağımlılık olarak verin. Kimsenin görmediği bir alan için hiçbir şey üretilmez."),
+        ("Hand the class file that declares it over as a dependency. Nothing is guessed: a call written against a method nobody has seen would be a class file the device refuses.", "Onu bildiren sınıf dosyasını bağımlılık olarak verin. Hiçbir şey tahmin edilmez: kimsenin görmediği bir yönteme yazılmış çağrı, cihazın reddedeceği bir sınıf dosyası olurdu."),
+        ("Import it, write it out in full, or hand the class file that declares it over as a dependency. Nothing is guessed: a name that resolves to nothing here would become a class file the device refuses.", "İçe aktarın, tam adıyla yazın ya da onu bildiren sınıf dosyasını bağımlılık olarak verin. Hiçbir şey tahmin edilmez: burada hiçbir şeye çözülmeyen bir ad, cihazın reddedeceği bir sınıf dosyasına dönüşürdü."),
+        ("Indefinite lengths let one value be written two ways, and a verifier that accepts both can be shown something a parser does not display.", "Belirsiz uzunluklar tek bir değerin iki biçimde yazılmasına izin verir; ikisini de kabul eden bir doğrulayıcıya, ayrıştırıcının göstermediği bir şey gösterilebilir."),
+        ("Inline markup inside a resource is not modelled. Its text is taken as written, so anything nested would be silently lost.", "Bir kaynağın içindeki satır içi biçimlendirme modellenmez. Metni yazıldığı gibi alınır; iç içe konan her şey sessizce kaybolurdu."),
+        ("Install the pinned version, or change the pin in the toolchain lock together with an architectural decision record.", "Sabitlenen sürümü kurun ya da araç zinciri kilidindeki sabiti, bir mimari karar kaydıyla birlikte değiştirin."),
+        ("It has been removed, so the next build makes it again rather than reading it. Nothing that came out of it should be trusted.", "Kaldırıldı; bu yüzden sonraki yapı onu okumak yerine yeniden üretir. Ondan çıkan hiçbir şeye güvenilmemeli."),
+        ("It is declared <declare-styleable name=\"MyView\">, and that name is what R.styleable calls the array.", "<declare-styleable name=\"MyView\"> olarak bildirilir ve R.styleable dizisini bu adla anar."),
+        ("It is declared by the file that holds it.", "Onu taşıyan dosya tarafından bildirilir."),
+        ("It is found by its name, so moving it or putting something else there would leave a folder nothing here recognises as a project.", "Adıyla bulunur; bu yüzden taşınması ya da yerine başka bir şey konması, burada hiçbir şeyin proje olarak tanımadığı bir klasör bırakırdı."),
+        ("It is neither confirmed nor disputed; it is not checked against anything.", "Ne doğrulanır ne çürütülür; hiçbir şeyle denetlenmez."),
+        ("It is spelled the way android.R spells it: the kind is the field of R it sits under, and the name the field itself.", "android.R'nin yazdığı gibi yazılır: tür, R içinde altında bulunduğu alandır; ad ise alanın kendisidir."),
+        ("It is spelled the way android.R.attr spells it, without the android: in front.", "android.R.attr'ın yazdığı gibi, başında android: olmadan yazılır."),
+        ("It is written <item type=\"id\" name=\"save\"/>. An <item> without a type is only meaningful inside a style, an array or a plural.", "<item type=\"id\" name=\"save\"/> olarak yazılır. Türü olmayan bir <item> yalnızca bir stil, dizi ya da çoğul içinde anlamlıdır."),
+        ("It names an attribute: android:textColor for the framework's, or a bare name for one declared here.", "Bir özniteliği adlandırır: çatıya ait olan için android:textColor, burada bildirilen için yalın ad."),
+        ("It was emptied, or the day it is held for has passed. Nothing here keeps a copy after that.", "Boşaltıldı ya da tutulduğu gün geçti. Bundan sonra burada hiçbir şey kopya saklamaz."),
+        ("Java compiles through the compiler contract, not through this one.", "Java, bu sözleşmeyle değil, derleyici sözleşmesiyle derlenir."),
+        ("Keep one of them. A package holding two classes of one name loads whichever the runtime reaches first, which is not something a build should decide by accident.", "Birini tutun. Aynı adı taşıyan iki sınıfı barındıran bir paket, çalışma zamanının önce ulaştığını yükler; bu, bir yapının kazara karar vereceği bir şey değildir."),
+        ("Known settings: alias, commonName, organisation, country, validityDays, validityYears, bits.", "Bilinen ayarlar: alias, commonName, organisation, country, validityDays, validityYears, bits."),
+        ("Letters, digits, dots, hyphens and underscores.", "Harf, rakam, nokta, kısa çizgi ve alt çizgi."),
+        ("Letters, digits, underscore and hyphen, at most 64 characters. The alias becomes the file name, so it may not contain a path.", "Harf, rakam, alt çizgi ve kısa çizgi; en çok 64 karakter. Takma ad dosya adına dönüşür, bu yüzden yol içeremez."),
+        ("Merging what the libraries ask for needs it read first.", "Kütüphanelerin istediklerini birleştirmek, önce bunun okunmasını gerektirir."),
+        ("Mount names are unique so a path means one thing.", "Bağlama adları benzersizdir; böylece bir yol tek bir anlama gelir."),
+        ("Mount the directory before reading from it.", "Okumadan önce dizini bağlayın."),
+        ("Move it aside. Overwriting it would throw away whatever it holds, and every application signed with the key it replaced could no longer be updated.", "Kenara alın. Üzerine yazmak taşıdığı her şeyi atardı ve değiştirdiği anahtarla imzalanmış her uygulama artık güncellenemezdi."),
+        ("Move or rename what is there first. Restoring over it would delete a file the trash was never asked to hold.", "Önce oradakini taşıyın ya da adını değiştirin. Üzerine geri almak, çöpe hiç konması istenmemiş bir dosyayı silerdi."),
+        ("Move the content to the next line.", "İçeriği bir sonraki satıra taşıyın."),
+        ("Name it without a format to read it; what it accepts is what the framework says it accepts.", "Okumak için biçim vermeden adlandırın; kabul ettiği, çatının kabul ettiğini söylediğidir."),
+        ("No architecture was chosen.", "Hiçbir mimari seçilmedi."),
+        ("No blinding factor could be drawn for this modulus.", "Bu modül için körleme çarpanı çekilemedi."),
+        ("No form of the instruction does that, so the method it came from is not one the JVM would run either.", "Komutun hiçbir biçimi bunu yapmaz; dolayısıyla geldiği yöntem JVM'in de çalıştıracağı bir yöntem değil."),
+        ("No language was chosen.", "Hiçbir dil seçilmedi."),
+        ("Node identifiers are unique within a graph.", "Düğüm tanımlayıcıları bir çizge içinde benzersizdir."),
+        ("Nothing has been moved. Without that note there would be no way to put it back, so it stays where it is.", "Hiçbir şey taşınmadı. O not olmadan geri koymanın yolu olmazdı; bu yüzden olduğu yerde kalıyor."),
+        ("Nothing here guesses at a name. A local, a parameter, a field of this class or of one above it: anything else is refused rather than written into a class file.", "Burada hiçbir şey ad tahmin etmez. Bir yerel değişken, bir parametre, bu sınıfın ya da üstündeki bir sınıfın alanı: bunların dışındaki her şey, sınıf dosyasına yazılmak yerine reddedilir."),
+        ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere.", "Bu yapıda hiçbir şey kayıp bir paroladan imza anahtarını kurtaramaz ve hiçbir şey parolayı hiçbir yere kaydetmez."),
+        ("Nothing in this build can recover a signing key from a lost password, and nothing in it records the password anywhere. If this is a password you are sure of, then the file is not the one it was written as. Nothing is decrypted either way.", "Bu yapıda hiçbir şey kayıp bir paroladan imza anahtarını kurtaramaz ve hiçbir şey parolayı hiçbir yere kaydetmez. Paroladan eminseniz, dosya yazıldığı dosya değildir. Her iki durumda da hiçbir şey çözülmez."),
+        ("Nothing is returned from a decryption whose padding does not check out.", "Dolgusu doğrulanmayan bir çözmeden hiçbir şey döndürülmez."),
+        ("Nothing is returned from a key whose contents do not read back.", "İçeriği geri okunamayan bir anahtardan hiçbir şey döndürülmez."),
+        ("Nothing is signed unblinded. A signature computed straight from the message would let anybody who can time it learn about the key.", "Hiçbir şey körlemesiz imzalanmaz. Doğrudan iletiden hesaplanan bir imza, süresini ölçebilen herkese anahtar hakkında bilgi verirdi."),
+        ("Nothing is skipped. An instruction this does not understand would become a method that runs and does the wrong thing, which is worse than one that does not build.", "Hiçbir şey atlanmaz. Buranın anlamadığı bir komut, çalışıp yanlış işi yapan bir yönteme dönüşürdü; bu, hiç derlenmeyenden kötüdür."),
+        ("Nothing it had produced was published, so nothing downstream can read half of it.", "Ürettiği hiçbir şey yayımlanmadı; böylece sonraki hiçbir adım yarısını okuyamaz."),
+        ("Nothing it had produced was published. A build on a device shares that device with whatever the person is actually doing.", "Ürettiği hiçbir şey yayımlanmadı. Cihaz üzerinde çalışan bir yapı, o cihazı kişinin o an yaptığı işle paylaşır."),
+        ("Nothing that needs randomness may proceed without it. A key made from a guessable source is worse than no key.", "Rastgeleliğe ihtiyaç duyan hiçbir şey onsuz ilerleyemez. Tahmin edilebilir bir kaynaktan üretilen anahtar, hiç anahtarı olmamaktan kötüdür."),
+        ("Nothing was handed back. A package that does not verify here would be refused at install time.", "Hiçbir şey geri verilmedi. Burada doğrulanmayan bir paket kurulum sırasında reddedilirdi."),
+        ("Nothing was handed back. This is a fault in this build, not in the project.", "Hiçbir şey geri verilmedi. Bu, projenin değil bu yapının hatasıdır."),
+        ("Nothing was written. A build is stopped between stages, so what it had done so far is thrown away rather than left half finished.", "Hiçbir şey yazılmadı. Bir yapı aşamalar arasında durdurulur; bu yüzden o ana dek yaptığı yarım bırakılmak yerine atılır."),
+        ("Nothing was written. A package built from this would install, launch, and hold none of that code, which is worse than not building it.", "Hiçbir şey yazılmadı. Bundan üretilen bir paket kurulur, açılır ve o kodun hiçbirini taşımazdı; bu, hiç derlememekten kötüdür."),
+        ("Nothing was written. A package that does not verify here would be refused at install time.", "Hiçbir şey yazılmadı. Burada doğrulanmayan bir paket kurulum sırasında reddedilirdi."),
+        ("One class asks a dex file to hold more than an instruction can name.", "Tek bir sınıf, dex dosyasından bir komutun adlandırabileceğinden fazlasını taşımasını istiyor."),
+        ("One is written ?android:attr/name. An application's own are not modelled.", "?android:attr/ad biçiminde yazılır. Uygulamanın kendine ait olanları modellenmez."),
+        ("One of the declared names is close to this one.", "Bildirilen adlardan biri buna yakın."),
+        ("One the framework declares is written ?android:attr/name; one this project declares with <attr> is written ?attr/name.", "Çatının bildirdiği ?android:attr/ad biçiminde, bu projenin <attr> ile bildirdiği ?attr/ad biçiminde yazılır."),
+        ("One the project reads itself is declared with <attr name=\"…\" format=\"…\"/> in a values file.", "Projenin kendi okuduğu, bir değerler dosyasında <attr name=\"…\" format=\"…\"/> ile bildirilir."),
+        ("One to sixty-four characters.", "Bir ile altmış dört karakter arası."),
+        ("One type, one place. Rename one of them.", "Bir tür, bir yer. Birinin adını değiştirin."),
+        ("Only &amp; &lt; &gt; &quot; &apos; and numeric references are accepted. Custom entities are not defined, which is what keeps a file from expanding into memory it does not have.", "Yalnızca &amp; &lt; &gt; &quot; &apos; ve sayısal başvurular kabul edilir. Özel varlıklar tanımlı değildir; dosyayı sahip olmadığı belleğe doğru şişmekten alıkoyan da budur."),
+        ("Only RSA is implemented; there is no elliptic-curve arithmetic here.", "Yalnızca RSA gerçeklenmiştir; burada eliptik eğri aritmetiği yoktur."),
+        ("Only the framework's own attributes and this project's are reachable.", "Yalnızca çatının kendi öznitelikleri ve bu projenin öznitelikleri erişilebilir."),
+        ("Only the framework's own attributes and this project's are reachable: android:name, or the bare name of one declared here with <attr>.", "Yalnızca çatının kendi öznitelikleri ve bu projeninkiler erişilebilir: android:ad ya da burada <attr> ile bildirilen birinin yalın adı."),
+        ("Only the project's own resources and @android: are available; nothing resolves a shared library's table yet.", "Yalnızca projenin kendi kaynakları ve @android: kullanılabilir; henüz hiçbir şey paylaşılan bir kütüphanenin tablosunu çözmez."),
+        ("Only whitespace may appear there.", "Orada yalnızca boşluk bulunabilir."),
+        ("Open a section first, for example [ Project ].", "Önce bir bölüm açın, örneğin [ Project ]."),
+        ("Put every attribute the view reads in one group.", "Görünümün okuduğu her özniteliği tek bir grupta toplayın."),
+        ("Put it in a `try` with a `catch` for it, or write `throws` on the method. Anything under `RuntimeException` or `Error` needs neither.", "Bunun için `catch` içeren bir `try` içine koyun ya da yönteme `throws` yazın. `RuntimeException` ya da `Error` altındaki hiçbir şey ikisini de gerektirmez."),
+        ("Putting something else there would leave a folder nothing here recognises as a project.", "Oraya başka bir şey koymak, burada hiçbir şeyin proje olarak tanımadığı bir klasör bırakırdı."),
+        ("Raise the limit deliberately if the artifact really is this large; an unbounded writer is a way to run a device out of memory.", "Ürün gerçekten bu kadar büyükse sınırı bilerek yükseltin; sınırsız bir yazıcı, cihazın belleğini tüketmenin bir yoludur."),
+        ("Raise the quota deliberately if the file really is this large.", "Dosya gerçekten bu kadar büyükse kotayı bilerek yükseltin."),
+        ("Remove one. Keeping the last would make the build depend on which file was read first.", "Birini kaldırın. Sonuncuyu tutmak, yapının hangi dosyanın önce okunduğuna bağlı olmasına yol açardı."),
+        ("Remove one. Keeping the last would make the file depend on attribute order.", "Birini kaldırın. Sonuncuyu tutmak, dosyanın öznitelik sırasına bağlı olmasına yol açardı."),
+        ("Remove one. Silently keeping the last value would make the build depend on line order.", "Birini kaldırın. Son değeri sessizce tutmak, yapının satır sırasına bağlı olmasına yol açardı."),
+        ("Report a version string, not a full tool banner.", "Tam bir araç başlığı değil, bir sürüm dizesi bildirin."),
+        ("Report each key once. The first value was kept and this entry was ignored.", "Her anahtarı bir kez bildirin. İlk değer tutuldu ve bu girdi yok sayıldı."),
+        ("Report only the keys listed in the toolchain lock.", "Yalnızca araç zinciri kilidinde listelenen anahtarları bildirin."),
+        ("Say which by casting an argument to the type that one takes. The language calls this ambiguous rather than choosing, and so does this.", "Bir argümanı, istediğiniz aşırı yüklemenin aldığı türe dönüştürerek hangisi olduğunu belirtin. Dil bunu seçmek yerine belirsiz sayar; burası da öyle."),
+        ("Sign with SHA-256 or SHA-512. SHA-384 is read here because certificates are signed with it, not because a package can be.", "SHA-256 ya da SHA-512 ile imzalayın. SHA-384 burada okunur çünkü sertifikalar onunla imzalanır, paketler onunla imzalanabildiği için değil."),
+        ("Something is already at that name.", "O adda zaten bir şey var."),
+        ("Something is already where that came from, so it is not put back.", "Geldiği yerde zaten bir şey var; bu yüzden geri konmuyor."),
+        ("Split archives are not read.", "Bölünmüş arşivler okunmaz."),
+        ("Strings are joined by something unexpected.", "Dizeler beklenmedik bir şeyle birleştiriliyor."),
+        ("Tags must be closed in the order they open.", "Etiketler açıldıkları sırayla kapatılmalıdır."),
+        ("Targeting a release the code is not compiled against means opting into behaviour that cannot be checked.", "Kodun karşısında derlenmediği bir sürümü hedeflemek, denetlenemeyen bir davranışı kabul etmek demektir."),
+        ("Text must be quoted. Numbers are written plainly. Booleans are exactly true or false, in lower case.", "Metin tırnak içinde olmalıdır. Sayılar yalın yazılır. Mantıksal değerler küçük harfle tam olarak true ya da false'tur."),
+        ("That change did not take, so the manifest was put back as it was.", "Bu değişiklik uygulanmadı; bildirim eski hâline döndürüldü."),
+        ("That constant is not one this translates.", "Bu, buranın çevirdiği bir sabit değil."),
+        ("That could not be copied.", "Bu kopyalanamadı."),
+        ("That could not be moved to the trash.", "Bu çöpe taşınamadı."),
+        ("That could not be moved.", "Bu taşınamadı."),
+        ("That could not be put back.", "Bu geri konulamadı."),
+        ("That could not be removed from the trash.", "Bu çöpten kaldırılamadı."),
+        ("That dependency could not be removed.", "Bu bağımlılık kaldırılamadı."),
+        ("That dependency is not in this project.", "Bu bağımlılık bu projede yok."),
+        ("That element is not an integer.", "Bu öğe bir tamsayı değil."),
+        ("That element is not an object identifier.", "Bu öğe bir nesne tanımlayıcısı değil."),
+        ("That entry has already been added.", "Bu girdi zaten eklenmiş."),
+        ("That file could not be read.", "Bu dosya okunamadı."),
+        ("That file could not be saved.", "Bu dosya kaydedilemedi."),
+        ("That file is larger than this editor opens.", "Bu dosya, düzenleyicinin açtığından büyük."),
+        ("That file is larger than this editor saves.", "Bu dosya, düzenleyicinin kaydettiğinden büyük."),
+        ("That file is not a readable archive.", "Bu dosya okunabilir bir arşiv değil."),
+        ("That file is not in the project.", "Bu dosya projede yok."),
+        ("That file is not text, so it is not opened for editing.", "Bu dosya metin değil; bu yüzden düzenlemeye açılmıyor."),
+        ("That folder could not be made.", "Bu klasör oluşturulamadı."),
+        ("That is larger than this store will hold.", "Bu, deponun taşıyacağından büyük."),
+        ("That is longer than anything this searches for.", "Bu, buranın aradığı her şeyden uzun."),
+        ("That is more files than this copies at once.", "Bu, buranın bir seferde kopyaladığından çok dosya."),
+        ("That is more permissions than this edits.", "Bu, buranın düzenlediğinden çok izin."),
+        ("That is not a resource the platform declares.", "Bu, platformun bildirdiği bir kaynak değil."),
+        ("That is not an attribute a theme could answer with.", "Bu, bir temanın karşılık verebileceği bir öznitelik değil."),
+        ("That is not here to be deleted.", "Silinecek şey burada değil."),
+        ("That is not in the project.", "Bu projede yok."),
+        ("That is not something this changes in a manifest.", "Bu, buranın bildirimde değiştirdiği bir şey değil."),
+        ("That is not the name of a dependency.", "Bu bir bağımlılık adı değil."),
+        ("That is not the name of a permission.", "Bu bir izin adı değil."),
+        ("That many years is not a period a date can hold.", "Bu kadar yıl, bir tarihin taşıyabileceği bir süre değil."),
+        ("That object is not in this store.", "Bu nesne bu depoda yok."),
+        ("That package could not be opened.", "Bu paket açılamadı."),
+        ("That package could not be read.", "Bu paket okunamadı."),
+        ("That package is larger than this opens.", "Bu paket, buranın açtığından büyük."),
+        ("That path does not end in a name.", "Bu yol bir adla bitmiyor."),
+        ("That path does not name a file inside the project.", "Bu yol, projenin içindeki bir dosyayı adlandırmıyor."),
+        ("That path names no file.", "Bu yol hiçbir dosyayı adlandırmıyor."),
+        ("That value is not one a manifest holds.", "Bu, bir bildirimin taşıdığı bir değer değil."),
+        ("That was held for its day and is gone.", "Bu, süresi boyunca tutuldu ve artık yok."),
+        ("That wide constant is not one this translates.", "Bu geniş sabit, buranın çevirdiklerinden değil."),
+        ("The alias in the key file is not text.", "Anahtar dosyasındaki takma ad metin değil."),
+        ("The alias is not a usable name.", "Takma ad kullanılabilir bir ad değil."),
+        ("The alignment padding is larger than the extra field allows.", "Hizalama dolgusu, ek alanın izin verdiğinden büyük."),
+        ("The application image could not be given an identifier.", "Uygulama görseline tanımlayıcı verilemedi."),
+        ("The application name is empty or too long.", "Uygulama adı boş ya da fazla uzun."),
+        ("The archive contains the same entry twice.", "Arşiv aynı girdiyi iki kez içeriyor."),
+        ("The archive disagrees with itself about its entry count.", "Arşiv, girdi sayısı konusunda kendisiyle çelişiyor."),
+        ("The archive has no end-of-central-directory record.", "Arşivde merkezi dizin sonu kaydı yok."),
+        ("The archive holds more entries than the format's counter allows.", "Arşiv, biçimin sayacının izin verdiğinden çok girdi taşıyor."),
+        ("The archive is larger than this implementation reads.", "Arşiv, bu gerçeklemenin okuduğundan büyük."),
+        ("The archive is split across several disks.", "Arşiv birkaç diske bölünmüş."),
+        ("The archive would hold more entries than the format allows.", "Arşiv, biçimin izin verdiğinden çok girdi taşıyacaktı."),
+        ("The array a styleable comes to has one place per attribute, so naming one twice has no second place to put it.", "Bir stil kümesinin karşılık geldiği dizide öznitelik başına tek bir yer vardır; bu yüzden birini iki kez adlandırmanın koyacak ikinci bir yeri yoktur."),
+        ("The bootstrap methods attribute stops early.", "Bootstrap yöntemleri özniteliği erken bitiyor."),
+        ("The build engine resolves a name against the project's own table before this point. One that arrives by name has no table behind it.", "Yapı motoru, bir adı bu noktadan önce projenin kendi tablosuna göre çözer. Ad olarak gelen birinin arkasında tablo yoktur."),
+        ("The build engine turns ?attr/name into the attribute's identifier and hands the numeric form here, for example ?0x01010435.", "Yapı motoru ?attr/ad ifadesini özniteliğin tanımlayıcısına çevirir ve sayısal biçimi buraya verir, örneğin ?0x01010435."),
+        ("The build engine turns a name into its identifier against the project's own table and hands the numeric form here, for example @0x7f060000. A name that arrives unresolved has no table behind it.", "Yapı motoru bir adı, projenin kendi tablosuna göre tanımlayıcısına çevirir ve sayısal biçimi buraya verir, örneğin @0x7f060000. Çözülmemiş gelen bir adın arkasında tablo yoktur."),
+        ("The bundle writer does not know that android attribute.", "Paket yazıcısı bu android özniteliğini bilmiyor."),
+        ("The byte-order marker is not a value the format defines.", "Bayt sırası imi, biçimin tanımladığı bir değer değil."),
+        ("The bytes no longer add up to what the file itself records. Nothing here is decrypted once that fails: signing with an altered key would produce a package no device accepts.", "Baytlar artık dosyanın kendi kaydettiğiyle uyuşmuyor. Bu doğrulanmadıktan sonra burada hiçbir şey çözülmez: değiştirilmiş bir anahtarla imzalamak, hiçbir cihazın kabul etmeyeceği bir paket üretirdi."),
+        ("The cache index could not be put in place.", "Önbellek dizini yerine konulamadı."),
+        ("The cache index could not be written.", "Önbellek dizini yazılamadı."),
+        ("The capability model denies by default (directive section 7).", "Yetki modeli varsayılan olarak reddeder (yönerge bölüm 7)."),
+        ("The central directory extends past the end of the file.", "Merkezi dizin dosyanın sonunu aşıyor."),
+        ("The central directory points somewhere that is not a header. The archive has been rewritten by something that did not update both.", "Merkezi dizin, başlık olmayan bir yeri gösteriyor. Arşiv, ikisini birden güncellemeyen bir şey tarafından yeniden yazılmış."),
+        ("The central directory's offset and size overflow.", "Merkezi dizinin konumu ve boyutu taşıyor."),
+        ("The certificate in the key file does not belong to the key in it.", "Anahtar dosyasındaki sertifika, içindeki anahtara ait değil."),
+        ("The certificate is larger than the accepted limit.", "Sertifika, kabul edilen sınırdan büyük."),
+        ("The certificate is not written as hexadecimal.", "Sertifika onaltılık olarak yazılmamış."),
+        ("The certificate is signed by itself and that signature does not hold.", "Sertifika kendisi tarafından imzalanmış ve bu imza doğrulanmıyor."),
+        ("The checksum on the key file is the wrong size.", "Anahtar dosyasındaki sağlama toplamının boyutu yanlış."),
+        ("The chosen Android API is outside what this builds for.", "Seçilen Android API'si, buranın derlediği aralığın dışında."),
+        ("The ciphertext is not a whole number of blocks.", "Şifreli metin tam sayıda blok değil."),
+        ("The class file version predates the format.", "Sınıf dosyası sürümü biçimden eski."),
+        ("The colour type and bit depth are not a pair the format allows.", "Renk türü ile bit derinliği, biçimin izin verdiği bir ikili değil."),
+        ("The compressed stream ends before the data it promised.", "Sıkıştırılmış akış, söz verdiği veriden önce bitiyor."),
+        ("The constant pool count is zero.", "Sabit havuzu sayısı sıfır."),
+        ("The constant pool holds a tag the format does not define.", "Sabit havuzu, biçimin tanımlamadığı bir etiket taşıyor."),
+        ("The country is not a two-letter code.", "Ülke iki harfli bir kod değil."),
+        ("The decompressed data does not match the checksum the stream carries.", "Açılan veri, akışın taşıdığı sağlama toplamıyla uyuşmuyor."),
+        ("The diagnostics above name the line. Every language folder is read, so a mistake in one stops the build rather than shipping an application that is missing its words on those devices.", "Yukarıdaki tanılar satırı bildirir. Her dil klasörü okunur; bu yüzden birindeki hata, o cihazlarda sözcükleri eksik bir uygulama yayımlamaktansa yapıyı durdurur."),
+        ("The directory must exist before it is mounted.", "Dizin bağlanmadan önce var olmalıdır."),
+        ("The element carries a different tag than the one expected.", "Öğe, beklenenden farklı bir etiket taşıyor."),
+        ("The encoded document is larger than this writer allows.", "Kodlanmış belge, bu yazıcının izin verdiğinden büyük."),
+        ("The encoded message is not smaller than the modulus.", "Kodlanmış ileti modülden küçük değil."),
+        ("The end record is too small to patch.", "Son kaydı yamalanamayacak kadar küçük."),
+        ("The end-of-central-directory signature is wrong.", "Merkezi dizin sonu imzası yanlış."),
+        ("The entry's bytes changed after it was written.", "Girdinin baytları yazıldıktan sonra değişmiş."),
+        ("The file changed after the build produced it, or storage returned different bytes. Do not use it.", "Dosya, yapı onu ürettikten sonra değişti ya da depolama farklı baytlar döndürdü. Kullanmayın."),
+        ("The file does not begin with the class file magic.", "Dosya, sınıf dosyası imzasıyla başlamıyor."),
+        ("The file does not match the checksum it records for itself.", "Dosya, kendisi için kaydettiği sağlama toplamıyla uyuşmuyor."),
+        ("The file does not match the signature it records for itself.", "Dosya, kendisi için kaydettiği imzayla uyuşmuyor."),
+        ("The file has been altered. Signing with it would produce a package no device accepts, so this build refuses to use it.", "Dosya değiştirilmiş. Onunla imzalamak hiçbir cihazın kabul etmeyeceği bir paket üretirdi; bu yüzden bu yapı onu kullanmayı reddediyor."),
+        ("The file has been changed by something that did not update the header, or it is damaged.", "Dosya, başlığı güncellemeyen bir şey tarafından değiştirilmiş ya da bozuk."),
+        ("The file is big-endian, which this reader does not support.", "Dosya büyük sonlu; bu okuyucu bunu desteklemiyor."),
+        ("The file is damaged. It is not used.", "Dosya bozuk. Kullanılmıyor."),
+        ("The file is larger than this reader accepts.", "Dosya, bu okuyucunun kabul ettiğinden büyük."),
+        ("The file is not a PNG image.", "Dosya bir PNG görüntüsü değil."),
+        ("The file is not an Omni signing key.", "Dosya bir Omni imza anahtarı değil."),
+        ("The file is shorter than a DEX header.", "Dosya bir DEX başlığından kısa."),
+        ("The file is too small to be an archive.", "Dosya arşiv olamayacak kadar küçük."),
+        ("The file is truncated or its header is wrong.", "Dosya kesilmiş ya da başlığı yanlış."),
+        ("The file is truncated, or it is not an archive. Every ZIP ends with this record.", "Dosya kesilmiş ya da arşiv değil. Her ZIP bu kayıtla biter."),
+        ("The file is truncated, or the record is wrong.", "Dosya kesilmiş ya da kayıt yanlış."),
+        ("The file is truncated, padded, or not the file it claims.", "Dosya kesilmiş, doldurulmuş ya da iddia ettiği dosya değil."),
+        ("The folder for that file could not be made.", "Bu dosyanın klasörü oluşturulamadı."),
+        ("The folder for the cache index could not be made.", "Önbellek dizininin klasörü oluşturulamadı."),
+        ("The folder for the copy could not be made.", "Kopyanın klasörü oluşturulamadı."),
+        ("The folder for the new name could not be made.", "Yeni adın klasörü oluşturulamadı."),
+        ("The folder it came from could not be made again.", "Geldiği klasör yeniden oluşturulamadı."),
+        ("The format carries a 24 bit mantissa with one of four radix points, and this is larger than the widest of them holds.", "Biçim, dört basamak noktasından biriyle 24 bitlik bir mantis taşır ve bu, bunların en genişinin taşıdığından büyük."),
+        ("The framework has no resource by that name.", "Çatıda bu adda bir kaynak yok."),
+        ("The graph names a plugin this build does not contain. Either the graph or the plugin set is out of date.", "Çizge, bu yapıda bulunmayan bir eklentiyi adlandırıyor. Ya çizge ya da eklenti kümesi güncel değil."),
+        ("The header chunk is not thirteen bytes.", "Başlık bloğu on üç bayt değil."),
+        ("The header declares an unexpected size.", "Başlık beklenmedik bir boyut bildiriyor."),
+        ("The header's file size is not the file's size.", "Başlıktaki dosya boyutu, dosyanın boyutu değil."),
+        ("The host is able to observe this and must report it.", "Ana ortam bunu gözleyebilir ve bildirmek zorundadır."),
+        ("The image carries bytes after its end chunk.", "Görüntü, bitiş bloğundan sonra bayt taşıyor."),
+        ("The image carries more than one header chunk.", "Görüntü birden çok başlık bloğu taşıyor."),
+        ("The image carries no header chunk.", "Görüntü hiç başlık bloğu taşımıyor."),
+        ("The image carries no pixel data.", "Görüntü hiç piksel verisi taşımıyor."),
+        ("The image could not be read a second time.", "Görüntü ikinci kez okunamadı."),
+        ("The image could not be read.", "Görüntü okunamadı."),
+        ("The image could not be stored with the project.", "Görüntü projeyle birlikte saklanamadı."),
+        ("The image does not begin with its header chunk.", "Görüntü başlık bloğuyla başlamıyor."),
+        ("The image ends in the middle of a chunk header.", "Görüntü bir blok başlığının ortasında bitiyor."),
+        ("The image has no end chunk, so it is incomplete.", "Görüntüde bitiş bloğu yok, yani eksik."),
+        ("The image has no width or no height.", "Görüntünün genişliği ya da yüksekliği yok."),
+        ("The image holds fewer scanlines than its header declares.", "Görüntü, başlığının bildirdiğinden az tarama satırı taşıyor."),
+        ("The image is larger than an application icon needs.", "Görüntü, bir uygulama simgesinin gerektirdiğinden büyük."),
+        ("The image is larger than this build will read.", "Görüntü, bu yapının okuyacağından büyük."),
+        ("The image uses a compression method the format does not define.", "Görüntü, biçimin tanımlamadığı bir sıkıştırma yöntemi kullanıyor."),
+        ("The image uses a filter method the format does not define.", "Görüntü, biçimin tanımlamadığı bir süzgeç yöntemi kullanıyor."),
+        ("The image uses an interlace method the format does not define.", "Görüntü, biçimin tanımlamadığı bir geçmeli tarama yöntemi kullanıyor."),
+        ("The initialisation vector is not sixteen bytes.", "Başlangıç vektörü on altı bayt değil."),
+        ("The input is truncated or the length field is wrong. Nothing is allocated for a length that cannot be satisfied.", "Girdi kesilmiş ya da uzunluk alanı yanlış. Karşılanamayacak bir uzunluk için hiçbir yer ayrılmaz."),
+        ("The input is truncated.", "Girdi kesilmiş."),
+        ("The iteration count is larger than this build accepts.", "Tur sayısı, bu yapının kabul ettiğinden büyük."),
+        ("The key file carries bytes after its last part.", "Anahtar dosyası son parçasından sonra bayt taşıyor."),
+        ("The key file claims a part longer than the file.", "Anahtar dosyası, dosyadan uzun bir parça bildiriyor."),
+        ("The key file could not be read.", "Anahtar dosyası okunamadı."),
+        ("The key file could not be removed.", "Anahtar dosyası kaldırılamadı."),
+        ("The key file could not be written.", "Anahtar dosyası yazılamadı."),
+        ("The key file does not use PBES2.", "Anahtar dosyası PBES2 kullanmıyor."),
+        ("The key file does not use PBKDF2.", "Anahtar dosyası PBKDF2 kullanmıyor."),
+        ("The key file ends in the middle of a length.", "Anahtar dosyası bir uzunluğun ortasında bitiyor."),
+        ("The key file is larger than any key this build writes.", "Anahtar dosyası, bu yapının yazdığı her anahtardan büyük."),
+        ("The key file is not encrypted with AES-256-CBC.", "Anahtar dosyası AES-256-CBC ile şifrelenmemiş."),
+        ("The key file is not the one that was written.", "Anahtar dosyası, yazılmış olan dosya değil."),
+        ("The key file was written by a different version.", "Anahtar dosyası farklı bir sürüm tarafından yazılmış."),
+        ("The key in the signing block is not the key in the certificate.", "İmza bloğundaki anahtar, sertifikadaki anahtar değil."),
+        ("The key is too small to carry a signature of this digest.", "Anahtar, bu özetin imzasını taşıyamayacak kadar küçük."),
+        ("The key size is not a number of bits.", "Anahtar boyutu bit sayısı değil."),
+        ("The key size is not one this build will produce.", "Anahtar boyutu, bu yapının üreteceklerinden değil."),
+        ("The keys folder could not be made.", "Anahtarlar klasörü oluşturulamadı."),
+        ("The locale a device falls back to was not chosen.", "Cihazın geri düştüğü yerel ayar seçilmedi."),
+        ("The magic is not terminated.", "İmza dizisi sonlandırılmamış."),
+        ("The manifest could not be read.", "Bildirim okunamadı."),
+        ("The manifest could not be written.", "Bildirim yazılamadı."),
+        ("The manifest declares no activity to build a class for.", "Bildirim, sınıf üretilecek hiçbir etkinlik bildirmiyor."),
+        ("The manifest has no opening tag.", "Bildirimde açılış etiketi yok."),
+        ("The manifest holds no element to change.", "Bildirimde değiştirilecek öğe yok."),
+        ("The manifest is not XML this build can read.", "Bildirim, bu yapının okuyabileceği bir XML değil."),
+        ("The manifest is what makes this a project.", "Burayı proje yapan şey bildirimdir."),
+        ("The manifest is written from the project's text manifest.", "Bildirim, projenin metin bildiriminden yazılır."),
+        ("The manifest names a resource this project does not hold.", "Bildirim, bu projede bulunmayan bir kaynağı adlandırıyor."),
+        ("The map list declares too many entries.", "Eşlem listesi fazla sayıda girdi bildiriyor."),
+        ("The map list is longer than the file.", "Eşlem listesi dosyadan uzun."),
+        ("The minimum platform is below what the security policy allows.", "En düşük platform, güvenlik ilkesinin izin verdiğinin altında."),
+        ("The minimum platform is newer than the target.", "En düşük platform hedeften yeni."),
+        ("The minimum platform is not a number.", "En düşük platform bir sayı değil."),
+        ("The note saying where it came from could not be written.", "Nereden geldiğini söyleyen not yazılamadı."),
+        ("The offset field is wrong, or the file is truncated.", "Konum alanı yanlış ya da dosya kesilmiş."),
+        ("The package carries no signing block.", "Paket hiç imza bloğu taşımıyor."),
+        ("The package does not match the digest recorded when it was signed.", "Paket, imzalandığında kaydedilen özetle uyuşmuyor."),
+        ("The package has been changed since it was signed. Do not install it.", "Paket imzalandığından beri değiştirilmiş. Kurmayın."),
+        ("The package has no end record.", "Pakette son kaydı yok."),
+        ("The package is too small to hold an end record.", "Paket son kaydını taşıyamayacak kadar küçük."),
+        ("The package name does not fit the table header.", "Paket adı tablo başlığına sığmıyor."),
+        ("The package name is not a usable Android package name.", "Paket adı kullanılabilir bir Android paket adı değil."),
+        ("The package this build signed does not verify against its own key.", "Bu yapının imzaladığı paket, kendi anahtarıyla doğrulanmıyor."),
+        ("The package this build wrote does not read back as an archive.", "Bu yapının yazdığı paket arşiv olarak geri okunmuyor."),
+        ("The palette is not a whole number of colours.", "Palet tam sayıda renk değil."),
+        ("The password did not open this key.", "Parola bu anahtarı açmadı."),
+        ("The password is the only thing between this file and whoever holds it. Nothing else in this build can recover the key without it.", "Bu dosya ile onu elinde tutan arasındaki tek şey paroladır. Bu yapıda başka hiçbir şey anahtarı onsuz kurtaramaz."),
+        ("The password is the only thing between this key and anyone who copies the file.", "Bu anahtar ile dosyayı kopyalayan herkes arasındaki tek şey paroladır."),
+        ("The password is too short to protect a signing key.", "Parola bir imza anahtarını koruyamayacak kadar kısa."),
+        ("The password is wrong, or the data is not what it claims.", "Parola yanlış ya da veri iddia ettiği şey değil."),
+        ("The patch belongs to a different writer.", "Yama başka bir yazıcıya ait."),
+        ("The plugin surface has no request to compile and nowhere to put what comes out. Use crate::compiler::Compiler, which has both.", "Eklenti yüzeyinin derlenecek bir isteği ve çıkanı koyacak bir yeri yok. İkisi de bulunan crate::compiler::Compiler kullanın."),
+        ("The private key is not an RSA key.", "Özel anahtar bir RSA anahtarı değil."),
+        ("The private key's factors and exponents disagree with its modulus, or this build computed the signature wrongly. Nothing is emitted either way.", "Özel anahtarın çarpanları ve üsleri modülüyle uyuşmuyor ya da bu yapı imzayı yanlış hesapladı. Her iki durumda da hiçbir şey üretilmez."),
+        ("The project declares no resource to write.", "Proje yazılacak hiçbir kaynak bildirmiyor."),
+        ("The project does not meet the security policy, so no bundle was produced.", "Proje güvenlik ilkesini karşılamıyor; bu yüzden hiçbir paket üretilmedi."),
+        ("The project does not meet the security policy, so nothing was produced.", "Proje güvenlik ilkesini karşılamıyor; bu yüzden hiçbir şey üretilmedi."),
+        ("The project folder could not be made.", "Proje klasörü oluşturulamadı."),
+        ("The project folder is nested deeper than this build walks.", "Proje klasörü, bu yapının gezdiğinden daha derin iç içe."),
+        ("The project folder is not here.", "Proje klasörü burada değil."),
+        ("The project has no manifest at its root.", "Projenin kökünde bildirim yok."),
+        ("The project holds more files than this build lists.", "Proje, bu yapının listelediğinden çok dosya taşıyor."),
+        ("The project's manifest could not be read.", "Projenin bildirimi okunamadı."),
+        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Körleme açık üs üzerine kuruludur ve burada hiçbir şey körlemesiz imzalamaz."),
+        ("The resource folder could not be made.", "Kaynak klasörü oluşturulamadı."),
+        ("The resource table could not be built.", "Kaynak tablosu kurulamadı."),
+        ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Cihazdaki çalışma ortamında modül sistemi yoktur: her sınıf, kendisine verilen sınıf yükleyicisi tarafından bulunur. Burada bütün işi paketler ve içe aktarmalar yapar."),
+        ("The same number has a shorter encoding. Two spellings of one value make a format ambiguous.", "Aynı sayının daha kısa bir kodlaması var. Tek bir değerin iki yazılışı biçimi belirsizleştirir."),
+        ("The signing block carries no scheme this build reads.", "İmza bloğu, bu yapının okuduğu hiçbir şemayı taşımıyor."),
+        ("The signing block carries one identifier twice.", "İmza bloğu bir tanımlayıcıyı iki kez taşıyor."),
+        ("The signing block is larger than the accepted limit.", "İmza bloğu kabul edilen sınırdan büyük."),
+        ("The signing block is too small to hold anything.", "İmza bloğu hiçbir şey taşıyamayacak kadar küçük."),
+        ("The signing block names no signer.", "İmza bloğu hiçbir imzalayıcı adlandırmıyor."),
+        ("The signing block starts past what the end record can express.", "İmza bloğu, son kaydının ifade edebileceğinin ötesinde başlıyor."),
+        ("The signing block's size reaches before the file starts.", "İmza bloğunun boyutu, dosyanın başlangıcından öncesine uzanıyor."),
+        ("The signing block's two size fields disagree.", "İmza bloğunun iki boyut alanı uyuşmuyor."),
+        ("The signing key could not be stored.", "İmza anahtarı saklanamadı."),
+        ("The stack went below empty.", "Yığın boşun altına indi."),
+        ("The stream expands beyond what this build reads.", "Akış, bu yapının okuduğunun ötesine genişliyor."),
+        ("The system random source could not be opened.", "Sistemin rastgelelik kaynağı açılamadı."),
+        ("The system random source ran short.", "Sistemin rastgelelik kaynağı yetersiz kaldı."),
+        ("The table holds more strings than the format allows.", "Tablo, biçimin izin verdiğinden çok dize taşıyor."),
+        ("The table this build writes holds the launcher icons and what the project's own values folders declare. A name that is in neither has no identifier to resolve to.", "Bu yapının yazdığı tablo, başlatıcı simgelerini ve projenin kendi değerler klasörlerinin bildirdiklerini taşır. İkisinde de olmayan bir adın çözüleceği bir tanımlayıcı yoktur."),
+        ("The tag is not a string this reader accepts.", "Etiket, bu okuyucunun kabul ettiği bir dize değil."),
+        ("The tag on the key file is the wrong size.", "Anahtar dosyasındaki etiketin boyutu yanlış."),
+        ("The target platform is newer than any this toolchain has.", "Hedef platform, bu araç zincirindeki her platformdan yeni."),
+        ("The target platform is not a number.", "Hedef platform bir sayı değil."),
+        ("The trash already holds every name this second could take.", "Çöp, bu saniyenin alabileceği her adı zaten taşıyor."),
+        ("The trash does not hold that.", "Çöp bunu taşımıyor."),
+        ("The trash folder could not be made.", "Çöp klasörü oluşturulamadı."),
+        ("The trash holds as much as this build keeps.", "Çöp, bu yapının sakladığı kadarını taşıyor."),
+        ("The validity period is not a number of days.", "Geçerlilik süresi gün sayısı değil."),
+        ("The validity period is not a number of years.", "Geçerlilik süresi yıl sayısı değil."),
+        ("The validity period is outside what a certificate may carry.", "Geçerlilik süresi, bir sertifikanın taşıyabileceğinin dışında."),
+        ("The value is the number the device carries when the name is written in a layout.", "Değer, ad bir yerleşimde yazıldığında cihazın taşıdığı sayıdır."),
+        ("The version code is not a number.", "Sürüm kodu bir sayı değil."),
+        ("The version code is outside what Android accepts.", "Sürüm kodu, Android'in kabul ettiğinin dışında."),
+        ("The version in the magic is not a number.", "İmza dizisindeki sürüm bir sayı değil."),
+        ("The version in the magic is not printable.", "İmza dizisindeki sürüm yazdırılabilir değil."),
+        ("The version name is not one Android will show.", "Sürüm adı, Android'in göstereceği bir ad değil."),
+        ("There is more than one certificate in these bytes.", "Bu baytlarda birden çok sertifika var."),
+        ("There is no open element here.", "Burada açık bir öğe yok."),
+        ("These bytes do not begin a binary XML document.", "Bu baytlar bir ikili XML belgesi başlatmıyor."),
+        ("They are the way an XML file is made to read other files, or to expand to a size that exhausts memory. A resource file needs neither, so neither is available.", "Bunlar, bir XML dosyasına başka dosyaları okutmanın ya da belleği tüketecek boyuta şişirmenin yoludur. Bir kaynak dosyası ikisine de gerek duymaz; bu yüzden ikisi de yoktur."),
+        ("This builds for sixty-four bit ARM and nothing else. A thirty-two bit or an emulator build is not produced here, so it is refused rather than written and left to fail somewhere further along.", "Burada yalnızca altmış dört bit ARM için derlenir. Otuz iki bitlik ya da öykünücü yapısı burada üretilmez; bu yüzden yazılıp ileride bir yerde başarısız olmaya bırakılmaktansa reddedilir."),
+        ("This compiler handles a subset of Java, and refuses the rest rather than mis-handling it. What it does and does not take is written at the top of Compilers/Java.rs.", "Bu derleyici Java'nın bir altkümesini işler ve gerisini yanlış işlemektense reddeder. Neyi alıp neyi almadığı Compilers/Java.rs dosyasının başında yazılıdır."),
+        ("This dex holds more of one thing than an instruction can name.", "Bu dex, tek bir şeyden bir komutun adlandırabileceğinden fazlasını taşıyor."),
+        ("This editor writes UTF-8. Opening a file that is not text would destroy it on the first save.", "Bu düzenleyici UTF-8 yazar. Metin olmayan bir dosyayı açmak, ilk kaydetmede onu yok ederdi."),
+        ("This is a build-host component. It is verified where the build actually runs, not on the device.", "Bu bir yapı ana bileşenidir. Cihazda değil, yapının gerçekten çalıştığı yerde doğrulanır."),
+        ("This is not the format it was read as.", "Bu, okunduğu biçim değil."),
+        ("This is the file's own description of itself, not evidence of who wrote it.", "Bu, dosyanın kendisini kendi tanımlamasıdır; onu kimin yazdığının kanıtı değildir."),
+        ("This project holds source in a language this build does not compile.", "Bu proje, bu yapının derlemediği bir dilde kaynak taşıyor."),
+        ("This subsystem is declared, not built. No artifact was produced and none should be expected until its status reaches EXPERIMENTAL.", "Bu altsistem bildirilmiştir, kurulmuş değildir. Hiçbir ürün üretilmedi ve durumu EXPERIMENTAL olana dek beklenmemelidir."),
+        ("Two dependencies declare the same class.", "İki bağımlılık aynı sınıfı bildiriyor."),
+        ("Two or more parts separated by dots, each starting with a lower-case letter, for example com.tr.yt.", "Noktayla ayrılmış, her biri küçük harfle başlayan iki ya da daha çok parça, örneğin com.tr.yt."),
+        ("Two upper-case letters, for example TR.", "İki büyük harf, örneğin TR."),
+        ("Unknown keys are reported rather than ignored. Remove it or add a matching pin to the toolchain lock.", "Bilinmeyen anahtarlar yok sayılmak yerine bildirilir. Kaldırın ya da araç zinciri kilidine eşleşen bir sabit ekleyin."),
+        ("Use a name such as 'project' or 'output'.", "'project' ya da 'output' gibi bir ad kullanın."),
+        ("Use letters, digits, '.', '-' and '_', for example 'compile.kotlin'.", "Harf, rakam, '.', '-' ve '_' kullanın, örneğin 'compile.kotlin'."),
+        ("Use letters, digits, '.', '-' and '_', up to 128 characters, for example 'dex.classes'.", "En çok 128 karakter olacak şekilde harf, rakam, '.', '-' ve '_' kullanın, örneğin 'dex.classes'."),
+        ("Use the form key=value, separated by ';'.", "';' ile ayrılmış anahtar=değer biçimini kullanın."),
+        ("What a class written here reads from around it is copied in, so a write would not be seen outside. Use a field, or an array of one.", "Burada yazılan bir sınıfın çevresinden okuduğu içeri kopyalanır; bu yüzden bir yazma dışarıdan görülmezdi. Bir alan ya da tek elemanlı bir dizi kullanın."),
+        ("What an attribute takes is what the framework says it takes, and a value it does not take is refused here rather than by the device.", "Bir özniteliğin aldığı, çatının aldığını söylediğidir; almadığı bir değer cihaz tarafından değil burada reddedilir."),
+        ("Whatever produced this package did not have the private key it claims. Do not install it.", "Bu paketi ne ürettiyse, iddia ettiği özel anahtara sahip değildi. Kurmayın."),
+        ("Which name a reader uses decides which file it gets. An archive that gives two answers is refused.", "Bir okuyucunun hangi adı kullandığı, hangi dosyayı alacağını belirler. İki yanıt veren bir arşiv reddedilir."),
+        ("Which of the two a reader uses is not defined, so the archive is refused rather than guessed at.", "Okuyucunun ikisinden hangisini kullanacağı tanımlı değildir; bu yüzden arşiv tahmin edilmektense reddedilir."),
+        ("Which of the two a verifier reads is not defined, so the block is refused rather than guessed at.", "Doğrulayıcının ikisinden hangisini okuyacağı tanımlı değildir; bu yüzden blok tahmin edilmektense reddedilir."),
+        ("Which of the two the device would read is not something to leave to the order they were written in.", "Cihazın ikisinden hangisini okuyacağı, yazılma sırasına bırakılacak bir şey değildir."),
+        ("Which quantities a language uses is the platform's to decide; a name it does not know would never be read.", "Bir dilin hangi nicelikleri kullandığına platform karar verir; bilmediği bir ad hiç okunmazdı."),
+        ("Without a stored key every build is a different application to Android, so an update would not install over the previous one.", "Saklanmış bir anahtar olmadan her yapı Android için farklı bir uygulamadır; bu yüzden bir güncelleme öncekinin üzerine kurulmazdı."),
+        ("Wrap it in \" or '.", "\" ya da ' içine alın."),
+        ("Wrap the entries in <resources> … </resources>.", "Girdileri <resources> … </resources> içine alın."),
+        ("Write `new` and the type in front of it, or give it to something declared as an array.", "Önüne `new` ve türü yazın ya da dizi olarak bildirilmiş bir şeye verin."),
+        ("Write `yield`, or `throw`.", "`yield` ya da `throw` yazın."),
+        ("Write a literal ampersand as &amp;.", "Düz bir ve işaretini &amp; olarak yazın."),
+        ("Write a number that fits in 32 bits.", "32 bite sığan bir sayı yazın."),
+        ("Write a quoted string, a whole number, true or false.", "Tırnaklı bir dize, bir tam sayı, true ya da false yazın."),
+        ("Write each one as an <item> inside it.", "Her birini içinde bir <item> olarak yazın."),
+        ("Write exactly true or false, in lower case.", "Küçük harfle tam olarak true ya da false yazın."),
+        ("Write it `static` if it does not need one, or make it from inside the class it belongs to.", "Gerekmiyorsa `static` yazın ya da ait olduğu sınıfın içinden üretin."),
+        ("Write it as &lt;.", "&lt; olarak yazın."),
+        ("Write it as 3 or as 0x3, either of which fits in 32 bits.", "3 ya da 0x3 olarak yazın; ikisi de 32 bite sığar."),
+        ("Write it as [ Project ].", "[ Project ] olarak yazın."),
+        ("Write it as name=\"value\".", "ad=\"değer\" olarak yazın."),
+        ("Write the class out, naming the method.", "Yöntemi adlandırarak sınıfı açıkça yazın."),
+        ("Write the loop over a reference type, or over an array.", "Döngüyü bir başvuru türü ya da bir dizi üzerinde yazın."),
+        ("Write the type, or give it a value.", "Türü yazın ya da bir değer verin."),
+        ("Write the type.", "Türü yazın."),
+        ("Write to an output mount. A source tree is mounted read-only on purpose.", "Bir çıktı bağlamasına yazın. Kaynak ağacı bilerek salt okunur bağlanır."),
+        ("ZIP64 is not implemented.", "ZIP64 gerçeklenmemiştir."),
+    ];
+
+    const TURKISH_WORDS: &[(&str, &str)] = &[
+        ("Accepted", "Kabul edilen"),
+        ("Accepts", "Kabul ettiği"),
+        ("Across", "Kapsam"),
+        ("Actual", "Gerçek"),
+        ("Algorithm", "Algoritma"),
+        ("Allowed", "İzin verilen"),
+        ("Also in", "Ayrıca şurada"),
+        ("And in", "Ve şurada"),
+        ("And more", "Dahası"),
+        ("Arranged by", "Düzenleyen"),
+        ("Artifact", "Ürün"),
+        ("Asked for", "İstenen"),
+        ("At entry", "Girdide"),
+        ("At offset", "Konumda"),
+        ("Attribute", "Öznitelik"),
+        ("Available", "Mevcut"),
+        ("Bit depth", "Bit derinliği"),
+        ("Bits", "Bit"),
+        ("Byte", "Bayt"),
+        ("Bytes", "Bayt"),
+        ("Bytes left", "Kalan bayt"),
+        ("Call", "Çağrı"),
+        ("Capability", "Yetki"),
+        ("Cause", "Neden"),
+        ("Central directory", "Merkezi dizin"),
+        ("Chain", "Zincir"),
+        ("Changed here", "Burada değişti"),
+        ("Character", "Karakter"),
+        ("Chosen", "Seçilen"),
+        ("Chunk", "Blok"),
+        ("Cipher", "Şifreleme"),
+        ("Claimed", "Bildirilen"),
+        ("Class", "Sınıf"),
+        ("Clears Google Play", "Google Play için yeterli"),
+        ("Colour type", "Renk türü"),
+        ("Compile_sdk", "Compile_sdk"),
+        ("Compiled here", "Burada derlenen"),
+        ("Computed", "Hesaplanan"),
+        ("Contract version", "Sözleşme sürümü"),
+        ("Declared", "Bildirilen"),
+        ("Declared in", "Bildirildiği yer"),
+        ("Declared outputs", "Bildirilen çıktılar"),
+        ("Deepest walked", "En derin gidilen"),
+        ("Deleted at", "Silinme zamanı"),
+        ("Descriptor", "Tanımlayıcı"),
+        ("Digests verified", "Doğrulanan özet"),
+        ("Directory", "Dizin"),
+        ("Distance", "Uzaklık"),
+        ("Drawn at", "Çizim boyutu"),
+        ("Element", "Öğe"),
+        ("Ends at", "Bitiş"),
+        ("Entries", "Girdi"),
+        ("Entry", "Girdi"),
+        ("Entry id", "Girdi kimliği"),
+        ("Expected", "Beklenen"),
+        ("Falls back to", "Geri düşülen"),
+        ("Field", "Alan"),
+        ("File", "Dosya"),
+        ("Files", "Dosyalar"),
+        ("Filter", "Süzgeç"),
+        ("First chunk", "İlk blok"),
+        ("First declared in", "İlk bildirildiği yer"),
+        ("First set on line", "İlk atandığı satır"),
+        ("Folder", "Klasör"),
+        ("For example", "Örneğin"),
+        ("Found", "Bulunan"),
+        ("From", "Kaynak"),
+        ("From offset", "Başlangıç konumu"),
+        ("Given", "Verilen"),
+        ("Hands off to", "Devrettiği"),
+        ("Header", "Başlık"),
+        ("Held", "Tutulan"),
+        ("Id", "Kimlik"),
+        ("Identifier", "Tanımlayıcı"),
+        ("Identifiers present", "Mevcut tanımlayıcı"),
+        ("In", "Şurada"),
+        ("Index", "Sıra"),
+        ("Install", "Kurulacak"),
+        ("Instruction", "Komut"),
+        ("Key", "Anahtar"),
+        ("Kind", "Tür"),
+        ("Known", "Bilinen"),
+        ("Known sections", "Bilinen bölümler"),
+        ("Largest", "En büyük"),
+        ("Largest edge", "En uzun kenar"),
+        ("Largest opened", "Açılan en büyük"),
+        ("Largest read", "Okunan en büyük"),
+        ("Largest saved", "Kaydedilen en büyük"),
+        ("Leading", "Baştaki"),
+        ("Length", "Uzunluk"),
+        ("Library", "Kütüphane"),
+        ("Limit", "Sınır"),
+        ("Line", "Satır"),
+        ("Listed", "Listelenen"),
+        ("Literals", "Sabitler"),
+        ("Local header", "Yerel başlık"),
+        ("Longest", "En uzun"),
+        ("Major", "Ana sürüm"),
+        ("Method", "Yöntem"),
+        ("Min_sdk", "Min_sdk"),
+        ("Minimum", "En az"),
+        ("Missing", "Eksik"),
+        ("Modulus", "Modül"),
+        ("Most", "En çok"),
+        ("Mount", "Bağlama"),
+        ("Mounted", "Bağlanan"),
+        ("Name", "Ad"),
+        ("Named", "Adı"),
+        ("Near", "Yakın olan"),
+        ("Needs", "Gereken"),
+        ("Needs at least", "En az gereken"),
+        ("Newest available", "Mevcut en yeni"),
+        ("Node", "Düğüm"),
+        ("Nodes involved", "İlgili düğümler"),
+        ("Numbered", "Numaralı"),
+        ("Object", "Nesne"),
+        ("Offset", "Konum"),
+        ("On this disk", "Bu diskte"),
+        ("Opened", "Açılan"),
+        ("Output", "Çıktı"),
+        ("Package", "Paket"),
+        ("Padding", "Dolgu"),
+        ("Palette", "Palet"),
+        ("Path", "Yol"),
+        ("Pinned", "Sabitlenen"),
+        ("Planned", "Planlanan"),
+        ("Pool", "Havuz"),
+        ("Produced", "Üretilen"),
+        ("Read", "Okunan"),
+        ("Reading", "Okunuyor"),
+        ("Reason", "Neden"),
+        ("Received", "Alınan"),
+        ("Recorded", "Kayıtlı"),
+        ("Reference", "Başvuru"),
+        ("Register", "Yazmaç"),
+        ("Registers", "Yazmaç"),
+        ("Remaining", "Kalan"),
+        ("Reported", "Raporlanan"),
+        ("Reserved", "Ayrılmış"),
+        ("Room", "Yer"),
+        ("Root", "Kök"),
+        ("Row", "Satır"),
+        ("Scheme", "Şema"),
+        ("Section", "Bölüm"),
+        ("Segments", "Parça"),
+        ("Setting", "Ayar"),
+        ("Shortest accepted", "Kabul edilen en kısa"),
+        ("Signatures verified", "Doğrulanan imza"),
+        ("Size", "Boyut"),
+        ("Smallest possible", "Olabilecek en küçük"),
+        ("Source", "Kaynak"),
+        ("Span", "Aralık"),
+        ("Spent", "Harcanan"),
+        ("State", "Durum"),
+        ("Stated", "Belirtilen"),
+        ("Stored as", "Saklanma biçimi"),
+        ("String", "Dize"),
+        ("Strings", "Dize"),
+        ("Styleable", "Stil kümesi"),
+        ("Superclass", "Üst sınıf"),
+        ("Supported", "Desteklenen"),
+        ("Table", "Tablo"),
+        ("Tag", "Etiket"),
+        ("Target", "Hedef"),
+        ("Target_sdk", "Target_sdk"),
+        ("Text", "Metin"),
+        ("This build reads", "Bu yapının okuduğu"),
+        ("To", "Hedef"),
+        ("Trailing", "Sondaki"),
+        ("Type", "Tür"),
+        ("Types", "Tür"),
+        ("Understood", "Anlaşılan"),
+        ("Units", "Birim"),
+        ("Value", "Değer"),
+        ("Waiting on", "Beklenen"),
+        ("Wanted", "İstenen"),
+        ("Wants", "İsteyen"),
+        ("Where", "Yer"),
+        ("Width", "Genişlik"),
+        ("Would become", "Olacağı"),
+        ("Writing", "Yazılıyor"),
+        ("Written", "Yazılan"),
+        ("by", "kadar"),
+        ("code", "kod"),
+        ("column", "sütun"),
+        ("constant", "sabit"),
+        ("distances", "uzaklık"),
+        ("down", "aşağı"),
+        ("entries", "girdi"),
+        ("failed", "başarısız"),
+        ("found", "bulunan"),
+        ("in total", "toplam"),
+        ("length", "uzunluk"),
+        ("local", "yerel"),
+        ("method", "yöntem"),
+        ("opcode", "işlem kodu"),
+        ("produced", "üretilen"),
+        ("register", "yazmaç"),
+        ("row", "satır"),
+        ("trailing", "sondaki"),
+    ];
+}
 pub mod caps {
     use crate::json::Writer;
 
@@ -2407,11 +3413,11 @@ pub mod toolchain {
                         ))
                         .with_context(format!("Found: {}", truncate(&value, 64)))
                         .with_context(format!("Source: {}", pin.source))
-                        .with_suggestion(format!(
-                            "Install {} {} or change the pin in the toolchain lock \
-                             together with an architectural decision record.",
-                            pin.display_name, pin.pinned
-                        )),
+                        .with_context(format!("Install: {} {}", pin.display_name, pin.pinned))
+                        .with_suggestion(
+                            "Install the pinned version, or change the pin in the toolchain \
+                             lock together with an architectural decision record.",
+                        ),
                     );
                 }
                 State::Missing => {
@@ -2424,10 +3430,8 @@ pub mod toolchain {
                             format!("{} was not reported by the host.", pin.display_name),
                         )
                         .with_context(format!("Expected: {}", pin.pinned))
-                        .with_suggestion(format!(
-                            "The host is able to observe '{}' and must report it.",
-                            pin.id
-                        )),
+                        .with_context(format!("Identifier: {}", pin.id))
+                        .with_suggestion("The host is able to observe this and must report it."),
                     );
                 }
                 State::NotObservable => {
@@ -3771,9 +4775,10 @@ pub mod vfs {
                 format!("{subject} does not hold {capability}."),
             )
             .with_context("The capability model denies by default (directive section 7).")
-            .with_suggestion(format!(
-                "Grant {capability} to this plugin explicitly if it genuinely needs it.",
-            )))
+            .with_context(format!("Capability: {capability}"))
+            .with_suggestion(
+                "Grant the capability to this plugin explicitly if it genuinely needs it.",
+            ))
         }
 
         fn resolve(
@@ -7132,7 +8137,7 @@ pub mod binary {
                 fail("E7040", "A table's size overflows.")
                     .with_context(format!("Table: {}", self.name))
                     .with_context(format!(
-                        "{} entries of {} bytes",
+                        "Entries: {} of {} bytes",
                         self.count, self.entry_size
                     ))
             })
@@ -7571,7 +8576,7 @@ pub mod xml {
                                     at,
                                 )
                                 .with_context(format!(
-                                    "<{}> opened at line {}",
+                                    "Opened: <{}> at line {}",
                                     open.name, open.position.line
                                 ))
                                 .with_suggestion("Tags must be closed in the order they open."),
@@ -10115,13 +11120,14 @@ pub mod resources {
                     entry.position,
                 );
                 if !near.is_empty() {
-                    diagnostic =
-                        diagnostic.with_suggestion(format!("Did you mean {}?", near.join(", ")));
+                    diagnostic = diagnostic
+                        .with_context(format!("Near: {}", near.join(", ")))
+                        .with_suggestion("One of the declared names is close to this one.");
                 } else {
-                    diagnostic = diagnostic.with_suggestion(format!(
-                        "Declare a {} called '{}', or correct the reference.",
-                        reference.kind, reference.name
-                    ));
+                    diagnostic = diagnostic
+                        .with_context(format!("Kind: {}", reference.kind))
+                        .with_context(format!("Name: {}", reference.name))
+                        .with_suggestion("Declare it, or correct the reference.");
                 }
                 sink.emit(diagnostic);
                 return false;
@@ -11478,6 +12484,18 @@ pub mod archive {
             .with_context(format!("Name: {}", truncate(name, 96)))
             .with_suggestion(suggestion.to_string()))
         };
+        let reject_with = |code: &str, message: String, detail: String, suggestion: &str| {
+            Err(Diagnostic::new(
+                code,
+                Severity::Error,
+                FailureClass::SecurityFailure,
+                "core.archive",
+                message,
+            )
+            .with_context(format!("Name: {}", truncate(name, 96)))
+            .with_context(detail)
+            .with_suggestion(suggestion.to_string()))
+        };
 
         if name.is_empty() {
             return reject(
@@ -11509,9 +12527,10 @@ pub mod archive {
             );
         }
         if let Some(bad) = name.chars().find(|c| (*c as u32) < 0x20 || *c == '\u{7f}') {
-            return reject(
+            return reject_with(
                 "EA005",
-                format!("An entry name contains U+{:04X}.", bad as u32),
+                "An entry name contains a control character.".into(),
+                format!("Character: U+{:04X}", bad as u32),
                 "A control character in a name is either a mistake or an attempt to \
                  confuse something downstream.",
             );
@@ -12351,9 +13370,11 @@ pub mod der {
             if element.tag != tag {
                 return Err(fail(
                     "ED010",
-                    format!("Expected tag 0x{tag:02x} but found 0x{:02x}.", element.tag),
+                    "The element carries a different tag than the one expected.",
                     element.offset,
-                ));
+                )
+                .with_context(format!("Expected: 0x{tag:02x}"))
+                .with_context(format!("Found: 0x{:02x}", element.tag)));
             }
             Ok(element)
         }
@@ -12495,9 +13516,10 @@ pub mod der {
             }
             other => Err(fail(
                 "ED041",
-                format!("Tag 0x{other:02x} is not a string this reader accepts."),
+                "The tag is not a string this reader accepts.",
                 element.offset,
-            )),
+            )
+            .with_context(format!("Tag: 0x{other:02x}"))),
         }
     }
 
@@ -13816,11 +14838,9 @@ pub mod signing {
                             Severity::Warning,
                             FailureClass::SecurityFailure,
                             "core.signing",
-                            format!(
-                                "A signature uses {}, which this build cannot check.",
-                                algorithm.name
-                            ),
+                            "A signature uses an algorithm this build cannot check.",
                         )
+                        .with_context(format!("Algorithm: {}", algorithm.name))
                         .with_suggestion(
                             "It is neither confirmed nor disputed; it is not checked \
                              against anything.",
@@ -14017,11 +15037,9 @@ pub mod signing {
                             Severity::Warning,
                             FailureClass::SecurityFailure,
                             "core.signing",
-                            format!(
-                                "A digest uses {}, which this build cannot recompute.",
-                                algorithm.name
-                            ),
+                            "A digest uses an algorithm this build cannot recompute.",
                         )
+                        .with_context(format!("Algorithm: {}", algorithm.name))
                         .with_suggestion(
                             "A verity digest is the root of an fs-verity Merkle tree, \
                              which is a different construction from the chunked digest \
@@ -14286,7 +15304,7 @@ pub mod dex {
         if data.len() < HEADER_SIZE as usize {
             return Err(fail("EX001", "The file is shorter than a DEX header.")
                 .with_context(format!("Length: {} bytes", data.len()))
-                .with_context(format!("A header is {HEADER_SIZE} bytes")));
+                .with_context(format!("Header: {HEADER_SIZE} bytes")));
         }
 
         let mut recorded_signature = [0u8; 20];
@@ -14425,12 +15443,10 @@ pub mod dex {
             ("class", class_defs_size),
         ] {
             if count > MAX_POOL_ENTRIES {
-                return Err(fail(
-                    "EX007",
-                    format!("The {name} pool declares too many entries."),
-                )
-                .with_context(format!("Declared: {count}"))
-                .with_context(format!("Limit: {MAX_POOL_ENTRIES}")));
+                return Err(fail("EX007", "A pool declares too many entries.")
+                    .with_context(format!("Pool: {name}"))
+                    .with_context(format!("Declared: {count}"))
+                    .with_context(format!("Limit: {MAX_POOL_ENTRIES}")));
             }
         }
 
@@ -14561,12 +15577,11 @@ pub mod dex {
     ) -> Result<(), Diagnostic> {
         let end = u64::from(offset) + u64::from(count) * entry_bytes;
         if end > data.len() as u64 {
-            return Err(
-                fail("EX008", format!("The {what} pool extends past the file."))
-                    .with_context(format!("Entries: {count}"))
-                    .with_context(format!("Ends at: {end}"))
-                    .with_context(format!("File: {} bytes", data.len())),
-            );
+            return Err(fail("EX008", "A pool extends past the file.")
+                .with_context(format!("Pool: {what}"))
+                .with_context(format!("Entries: {count}"))
+                .with_context(format!("Ends at: {end}"))
+                .with_context(format!("File: {} bytes", data.len())));
         }
         Ok(())
     }
@@ -14597,21 +15612,19 @@ pub mod dex {
 
     fn string_at(strings: &[String], index: u32, what: &str) -> Result<String, Diagnostic> {
         strings.get(index as usize).cloned().ok_or_else(|| {
-            fail(
-                "EX014",
-                format!("A {what} refers to string {index}, which is not there."),
-            )
-            .with_context(format!("Strings: {}", strings.len()))
+            fail("EX014", "A reference points at a string that is not there.")
+                .with_context(format!("Reference: {what}"))
+                .with_context(format!("Index: {index}"))
+                .with_context(format!("Strings: {}", strings.len()))
         })
     }
 
     fn type_at(types: &[String], index: u32, what: &str) -> Result<String, Diagnostic> {
         types.get(index as usize).cloned().ok_or_else(|| {
-            fail(
-                "EX015",
-                format!("A {what} refers to type {index}, which is not there."),
-            )
-            .with_context(format!("Types: {}", types.len()))
+            fail("EX015", "A reference points at a type that is not there.")
+                .with_context(format!("Reference: {what}"))
+                .with_context(format!("Index: {index}"))
+                .with_context(format!("Types: {}", types.len()))
         })
     }
 
@@ -14712,10 +15725,8 @@ pub mod dex {
             let proto_index = usize::from(reader.u16()?);
             let name_index = reader.u32()?;
             let shorty = shorties.get(proto_index).cloned().ok_or_else(|| {
-                fail(
-                    "EX016",
-                    format!("A method refers to prototype {proto_index}, which is not there."),
-                )
+                fail("EX016", "A method refers to a prototype that is not there.")
+                    .with_context(format!("Index: {proto_index}"))
             })?;
             methods.push(Method {
                 class: type_at(types, class_index, "method class")?,
@@ -15806,7 +16817,9 @@ pub mod rsa {
 
     fn integer(reader: &mut der::Reader<'_>, what: &str) -> Result<Natural, Diagnostic> {
         let element = reader.expect(der::tag::INTEGER).map_err(|error| {
-            fail("ER010", format!("A key is missing its {what}.")).with_context(error.message)
+            fail("ER010", "A key is missing one of its numbers.")
+                .with_context(format!("Missing: {what}"))
+                .with_context(error.message)
         })?;
         let bytes = der::read_integer_bytes(&element)?;
         Ok(Natural::from_bytes_be(bytes))
@@ -18548,7 +19561,10 @@ pub mod dexwrite {
                 .iter()
                 .position(|held| held == text)
                 .map(|at| at as u32)
-                .ok_or_else(|| fail("EW001", format!("string {text:?} was not interned")))
+                .ok_or_else(|| {
+                    fail("EW001", "A string was never interned.")
+                        .with_context(format!("Text: {text:?}"))
+                })
         }
 
         fn index_of_type(&self, descriptor: &str) -> Result<u32, Diagnostic> {
@@ -18556,7 +19572,10 @@ pub mod dexwrite {
                 .iter()
                 .position(|held| held == descriptor)
                 .map(|at| at as u32)
-                .ok_or_else(|| fail("EW002", format!("type {descriptor:?} was not interned")))
+                .ok_or_else(|| {
+                    fail("EW002", "A type was never interned.")
+                        .with_context(format!("Descriptor: {descriptor:?}"))
+                })
         }
 
         fn index_of_proto(&self, reference: &MethodRef) -> Result<u32, Diagnostic> {
@@ -18566,7 +19585,7 @@ pub mod dexwrite {
                     *ret == reference.return_type && *params == reference.parameters
                 })
                 .map(|at| at as u32)
-                .ok_or_else(|| fail("EW003", "a prototype was not interned"))
+                .ok_or_else(|| fail("EW003", "A prototype was never interned."))
         }
 
         fn index_of_method(&self, reference: &MethodRef) -> Result<u32, Diagnostic> {
@@ -18577,7 +19596,7 @@ pub mod dexwrite {
                     *class == reference.class && *name == reference.name && *held == proto
                 })
                 .map(|at| at as u32)
-                .ok_or_else(|| fail("EW004", "a method was not interned"))
+                .ok_or_else(|| fail("EW004", "A method was never interned."))
         }
 
         fn index_of_field(&self, reference: &FieldRef) -> Result<u32, Diagnostic> {
@@ -18585,7 +19604,7 @@ pub mod dexwrite {
                 .iter()
                 .position(|held| held == reference)
                 .map(|at| at as u32)
-                .ok_or_else(|| fail("EW005", "a field was not interned"))
+                .ok_or_else(|| fail("EW005", "A field was never interned."))
         }
     }
 
@@ -19852,16 +20871,14 @@ pub mod dalvik {
     }
 
     fn unsupported(at: usize, opcode: u8, name: &str) -> Diagnostic {
-        fail(
-            "ED900",
-            format!("`{name}` is not translated to Dalvik here."),
-        )
-        .with_context(format!("Offset {at}, opcode {opcode:#04x}"))
-        .with_suggestion(
-            "Nothing is skipped. An instruction this does not understand would become a \
+        fail("ED900", "An instruction is not translated to Dalvik here.")
+            .with_context(format!("Instruction: {name}"))
+            .with_context(format!("Offset {at}, opcode {opcode:#04x}"))
+            .with_suggestion(
+                "Nothing is skipped. An instruction this does not understand would become a \
              method that runs and does the wrong thing, which is worse than one that \
              does not build.",
-        )
+            )
     }
 
     struct Fixup {
@@ -23159,19 +24176,24 @@ pub mod scaffold {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
             {
-                return Err(fail("EP017", "The version name is not one Android will show.")
-                    .with_context(format!("Value: {:?}", self.version_name))
-                    .with_suggestion(format!(
-                        "Letters, digits, dots, hyphens and underscores, at most                          {LONGEST_VERSION_NAME} characters, for example {FIRST_VERSION_NAME}.",
-                    )));
+                return Err(
+                    fail("EP017", "The version name is not one Android will show.")
+                        .with_context(format!("Value: {:?}", self.version_name))
+                        .with_context(format!("Longest: {LONGEST_VERSION_NAME} characters"))
+                        .with_context(format!("For example: {FIRST_VERSION_NAME}"))
+                        .with_suggestion("Letters, digits, dots, hyphens and underscores."),
+                );
             }
             if self.version_code < 1 || self.version_code > LARGEST_VERSION_CODE {
-                return Err(fail("EP018", "The version code is outside what Android accepts.")
-                    .with_context(format!("Chosen: {}", self.version_code))
-                    .with_context(format!("Allowed: 1 to {LARGEST_VERSION_CODE}"))
-                    .with_suggestion(
-                        "Google Play refuses an upload whose version code is not larger than                          the one before it, so this number only ever goes up.",
-                    ));
+                return Err(
+                    fail("EP018", "The version code is outside what Android accepts.")
+                        .with_context(format!("Chosen: {}", self.version_code))
+                        .with_context(format!("Allowed: 1 to {LARGEST_VERSION_CODE}"))
+                        .with_suggestion(
+                            "Google Play refuses an upload whose version code is not larger than \
+                            the one before it, so this number only ever goes up.",
+                        ),
+                );
             }
             if self.languages.is_empty() {
                 return Err(fail("EP013", "No language was chosen."));
@@ -23180,12 +24202,13 @@ pub mod scaffold {
                 return Err(
                     fail("EP019", "The locale a device falls back to was not chosen.")
                         .with_context(format!("Chosen: {}", self.locales.join(", ")))
-                        .with_suggestion(format!(
-                            "Every other locale is a translation of {BASE_LOCALE}. A device whose \
-                     language is none of the chosen ones reads that folder, so leaving it \
-                     out would ship an application with no name on most of the world's \
-                     phones.",
-                        )),
+                        .with_context(format!("Falls back to: {BASE_LOCALE}"))
+                        .with_suggestion(
+                            "Every other locale is a translation of the fallback one. A device \
+                             whose language is none of the chosen ones reads that folder, so \
+                             leaving it out would ship an application with no name on most of \
+                             the world's phones.",
+                        ),
                 );
             }
             if self.min_sdk < OLDEST_SUPPORTED {
@@ -24796,9 +25819,8 @@ pub mod image {
                     )
                     .with_context(format!("Size: {width} by {height}"))
                     .with_context(format!("Largest edge: {LARGEST_EDGE}"))
-                    .with_suggestion(format!(
-                        "A launcher icon is drawn at {LAUNCHER_EDGE} pixels at most.",
-                    )));
+                    .with_context(format!("Drawn at: {LAUNCHER_EDGE} pixels"))
+                    .with_suggestion("A launcher icon is drawn no larger than that."));
                 }
                 header = Some(Png {
                     width,
@@ -28529,7 +29551,8 @@ pub mod keystore {
                 ("organisation", &self.organisation),
             ] {
                 if text.trim().is_empty() || text.len() > 64 {
-                    return Err(fail("EY011", format!("The {what} is empty or too long."))
+                    return Err(fail("EY011", "A field of the name is empty or too long.")
+                        .with_context(format!("Field: {what}"))
                         .with_context(format!("Value: {text:?}"))
                         .with_suggestion("One to sixty-four characters."));
                 }
@@ -28548,10 +29571,12 @@ pub mod keystore {
                 .with_context(format!(
                     "Allowed: {SHORTEST_VALIDITY_DAYS} to {LONGEST_VALIDITY_DAYS} days"
                 ))
-                .with_suggestion(format!(
-                    "Google Play requires a key valid until at least 22 October 2033; \
-                         {PLAY_STORE_VALIDITY_DAYS} days from today clears that.",
-                )));
+                .with_context(format!(
+                    "Clears Google Play: {PLAY_STORE_VALIDITY_DAYS} days"
+                ))
+                .with_suggestion(
+                    "Google Play requires a key valid until at least 22 October 2033.",
+                ));
             }
             if self.bits != SMALLEST_KEY_BITS && self.bits != 3072 && self.bits != LARGEST_KEY_BITS
             {
@@ -28972,9 +29997,8 @@ pub mod keystore {
                 return Ok(());
             }
 
-            Err(fail("EY021", "The password did not open this key.").with_context(format!(
-                "Path: {path}"
-            )))
+            Err(fail("EY021", "The password did not open this key.")
+                .with_context(format!("Path: {path}")))
         })
         .map_err(|error| {
             if error.code == "EY021" {
@@ -28989,7 +30013,8 @@ pub mod keystore {
                 .with_context(format!("Path: {path}"))
                 .with_context(format!("Reported: {} {}", error.code, error.message))
                 .with_suggestion(
-                    "Nothing in this build can recover a signing key from a lost password,                      and nothing in it records the password anywhere.",
+                    "Nothing in this build can recover a signing key from a lost password, \
+                        and nothing in it records the password anywhere.",
                 )
         })?;
 
@@ -29223,7 +30248,9 @@ pub mod builder {
                     return Err(fail("EB048", "A resource file could not be read as XML.")
                         .with_context(format!("File: {entry}"))
                         .with_suggestion(
-                            "A layout, a menu and an animation are XML, and one that does                              not parse would be written into the package as bytes no device                              can read.",
+                            "A layout, a menu and an animation are XML, and one that does \
+                                not parse would be written into the package as bytes no device \
+                                can read.",
                         ));
                 };
                 let mut declared = Vec::new();
@@ -29341,10 +30368,11 @@ pub mod builder {
             };
             resolve_references(&mut parsed, Some(&compiled))?;
             let bytes = crate::axml::encode_knowing(&parsed, &own).map_err(|why| {
-                why.with_context(format!("File: {entry}"))
-                    .with_suggestion(
-                        "Every attribute a resource carries is written with the identifier                          the platform gives it. One this build cannot name would be dropped                          by Android without a word, so it is refused instead.",
-                    )
+                why.with_context(format!("File: {entry}")).with_suggestion(
+                    "Every attribute a resource carries is written with the identifier \
+                            the platform gives it. One this build cannot name would be dropped \
+                            by Android without a word, so it is refused instead.",
+                )
             })?;
             files.push((entry, bytes));
         }
@@ -29407,15 +30435,15 @@ pub mod builder {
                 let Some(found) =
                     crate::axml::framework_id(reference.kind.as_str(), &reference.name)
                 else {
-                    return Err(fail(
-                        "EB045",
-                        "That is not a resource the platform declares.",
-                    )
-                    .with_context(format!("Attribute: {}", attribute.name))
-                    .with_context(format!("Value: {}", attribute.value))
-                    .with_suggestion(
-                        "Every identifier the platform hands out is written into this                          build. A name that is not among them is one no device has.",
-                    ));
+                    return Err(
+                        fail("EB045", "That is not a resource the platform declares.")
+                            .with_context(format!("Attribute: {}", attribute.name))
+                            .with_context(format!("Value: {}", attribute.value))
+                            .with_suggestion(
+                                "Every identifier the platform hands out is written into this \
+                            build. A name that is not among them is one no device has.",
+                            ),
+                    );
                 };
                 attribute.value = format!("@0x{found:08x}");
                 continue;
@@ -29967,7 +30995,7 @@ public final class R {{
                 refusal = refusal.with_context(format!("{language}: {path}"));
             }
             if ignored.len() > 12 {
-                refusal = refusal.with_context(format!("and {} more", ignored.len() - 12));
+                refusal = refusal.with_context(format!("And more: {}", ignored.len() - 12));
             }
             let compiled: Vec<&str> = crate::scaffold::compiled_languages().collect();
             refusal = refusal.with_context(format!("Compiled here: {}", compiled.join(", ")));
@@ -31135,8 +32163,9 @@ pub mod jvm {
         if count * least_bytes_each > reader.remaining() as u64 {
             return Err(fail(
                 "EJ004",
-                format!("There are more {what} entries than bytes."),
+                "A table declares more entries than the file has bytes for.",
             )
+            .with_context(format!("Table: {what}"))
             .with_context(format!("Entries: {count}"))
             .with_context(format!("Bytes left: {}", reader.remaining())));
         }
@@ -31235,16 +32264,17 @@ pub mod jvm {
             Some(Constant::Utf8(text)) => Ok(text.clone()),
             Some(other) => Err(fail(
                 "EJ012",
-                format!("A {what} points at a pool entry that is not a string."),
+                "A reference points at a pool entry that is not a string.",
             )
+            .with_context(format!("Reference: {what}"))
             .with_context(format!("Index: {index}"))
             .with_context(format!("Found: {other:?}"))),
-            None => Err(fail(
-                "EJ013",
-                format!("A {what} points outside the constant pool."),
-            )
-            .with_context(format!("Index: {index}"))
-            .with_context(format!("Pool: {} entries", constants.len()))),
+            None => Err(
+                fail("EJ013", "A reference points outside the constant pool.")
+                    .with_context(format!("Reference: {what}"))
+                    .with_context(format!("Index: {index}"))
+                    .with_context(format!("Pool: {} entries", constants.len())),
+            ),
         }
     }
 
@@ -31253,14 +32283,15 @@ pub mod jvm {
             Some(Constant::Class(name_index)) => constant_utf8(constants, *name_index, what),
             Some(other) => Err(fail(
                 "EJ014",
-                format!("A {what} points at a pool entry that is not a class."),
+                "A reference points at a pool entry that is not a class.",
             )
+            .with_context(format!("Reference: {what}"))
             .with_context(format!("Found: {other:?}"))),
-            None => Err(fail(
-                "EJ013",
-                format!("A {what} points outside the constant pool."),
-            )
-            .with_context(format!("Index: {index}"))),
+            None => Err(
+                fail("EJ013", "A reference points outside the constant pool.")
+                    .with_context(format!("Reference: {what}"))
+                    .with_context(format!("Index: {index}")),
+            ),
         }
     }
 
@@ -33773,6 +34804,28 @@ pub mod ffi {
     #[no_mangle]
     pub extern "C" fn omni_build_stop() {
         let _ = catch_unwind(crate::progress::stop);
+    }
+
+    #[no_mangle]
+    pub unsafe extern "C" fn omni_speak(tag: *const c_char) -> *mut c_char {
+        let result = catch_unwind(|| {
+            let asked = text_from(tag).unwrap_or_default();
+            let spoken = crate::speech::choose(&asked);
+            let mut w = crate::json::Writer::new();
+            w.begin_object(None);
+            w.field_str("language", spoken);
+            w.begin_array(Some("languages"));
+            for known in crate::speech::LANGUAGES {
+                w.element_str(known);
+            }
+            w.end_array();
+            w.end_object();
+            match CString::new(w.finish()) {
+                Ok(answer) => answer.into_raw(),
+                Err(_) => std::ptr::null_mut(),
+            }
+        });
+        result.unwrap_or(std::ptr::null_mut())
     }
 
     #[no_mangle]
@@ -36636,7 +37689,10 @@ mod tests {
         let mut sink = Sink::new();
         assert!(table.compile(&mut sink).is_none());
         let error = sink.entries().iter().find(|d| d.code == "E9031").unwrap();
-        assert!(error.suggestion.as_deref().unwrap().contains("omni_accent"));
+        assert!(error
+            .context
+            .iter()
+            .any(|line| line.contains("omni_accent")));
     }
 
     #[test]
@@ -37676,6 +38732,81 @@ mod tests {
     app:localOnly="hello"
     app:plainRef="@color/ink" />
 "####;
+
+    #[test]
+    fn a_refusal_is_written_in_the_language_the_reader_asked_for() {
+        let _turn = super::progress::one_at_a_time();
+        let refusal = Diagnostic::new(
+            "EY013",
+            Severity::Error,
+            FailureClass::UserError,
+            "core.keystore",
+            "The validity period is outside what a certificate may carry.",
+        )
+        .with_context("Chosen: 20000 days")
+        .with_context("Allowed: 30 to 9125 days")
+        .with_suggestion("Google Play requires a key valid until at least 22 October 2033.");
+
+        assert_eq!(super::speech::choose("en"), "en");
+        let mut w = super::json::Writer::new();
+        refusal.write_json(&mut w);
+        let english = w.finish();
+        assert!(
+            english.contains("The validity period is outside"),
+            "{english}"
+        );
+        assert!(english.contains("Chosen: 20000 days"), "{english}");
+
+        assert_eq!(super::speech::choose("tr-TR"), "tr");
+        let mut w = super::json::Writer::new();
+        refusal.write_json(&mut w);
+        let turkish = w.finish();
+        super::speech::choose("en");
+
+        assert!(
+            turkish.contains("Geçerlilik süresi, bir sertifikanın taşıyabileceğinin dışında."),
+            "{turkish}"
+        );
+        assert!(turkish.contains("Seçilen: 20000 days"), "{turkish}");
+        assert!(
+            turkish.contains("İzin verilen: 30 to 9125 days"),
+            "{turkish}"
+        );
+        assert!(
+            turkish.contains("Google Play, en az 22 Ekim 2033"),
+            "{turkish}"
+        );
+        assert!(
+            turkish.contains("The validity period is outside what a certificate may carry."),
+            "the English is kept beside it: {turkish}"
+        );
+        assert_eq!(super::speech::chosen(), "en");
+    }
+
+    #[test]
+    fn a_language_nobody_wrote_a_word_for_reads_as_it_was_written() {
+        let _turn = super::progress::one_at_a_time();
+        assert_eq!(super::speech::choose("ja"), "en");
+        assert_eq!(
+            super::speech::sentence("The manifest could not be read."),
+            "The manifest could not be read."
+        );
+        assert_eq!(super::speech::detail("Path: /a/b"), "Path: /a/b");
+        assert_eq!(super::speech::choose("tr"), "tr");
+        assert_eq!(
+            super::speech::detail("Offset 4, constant 9"),
+            "Konum 4, sabit 9"
+        );
+        assert_eq!(
+            super::speech::detail("First declared in Main.java at line 3"),
+            "İlk bildirildiği yer Main.java at line 3"
+        );
+        assert_eq!(
+            super::speech::detail("Nothing anybody wrote"),
+            "Nothing anybody wrote"
+        );
+        super::speech::choose("en");
+    }
 
     #[test]
     fn a_build_stops_when_it_is_asked_to_and_leaves_nothing_behind() {

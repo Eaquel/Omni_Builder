@@ -32,8 +32,6 @@
     <string name="omni_form_version_code">Sürüm kodu</string>
     <string name="omni_form_min_sdk">En eski Android</string>
     <string name="omni_form_target_sdk">En yeni Android</string>
-    <string name="omni_form_locales">Uygulamanın konuştuğu diller</string>
-    <string name="omni_form_locales_note">Her biri için bir kelime klasörü yazılır ve uygulama adı oradan okunur. İngilizce her zaman yazılır, çünkü diğerlerinden hiçbirine ayarlı olmayan bir cihaz ona döner.</string>
     <string name="omni_form_image">Uygulama görseli</string>
     <string name="omni_form_image_choose">GÖRSEL SEÇ</string>
     <string name="omni_form_image_none">Görsel seçilmedi.</string>
