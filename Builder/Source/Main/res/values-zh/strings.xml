@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="omni_app_name">Omni_Builder</string>
+    <string name="omni_app_name">Omni Builder</string>
     <string name="omni_tab_projects">项目</string>
     <string name="omni_tab_files">文件</string>
     <string name="omni_tab_build">构建</string>

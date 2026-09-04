@@ -205,7 +205,7 @@ object OmniLog {
     }
 
     private fun sessionDocument(): String = buildString {
-        append("Omni_Builder session log\n")
+        append("Omni Builder session log\n")
         append("Started: ").append(installedAt).append('\n')
         append("Written: ").append(timestamp()).append('\n')
         append("-".repeat(72)).append('\n')
