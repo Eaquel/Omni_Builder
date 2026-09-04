@@ -66,6 +66,9 @@
     <string name="omni_files_root">Projeto</string>
     <string name="omni_files_empty">Esta pasta está vazia.</string>
     <string name="omni_files_split">DIVIDIR</string>
+    <string name="omni_tab_shell">SHELL</string>
+    <string name="omni_shell_refused">Não foi possível iniciar um shell aqui.</string>
+    <string name="omni_shell_note">A trabalhar em %1$s. Um toque abre o teclado.</string>
     <string name="omni_files_by_name">NOME</string>
     <string name="omni_files_by_size">TAMANHO</string>
     <string name="omni_files_by_changed">DATA</string>

@@ -66,6 +66,9 @@
     <string name="omni_files_root">Projekt</string>
     <string name="omni_files_empty">Dieser Ordner ist leer.</string>
     <string name="omni_files_split">TEILEN</string>
+    <string name="omni_tab_shell">SHELL</string>
+    <string name="omni_shell_refused">Hier konnte keine Shell gestartet werden.</string>
+    <string name="omni_shell_note">Arbeitet in %1$s. Ein Tippen öffnet die Tastatur.</string>
     <string name="omni_files_by_name">NAME</string>
     <string name="omni_files_by_size">GRÖSSE</string>
     <string name="omni_files_by_changed">DATUM</string>

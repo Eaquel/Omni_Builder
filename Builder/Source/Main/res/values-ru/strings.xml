@@ -66,6 +66,9 @@
     <string name="omni_files_root">Проект</string>
     <string name="omni_files_empty">Эта папка пуста.</string>
     <string name="omni_files_split">РАЗДЕЛИТЬ</string>
+    <string name="omni_tab_shell">ОБОЛОЧКА</string>
+    <string name="omni_shell_refused">Здесь не удалось запустить оболочку.</string>
+    <string name="omni_shell_note">Работает в %1$s. Нажатие открывает клавиатуру.</string>
     <string name="omni_files_by_name">ИМЯ</string>
     <string name="omni_files_by_size">РАЗМЕР</string>
     <string name="omni_files_by_changed">ДАТА</string>

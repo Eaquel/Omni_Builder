@@ -65,6 +65,7 @@ import android.text.style.StyleSpan
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -74,7 +75,10 @@ import android.view.WindowInsetsController
 import android.view.accessibility.AccessibilityNodeInfo
 import android.view.animation.AccelerateInterpolator
 import android.view.animation.DecelerateInterpolator
+import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.view.inputmethod.InputMethodManager
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
@@ -502,6 +506,18 @@ object Builder {
     external fun nativeBuildStop()
 
     external fun nativeSpeak(tag: String): String
+
+    external fun nativeShellOpen(folder: String, home: String, rows: Int, columns: Int): Int
+
+    external fun nativeShellRead(handle: Int, into: ByteArray, wait: Int): Int
+
+    external fun nativeShellWrite(handle: Int, from: ByteArray): Int
+
+    external fun nativeShellResize(handle: Int, rows: Int, columns: Int)
+
+    external fun nativeShellClose(handle: Int)
+
+    external fun nativeShellInterrupt(handle: Int)
 
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
@@ -1137,6 +1153,707 @@ object Preferences {
         store(context).edit().putFloat(READING, size).apply()
     }
 
+}
+
+internal class Screenful(var rows: Int, var columns: Int) {
+
+    companion object {
+        const val DEFAULT_INK = -1
+        const val DEFAULT_GROUND = -2
+        const val BOLD = 1
+        const val FAINT = 2
+        const val UNDERLINE = 4
+        const val REVERSE = 8
+    }
+
+    class Cell {
+        var letter: Char = ' '
+        var ink: Int = DEFAULT_INK
+        var ground: Int = DEFAULT_GROUND
+        var style: Int = 0
+
+        fun clear(ink: Int, ground: Int) {
+            letter = ' '
+            this.ink = ink
+            this.ground = ground
+            style = 0
+        }
+    }
+
+    var lines: Array<Array<Cell>> = Array(rows) { Array(columns) { Cell() } }
+    var row = 0
+    var column = 0
+    var ink = DEFAULT_INK
+    var ground = DEFAULT_GROUND
+    var style = 0
+    var wrapping = true
+    var showCursor = true
+    var scrollTop = 0
+    var scrollBottom = rows - 1
+    private var pending = false
+    private var savedRow = 0
+    private var savedColumn = 0
+
+    fun resize(nextRows: Int, nextColumns: Int) {
+        if (nextRows == rows && nextColumns == columns) {
+            return
+        }
+        lines = Array(nextRows) { r ->
+            Array(nextColumns) { c ->
+                val was = lines.getOrNull(r)?.getOrNull(c)
+                Cell().apply {
+                    if (was != null) {
+                        letter = was.letter
+                        ink = was.ink
+                        ground = was.ground
+                        style = was.style
+                    }
+                }
+            }
+        }
+        rows = nextRows
+        columns = nextColumns
+        row = row.coerceIn(0, rows - 1)
+        column = column.coerceIn(0, columns - 1)
+        scrollTop = 0
+        scrollBottom = rows - 1
+    }
+
+    fun at(r: Int, c: Int): Cell = lines[r][c]
+
+    fun put(letter: Char) {
+        if (pending && wrapping) {
+            column = 0
+            down()
+            pending = false
+        }
+        if (column >= columns) {
+            column = columns - 1
+        }
+        val cell = lines[row][column]
+        cell.letter = letter
+        cell.ink = ink
+        cell.ground = ground
+        cell.style = style
+        if (column == columns - 1) {
+            pending = true
+        } else {
+            column += 1
+        }
+    }
+
+    fun place(r: Int, c: Int) {
+        row = r.coerceIn(0, rows - 1)
+        column = c.coerceIn(0, columns - 1)
+        pending = false
+    }
+
+    fun move(dr: Int, dc: Int) = place(row + dr, column + dc)
+
+    fun save() {
+        savedRow = row
+        savedColumn = column
+    }
+
+    fun restore() = place(savedRow, savedColumn)
+
+    fun down() {
+        if (row == scrollBottom) {
+            scrollUp()
+        } else if (row < rows - 1) {
+            row += 1
+        }
+        pending = false
+    }
+
+    fun up() {
+        if (row == scrollTop) {
+            scrollDown()
+        } else if (row > 0) {
+            row -= 1
+        }
+        pending = false
+    }
+
+    fun scrollUp() {
+        for (r in scrollTop until scrollBottom) {
+            lines[r] = lines[r + 1]
+        }
+        lines[scrollBottom] = Array(columns) { Cell().apply { clear(ink, ground) } }
+    }
+
+    fun scrollDown() {
+        for (r in scrollBottom downTo scrollTop + 1) {
+            lines[r] = lines[r - 1]
+        }
+        lines[scrollTop] = Array(columns) { Cell().apply { clear(ink, ground) } }
+    }
+
+    fun eraseInLine(how: Int) {
+        val from = if (how == 0) column else 0
+        val until = (if (how == 1) column else columns - 1).coerceAtMost(columns - 1)
+        for (c in from..until) {
+            lines[row][c].clear(ink, ground)
+        }
+        pending = false
+    }
+
+    fun eraseInDisplay(how: Int) {
+        when (how) {
+            0 -> {
+                eraseInLine(0)
+                for (r in row + 1 until rows) {
+                    for (c in 0 until columns) lines[r][c].clear(ink, ground)
+                }
+            }
+            1 -> {
+                eraseInLine(1)
+                for (r in 0 until row) {
+                    for (c in 0 until columns) lines[r][c].clear(ink, ground)
+                }
+            }
+            else -> {
+                for (r in 0 until rows) {
+                    for (c in 0 until columns) lines[r][c].clear(ink, ground)
+                }
+            }
+        }
+    }
+
+    fun insertLines(count: Int) {
+        repeat(count.coerceIn(1, rows)) {
+            for (r in scrollBottom downTo row + 1) {
+                lines[r] = lines[r - 1]
+            }
+            lines[row] = Array(columns) { Cell().apply { clear(ink, ground) } }
+        }
+    }
+
+    fun deleteLines(count: Int) {
+        repeat(count.coerceIn(1, rows)) {
+            for (r in row until scrollBottom) {
+                lines[r] = lines[r + 1]
+            }
+            lines[scrollBottom] = Array(columns) { Cell().apply { clear(ink, ground) } }
+        }
+    }
+
+    private fun copyInto(target: Cell, source: Cell) {
+        target.letter = source.letter
+        target.ink = source.ink
+        target.ground = source.ground
+        target.style = source.style
+    }
+
+    fun deleteCharacters(count: Int) {
+        val many = count.coerceIn(1, columns)
+        for (c in column until columns) {
+            val from = c + many
+            if (from < columns) {
+                copyInto(lines[row][c], lines[row][from])
+            } else {
+                lines[row][c].clear(ink, ground)
+            }
+        }
+    }
+
+    fun insertCharacters(count: Int) {
+        val many = count.coerceIn(1, columns)
+        for (c in columns - 1 downTo column) {
+            val from = c - many
+            if (from >= column) {
+                copyInto(lines[row][c], lines[row][from])
+            } else {
+                lines[row][c].clear(ink, ground)
+            }
+        }
+    }
+
+    fun eraseCharacters(count: Int) {
+        val many = count.coerceIn(1, columns)
+        for (c in column until (column + many).coerceAtMost(columns)) {
+            lines[row][c].clear(ink, ground)
+        }
+    }
+
+    fun tab() {
+        column = (((column / 8) + 1) * 8).coerceAtMost(columns - 1)
+        pending = false
+    }
+
+    fun carriageReturn() {
+        column = 0
+        pending = false
+    }
+
+    fun backspace() {
+        if (column > 0) {
+            column -= 1
+        }
+        pending = false
+    }
+}
+
+internal class Sequences(private val screen: Screenful) {
+
+    private enum class Where { GROUND, ESCAPE, CSI, OSC, CHARSET }
+
+    private var where = Where.GROUND
+    private val digits = StringBuilder()
+    private val text = StringBuilder()
+    private var question = false
+    private var carried = ByteArray(0)
+
+    fun feed(bytes: ByteArray, length: Int) {
+        val whole = if (carried.isEmpty()) bytes.copyOf(length) else carried + bytes.copyOf(length)
+        var at = 0
+        while (at < whole.size) {
+            val lead = whole[at].toInt() and 0xFF
+            val need = when {
+                lead < 0x80 -> 1
+                lead and 0xE0 == 0xC0 -> 2
+                lead and 0xF0 == 0xE0 -> 3
+                lead and 0xF8 == 0xF0 -> 4
+                else -> 1
+            }
+            if (at + need > whole.size) {
+                break
+            }
+            if (need == 1) {
+                take(lead.toChar())
+            } else {
+                for (letter in String(whole, at, need, Charsets.UTF_8)) {
+                    take(letter)
+                }
+            }
+            at += need
+        }
+        carried = if (at < whole.size) whole.copyOfRange(at, whole.size) else ByteArray(0)
+    }
+
+    private fun take(letter: Char) {
+        when (where) {
+            Where.GROUND -> ground(letter)
+            Where.ESCAPE -> escape(letter)
+            Where.CSI -> csi(letter)
+            Where.OSC -> osc(letter)
+            Where.CHARSET -> where = Where.GROUND
+        }
+    }
+
+    private fun ground(letter: Char) {
+        when (letter) {
+            '\u001B' -> {
+                where = Where.ESCAPE
+                digits.setLength(0)
+                question = false
+            }
+            '\n' -> screen.down()
+            '\r' -> screen.carriageReturn()
+            '\b' -> screen.backspace()
+            '\t' -> screen.tab()
+            '\u0007' -> Unit
+            '\u000B', '\u000C' -> screen.down()
+            else -> if (letter.code >= 32) screen.put(letter)
+        }
+    }
+
+    private fun escape(letter: Char) {
+        when (letter) {
+            '[' -> {
+                where = Where.CSI
+                digits.setLength(0)
+                question = false
+            }
+            ']' -> {
+                where = Where.OSC
+                text.setLength(0)
+            }
+            '(', ')', '*', '+' -> where = Where.CHARSET
+            'M' -> {
+                screen.up()
+                where = Where.GROUND
+            }
+            'D' -> {
+                screen.down()
+                where = Where.GROUND
+            }
+            'E' -> {
+                screen.carriageReturn()
+                screen.down()
+                where = Where.GROUND
+            }
+            '7' -> {
+                screen.save()
+                where = Where.GROUND
+            }
+            '8' -> {
+                screen.restore()
+                where = Where.GROUND
+            }
+            'c' -> {
+                screen.eraseInDisplay(2)
+                screen.place(0, 0)
+                where = Where.GROUND
+            }
+            else -> where = Where.GROUND
+        }
+    }
+
+    private fun numbers(): List<Int> =
+        digits.toString().split(';').map { it.trim().toIntOrNull() ?: 0 }
+
+    private fun first(fallback: Int): Int {
+        val held = numbers().firstOrNull() ?: 0
+        return if (held == 0) fallback else held
+    }
+
+    private fun csi(letter: Char) {
+        if (letter == '?' || letter == '>' || letter == '!') {
+            question = question || letter == '?'
+            return
+        }
+        if (letter.isDigit() || letter == ';' || letter == ':' || letter == ' ') {
+            digits.append(letter)
+            return
+        }
+        where = Where.GROUND
+        when (letter) {
+            'A' -> screen.move(-first(1), 0)
+            'B' -> screen.move(first(1), 0)
+            'C' -> screen.move(0, first(1))
+            'D' -> screen.move(0, -first(1))
+            'E' -> screen.place(screen.row + first(1), 0)
+            'F' -> screen.place(screen.row - first(1), 0)
+            'G' -> screen.place(screen.row, first(1) - 1)
+            'd' -> screen.place(first(1) - 1, screen.column)
+            'H', 'f' -> {
+                val held = numbers()
+                val r = held.getOrNull(0)?.takeIf { it > 0 } ?: 1
+                val c = held.getOrNull(1)?.takeIf { it > 0 } ?: 1
+                screen.place(r - 1, c - 1)
+            }
+            'J' -> screen.eraseInDisplay(numbers().firstOrNull() ?: 0)
+            'K' -> screen.eraseInLine(numbers().firstOrNull() ?: 0)
+            'L' -> screen.insertLines(first(1))
+            'M' -> screen.deleteLines(first(1))
+            'P' -> screen.deleteCharacters(first(1))
+            '@' -> screen.insertCharacters(first(1))
+            'X' -> screen.eraseCharacters(first(1))
+            'S' -> repeat(first(1)) { screen.scrollUp() }
+            'T' -> repeat(first(1)) { screen.scrollDown() }
+            'r' -> {
+                val held = numbers()
+                val top = (held.getOrNull(0)?.takeIf { it > 0 } ?: 1) - 1
+                val bottom = (held.getOrNull(1)?.takeIf { it > 0 } ?: screen.rows) - 1
+                screen.scrollTop = top.coerceIn(0, screen.rows - 1)
+                screen.scrollBottom = bottom.coerceIn(screen.scrollTop, screen.rows - 1)
+                screen.place(0, 0)
+            }
+            's' -> screen.save()
+            'u' -> screen.restore()
+            'm' -> paint(numbers())
+            'h', 'l' -> mode(letter == 'h')
+            else -> Unit
+        }
+    }
+
+    private fun mode(on: Boolean) {
+        if (!question) {
+            return
+        }
+        for (one in numbers()) {
+            when (one) {
+                7 -> screen.wrapping = on
+                25 -> screen.showCursor = on
+                1049, 1047, 47 -> {
+                    screen.eraseInDisplay(2)
+                    screen.place(0, 0)
+                }
+            }
+        }
+    }
+
+    private fun paint(codes: List<Int>) {
+        if (codes.isEmpty()) {
+            return
+        }
+        var at = 0
+        while (at < codes.size) {
+            when (val code = codes[at]) {
+                0 -> {
+                    screen.ink = Screenful.DEFAULT_INK
+                    screen.ground = Screenful.DEFAULT_GROUND
+                    screen.style = 0
+                }
+                1 -> screen.style = screen.style or Screenful.BOLD
+                2 -> screen.style = screen.style or Screenful.FAINT
+                4 -> screen.style = screen.style or Screenful.UNDERLINE
+                7 -> screen.style = screen.style or Screenful.REVERSE
+                22 -> screen.style = screen.style and (Screenful.BOLD or Screenful.FAINT).inv()
+                24 -> screen.style = screen.style and Screenful.UNDERLINE.inv()
+                27 -> screen.style = screen.style and Screenful.REVERSE.inv()
+                39 -> screen.ink = Screenful.DEFAULT_INK
+                49 -> screen.ground = Screenful.DEFAULT_GROUND
+                in 30..37 -> screen.ink = code - 30
+                in 40..47 -> screen.ground = code - 40
+                in 90..97 -> screen.ink = code - 90 + 8
+                in 100..107 -> screen.ground = code - 100 + 8
+                38, 48 -> {
+                    val kind = codes.getOrNull(at + 1)
+                    val chosen = when (kind) {
+                        5 -> codes.getOrNull(at + 2) ?: 0
+                        2 -> 256 + ((codes.getOrNull(at + 2) ?: 0) shl 16) +
+                            ((codes.getOrNull(at + 3) ?: 0) shl 8) + (codes.getOrNull(at + 4) ?: 0)
+                        else -> null
+                    }
+                    if (chosen != null) {
+                        if (code == 38) screen.ink = chosen else screen.ground = chosen
+                    }
+                    at += if (kind == 2) 4 else 2
+                }
+                else -> Unit
+            }
+            at += 1
+        }
+    }
+
+    private fun osc(letter: Char) {
+        if (letter == '\u0007' || letter == '\u009C' || letter == '\u001B') {
+            text.setLength(0)
+            where = Where.GROUND
+            return
+        }
+        if (text.length < 256) {
+            text.append(letter)
+        }
+    }
+}
+
+internal class TerminalView(
+    context: Context,
+    private var palette: Palette,
+    private val onKey: (ByteArray) -> Unit,
+) : View(context) {
+
+    val screen = Screenful(24, 80)
+    private val reader = Sequences(screen)
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Type.data }
+    private var cellWidth = 0f
+    private var cellHeight = 0f
+    private var baseline = 0f
+    private var lettering = 0f
+    private var onResize: ((Int, Int) -> Unit)? = null
+
+    init {
+        isFocusableInTouchMode = true
+        lettering = inPixels(13f)
+        measureCell()
+    }
+
+    fun repaint(next: Palette) {
+        palette = next
+        invalidate()
+    }
+
+    fun sizeText(sp: Float) {
+        lettering = inPixels(sp.coerceIn(8f, 24f))
+        measureCell()
+        fit(width, height)
+        invalidate()
+    }
+
+    fun textSizeSp(): Float = lettering / inPixels(1f)
+
+    private fun inPixels(sp: Float): Float = TypedValue.applyDimension(
+        TypedValue.COMPLEX_UNIT_SP,
+        sp,
+        resources.displayMetrics,
+    )
+
+    fun whenResized(what: (Int, Int) -> Unit) {
+        onResize = what
+    }
+
+    fun accept(bytes: ByteArray, length: Int) {
+        reader.feed(bytes, length)
+        postInvalidate()
+    }
+
+    private fun measureCell() {
+        paint.textSize = lettering
+        cellWidth = paint.measureText("M")
+        val metrics = paint.fontMetrics
+        cellHeight = metrics.descent - metrics.ascent + 1f
+        baseline = -metrics.ascent
+    }
+
+    private fun fit(w: Int, h: Int) {
+        if (w <= 0 || h <= 0 || cellWidth <= 0f || cellHeight <= 0f) {
+            return
+        }
+        val columns = (w / cellWidth).toInt().coerceIn(20, 400)
+        val rows = (h / cellHeight).toInt().coerceIn(4, 200)
+        if (columns != screen.columns || rows != screen.rows) {
+            screen.resize(rows, columns)
+            onResize?.invoke(rows, columns)
+        }
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, was: Int, then: Int) {
+        super.onSizeChanged(w, h, was, then)
+        fit(w, h)
+    }
+
+    private fun colourOf(code: Int, ground: Boolean): Int {
+        val found = when {
+            code == Screenful.DEFAULT_INK -> palette.foreground
+            code == Screenful.DEFAULT_GROUND -> Color.TRANSPARENT
+            code >= 256 -> {
+                val rgb = code - 256
+                Color.rgb((rgb shr 16) and 0xFF, (rgb shr 8) and 0xFF, rgb and 0xFF)
+            }
+            code < 16 -> ANSI[code]
+            code < 232 -> {
+                val at = code - 16
+                Color.rgb(STEPS[at / 36], STEPS[(at / 6) % 6], STEPS[at % 6])
+            }
+            else -> {
+                val grey = (8 + (code - 232) * 10).coerceIn(0, 255)
+                Color.rgb(grey, grey, grey)
+            }
+        }
+        return if (ground && found == Color.TRANSPARENT) palette.background else found
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        canvas.drawColor(palette.background)
+        paint.textSize = lettering
+        val word = StringBuilder()
+        for (r in 0 until screen.rows) {
+            var c = 0
+            while (c < screen.columns) {
+                val cell = screen.at(r, c)
+                var run = c
+                while (run < screen.columns) {
+                    val next = screen.at(r, run)
+                    if (next.ground != cell.ground || next.style != cell.style ||
+                        next.ink != cell.ink
+                    ) {
+                        break
+                    }
+                    run += 1
+                }
+                val reversed = (cell.style and Screenful.REVERSE) != 0
+                val ink = colourOf(if (reversed) cell.ground else cell.ink, reversed)
+                val ground = colourOf(if (reversed) cell.ink else cell.ground, true)
+                val left = c * cellWidth
+                val top = r * cellHeight
+                if (ground != palette.background) {
+                    paint.style = Paint.Style.FILL
+                    paint.color = ground
+                    canvas.drawRect(left, top, run * cellWidth, top + cellHeight, paint)
+                }
+                word.setLength(0)
+                for (at in c until run) {
+                    word.append(screen.at(r, at).letter)
+                }
+                paint.color = if ((cell.style and Screenful.FAINT) != 0) {
+                    Ink.fade(ink, 0.6f)
+                } else {
+                    ink
+                }
+                paint.isFakeBoldText = (cell.style and Screenful.BOLD) != 0
+                paint.style = Paint.Style.FILL
+                canvas.drawText(word.toString(), left, top + baseline, paint)
+                if ((cell.style and Screenful.UNDERLINE) != 0) {
+                    paint.strokeWidth = 1f
+                    canvas.drawLine(
+                        left,
+                        top + cellHeight - 2f,
+                        run * cellWidth,
+                        top + cellHeight - 2f,
+                        paint,
+                    )
+                }
+                c = run
+            }
+        }
+        if (screen.showCursor) {
+            paint.style = Paint.Style.FILL
+            paint.color = Ink.fade(palette.accent, 0.55f)
+            canvas.drawRect(
+                screen.column * cellWidth,
+                screen.row * cellHeight,
+                (screen.column + 1) * cellWidth,
+                (screen.row + 1) * cellHeight,
+                paint,
+            )
+        }
+    }
+
+    override fun onCheckIsTextEditor(): Boolean = true
+
+    override fun onCreateInputConnection(out: EditorInfo): InputConnection {
+        out.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        out.imeOptions = EditorInfo.IME_ACTION_NONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+            EditorInfo.IME_FLAG_NO_FULLSCREEN
+        return object : BaseInputConnection(this, false) {
+            override fun commitText(written: CharSequence?, position: Int): Boolean {
+                written?.let { onKey(it.toString().toByteArray(Charsets.UTF_8)) }
+                return true
+            }
+
+            override fun sendKeyEvent(event: KeyEvent?): Boolean {
+                if (event != null && event.action == KeyEvent.ACTION_DOWN) {
+                    return this@TerminalView.onKeyDown(event.keyCode, event)
+                }
+                return true
+            }
+
+            override fun deleteSurroundingText(before: Int, after: Int): Boolean {
+                repeat(before) { onKey(byteArrayOf(0x7F)) }
+                return true
+            }
+        }
+    }
+
+    override fun onKeyDown(code: Int, event: KeyEvent): Boolean {
+        val said = when (code) {
+            KeyEvent.KEYCODE_DEL -> byteArrayOf(0x7F)
+            KeyEvent.KEYCODE_ENTER -> byteArrayOf(0x0D)
+            KeyEvent.KEYCODE_TAB -> byteArrayOf(0x09)
+            KeyEvent.KEYCODE_ESCAPE -> byteArrayOf(0x1B)
+            KeyEvent.KEYCODE_DPAD_UP -> "\u001B[A".toByteArray()
+            KeyEvent.KEYCODE_DPAD_DOWN -> "\u001B[B".toByteArray()
+            KeyEvent.KEYCODE_DPAD_RIGHT -> "\u001B[C".toByteArray()
+            KeyEvent.KEYCODE_DPAD_LEFT -> "\u001B[D".toByteArray()
+            KeyEvent.KEYCODE_MOVE_HOME -> "\u001B[H".toByteArray()
+            KeyEvent.KEYCODE_MOVE_END -> "\u001B[F".toByteArray()
+            else -> {
+                val letter = event.unicodeChar
+                when {
+                    event.isCtrlPressed && letter != 0 ->
+                        byteArrayOf((letter.toChar().uppercaseChar().code and 0x1F).toByte())
+                    letter != 0 -> letter.toChar().toString().toByteArray(Charsets.UTF_8)
+                    else -> return super.onKeyDown(code, event)
+                }
+            }
+        }
+        onKey(said)
+        return true
+    }
+
+    private companion object {
+        val STEPS = intArrayOf(0, 95, 135, 175, 215, 255)
+
+        val ANSI = intArrayOf(
+            0xFF1E1E1E.toInt(), 0xFFCD3131.toInt(), 0xFF0DBC79.toInt(), 0xFFE5E510.toInt(),
+            0xFF2472C8.toInt(), 0xFFBC3FBC.toInt(), 0xFF11A8CD.toInt(), 0xFFE5E5E5.toInt(),
+            0xFF666666.toInt(), 0xFFF14C4C.toInt(), 0xFF23D18B.toInt(), 0xFFF5F543.toInt(),
+            0xFF3B8EEA.toInt(), 0xFFD670D6.toInt(), 0xFF29B8DB.toInt(), 0xFFFFFFFF.toInt(),
+        )
+    }
 }
 
 class AuroraView(context: Context, private var palette: Palette) : View(context) {
@@ -2060,7 +2777,7 @@ class FlowLayout(
     }
 }
 
-private enum class Tab { PROJECTS, FILES, BUILD, TRASH, SETTINGS }
+private enum class Tab { PROJECTS, FILES, BUILD, SHELL, TRASH, SETTINGS }
 
 private enum class Order(val label: Int) {
     NAME(R.string.omni_files_by_name),
@@ -2112,6 +2829,10 @@ private sealed interface Screen {
         override val tab = Tab.BUILD
     }
 
+    data class Shell(val root: String?) : Screen {
+        override val tab = Tab.SHELL
+    }
+
     data object Trash : Screen {
         override val tab = Tab.TRASH
     }
@@ -2143,7 +2864,7 @@ class BuilderActivity : Activity() {
 
         const val WIDE_DP = 600
 
-        val ON_THE_BAR = listOf(Tab.PROJECTS, Tab.FILES, Tab.BUILD)
+        val ON_THE_BAR = listOf(Tab.PROJECTS, Tab.FILES, Tab.BUILD, Tab.SHELL)
 
         const val COLUMN_DP = 640
 
@@ -2270,6 +2991,11 @@ class BuilderActivity : Activity() {
     private var secondFolder: String? = null
     private var filesOrder = Order.NAME
     private var filesReversed = false
+    private var shellHandle = -1
+    private var shellView: TerminalView? = null
+    private var shellReader: Thread? = null
+    private var shellFolder: String? = null
+    private var shellControl = false
 
     private var keyAlias = DEFAULT_KEY_ALIAS
     private var keyCommonName = DEFAULT_KEY_COMMON_NAME
@@ -2580,6 +3306,7 @@ class BuilderActivity : Activity() {
     override fun onDestroy() {
         keepTheDraft()
         stopTheBuild()
+        closeTheShell()
         runCatching { unregisterReceiver(installAnswer) }
         OmniLog.flushSession()
         super.onDestroy()
@@ -2716,6 +3443,7 @@ class BuilderActivity : Activity() {
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
+            is Screen.Shell -> renderShell(here.root)
             is Screen.Trash -> renderTrash()
             is Screen.Settings -> renderSettings()
             is Screen.Keys -> renderKeys()
@@ -2832,6 +3560,7 @@ class BuilderActivity : Activity() {
             Tab.PROJECTS -> Screen.Projects
             Tab.FILES -> root?.let { Screen.Files(it, "") } ?: Screen.Projects
             Tab.BUILD -> root?.let { Screen.Build(it) } ?: Screen.Projects
+            Tab.SHELL -> Screen.Shell(root)
             Tab.TRASH -> Screen.Trash
             Tab.SETTINGS -> Screen.Settings
         }
@@ -2870,6 +3599,7 @@ class BuilderActivity : Activity() {
             is Screen.Editor -> here.path.substringAfterLast('/')
             is Screen.Picture -> here.path.substringAfterLast('/')
             is Screen.Build -> getString(R.string.omni_build_title)
+            is Screen.Shell -> getString(R.string.omni_tab_shell)
             is Screen.Trash -> getString(R.string.omni_tab_trash)
             is Screen.Settings -> getString(R.string.omni_tab_settings)
             is Screen.Keys -> getString(R.string.omni_keys_title)
@@ -2900,6 +3630,7 @@ class BuilderActivity : Activity() {
             Tab.PROJECTS to R.string.omni_tab_projects,
             Tab.FILES to R.string.omni_tab_files,
             Tab.BUILD to R.string.omni_tab_build,
+            Tab.SHELL to R.string.omni_tab_shell,
         )
         for (tab in ON_THE_BAR) {
             val active = screen.tab == tab
@@ -5150,6 +5881,141 @@ class BuilderActivity : Activity() {
         }
         content.addView(shelf)
         content.addView(quiet(getString(R.string.omni_trash_note)))
+    }
+
+    private fun renderShell(root: String?) {
+        val home = filesDir.absolutePath
+        val folder = root ?: home
+        val view = TerminalView(this, palette) { bytes -> sendToTheShell(bytes) }
+        shellView = view
+        shellFolder = folder
+
+        val frame = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = sheet(palette.background, palette.divider)
+            setPadding(gap(1), gap(1), gap(1), gap(1))
+        }
+        frame.addView(view, LinearLayout.LayoutParams(MATCH_PARENT, gap(74)))
+        content.addView(frame)
+        content.addView(shellKeys(view))
+
+        view.whenResized { rows, columns ->
+            if (shellHandle >= 0) {
+                runCatching { Builder.nativeShellResize(shellHandle, rows, columns) }
+            }
+        }
+        view.setOnClickListener {
+            view.requestFocus()
+            val keyboard = getSystemService(InputMethodManager::class.java)
+            keyboard?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        }
+
+        if (shellHandle < 0) {
+            openTheShell(folder, home, view)
+        } else {
+            view.accept(byteArrayOf(), 0)
+        }
+    }
+
+    private fun openTheShell(folder: String, home: String, view: TerminalView) {
+        File(home, "tmp").mkdirs()
+        val handle = runCatching {
+            Builder.nativeShellOpen(folder, home, view.screen.rows, view.screen.columns)
+        }.getOrDefault(-1)
+        if (handle < 0) {
+            results.addView(notice(getString(R.string.omni_shell_refused), palette.error))
+            return
+        }
+        shellHandle = handle
+        OmniLog.event(LogLevel.INFO, "shell", "A shell was opened.")
+        val reader = Thread {
+            val room = ByteArray(8192)
+            while (!Thread.currentThread().isInterrupted) {
+                val got = runCatching { Builder.nativeShellRead(handle, room, 60) }
+                    .getOrDefault(-1)
+                if (got < 0) {
+                    break
+                }
+                if (got > 0) {
+                    val copy = room.copyOf(got)
+                    runOnUiThread { shellView?.accept(copy, copy.size) }
+                }
+            }
+            runOnUiThread { closeTheShell() }
+        }
+        reader.isDaemon = true
+        shellReader = reader
+        reader.start()
+    }
+
+    private fun sendToTheShell(bytes: ByteArray) {
+        if (shellHandle < 0 || bytes.isEmpty()) {
+            return
+        }
+        val said = if (shellControl) {
+            shellControl = false
+            byteArrayOf((bytes[0].toInt().toChar().uppercaseChar().code and 0x1F).toByte())
+        } else {
+            bytes
+        }
+        runCatching { Builder.nativeShellWrite(shellHandle, said) }
+    }
+
+    private fun closeTheShell() {
+        val handle = shellHandle
+        shellHandle = -1
+        shellReader?.interrupt()
+        shellReader = null
+        if (handle >= 0) {
+            runCatching { Builder.nativeShellClose(handle) }
+            OmniLog.event(LogLevel.INFO, "shell", "The shell was closed.")
+        }
+    }
+
+    private fun shellKeys(view: TerminalView): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, gap(2), 0, gap(1))
+        }
+        val keys = listOf<Pair<String, () -> Unit>>(
+            "ESC" to { sendToTheShell(byteArrayOf(0x1B)) },
+            "TAB" to { sendToTheShell(byteArrayOf(0x09)) },
+            "CTRL" to { shellControl = !shellControl },
+            "^C" to { runCatching { Builder.nativeShellInterrupt(shellHandle) }.let { } },
+            "/" to { sendToTheShell("/".toByteArray()) },
+            "-" to { sendToTheShell("-".toByteArray()) },
+            "|" to { sendToTheShell("|".toByteArray()) },
+            "↑" to { sendToTheShell("\u001B[A".toByteArray()) },
+            "↓" to { sendToTheShell("\u001B[B".toByteArray()) },
+        )
+        for ((label, press) in keys) {
+            row.addView(
+                TextView(this).apply {
+                    text = label
+                    typeface = Type.data
+                    setTextColor(palette.foreground)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    gravity = Gravity.CENTER
+                    setPadding(gap(1), gap(2), gap(1), gap(2))
+                    isClickable = true
+                    readAs(Button::class.java.name)
+                    background = touchable(pill(palette.raised, gap(2).toFloat()), palette.accent)
+                    setOnClickListener {
+                        press()
+                        view.requestFocus()
+                    }
+                },
+                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
+                    marginEnd = gap(1) / 2
+                },
+            )
+        }
+        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        holder.addView(row)
+        holder.addView(
+            quiet(getString(R.string.omni_shell_note, shellFolder ?: filesDir.absolutePath))
+        )
+        return holder
     }
 
     private fun renderTrash() {

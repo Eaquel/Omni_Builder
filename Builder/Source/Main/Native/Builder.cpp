@@ -2,7 +2,18 @@
 
 #include <android/log.h>
 
+#include <fcntl.h>
+#include <poll.h>
+#include <pty.h>
+#include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <termios.h>
+#include <unistd.h>
+
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 
 namespace {
@@ -758,6 +769,136 @@ JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeBuildExpect(
     return;
   }
   omni_build_expect(held.c_str());
+}
+
+JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellOpen(
+    JNIEnv *env, jobject , jstring folder, jstring home, jint rows, jint columns) {
+  std::string folder_text;
+  std::string home_text;
+  if (folder == nullptr || !JavaStringToUtf8(env, folder, &folder_text) ||
+      home == nullptr || !JavaStringToUtf8(env, home, &home_text)) {
+    ThrowJava(env, kIllegalState, "A shell needs a folder to start in.");
+    return -1;
+  }
+
+  struct winsize size {};
+  size.ws_row = static_cast<unsigned short>(rows > 0 ? rows : 24);
+  size.ws_col = static_cast<unsigned short>(columns > 0 ? columns : 80);
+
+  int master = -1;
+  const pid_t child = forkpty(&master, nullptr, nullptr, &size);
+  if (child < 0) {
+    return -1;
+  }
+  if (child == 0) {
+    setenv("HOME", home_text.c_str(), 1);
+    setenv("TMPDIR", (home_text + "/tmp").c_str(), 1);
+    setenv("TERM", "xterm-256color", 1);
+    setenv("LANG", "C.UTF-8", 1);
+    setenv("PS1", "$ ", 1);
+    if (chdir(folder_text.c_str()) != 0) {
+      const int ignored = chdir(home_text.c_str());
+      (void)ignored;
+    }
+    execl("/system/bin/sh", "sh", nullptr);
+    _exit(127);
+  }
+
+  const int flags = fcntl(master, F_GETFL, 0);
+  if (flags >= 0) {
+    fcntl(master, F_SETFL, flags | O_NONBLOCK);
+  }
+  return master;
+}
+
+JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellRead(
+    JNIEnv *env, jobject , jint handle, jbyteArray into, jint wait) {
+  if (handle < 0 || into == nullptr) {
+    return -1;
+  }
+  struct pollfd watched {};
+  watched.fd = handle;
+  watched.events = POLLIN;
+  const int ready = poll(&watched, 1, wait);
+  if (ready <= 0) {
+    return 0;
+  }
+  const jsize room = env->GetArrayLength(into);
+  jbyte *bytes = env->GetByteArrayElements(into, nullptr);
+  if (bytes == nullptr) {
+    return -1;
+  }
+  const ssize_t got = read(handle, bytes, static_cast<size_t>(room));
+  env->ReleaseByteArrayElements(into, bytes, 0);
+  if (got > 0) {
+    return static_cast<jint>(got);
+  }
+  if (got == 0) {
+    return -1;
+  }
+  return (errno == EAGAIN || errno == EINTR) ? 0 : -1;
+}
+
+JNIEXPORT jint JNICALL Java_com_omni_builder_Builder_nativeShellWrite(
+    JNIEnv *env, jobject , jint handle, jbyteArray from) {
+  if (handle < 0 || from == nullptr) {
+    return -1;
+  }
+  const jsize length = env->GetArrayLength(from);
+  jbyte *bytes = env->GetByteArrayElements(from, nullptr);
+  if (bytes == nullptr) {
+    return -1;
+  }
+  jsize written = 0;
+  while (written < length) {
+    const ssize_t step = write(handle, bytes + written, static_cast<size_t>(length - written));
+    if (step > 0) {
+      written += static_cast<jsize>(step);
+      continue;
+    }
+    if (step < 0 && (errno == EAGAIN || errno == EINTR)) {
+      continue;
+    }
+    break;
+  }
+  env->ReleaseByteArrayElements(from, bytes, JNI_ABORT);
+  return written;
+}
+
+JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellResize(
+    JNIEnv *, jobject , jint handle, jint rows, jint columns) {
+  if (handle < 0) {
+    return;
+  }
+  struct winsize size {};
+  size.ws_row = static_cast<unsigned short>(rows > 0 ? rows : 24);
+  size.ws_col = static_cast<unsigned short>(columns > 0 ? columns : 80);
+  ioctl(handle, TIOCSWINSZ, &size);
+}
+
+JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellClose(
+    JNIEnv *, jobject , jint handle) {
+  if (handle < 0) {
+    return;
+  }
+  pid_t group = tcgetpgrp(handle);
+  if (group > 0) {
+    kill(-group, SIGHUP);
+  }
+  close(handle);
+  while (waitpid(-1, nullptr, WNOHANG) > 0) {
+  }
+}
+
+JNIEXPORT void JNICALL Java_com_omni_builder_Builder_nativeShellInterrupt(
+    JNIEnv *, jobject , jint handle) {
+  if (handle < 0) {
+    return;
+  }
+  const pid_t group = tcgetpgrp(handle);
+  if (group > 0) {
+    kill(-group, SIGINT);
+  }
 }
 
 }

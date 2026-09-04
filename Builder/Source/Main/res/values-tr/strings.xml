@@ -66,6 +66,9 @@
     <string name="omni_files_root">Proje</string>
     <string name="omni_files_empty">Bu klasör boş.</string>
     <string name="omni_files_split">BÖL</string>
+    <string name="omni_tab_shell">KABUK</string>
+    <string name="omni_shell_refused">Burada bir kabuk başlatılamadı.</string>
+    <string name="omni_shell_note">%1$s içinde çalışıyor. Dokununca klavye açılır.</string>
     <string name="omni_files_by_name">AD</string>
     <string name="omni_files_by_size">BOYUT</string>
     <string name="omni_files_by_changed">TARİH</string>

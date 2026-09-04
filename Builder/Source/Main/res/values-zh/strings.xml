@@ -66,6 +66,9 @@
     <string name="omni_files_root">项目</string>
     <string name="omni_files_empty">这个文件夹是空的。</string>
     <string name="omni_files_split">分屏</string>
+    <string name="omni_tab_shell">终端</string>
+    <string name="omni_shell_refused">无法在此处启动终端。</string>
+    <string name="omni_shell_note">正在 %1$s 中运行。轻触可打开键盘。</string>
     <string name="omni_files_by_name">名称</string>
     <string name="omni_files_by_size">大小</string>
     <string name="omni_files_by_changed">日期</string>

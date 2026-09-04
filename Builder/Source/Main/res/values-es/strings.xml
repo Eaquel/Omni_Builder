@@ -66,6 +66,9 @@
     <string name="omni_files_root">Proyecto</string>
     <string name="omni_files_empty">Esta carpeta está vacía.</string>
     <string name="omni_files_split">DIVIDIR</string>
+    <string name="omni_tab_shell">CONSOLA</string>
+    <string name="omni_shell_refused">No se pudo iniciar una consola aquí.</string>
+    <string name="omni_shell_note">Trabajando en %1$s. Toca para abrir el teclado.</string>
     <string name="omni_files_by_name">NOMBRE</string>
     <string name="omni_files_by_size">TAMAÑO</string>
     <string name="omni_files_by_changed">FECHA</string>

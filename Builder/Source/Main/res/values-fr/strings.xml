@@ -66,6 +66,9 @@
     <string name="omni_files_root">Projet</string>
     <string name="omni_files_empty">Ce dossier est vide.</string>
     <string name="omni_files_split">DIVISER</string>
+    <string name="omni_tab_shell">SHELL</string>
+    <string name="omni_shell_refused">Aucun shell n\'a pu démarrer ici.</string>
+    <string name="omni_shell_note">Travaille dans %1$s. Une pression ouvre le clavier.</string>
     <string name="omni_files_by_name">NOM</string>
     <string name="omni_files_by_size">TAILLE</string>
     <string name="omni_files_by_changed">DATE</string>
