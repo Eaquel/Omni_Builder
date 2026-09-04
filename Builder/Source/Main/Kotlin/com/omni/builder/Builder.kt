@@ -20,6 +20,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageInstaller
+import android.content.pm.PackageManager
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.content.res.Resources
@@ -1103,6 +1104,7 @@ object Preferences {
     private const val THEME = "theme"
     private const val SIGNING_KEY = "signing_key"
     private const val TIMINGS = "build_timings"
+    private const val WIRELESS = "wireless_debugging"
 
     val LANGUAGES: List<Pair<String, String>> = listOf(
         "en" to "English",
@@ -1124,6 +1126,13 @@ object Preferences {
 
     fun setLanguage(context: Context, tag: String) {
         store(context).edit().putString(LANGUAGE, tag).apply()
+    }
+
+    fun keepsWirelessDebugging(context: Context): Boolean =
+        store(context).getBoolean(WIRELESS, false)
+
+    fun keepWirelessDebugging(context: Context, wanted: Boolean) {
+        store(context).edit().putBoolean(WIRELESS, wanted).apply()
     }
 
     fun palette(context: Context): Palette =
@@ -2101,6 +2110,57 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
         paint.shader = glow
         canvas.drawCircle(x, y, radius, paint)
         paint.shader = null
+    }
+}
+
+internal object Debugging {
+
+    const val COMMAND = "adb shell pm grant com.omni.builder android.permission.WRITE_SECURE_SETTINGS"
+
+    private const val WIFI_ENABLED = "adb_wifi_enabled"
+
+    fun granted(context: Context): Boolean =
+        context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) ==
+            PackageManager.PERMISSION_GRANTED
+
+    fun wirelessOn(context: Context): Boolean =
+        runCatching {
+            Settings.Global.getInt(context.contentResolver, WIFI_ENABLED, 0) == 1
+        }.getOrDefault(false)
+
+    fun turnWirelessOn(context: Context, wanted: Boolean): Boolean {
+        if (!granted(context)) {
+            return false
+        }
+        return runCatching {
+            Settings.Global.putInt(context.contentResolver, WIFI_ENABLED, if (wanted) 1 else 0)
+        }.getOrDefault(false)
+    }
+
+    fun port(context: Context): Int =
+        runCatching {
+            Settings.Global.getInt(context.contentResolver, "adb_wifi_port", 0)
+        }.getOrDefault(0)
+}
+
+class Boot : BroadcastReceiver() {
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val wanted = intent.action == Intent.ACTION_BOOT_COMPLETED ||
+            intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
+        if (!wanted || !Preferences.keepsWirelessDebugging(context)) {
+            return
+        }
+        val done = Debugging.turnWirelessOn(context, true)
+        OmniLog.event(
+            if (done) LogLevel.INFO else LogLevel.WARN,
+            "debugging",
+            if (done) {
+                "Wireless debugging was turned back on after a restart."
+            } else {
+                "Wireless debugging could not be turned back on; the permission is not held."
+            },
+        )
     }
 }
 
@@ -6270,6 +6330,86 @@ class BuilderActivity : Activity() {
             go(Screen.Keys)
         })
         content.addView(signing)
+
+        content.addView(heading(getString(R.string.omni_debugging_title)))
+        val debugging = card()
+        val held = Debugging.granted(this)
+        debugging.addView(
+            keyValue(
+                getString(R.string.omni_debugging_permission),
+                if (held) {
+                    getString(R.string.omni_debugging_held)
+                } else {
+                    getString(R.string.omni_debugging_missing)
+                },
+                "",
+                if (held) palette.ok else palette.warning,
+            )
+        )
+        if (!held) {
+            debugging.addView(quiet(getString(R.string.omni_debugging_how)))
+            debugging.addView(
+                EditText(this).apply {
+                    setText(Debugging.COMMAND)
+                    setTextColor(palette.foreground)
+                    setBackgroundColor(Color.TRANSPARENT)
+                    typeface = Type.data
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                    setTextIsSelectable(true)
+                    keyListener = null
+                    setPadding(gap(2))
+                }
+            )
+            debugging.addView(
+                subtle(getString(R.string.omni_action_copy), palette.accent) {
+                    val board = getSystemService(ClipboardManager::class.java)
+                    board?.setPrimaryClip(ClipData.newPlainText("adb", Debugging.COMMAND))
+                    results.addView(
+                        notice(getString(R.string.omni_debugging_copied), palette.ok)
+                    )
+                }
+            )
+        } else {
+            val keeping = Preferences.keepsWirelessDebugging(this)
+            debugging.addView(
+                row(
+                    getString(R.string.omni_debugging_keep),
+                    if (Debugging.wirelessOn(this)) {
+                        val port = Debugging.port(this)
+                        if (port > 0) {
+                            getString(R.string.omni_debugging_on_at, port)
+                        } else {
+                            getString(R.string.omni_debugging_on)
+                        }
+                    } else {
+                        getString(R.string.omni_debugging_off)
+                    },
+                    if (keeping) {
+                        getString(R.string.omni_action_stop)
+                    } else {
+                        getString(R.string.omni_action_start)
+                    },
+                    palette.accent,
+                ) {
+                    val next = !keeping
+                    Preferences.keepWirelessDebugging(this, next)
+                    val done = Debugging.turnWirelessOn(this, next)
+                    render(false)
+                    results.addView(
+                        notice(
+                            if (done) {
+                                getString(R.string.omni_debugging_changed)
+                            } else {
+                                getString(R.string.omni_debugging_refused)
+                            },
+                            if (done) palette.ok else palette.error,
+                        )
+                    )
+                }
+            )
+            debugging.addView(quiet(getString(R.string.omni_debugging_note)))
+        }
+        content.addView(debugging)
 
         content.addView(
             row(
