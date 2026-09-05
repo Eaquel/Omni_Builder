@@ -1671,7 +1671,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Başka bir takma ad seçin. Bu yapı bir imza anahtarının üzerine yazmaz; çünkü eskisiyle imzalanmış her uygulama artık güncellenemezdi."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Başka bir ad seçin. Üzerine kopyalamak, oradakini sormadan değiştirirdi."),
         ("Choose another name. Moving over it would delete what is there without asking.", "Başka bir ad seçin. Üzerine taşımak, oradakini sormadan silerdi."),
-        ("Close it with -->.", "--> ile kapatın."),
+                ("Classes nothing reaches were left out of the package.", "Hiçbir şeyin ulaşmadığı sınıflar pakete konulmadı."),
+("Close it with -->.", "--> ile kapatın."),
         ("Close it with ]]>.", "]]> ile kapatın."),
         ("Close it.", "Kapatın."),
         ("Close the quote.", "Tırnağı kapatın."),
@@ -2202,6 +2203,7 @@ pub mod speech {
         ("Directory", "Dizin"),
         ("Distance", "Uzaklık"),
         ("Drawn at", "Çizim boyutu"),
+        ("Dropped", "Çıkarılan"),
         ("Element", "Öğe"),
         ("Ends at", "Bitiş"),
         ("Entries", "Girdi"),
@@ -2232,6 +2234,7 @@ pub mod speech {
         ("Index", "Sıra"),
         ("Install", "Kurulacak"),
         ("Instruction", "Komut"),
+        ("Kept", "Kalan"),
         ("Key", "Anahtar"),
         ("Kind", "Tür"),
         ("Known", "Bilinen"),
@@ -2720,7 +2723,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Wählen Sie einen anderen Alias. Dieser Build überschreibt keinen Signaturschlüssel, denn jede mit dem alten signierte Anwendung ließe sich nicht mehr aktualisieren."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Wählen Sie einen anderen Namen. Darüber zu kopieren ersetzte das Vorhandene ohne Rückfrage."),
         ("Choose another name. Moving over it would delete what is there without asking.", "Wählen Sie einen anderen Namen. Darüber zu verschieben löschte das Vorhandene ohne Rückfrage."),
-        ("Close it with -->.", "Schließen Sie es mit -->."),
+                ("Classes nothing reaches were left out of the package.", "Klassen, die nichts erreicht, wurden nicht in das Paket aufgenommen."),
+("Close it with -->.", "Schließen Sie es mit -->."),
         ("Close it with ]]>.", "Schließen Sie es mit ]]>."),
         ("Close it.", "Schließen Sie es."),
         ("Close the quote.", "Schließen Sie das Anführungszeichen."),
@@ -3251,6 +3255,7 @@ pub mod speech {
         ("Directory", "Verzeichnis"),
         ("Distance", "Abstand"),
         ("Drawn at", "Gezeichnet mit"),
+        ("Dropped", "Weggelassen"),
         ("Element", "Element"),
         ("Ends at", "Endet bei"),
         ("Entries", "Einträge"),
@@ -3281,6 +3286,7 @@ pub mod speech {
         ("Index", "Index"),
         ("Install", "Zu installieren"),
         ("Instruction", "Befehl"),
+        ("Kept", "Behalten"),
         ("Key", "Schlüssel"),
         ("Kind", "Art"),
         ("Known", "Bekannt"),
@@ -3769,7 +3775,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Elija otro alias. Esta compilación no sobrescribe una clave de firma, porque cada aplicación firmada con la antigua ya no se podría actualizar."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Elija otro nombre. Copiar encima sustituiría lo que hay sin preguntar."),
         ("Choose another name. Moving over it would delete what is there without asking.", "Elija otro nombre. Mover encima borraría lo que hay sin preguntar."),
-        ("Close it with -->.", "Ciérrelo con -->."),
+                ("Classes nothing reaches were left out of the package.", "Las clases a las que no llega nada se dejaron fuera del paquete."),
+("Close it with -->.", "Ciérrelo con -->."),
         ("Close it with ]]>.", "Ciérrelo con ]]>."),
         ("Close it.", "Ciérrelo."),
         ("Close the quote.", "Cierre la comilla."),
@@ -4300,6 +4307,7 @@ pub mod speech {
         ("Directory", "Directorio"),
         ("Distance", "Distancia"),
         ("Drawn at", "Dibujado a"),
+        ("Dropped", "Descartadas"),
         ("Element", "Elemento"),
         ("Ends at", "Termina en"),
         ("Entries", "Entradas"),
@@ -4330,6 +4338,7 @@ pub mod speech {
         ("Index", "Índice"),
         ("Install", "Instalar"),
         ("Instruction", "Instrucción"),
+        ("Kept", "Conservadas"),
         ("Key", "Clave"),
         ("Kind", "Tipo"),
         ("Known", "Conocido"),
@@ -4818,7 +4827,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Choisissez un autre alias. Cette compilation n'écrasera pas une clé de signature, parce que toute application signée avec l'ancienne ne pourrait plus être mise à jour."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Choisissez un autre nom. Copier par-dessus remplacerait ce qui est là sans demander."),
         ("Choose another name. Moving over it would delete what is there without asking.", "Choisissez un autre nom. Déplacer par-dessus supprimerait ce qui est là sans demander."),
-        ("Close it with -->.", "Fermez-le avec -->."),
+                ("Classes nothing reaches were left out of the package.", "Les classes que rien n'atteint ont été laissées hors du paquet."),
+("Close it with -->.", "Fermez-le avec -->."),
         ("Close it with ]]>.", "Fermez-le avec ]]>."),
         ("Close it.", "Fermez-le."),
         ("Close the quote.", "Fermez le guillemet."),
@@ -5349,6 +5359,7 @@ pub mod speech {
         ("Directory", "Répertoire"),
         ("Distance", "Distance"),
         ("Drawn at", "Dessiné à"),
+        ("Dropped", "Écartées"),
         ("Element", "Élément"),
         ("Ends at", "Se termine à"),
         ("Entries", "Entrées"),
@@ -5382,6 +5393,7 @@ pub mod speech {
         ("Index", "Index"),
         ("Install", "À installer"),
         ("Instruction", "Instruction"),
+        ("Kept", "Gardées"),
         ("Key", "Clé"),
         ("Kind", "Genre"),
         ("Known", "Connu"),
@@ -5870,7 +5882,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Scegliete un altro alias. Questa compilazione non sovrascriverà una chiave di firma, perché ogni applicazione firmata con quella vecchia non potrebbe più essere aggiornata."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Scegliete un altro nome. Copiarci sopra sostituirebbe ciò che c'è senza chiedere."),
         ("Choose another name. Moving over it would delete what is there without asking.", "Scegliete un altro nome. Spostarci sopra cancellerebbe ciò che c'è senza chiedere."),
-        ("Close it with -->.", "Chiudetelo con -->."),
+                ("Classes nothing reaches were left out of the package.", "Le classi che nulla raggiunge sono state lasciate fuori dal pacchetto."),
+("Close it with -->.", "Chiudetelo con -->."),
         ("Close it with ]]>.", "Chiudetelo con ]]>."),
         ("Close it.", "Chiudetelo."),
         ("Close the quote.", "Chiudete le virgolette."),
@@ -6401,6 +6414,7 @@ pub mod speech {
         ("Directory", "Directory"),
         ("Distance", "Distanza"),
         ("Drawn at", "Disegnato a"),
+        ("Dropped", "Scartate"),
         ("Element", "Elemento"),
         ("Ends at", "Finisce a"),
         ("Entries", "Voci"),
@@ -6434,6 +6448,7 @@ pub mod speech {
         ("Index", "Indice"),
         ("Install", "Da installare"),
         ("Instruction", "Istruzione"),
+        ("Kept", "Tenute"),
         ("Key", "Chiave"),
         ("Kind", "Genere"),
         ("Known", "Noto"),
@@ -6922,7 +6937,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Escolha outro apelido. Esta compilação não sobrescreverá uma chave de assinatura, porque todo aplicativo assinado com a antiga não poderia mais ser atualizado."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Escolha outro nome. Copiar por cima substituiria o que está ali sem perguntar."),
         ("Choose another name. Moving over it would delete what is there without asking.", "Escolha outro nome. Mover por cima apagaria o que está ali sem perguntar."),
-        ("Close it with -->.", "Feche-o com -->."),
+                ("Classes nothing reaches were left out of the package.", "As classes que nada alcança ficaram de fora do pacote."),
+("Close it with -->.", "Feche-o com -->."),
         ("Close it with ]]>.", "Feche-o com ]]>."),
         ("Close it.", "Feche-o."),
         ("Close the quote.", "Feche as aspas."),
@@ -7453,6 +7469,7 @@ pub mod speech {
         ("Directory", "Diretório"),
         ("Distance", "Distância"),
         ("Drawn at", "Desenhado em"),
+        ("Dropped", "Descartadas"),
         ("Element", "Elemento"),
         ("Ends at", "Termina em"),
         ("Entries", "Entradas"),
@@ -7483,6 +7500,7 @@ pub mod speech {
         ("Index", "Índice"),
         ("Install", "A instalar"),
         ("Instruction", "Instrução"),
+        ("Kept", "Mantidas"),
         ("Key", "Chave"),
         ("Kind", "Espécie"),
         ("Known", "Conhecido"),
@@ -7971,7 +7989,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "Выберите другой псевдоним. Эта сборка не станет переписывать ключ подписи, потому что каждое приложение, подписанное старым, больше нельзя было бы обновить."),
         ("Choose another name. Copying over it would replace what is there without asking.", "Выберите другое имя. Копирование поверх заменило бы то, что там есть, не спрашивая."),
         ("Choose another name. Moving over it would delete what is there without asking.", "Выберите другое имя. Перемещение поверх удалило бы то, что там есть, не спрашивая."),
-        ("Close it with -->.", "Закройте это через -->."),
+                ("Classes nothing reaches were left out of the package.", "Классы, до которых ничто не доходит, в пакет не вошли."),
+("Close it with -->.", "Закройте это через -->."),
         ("Close it with ]]>.", "Закройте это через ]]>."),
         ("Close it.", "Закройте это."),
         ("Close the quote.", "Закройте кавычку."),
@@ -8502,6 +8521,7 @@ pub mod speech {
         ("Directory", "Каталог"),
         ("Distance", "Расстояние"),
         ("Drawn at", "Нарисовано при"),
+        ("Dropped", "Отброшено"),
         ("Element", "Элемент"),
         ("Ends at", "Заканчивается на"),
         ("Entries", "Записи"),
@@ -8532,6 +8552,7 @@ pub mod speech {
         ("Index", "Индекс"),
         ("Install", "К установке"),
         ("Instruction", "Инструкция"),
+        ("Kept", "Оставлено"),
         ("Key", "Ключ"),
         ("Kind", "Вид"),
         ("Known", "Известно"),
@@ -9020,7 +9041,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "اختر لقبًا آخر. لن يكتب هذا البناء فوق مفتاح توقيع، لأن كل تطبيق وُقّع بالقديم لن يمكن تحديثه بعد ذلك."),
         ("Choose another name. Copying over it would replace what is there without asking.", "اختر اسمًا آخر. النسخ فوقه سيستبدل ما هو موجود بلا سؤال."),
         ("Choose another name. Moving over it would delete what is there without asking.", "اختر اسمًا آخر. النقل فوقه سيحذف ما هو موجود بلا سؤال."),
-        ("Close it with -->.", "أغلقه بـ -->."),
+                ("Classes nothing reaches were left out of the package.", "الأصناف التي لا يصل إليها شيء تُركت خارج الحزمة."),
+("Close it with -->.", "أغلقه بـ -->."),
         ("Close it with ]]>.", "أغلقه بـ ]]>."),
         ("Close it.", "أغلقه."),
         ("Close the quote.", "أغلق علامة الاقتباس."),
@@ -9551,6 +9573,7 @@ pub mod speech {
         ("Directory", "الدليل"),
         ("Distance", "المسافة"),
         ("Drawn at", "مرسوم عند"),
+        ("Dropped", "المُسقَطة"),
         ("Element", "العنصر"),
         ("Ends at", "ينتهي عند"),
         ("Entries", "المدخلات"),
@@ -9581,6 +9604,7 @@ pub mod speech {
         ("Index", "الفهرس"),
         ("Install", "للتثبيت"),
         ("Instruction", "التعليمة"),
+        ("Kept", "المُبقاة"),
         ("Key", "المفتاح"),
         ("Kind", "الفئة"),
         ("Known", "معروف"),
@@ -10069,7 +10093,8 @@ pub mod speech {
         ("Choose another alias. This build will not overwrite a signing key, because every application signed with the old one could no longer be updated.", "请另选一个别名。此构建不会覆写签名密钥，因为凡是用旧密钥签过名的应用都将无法再更新。"),
         ("Choose another name. Copying over it would replace what is there without asking.", "请另选一个名字。往上面复制会不问一声就替换掉那里的内容。"),
         ("Choose another name. Moving over it would delete what is there without asking.", "请另选一个名字。往上面移动会不问一声就删掉那里的内容。"),
-        ("Close it with -->.", "请用 --> 把它闭合。"),
+                ("Classes nothing reaches were left out of the package.", "没有任何路径能到达的类没有进入这个包。"),
+("Close it with -->.", "请用 --> 把它闭合。"),
         ("Close it with ]]>.", "请用 ]]> 把它闭合。"),
         ("Close it.", "请把它闭合。"),
         ("Close the quote.", "请把引号闭合。"),
@@ -10600,6 +10625,7 @@ pub mod speech {
         ("Directory", "目录"),
         ("Distance", "距离"),
         ("Drawn at", "绘制于"),
+        ("Dropped", "丢弃"),
         ("Element", "元素"),
         ("Ends at", "结束于"),
         ("Entries", "条目"),
@@ -10630,6 +10656,7 @@ pub mod speech {
         ("Index", "索引"),
         ("Install", "待安装"),
         ("Instruction", "指令"),
+        ("Kept", "保留"),
         ("Key", "密钥"),
         ("Kind", "种类"),
         ("Known", "已知"),
@@ -32753,6 +32780,235 @@ public final class {class_name} extends ContentProvider {{
     }
 }
 
+pub mod shrink {
+    use crate::dexwrite::{Class, Operand};
+    use std::collections::BTreeSet;
+
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    pub struct Trimmed {
+        pub kept: usize,
+        pub dropped: usize,
+        pub names: Vec<String>,
+    }
+
+    impl Trimmed {
+        pub fn write_json(&self, w: &mut crate::json::Writer, key: &str) {
+            w.begin_object(Some(key));
+            w.field_u64("kept", self.kept as u64);
+            w.field_u64("dropped", self.dropped as u64);
+            w.begin_array(Some("names"));
+            for one in &self.names {
+                w.element_str(one);
+            }
+            w.end_array();
+            w.end_object();
+        }
+    }
+
+    pub fn qualified(named: &str, package: &str) -> String {
+        if let Some(rest) = named.strip_prefix('.') {
+            format!("{package}.{rest}")
+        } else if named.contains('.') || package.is_empty() {
+            named.to_string()
+        } else {
+            format!("{package}.{named}")
+        }
+    }
+
+    pub fn descriptor_of(named: &str, package: &str) -> String {
+        format!("L{};", qualified(named, package).replace('.', "/"))
+    }
+
+    pub fn roots_from_manifest(manifest: &str, package: &str) -> Vec<String> {
+        let mut sink = crate::diag::Sink::new();
+        let Some(root) = crate::xml::parse(manifest, "AndroidManifest.xml", &mut sink) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        const NAMES_A_CLASS: &[&str] = &[
+            "application",
+            "activity",
+            "activity-alias",
+            "service",
+            "receiver",
+            "provider",
+        ];
+        let mut waiting = vec![&root];
+        while let Some(here) = waiting.pop() {
+            if NAMES_A_CLASS.contains(&here.name.as_str()) {
+                if let Some(named) = here.attribute("android:name") {
+                    if !named.is_empty() {
+                        out.push(descriptor_of(named, package));
+                    }
+                }
+            }
+            for child in &here.children {
+                waiting.push(child);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn named_in(descriptor: &str) -> Option<&str> {
+        descriptor
+            .trim_start_matches('[')
+            .strip_prefix('L')
+            .and_then(|rest| rest.strip_suffix(';'))
+    }
+
+    fn touches(class: &Class, out: &mut BTreeSet<String>) {
+        let mut note = |descriptor: &str| {
+            if let Some(held) = named_in(descriptor) {
+                out.insert(held.to_string());
+            }
+        };
+        note(&class.superclass);
+        for one in &class.interfaces {
+            note(one);
+        }
+        for one in &class.annotations {
+            note(&one.descriptor);
+        }
+        for field in class
+            .static_fields
+            .iter()
+            .chain(class.instance_fields.iter())
+        {
+            note(&field.reference.class);
+            note(&field.reference.descriptor);
+        }
+        for method in class
+            .direct_methods
+            .iter()
+            .chain(class.virtual_methods.iter())
+        {
+            note(&method.reference.class);
+            note(&method.reference.return_type);
+            for one in &method.reference.parameters {
+                note(one);
+            }
+            for one in &method.tries {
+                for (caught, _) in &one.catches {
+                    if let Some(held) = caught {
+                        note(held);
+                    }
+                }
+            }
+            for one in &method.instructions {
+                match &one.operand {
+                    Operand::Method(reference) => {
+                        note(&reference.class);
+                        note(&reference.return_type);
+                        for held in &reference.parameters {
+                            note(held);
+                        }
+                    }
+                    Operand::Field(reference) => {
+                        note(&reference.class);
+                        note(&reference.descriptor);
+                    }
+                    Operand::Type(held) => note(held),
+                    Operand::Text(held) => {
+                        if held.contains('.') && !held.contains(' ') {
+                            note(&format!("L{};", held.replace('.', "/")));
+                        }
+                    }
+                    Operand::None => {}
+                }
+            }
+        }
+    }
+
+    pub fn reachable(classes: &[Class], roots: &[String]) -> BTreeSet<String> {
+        let by_name: std::collections::BTreeMap<&str, &Class> = classes
+            .iter()
+            .filter_map(|one| named_in(&one.descriptor).map(|held| (held, one)))
+            .collect();
+
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut waiting: Vec<String> = Vec::new();
+        for one in roots {
+            if let Some(held) = named_in(one) {
+                waiting.push(held.to_string());
+            }
+        }
+        for one in classes {
+            let Some(held) = named_in(&one.descriptor) else {
+                continue;
+            };
+            if held.rsplit('/').next() == Some(crate::seal::CLASS) {
+                waiting.push(held.to_string());
+            }
+        }
+
+        while let Some(here) = waiting.pop() {
+            if !seen.insert(here.clone()) {
+                continue;
+            }
+            let Some(class) = by_name.get(here.as_str()) else {
+                continue;
+            };
+            let mut found = BTreeSet::new();
+            touches(class, &mut found);
+            for one in found {
+                if !seen.contains(&one) {
+                    waiting.push(one);
+                }
+            }
+        }
+
+        seen
+    }
+
+    pub fn apply(classes: Vec<Class>, roots: &[String]) -> (Vec<Class>, Trimmed) {
+        if roots.is_empty() {
+            let kept = classes.len();
+            return (
+                classes,
+                Trimmed {
+                    kept,
+                    dropped: 0,
+                    names: Vec::new(),
+                },
+            );
+        }
+        let seen = reachable(&classes, roots);
+        let anchored = classes
+            .iter()
+            .filter_map(|one| named_in(&one.descriptor))
+            .any(|held| seen.contains(held));
+        if !anchored {
+            let kept = classes.len();
+            return (
+                classes,
+                Trimmed {
+                    kept,
+                    dropped: 0,
+                    names: Vec::new(),
+                },
+            );
+        }
+        let mut names = Vec::new();
+        let mut out = Vec::with_capacity(classes.len());
+        for one in classes {
+            let held = named_in(&one.descriptor).map(|held| held.to_string());
+            match held {
+                Some(named) if !seen.contains(&named) => names.push(named),
+                _ => out.push(one),
+            }
+        }
+        names.sort();
+        let trimmed = Trimmed {
+            kept: out.len(),
+            dropped: names.len(),
+            names,
+        };
+        (out, trimmed)
+    }
+}
+
 pub mod settings {
     use crate::diag::{Diagnostic, Severity};
     use crate::json::{Json, Writer};
@@ -39291,6 +39547,8 @@ pub mod builder {
         pub library_packages: Vec<String>,
 
         pub sealed: Option<String>,
+
+        pub shrink: bool,
     }
 
     pub struct Icons {
@@ -39738,6 +39996,7 @@ pub mod builder {
             library_resources: Vec::new(),
             library_packages: Vec::new(),
             sealed: None,
+            shrink: true,
         }
     }
 
@@ -39821,6 +40080,8 @@ pub mod builder {
             })?
             .to_string();
 
+        let package = package_name(&root);
+        let activity = crate::shrink::qualified(&activity, &package);
         let descriptor = format!("L{};", activity.replace('.', "/"));
         Ok(Project {
             manifest: manifest.to_string(),
@@ -39856,6 +40117,7 @@ pub mod builder {
             library_resources: Vec::new(),
             library_packages: Vec::new(),
             sealed: None,
+            shrink: true,
         })
     }
 
@@ -39872,14 +40134,16 @@ pub mod builder {
     pub fn sealed_project(root: &str, fingerprint: Option<&str>) -> Result<Project, Diagnostic> {
         crate::progress::enter_checked("project")?;
         let manifest = crate::scaffold::read_manifest(root)?;
-        let manifest = match crate::settings::held(root)? {
-            Some(settings) => crate::settings::over_manifest(&manifest, &settings),
+        let held = crate::settings::held(root)?;
+        let manifest = match &held {
+            Some(settings) => crate::settings::over_manifest(&manifest, settings),
             None => manifest,
         };
 
         let brought = brought_by_libraries(root)?;
         let manifest = merged_manifest(&manifest, &brought.manifests)?;
         let mut project = from_manifest(&manifest)?;
+        project.shrink = held.as_ref().map(|one| one.shrink).unwrap_or(true);
         project.icon = crate::scaffold::icon_bytes(root);
         project.launcher = crate::scaffold::launcher_files(root);
         project.values = crate::scaffold::values_files(root);
@@ -40899,7 +41163,28 @@ public final class R {{
         }
         if !project.code.is_empty() {
             crate::progress::enter_checked("dex")?;
-            for (which, held) in crate::dexwrite::write_all(&project.code, &project.references)?
+            let package = package_of(&project.manifest).unwrap_or_default();
+            let written = if project.shrink {
+                let roots = crate::shrink::roots_from_manifest(&project.manifest, &package);
+                let (kept, trimmed) = crate::shrink::apply(project.code.clone(), &roots);
+                if trimmed.dropped > 0 {
+                    sink.emit(
+                        crate::diag::Diagnostic::new(
+                            "EB070",
+                            Severity::Info,
+                            FailureClass::Success,
+                            "core.shrink",
+                            "Classes nothing reaches were left out of the package.",
+                        )
+                        .with_context(format!("Kept: {}", trimmed.kept))
+                        .with_context(format!("Dropped: {}", trimmed.dropped)),
+                    );
+                }
+                kept
+            } else {
+                project.code.clone()
+            };
+            for (which, held) in crate::dexwrite::write_all(&written, &project.references)?
                 .into_iter()
                 .enumerate()
             {
@@ -49876,6 +50161,137 @@ public class Written {
     }
 
     #[test]
+    fn a_class_nothing_reaches_does_not_enter_the_package() {
+        const MAIN: &str = r#"
+package com.tr.yt.lean;
+
+import android.app.Activity;
+import android.os.Bundle;
+
+public final class MainActivity extends Activity {
+
+    @Override
+    protected void onCreate(Bundle state) {
+        super.onCreate(state);
+        Used one = new Used();
+        one.count();
+    }
+}
+"#;
+        const USED: &str = r#"
+package com.tr.yt.lean;
+
+final class Used {
+
+    int count() {
+        return 1;
+    }
+}
+"#;
+        const NEVER: &str = r#"
+package com.tr.yt.lean;
+
+final class NeverCalled {
+
+    int count() {
+        return 2;
+    }
+}
+"#;
+
+        let directory = temp_directory("omni-lean");
+        let root = directory.join("Lean");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt.lean".to_string(),
+                label: "Lean".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let sources = root.join("Java");
+        std::fs::create_dir_all(&sources).unwrap();
+        for (name, text) in [
+            ("MainActivity.java", MAIN),
+            ("Used.java", USED),
+            ("NeverCalled.java", NEVER),
+        ] {
+            std::fs::write(sources.join(name), text.trim_start()).unwrap();
+        }
+
+        let project = super::builder::from_project(&folder).expect("it compiles");
+        let named: Vec<&str> = project
+            .code
+            .iter()
+            .map(|one| one.descriptor.as_str())
+            .collect();
+        assert!(
+            named.contains(&"Lcom/tr/yt/lean/NeverCalled;"),
+            "it is compiled: {named:?}"
+        );
+
+        let package = "com.tr.yt.lean";
+        let roots = super::shrink::roots_from_manifest(&project.manifest, package);
+        assert!(
+            roots.contains(&"Lcom/tr/yt/lean/MainActivity;".to_string()),
+            "the activity is a root: {roots:?}"
+        );
+
+        let (kept, trimmed) = super::shrink::apply(project.code.clone(), &roots);
+        let left: Vec<&str> = kept.iter().map(|one| one.descriptor.as_str()).collect();
+        assert!(
+            left.contains(&"Lcom/tr/yt/lean/MainActivity;"),
+            "the activity stays: {left:?}"
+        );
+        assert!(
+            left.contains(&"Lcom/tr/yt/lean/Used;"),
+            "what it reaches stays: {left:?}"
+        );
+        assert!(
+            !left.contains(&"Lcom/tr/yt/lean/NeverCalled;"),
+            "what nothing reaches goes: {left:?}"
+        );
+        assert!(
+            trimmed
+                .names
+                .contains(&"com/tr/yt/lean/NeverCalled".to_string()),
+            "and it is named: {:?}",
+            trimmed.names
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn nothing_is_dropped_when_there_is_no_root_to_start_from() {
+        let held = vec![crate::dexwrite::Class {
+            descriptor: "Lcom/tr/yt/only/Alone;".to_string(),
+            superclass: "Ljava/lang/Object;".to_string(),
+            interfaces: Vec::new(),
+            access_flags: crate::dexwrite::ACC_PUBLIC,
+            source_file: None,
+            annotations: Vec::new(),
+            direct_methods: Vec::new(),
+            virtual_methods: Vec::new(),
+            static_fields: Vec::new(),
+            instance_fields: Vec::new(),
+        }];
+        let (kept, trimmed) = super::shrink::apply(held, &[]);
+        assert_eq!(
+            kept.len(),
+            1,
+            "with no roots nothing is reachable, so nothing goes"
+        );
+        assert_eq!(trimmed.dropped, 0);
+    }
+
+    #[test]
     fn a_project_of_several_files_becomes_a_package_that_verifies() {
         const MAIN: &str = r#"
 package com.tr.yt.several;
@@ -54722,6 +55138,7 @@ public final class MainActivity extends Activity {
             library_resources: Vec::new(),
             library_packages: Vec::new(),
             sealed: None,
+            shrink: true,
         }
     }
 
@@ -55387,6 +55804,7 @@ public final class MainActivity extends Activity {
                 library_resources: Vec::new(),
                 library_packages: Vec::new(),
                 sealed: None,
+                shrink: true,
             };
             let mut sink = Sink::new();
             let error = super::builder::build(&project, &key, 1_787_000_000, &mut sink)
