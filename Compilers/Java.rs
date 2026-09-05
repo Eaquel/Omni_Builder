@@ -18719,6 +18719,88 @@ fn method_shape(unit: &Unit, method: &Method) -> u16 {
     flags
 }
 
+fn everything_abstract_is_implemented(
+    unit: &Unit,
+    superclass: &str,
+    interfaces: &[String],
+    classpath: &Classpath,
+) -> Result<(), Diagnostic> {
+    fn walk(
+        name: &str,
+        classpath: &Classpath,
+        seen: &mut std::collections::BTreeSet<String>,
+        required: &mut std::collections::BTreeSet<(String, usize)>,
+        provided: &mut std::collections::BTreeSet<(String, usize)>,
+    ) {
+        if name == "java/lang/Object" || !seen.insert(name.to_string()) {
+            return;
+        }
+        let Some(known) = classpath.get(name) else {
+            return;
+        };
+        for method in &known.methods {
+            if method.static_ || method.name.starts_with('<') {
+                continue;
+            }
+            let mark = (method.name.clone(), method.parameters.len());
+            if method.abstract_ {
+                required.insert(mark);
+            } else {
+                provided.insert(mark);
+            }
+        }
+        if let Some(above) = &known.superclass {
+            walk(above, classpath, seen, required, provided);
+        }
+        for one in &known.interfaces {
+            walk(one, classpath, seen, required, provided);
+        }
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut required = std::collections::BTreeSet::new();
+    let mut provided = std::collections::BTreeSet::new();
+
+    for method in &unit.methods {
+        if method.constructor || method.name.starts_with('<') {
+            continue;
+        }
+        if method.body.is_some() || method.modifiers.native_ {
+            provided.insert((method.name.clone(), method.parameters.len()));
+        }
+    }
+
+    walk(
+        superclass,
+        classpath,
+        &mut seen,
+        &mut required,
+        &mut provided,
+    );
+    for one in interfaces {
+        walk(one, classpath, &mut seen, &mut required, &mut provided);
+    }
+
+    let missing: Vec<&(String, usize)> = required.difference(&provided).collect();
+    let Some((name, count)) = missing.first() else {
+        return Ok(());
+    };
+
+    let here = unit.internal_name().replace('/', ".");
+    let _ = count;
+    Err(at(
+        "EJ257",
+        1,
+        1,
+        format!(
+            "`{here}` is not abstract and does not implement `{name}`, \
+             a method its supertypes leave abstract."
+        ),
+    )
+    .with_context(format!("Method: {name}"))
+    .with_suggestion("Give the class a body for that method, or mark the class abstract."))
+}
+
 pub fn compile_unit(
     unit: &Unit,
     classpath: &Classpath,
@@ -18772,6 +18854,10 @@ pub fn compile_unit_in_nest(
             &mut made,
         );
         interfaces.push(probe.resolve_class(name, 1)?);
+    }
+
+    if unit.shape == Shape::Class && !unit.modifiers.abstract_ {
+        everything_abstract_is_implemented(unit, &superclass, &interfaces, classpath)?;
     }
 
     let mut field_bytes = Vec::new();
@@ -19662,6 +19748,100 @@ mod tests {
             produced.iter().map(|(name, _)| name).collect::<Vec<_>>()
         );
         Ok(produced.remove(0))
+    }
+
+    #[test]
+    fn a_concrete_class_must_answer_every_abstract_method() {
+        let source = r#"
+            package com.my.app;
+
+            interface Shape {
+                double area();
+                double around();
+            }
+
+            final class Circle implements Shape {
+                private final double radius;
+
+                Circle(double radius) {
+                    this.radius = radius;
+                }
+
+                public double area() {
+                    return 3.14159 * radius * radius;
+                }
+            }
+        "#;
+        let error = compile(source, &empty()).expect_err("around() is left unimplemented");
+        assert_eq!(error.code, "EJ257");
+        assert!(
+            error.message.contains("around"),
+            "the refusal names the method it is missing: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_class_that_answers_everything_is_accepted() {
+        let source = r#"
+            package com.my.app;
+
+            interface Shape {
+                double area();
+                double around();
+            }
+
+            final class Square implements Shape {
+                private final double side;
+
+                Square(double side) {
+                    this.side = side;
+                }
+
+                public double area() {
+                    return side * side;
+                }
+
+                public double around() {
+                    return side * 4.0;
+                }
+            }
+        "#;
+        compile(source, &empty()).expect("every method is answered");
+    }
+
+    #[test]
+    fn a_wrong_number_of_parameters_does_not_answer_an_abstract_method() {
+        let source = r#"
+            package com.my.app;
+
+            interface Sink {
+                void take(int one, int two);
+            }
+
+            final class Drain implements Sink {
+                public void take(int one) {
+                }
+            }
+        "#;
+        let error =
+            compile(source, &empty()).expect_err("take(int) does not answer take(int, int)");
+        assert_eq!(error.code, "EJ257");
+    }
+
+    #[test]
+    fn an_abstract_class_need_not_answer_everything() {
+        let source = r#"
+            package com.my.app;
+
+            interface Shape {
+                double area();
+            }
+
+            abstract class Partial implements Shape {
+            }
+        "#;
+        compile(source, &empty()).expect("an abstract class may leave it open");
     }
 
     #[test]

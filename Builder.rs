@@ -883,20 +883,45 @@ pub mod diag {
             w.end_array();
             w.end_object();
         }
+
+        pub fn write_body(&self, w: &mut Writer, done: &str, held: bool) {
+            w.field_bool(done, held);
+            w.field_str("code", &self.code);
+            w.field_str("error", &crate::speech::sentence(&self.message));
+            w.field_str("english", &self.message);
+            if let Some(suggestion) = &self.suggestion {
+                w.field_str("suggestion", &crate::speech::sentence(suggestion));
+            }
+            w.begin_array(Some("context"));
+            for line in &self.context {
+                w.element_str(&crate::speech::detail(line));
+            }
+            w.end_array();
+        }
     }
 
     impl core::fmt::Display for Diagnostic {
         fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            write!(f, "{} [{}]", self.code, self.severity)?;
+            write!(
+                f,
+                "{} [{}]",
+                self.code,
+                crate::speech::sentence(self.severity.as_str())
+            )?;
             if let Some(loc) = &self.location {
                 write!(f, " {}", loc)?;
             }
-            write!(f, "\n{}", self.message)?;
+            write!(f, "\n{}", crate::speech::sentence(&self.message))?;
             for line in &self.context {
-                write!(f, "\n  {}", line)?;
+                write!(f, "\n  {}", crate::speech::detail(line))?;
             }
             if let Some(s) = &self.suggestion {
-                write!(f, "\nSuggestion: {}", s)?;
+                write!(
+                    f,
+                    "\n{}: {}",
+                    crate::speech::sentence("Suggestion"),
+                    crate::speech::sentence(s)
+                )?;
             }
             Ok(())
         }
@@ -1398,7 +1423,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Diğer her yerel ayar, geri düşülen ayarın çevirisidir. Dili seçilenlerden hiçbiri olmayan bir cihaz o klasörü okur; dolayısıyla onu dışarıda bırakmak, dünyadaki telefonların çoğunda adsız bir uygulama yayımlamak olurdu."),
         ("Every resource is declared as <type name=\"…\">.", "Her kaynak <tür name=\"…\"> olarak bildirilir."),
         ("Fix what those nodes reported. This node has no problem of its own.", "O düğümlerin bildirdiklerini giderin. Bu düğümün kendine ait bir sorunu yok."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Buna başka bir ad verin. Buraya yazmak, ikinci bir projenin dosyalarını birincininkilerin arasına koyar ve birinciyi adlandıran bildirimin üzerine yazılırdı."),
+        ("Give the class a body for that method, or mark the class abstract.", "O yönteme sınıfta bir gövde ver ya da sınıfı abstract olarak işaretle."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Buna başka bir ad verin. Buraya yazmak, ikinci bir projenin dosyalarını birincininkilerin arasına koyar ve birinciyi adlandıran bildirimin üzerine yazılırdı."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play, sürüm kodu bir öncekinden büyük olmayan yüklemeleri reddeder; bu yüzden bu sayı yalnızca artar."),
         ("Google Play requires a key valid until at least 22 October 2033.", "Google Play, en az 22 Ekim 2033'e kadar geçerli bir anahtar ister."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Bu eklentinin gerçekten ihtiyacı varsa yetkiyi ona açıkça verin."),
@@ -2343,7 +2369,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Jedes andere Gebietsschema ist eine Übersetzung des Rückfalls. Ein Gerät, dessen Sprache keine der gewählten ist, liest jenen Ordner; ihn wegzulassen lieferte auf den meisten Telefonen der Welt eine Anwendung ohne Namen aus."),
         ("Every resource is declared as <type name=\"…\">.", "Jede Ressource wird als <typ name=\"…\"> deklariert."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Beheben Sie, was jene Knoten gemeldet haben. Dieser Knoten hat kein eigenes Problem."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Geben Sie diesem einen anderen Namen. Hierher zu schreiben legte die Dateien eines zweiten Projekts zwischen die des ersten, und das Manifest, das das erste benennt, würde ersetzt."),
+        ("Give the class a body for that method, or mark the class abstract.", "Gib der Klasse einen Rumpf für diese Methode, oder markiere die Klasse als abstract."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Geben Sie diesem einen anderen Namen. Hierher zu schreiben legte die Dateien eines zweiten Projekts zwischen die des ersten, und das Manifest, das das erste benennt, würde ersetzt."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play lehnt einen Upload ab, dessen Versionscode nicht größer als der vorige ist; diese Zahl steigt also nur."),
         ("Google Play requires a key valid until at least 22 October 2033.", "Google Play verlangt einen Schlüssel, der mindestens bis zum 22. Oktober 2033 gültig ist."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Erteilen Sie diesem Plugin die Befugnis ausdrücklich, wenn es sie wirklich braucht."),
@@ -3288,7 +3315,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Cada otro ajuste regional es una traducción del de reserva. Un dispositivo cuyo idioma no es ninguno de los elegidos lee esa carpeta, así que dejarla fuera entregaría una aplicación sin nombre en la mayoría de los teléfonos del mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Cada recurso se declara como <tipo name=\"…\">."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Corrija lo que informaron esos nodos. Este nodo no tiene ningún problema propio."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Dé otro nombre a este. Escribir aquí pondría los archivos de un segundo proyecto entre los del primero, y se sustituiría el manifiesto que nombra al primero."),
+        ("Give the class a body for that method, or mark the class abstract.", "Da a la clase un cuerpo para ese método, o marca la clase como abstract."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Dé otro nombre a este. Escribir aquí pondría los archivos de un segundo proyecto entre los del primero, y se sustituiría el manifiesto que nombra al primero."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play rechaza una subida cuyo código de versión no sea mayor que el anterior, así que este número solo sube."),
         ("Google Play requires a key valid until at least 22 October 2033.", "Google Play exige una clave válida al menos hasta el 22 de octubre de 2033."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Conceda la capacidad a este complemento de forma explícita si de verdad la necesita."),
@@ -4233,7 +4261,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toute autre locale est une traduction de la locale de repli. Un appareil dont la langue n'est aucune des langues choisies lit ce dossier ; l'omettre livrerait donc une application sans nom sur la plupart des téléphones du monde."),
         ("Every resource is declared as <type name=\"…\">.", "Chaque ressource est déclarée sous la forme <type name=\"…\">."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Corrigez ce que ces nœuds ont signalé. Ce nœud n'a aucun problème propre."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Donnez-lui un autre nom. Écrire ici mettrait les fichiers d'un second projet parmi ceux du premier, et le manifeste qui nomme le premier serait celui qu'on remplace."),
+        ("Give the class a body for that method, or mark the class abstract.", "Donnez à la classe un corps pour cette méthode, ou marquez la classe comme abstract."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Donnez-lui un autre nom. Écrire ici mettrait les fichiers d'un second projet parmi ceux du premier, et le manifeste qui nomme le premier serait celui qu'on remplace."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play refuse un envoi dont le code de version n'est pas supérieur au précédent ; ce nombre ne fait donc que croître."),
         ("Google Play requires a key valid until at least 22 October 2033.", "Google Play exige une clé valide au moins jusqu'au 22 octobre 2033."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Accordez explicitement cette permission à ce greffon s'il en a réellement besoin."),
@@ -5181,7 +5210,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Ogni altra locale è una traduzione di quella di ripiego. Un dispositivo la cui lingua non è nessuna di quelle scelte legge quella cartella, quindi ometterla distribuirebbe un'applicazione senza nome sulla maggior parte dei telefoni del mondo."),
         ("Every resource is declared as <type name=\"…\">.", "Ogni risorsa è dichiarata come <tipo name=\"…\">."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Correggete ciò che quei nodi hanno segnalato. Questo nodo non ha alcun problema proprio."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Date a questo un altro nome. Scrivere qui metterebbe i file di un secondo progetto tra quelli del primo, e il manifesto che nomina il primo sarebbe quello sostituito."),
+        ("Give the class a body for that method, or mark the class abstract.", "Dai alla classe un corpo per quel metodo, oppure segna la classe come abstract."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Date a questo un altro nome. Scrivere qui metterebbe i file di un secondo progetto tra quelli del primo, e il manifesto che nomina il primo sarebbe quello sostituito."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play rifiuta un caricamento il cui codice di versione non è maggiore del precedente, quindi questo numero può solo salire."),
         ("Google Play requires a key valid until at least 22 October 2033.", "Google Play richiede una chiave valida almeno fino al 22 ottobre 2033."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Concedete esplicitamente la facoltà a questo plugin se ne ha davvero bisogno."),
@@ -6129,7 +6159,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Toda outra localidade é uma tradução da de recurso. Um dispositivo cujo idioma não é nenhum dos escolhidos lê essa pasta, então omiti-la entregaria um aplicativo sem nome na maioria dos telefones do mundo."),
         ("Every resource is declared as <type name=\"…\">.", "Cada recurso é declarado como <tipo name=\"…\">."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Corrija o que aqueles nós relataram. Este nó não tem problema próprio."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Dê a este outro nome. Escrever aqui poria os arquivos de um segundo projeto entre os do primeiro, e o manifesto que nomeia o primeiro seria o substituído."),
+        ("Give the class a body for that method, or mark the class abstract.", "Dê à classe um corpo para esse método, ou marque a classe como abstract."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Dê a este outro nome. Escrever aqui poria os arquivos de um segundo projeto entre os do primeiro, e o manifesto que nomeia o primeiro seria o substituído."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "O Google Play recusa um envio cujo código de versão não é maior que o anterior, então esse número só sobe."),
         ("Google Play requires a key valid until at least 22 October 2033.", "O Google Play exige uma chave válida pelo menos até 22 de outubro de 2033."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Conceda a faculdade a este plugin explicitamente se ele realmente precisar dela."),
@@ -7074,7 +7105,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "Каждая другая локаль — перевод запасной. Устройство, язык которого не входит в выбранные, читает эту папку, поэтому её пропуск выпустил бы приложение без имени на большинстве телефонов мира."),
         ("Every resource is declared as <type name=\"…\">.", "Каждый ресурс объявляется как <тип name=\"…\">."),
         ("Fix what those nodes reported. This node has no problem of its own.", "Исправьте то, о чём сообщили те узлы. У этого узла собственной проблемы нет."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Дайте этому другое имя. Запись сюда положила бы файлы второго проекта среди файлов первого, а манифест, называющий первый, оказался бы заменённым."),
+        ("Give the class a body for that method, or mark the class abstract.", "Дайте классу тело для этого метода или пометьте класс как abstract."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "Дайте этому другое имя. Запись сюда положила бы файлы второго проекта среди файлов первого, а манифест, называющий первый, оказался бы заменённым."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play отклоняет загрузку, у которой код версии не больше предыдущего, поэтому это число только растёт."),
         ("Google Play requires a key valid until at least 22 October 2033.", "Google Play требует ключ, действительный не менее чем до 22 октября 2033 года."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "Явно выдайте это полномочие этому подключаемому модулю, если оно ему действительно нужно."),
@@ -8019,7 +8051,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "كل لغة محلية أخرى ترجمة للغة الاحتياطية. والجهاز الذي لا تكون لغته من المختارة يقرأ ذلك المجلد، فحذفه سيطرح تطبيقًا بلا اسم على أكثر هواتف العالم."),
         ("Every resource is declared as <type name=\"…\">.", "يُعلن كل مورد على صورة <نوع name=\"…\">."),
         ("Fix what those nodes reported. This node has no problem of its own.", "أصلح ما أبلغت عنه تلك العقد. وليست لهذه العقدة مشكلة خاصة بها."),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "أعطِ هذا اسمًا آخر. الكتابة هنا ستضع ملفات مشروع ثانٍ بين ملفات الأول، والبيان الذي يسمّي الأول هو الذي سيُستبدل."),
+        ("Give the class a body for that method, or mark the class abstract.", "امنح الصنف جسمًا لتلك الطريقة، أو ضع علامة abstract على الصنف."),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "أعطِ هذا اسمًا آخر. الكتابة هنا ستضع ملفات مشروع ثانٍ بين ملفات الأول، والبيان الذي يسمّي الأول هو الذي سيُستبدل."),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "يرفض Google Play رفعًا لا يكون رمز إصداره أكبر من سابقه، فهذا العدد لا يزيد إلا صعودًا."),
         ("Google Play requires a key valid until at least 22 October 2033.", "يشترط Google Play مفتاحًا صالحًا حتى 22 أكتوبر 2033 على الأقل."),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "امنح هذه الصلاحية لهذه الإضافة صراحةً إن كانت تحتاجها حقًا."),
@@ -8964,7 +8997,8 @@ pub mod speech {
         ("Every other locale is a translation of the fallback one. A device whose language is none of the chosen ones reads that folder, so leaving it out would ship an application with no name on most of the world's phones.", "其余每个区域设置都是回退区域设置的译文。语言不在所选之列的设备读的正是那个文件夹，所以略去它，就等于在世界上多数手机上交付一个没有名字的应用。"),
         ("Every resource is declared as <type name=\"…\">.", "每个资源都声明为 <类型 name=\"…\">。"),
         ("Fix what those nodes reported. This node has no problem of its own.", "请修好那些节点报告的问题。这个节点本身没有问题。"),
-        ("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "请给这个另取一个名字。写到这里会把第二个项目的文件混进第一个项目里，而被替换掉的正是指名第一个项目的那份清单。"),
+        ("Give the class a body for that method, or mark the class abstract.", "给这个类为该方法写一个方法体，或把这个类标记为 abstract。"),
+("Give this one another name. Writing here would put a second project's files among the first one's, and the manifest that names the first would be the one replaced.", "请给这个另取一个名字。写到这里会把第二个项目的文件混进第一个项目里，而被替换掉的正是指名第一个项目的那份清单。"),
         ("Google Play refuses an upload whose version code is not larger than the one before it, so this number only ever goes up.", "Google Play 会拒绝版本号不大于前一次的上传，所以这个数字只增不减。"),
         ("Google Play requires a key valid until at least 22 October 2033.", "Google Play 要求密钥至少在 2033 年 10 月 22 日之前有效。"),
         ("Grant the capability to this plugin explicitly if it genuinely needs it.", "如果这个插件确实需要该权能，请显式地授予它。"),
@@ -38894,9 +38928,10 @@ pub mod builder {
             }
             if let Some(refusal) = &self.refusal {
                 w.field_str("code", &refusal.code);
-                w.field_str("error", &refusal.message);
+                w.field_str("error", &crate::speech::sentence(&refusal.message));
+                w.field_str("english", &refusal.message);
                 if let Some(suggestion) = &refusal.suggestion {
-                    w.field_str("suggestion", suggestion);
+                    w.field_str("suggestion", &crate::speech::sentence(suggestion));
                 }
                 if let Some(place) = &refusal.location {
                     w.begin_object(Some("location"));
@@ -38907,7 +38942,7 @@ pub mod builder {
                 }
                 w.begin_array(Some("context"));
                 for line in &refusal.context {
-                    w.element_str(line);
+                    w.element_str(&crate::speech::detail(line));
                 }
                 w.end_array();
             }
@@ -43081,16 +43116,7 @@ pub mod ffi {
                     made.write_json(&mut w, "layout");
                 }
                 Err(error) => {
-                    w.field_bool("created", false);
-                    w.field_str("error", &error.message);
-                    if let Some(suggestion) = &error.suggestion {
-                        w.field_str("suggestion", suggestion);
-                    }
-                    w.begin_array(Some("context"));
-                    for line in &error.context {
-                        w.element_str(line);
-                    }
-                    w.end_array();
+                    error.write_body(&mut w, "created", false);
                 }
             }
             w.end_object();
@@ -43215,17 +43241,7 @@ pub mod ffi {
     }
 
     fn write_failure(w: &mut crate::json::Writer, done: &str, error: &crate::diag::Diagnostic) {
-        w.field_bool(done, false);
-        w.field_str("code", &error.code);
-        w.field_str("error", &error.message);
-        if let Some(suggestion) = &error.suggestion {
-            w.field_str("suggestion", suggestion);
-        }
-        w.begin_array(Some("context"));
-        for line in &error.context {
-            w.element_str(line);
-        }
-        w.end_array();
+        error.write_body(w, done, false);
     }
 
     #[no_mangle]
@@ -46994,6 +47010,37 @@ mod tests {
             "the English is kept beside it: {turkish}"
         );
         assert_eq!(super::speech::chosen(), "en");
+    }
+
+    #[test]
+    fn the_body_the_app_reads_is_written_in_the_chosen_language() {
+        let _turn = super::progress::one_at_a_time();
+        let refusal = Diagnostic::new(
+            "EM001",
+            Severity::Error,
+            FailureClass::UserError,
+            "core.manifest",
+            "The manifest could not be read.",
+        )
+        .with_context("Path: /a/b");
+
+        super::speech::choose("tr");
+        let mut w = super::json::Writer::new();
+        w.begin_object(None);
+        refusal.write_body(&mut w, "created", false);
+        w.end_object();
+        let body = w.finish();
+        super::speech::choose("en");
+
+        assert!(
+            body.contains("Bildirim okunamadı."),
+            "the error the app reads is translated: {body}"
+        );
+        assert!(body.contains("Yol: /a/b"), "the context labels too: {body}");
+        assert!(
+            body.contains("\"english\""),
+            "the English is carried alongside for the log: {body}"
+        );
     }
 
     #[test]
