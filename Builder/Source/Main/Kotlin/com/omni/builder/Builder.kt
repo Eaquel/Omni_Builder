@@ -1105,7 +1105,6 @@ object Preferences {
     private const val THEME = "theme"
     private const val SIGNING_KEY = "signing_key"
     private const val TIMINGS = "build_timings"
-    private const val WIRELESS = "wireless_debugging"
     private const val NEW_PACKAGE = "new_package"
     private const val NEW_MIN_SDK = "new_min_sdk"
     private const val NEW_TARGET_SDK = "new_target_sdk"
@@ -1147,13 +1146,6 @@ object Preferences {
 
     fun setNewPlatforms(context: Context, minimum: Int, target: Int) {
         store(context).edit().putInt(NEW_MIN_SDK, minimum).putInt(NEW_TARGET_SDK, target).apply()
-    }
-
-    fun keepsWirelessDebugging(context: Context): Boolean =
-        store(context).getBoolean(WIRELESS, false)
-
-    fun keepWirelessDebugging(context: Context, wanted: Boolean) {
-        store(context).edit().putBoolean(WIRELESS, wanted).apply()
     }
 
     fun palette(context: Context): Palette =
@@ -1704,290 +1696,6 @@ internal class Sequences(private val screen: Screenful, private val reply: (Stri
     }
 }
 
-internal class TerminalView(
-    context: Context,
-    private var palette: Palette,
-    private val onKey: (ByteArray) -> Unit,
-) : View(context) {
-
-    val screen = Screenful(24, 80)
-    private val reader = Sequences(screen) { said -> onKey(said.toByteArray(Charsets.UTF_8)) }
-    private var lookingBack = 0
-    private var dragFrom = 0f
-    private var dragged = 0f
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { typeface = Type.data }
-    private var cellWidth = 0f
-    private var cellHeight = 0f
-    private var baseline = 0f
-    private var lettering = 0f
-    private var onResize: ((Int, Int) -> Unit)? = null
-
-    init {
-        isFocusableInTouchMode = true
-        lettering = inPixels(13f)
-        measureCell()
-    }
-
-    fun repaint(next: Palette) {
-        palette = next
-        invalidate()
-    }
-
-    fun sizeText(sp: Float) {
-        lettering = inPixels(sp.coerceIn(8f, 24f))
-        measureCell()
-        fit(width, height)
-        invalidate()
-    }
-
-    fun textSizeSp(): Float = lettering / inPixels(1f)
-
-    private fun inPixels(sp: Float): Float = TypedValue.applyDimension(
-        TypedValue.COMPLEX_UNIT_SP,
-        sp,
-        resources.displayMetrics,
-    )
-
-    fun whenResized(what: (Int, Int) -> Unit) {
-        onResize = what
-    }
-
-    fun accept(bytes: ByteArray, length: Int) {
-        reader.feed(bytes, length)
-        lookingBack = 0
-        postInvalidate()
-    }
-
-    private fun rowAt(r: Int): Array<Screenful.Cell>? {
-        val back = lookingBack
-        if (back == 0) {
-            return screen.lines.getOrNull(r)
-        }
-        val from = screen.history.size - back
-        val at = from + r
-        return if (at < screen.history.size) {
-            screen.history.getOrNull(at)
-        } else {
-            screen.lines.getOrNull(at - screen.history.size)
-        }
-    }
-
-    @Suppress("ClickableViewAccessibility")
-    override fun onTouchEvent(event: MotionEvent): Boolean {
-        when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> {
-                dragFrom = event.y
-                dragged = 0f
-                return true
-            }
-            MotionEvent.ACTION_MOVE -> {
-                if (screen.onAlternate || cellHeight <= 0f) {
-                    return true
-                }
-                val moved = event.y - dragFrom
-                dragged += kotlin.math.abs(moved)
-                val steps = (moved / cellHeight).toInt()
-                if (steps != 0) {
-                    dragFrom = event.y
-                    lookingBack = (lookingBack + steps).coerceIn(0, screen.history.size)
-                    invalidate()
-                }
-                return true
-            }
-            MotionEvent.ACTION_UP -> {
-                if (dragged < cellHeight) {
-                    performClick()
-                }
-                return true
-            }
-        }
-        return super.onTouchEvent(event)
-    }
-
-    private fun measureCell() {
-        paint.textSize = lettering
-        cellWidth = paint.measureText("M")
-        val metrics = paint.fontMetrics
-        cellHeight = metrics.descent - metrics.ascent + 1f
-        baseline = -metrics.ascent
-    }
-
-    private fun fit(w: Int, h: Int) {
-        if (w <= 0 || h <= 0 || cellWidth <= 0f || cellHeight <= 0f) {
-            return
-        }
-        val columns = (w / cellWidth).toInt().coerceIn(20, 400)
-        val rows = (h / cellHeight).toInt().coerceIn(4, 200)
-        if (columns != screen.columns || rows != screen.rows) {
-            screen.resize(rows, columns)
-            onResize?.invoke(rows, columns)
-        }
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, was: Int, then: Int) {
-        super.onSizeChanged(w, h, was, then)
-        fit(w, h)
-    }
-
-    private fun colourOf(code: Int, ground: Boolean): Int {
-        val found = when {
-            code == Screenful.DEFAULT_INK -> palette.foreground
-            code == Screenful.DEFAULT_GROUND -> Color.TRANSPARENT
-            code >= 256 -> {
-                val rgb = code - 256
-                Color.rgb((rgb shr 16) and 0xFF, (rgb shr 8) and 0xFF, rgb and 0xFF)
-            }
-            code < 16 -> ANSI[code]
-            code < 232 -> {
-                val at = code - 16
-                Color.rgb(STEPS[at / 36], STEPS[(at / 6) % 6], STEPS[at % 6])
-            }
-            else -> {
-                val grey = (8 + (code - 232) * 10).coerceIn(0, 255)
-                Color.rgb(grey, grey, grey)
-            }
-        }
-        return if (ground && found == Color.TRANSPARENT) palette.background else found
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        canvas.drawColor(palette.background)
-        paint.textSize = lettering
-        val word = StringBuilder()
-        for (r in 0 until screen.rows) {
-            val line = rowAt(r) ?: continue
-            var c = 0
-            while (c < screen.columns) {
-                val cell = line.getOrNull(c) ?: break
-                var run = c
-                while (run < screen.columns) {
-                    val next = line.getOrNull(run) ?: break
-                    if (next.ground != cell.ground || next.style != cell.style ||
-                        next.ink != cell.ink
-                    ) {
-                        break
-                    }
-                    run += 1
-                }
-                val reversed = (cell.style and Screenful.REVERSE) != 0
-                val ink = colourOf(if (reversed) cell.ground else cell.ink, reversed)
-                val ground = colourOf(if (reversed) cell.ink else cell.ground, true)
-                val left = c * cellWidth
-                val top = r * cellHeight
-                if (ground != palette.background) {
-                    paint.style = Paint.Style.FILL
-                    paint.color = ground
-                    canvas.drawRect(left, top, run * cellWidth, top + cellHeight, paint)
-                }
-                word.setLength(0)
-                for (at in c until run) {
-                    word.append(line.getOrNull(at)?.letter ?: ' ')
-                }
-                paint.color = if ((cell.style and Screenful.FAINT) != 0) {
-                    Ink.fade(ink, 0.6f)
-                } else {
-                    ink
-                }
-                paint.isFakeBoldText = (cell.style and Screenful.BOLD) != 0
-                paint.style = Paint.Style.FILL
-                canvas.drawText(word.toString(), left, top + baseline, paint)
-                if ((cell.style and Screenful.UNDERLINE) != 0) {
-                    paint.strokeWidth = 1f
-                    canvas.drawLine(
-                        left,
-                        top + cellHeight - 2f,
-                        run * cellWidth,
-                        top + cellHeight - 2f,
-                        paint,
-                    )
-                }
-                c = run
-            }
-        }
-        if (screen.showCursor && lookingBack == 0) {
-            paint.style = Paint.Style.FILL
-            paint.color = Ink.fade(palette.accent, 0.55f)
-            canvas.drawRect(
-                screen.column * cellWidth,
-                screen.row * cellHeight,
-                (screen.column + 1) * cellWidth,
-                (screen.row + 1) * cellHeight,
-                paint,
-            )
-        }
-    }
-
-    override fun onCheckIsTextEditor(): Boolean = true
-
-    override fun onCreateInputConnection(out: EditorInfo): InputConnection {
-        out.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-        out.imeOptions = EditorInfo.IME_ACTION_NONE or EditorInfo.IME_FLAG_NO_EXTRACT_UI or
-            EditorInfo.IME_FLAG_NO_FULLSCREEN
-        return object : BaseInputConnection(this, false) {
-            override fun commitText(written: CharSequence?, position: Int): Boolean {
-                written?.let { onKey(it.toString().toByteArray(Charsets.UTF_8)) }
-                return true
-            }
-
-            override fun sendKeyEvent(event: KeyEvent?): Boolean {
-                if (event != null && event.action == KeyEvent.ACTION_DOWN) {
-                    return this@TerminalView.onKeyDown(event.keyCode, event)
-                }
-                return true
-            }
-
-            override fun deleteSurroundingText(before: Int, after: Int): Boolean {
-                repeat(before) { onKey(byteArrayOf(0x7F)) }
-                return true
-            }
-        }
-    }
-
-    override fun onKeyDown(code: Int, event: KeyEvent): Boolean {
-        val said = when (code) {
-            KeyEvent.KEYCODE_DEL -> byteArrayOf(0x7F)
-            KeyEvent.KEYCODE_ENTER -> byteArrayOf(0x0D)
-            KeyEvent.KEYCODE_TAB -> byteArrayOf(0x09)
-            KeyEvent.KEYCODE_ESCAPE -> byteArrayOf(0x1B)
-            KeyEvent.KEYCODE_DPAD_UP -> arrow('A')
-            KeyEvent.KEYCODE_DPAD_DOWN -> arrow('B')
-            KeyEvent.KEYCODE_DPAD_RIGHT -> arrow('C')
-            KeyEvent.KEYCODE_DPAD_LEFT -> arrow('D')
-            KeyEvent.KEYCODE_MOVE_HOME -> "\u001B[H".toByteArray()
-            KeyEvent.KEYCODE_MOVE_END -> "\u001B[F".toByteArray()
-            else -> {
-                val letter = event.unicodeChar
-                when {
-                    event.isCtrlPressed && letter != 0 ->
-                        byteArrayOf((letter.toChar().uppercaseChar().code and 0x1F).toByte())
-                    letter != 0 -> letter.toChar().toString().toByteArray(Charsets.UTF_8)
-                    else -> return super.onKeyDown(code, event)
-                }
-            }
-        }
-        onKey(said)
-        return true
-    }
-
-    fun arrow(which: Char): ByteArray =
-        if (screen.applicationKeys) {
-            "\u001BO$which".toByteArray()
-        } else {
-            "\u001B[$which".toByteArray()
-        }
-
-    private companion object {
-        val STEPS = intArrayOf(0, 95, 135, 175, 215, 255)
-
-        val ANSI = intArrayOf(
-            0xFF1E1E1E.toInt(), 0xFFCD3131.toInt(), 0xFF0DBC79.toInt(), 0xFFE5E510.toInt(),
-            0xFF2472C8.toInt(), 0xFFBC3FBC.toInt(), 0xFF11A8CD.toInt(), 0xFFE5E5E5.toInt(),
-            0xFF666666.toInt(), 0xFFF14C4C.toInt(), 0xFF23D18B.toInt(), 0xFFF5F543.toInt(),
-            0xFF3B8EEA.toInt(), 0xFFD670D6.toInt(), 0xFF29B8DB.toInt(), 0xFFFFFFFF.toInt(),
-        )
-    }
-}
-
 class AuroraView(context: Context, private var palette: Palette) : View(context) {
 
     private companion object {
@@ -2233,57 +1941,6 @@ class AuroraView(context: Context, private var palette: Palette) : View(context)
         paint.shader = glow
         canvas.drawCircle(x, y, radius, paint)
         paint.shader = null
-    }
-}
-
-internal object Debugging {
-
-    const val COMMAND = "adb shell pm grant com.omni.builder android.permission.WRITE_SECURE_SETTINGS"
-
-    private const val WIFI_ENABLED = "adb_wifi_enabled"
-
-    fun granted(context: Context): Boolean =
-        context.checkSelfPermission(android.Manifest.permission.WRITE_SECURE_SETTINGS) ==
-            PackageManager.PERMISSION_GRANTED
-
-    fun wirelessOn(context: Context): Boolean =
-        runCatching {
-            Settings.Global.getInt(context.contentResolver, WIFI_ENABLED, 0) == 1
-        }.getOrDefault(false)
-
-    fun turnWirelessOn(context: Context, wanted: Boolean): Boolean {
-        if (!granted(context)) {
-            return false
-        }
-        return runCatching {
-            Settings.Global.putInt(context.contentResolver, WIFI_ENABLED, if (wanted) 1 else 0)
-        }.getOrDefault(false)
-    }
-
-    fun port(context: Context): Int =
-        runCatching {
-            Settings.Global.getInt(context.contentResolver, "adb_wifi_port", 0)
-        }.getOrDefault(0)
-}
-
-class Boot : BroadcastReceiver() {
-
-    override fun onReceive(context: Context, intent: Intent) {
-        val wanted = intent.action == Intent.ACTION_BOOT_COMPLETED ||
-            intent.action == Intent.ACTION_MY_PACKAGE_REPLACED
-        if (!wanted || !Preferences.keepsWirelessDebugging(context)) {
-            return
-        }
-        val done = Debugging.turnWirelessOn(context, true)
-        OmniLog.event(
-            if (done) LogLevel.INFO else LogLevel.WARN,
-            "debugging",
-            if (done) {
-                "Wireless debugging was turned back on after a restart."
-            } else {
-                "Wireless debugging could not be turned back on; the permission is not held."
-            },
-        )
     }
 }
 
@@ -2960,7 +2617,7 @@ class FlowLayout(
     }
 }
 
-private enum class Tab { PROJECTS, FILES, BUILD, SHELL, TRASH, SETTINGS }
+private enum class Tab { PROJECTS, FILES, BUILD, TRASH, SETTINGS }
 
 private enum class Order(val label: Int) {
     NAME(R.string.omni_files_by_name),
@@ -2988,18 +2645,6 @@ private sealed interface Screen {
         override val tab = Tab.FILES
     }
 
-    data class Search(val root: String) : Screen {
-        override val tab = Tab.FILES
-    }
-
-    data class Manifest(val root: String) : Screen {
-        override val tab = Tab.FILES
-    }
-
-    data class Depends(val root: String) : Screen {
-        override val tab = Tab.FILES
-    }
-
     data class Health(val root: String) : Screen {
         override val tab = Tab.FILES
     }
@@ -3010,10 +2655,6 @@ private sealed interface Screen {
 
     data class Build(val root: String) : Screen {
         override val tab = Tab.BUILD
-    }
-
-    data class Shell(val root: String?) : Screen {
-        override val tab = Tab.SHELL
     }
 
     data object Trash : Screen {
@@ -3047,7 +2688,7 @@ class BuilderActivity : Activity() {
 
         const val WIDE_DP = 600
 
-        val ON_THE_BAR = listOf(Tab.PROJECTS, Tab.FILES, Tab.BUILD, Tab.SHELL)
+        val ON_THE_BAR = listOf(Tab.PROJECTS, Tab.FILES, Tab.BUILD)
 
         const val COLUMN_DP = 640
 
@@ -3178,7 +2819,6 @@ class BuilderActivity : Activity() {
     private var filesOrder = Order.NAME
     private var filesReversed = false
     private var shellHandle = -1
-    private var shellView: TerminalView? = null
     private var shellReader: Thread? = null
     private var shellFolder: String? = null
     private var shellControl = false
@@ -3305,10 +2945,6 @@ class BuilderActivity : Activity() {
                 markControl(Mark.Shape.GEAR, R.string.omni_tab_settings) { go(Screen.Settings) },
                 LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
             )
-            addView(
-                markControl(Mark.Shape.MORE, R.string.omni_action_more) { openPalette() },
-                LinearLayout.LayoutParams(gap(TOUCH_UNITS), gap(TOUCH_UNITS)),
-            )
         }
 
         val roof = View(this)
@@ -3414,6 +3050,40 @@ class BuilderActivity : Activity() {
         if (hasFocus) {
             hideTheNavigationBar()
         }
+    }
+
+    private val troubleSeen = mutableMapOf<String, Boolean>()
+    private val troubleAsked = mutableSetOf<String>()
+
+    private fun lookForTrouble(root: String) {
+        if (!troubleAsked.add(root)) {
+            return
+        }
+        Thread {
+            val answer = runCatching { Builder.nativeProjectHealth(root) }.getOrNull()
+            val read = answer?.let { runCatching { JSONObject(it) }.getOrNull() }
+            val health = read?.optJSONObject("health")
+            val troubled = when {
+                read == null -> false
+                !read.optBoolean("read", false) -> true
+                health == null -> true
+                else -> !health.optBoolean("clear", true)
+            }
+            runOnUiThread {
+                if (isFinishing || isDestroyed) {
+                    return@runOnUiThread
+                }
+                val before = troubleSeen.put(root, troubled)
+                if (before != troubled && screen is Screen.Files) {
+                    render(false)
+                }
+            }
+        }.start()
+    }
+
+    private fun forgetTrouble(root: String) {
+        troubleAsked.remove(root)
+        troubleSeen.remove(root)
     }
 
     private fun provisionSharedKey() {
@@ -3625,14 +3295,10 @@ class BuilderActivity : Activity() {
             is Screen.Projects -> renderProjects()
             is Screen.NewProject -> renderNewProject()
             is Screen.Files -> renderFiles(here.root, here.folder)
-            is Screen.Search -> renderSearch(here.root)
-            is Screen.Manifest -> renderManifest(here.root)
-            is Screen.Depends -> renderDepends(here.root)
             is Screen.Health -> renderHealth(here.root)
             is Screen.Editor -> renderEditor(here.root, here.path)
             is Screen.Picture -> renderPicture(here.root, here.path)
             is Screen.Build -> renderBuild(here.root)
-            is Screen.Shell -> renderShell(here.root)
             is Screen.Trash -> renderTrash()
             is Screen.Settings -> renderSettings()
             is Screen.Keys -> renderKeys()
@@ -3703,9 +3369,6 @@ class BuilderActivity : Activity() {
                 } else {
                     go(Screen.Files(here.root, here.folder.substringBeforeLast('/', "")))
                 }
-            is Screen.Search -> go(Screen.Files(here.root, ""))
-            is Screen.Manifest -> go(Screen.Files(here.root, ""))
-            is Screen.Depends -> go(Screen.Files(here.root, ""))
             is Screen.Health -> go(Screen.Files(here.root, ""))
             is Screen.Build -> go(Screen.Files(here.root, ""))
             is Screen.Keys -> go(Screen.Settings)
@@ -3714,42 +3377,12 @@ class BuilderActivity : Activity() {
         }
     }
 
-    private fun openPalette() {
-        val root = openProject
-        val actions = mutableListOf<Pair<String, () -> Unit>>()
-        actions += getString(R.string.omni_tab_projects) to { go(Screen.Projects) }
-        actions += getString(R.string.omni_projects_new) to { go(Screen.NewProject) }
-        if (root != null) {
-            actions += getString(R.string.omni_tab_files) to { go(Screen.Files(root, "")) }
-            actions += getString(R.string.omni_search_title) to { go(Screen.Search(root)) }
-            actions += getString(R.string.omni_tab_build) to { go(Screen.Build(root)) }
-            actions += getString(R.string.omni_action_new_file) to {
-                go(Screen.Files(root, ""))
-                askForName(getString(R.string.omni_action_new_file), "") { name ->
-                    act(Builder.nativeWriteFile(root, name, ""), "saved")
-                }
-            }
-        }
-        actions += getString(R.string.omni_keys_title) to { go(Screen.Keys) }
-        actions += getString(R.string.omni_keys_new) to { go(Screen.NewKey) }
-        actions += getString(R.string.omni_tab_trash) to { go(Screen.Trash) }
-        actions += getString(R.string.omni_tab_settings) to { go(Screen.Settings) }
-
-        val labels = actions.map { it.first }.toTypedArray()
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.omni_palette_title))
-            .setItems(labels) { _, index -> actions[index].second() }
-            .setNegativeButton(android.R.string.cancel, null)
-            .show()
-    }
-
     private fun destination(tab: Tab): Screen {
         val root = openProject
         return when (tab) {
             Tab.PROJECTS -> Screen.Projects
             Tab.FILES -> root?.let { Screen.Files(it, "") } ?: Screen.Projects
             Tab.BUILD -> root?.let { Screen.Build(it) } ?: Screen.Projects
-            Tab.SHELL -> Screen.Shell(root)
             Tab.TRASH -> Screen.Trash
             Tab.SETTINGS -> Screen.Settings
         }
@@ -3781,14 +3414,10 @@ class BuilderActivity : Activity() {
             is Screen.Projects -> getString(R.string.omni_projects_title)
             is Screen.NewProject -> getString(R.string.omni_projects_new)
             is Screen.Files -> File(here.root).name
-            is Screen.Search -> getString(R.string.omni_search_title)
-            is Screen.Manifest -> getString(R.string.omni_manifest_title)
-            is Screen.Depends -> getString(R.string.omni_depends_title)
             is Screen.Health -> getString(R.string.omni_health_title)
             is Screen.Editor -> here.path.substringAfterLast('/')
             is Screen.Picture -> here.path.substringAfterLast('/')
             is Screen.Build -> getString(R.string.omni_build_title)
-            is Screen.Shell -> getString(R.string.omni_tab_shell)
             is Screen.Trash -> getString(R.string.omni_tab_trash)
             is Screen.Settings -> getString(R.string.omni_tab_settings)
             is Screen.Keys -> getString(R.string.omni_keys_title)
@@ -3819,7 +3448,6 @@ class BuilderActivity : Activity() {
             Tab.PROJECTS to R.string.omni_tab_projects,
             Tab.FILES to R.string.omni_tab_files,
             Tab.BUILD to R.string.omni_tab_build,
-            Tab.SHELL to R.string.omni_tab_shell,
         )
         for (tab in ON_THE_BAR) {
             val active = screen.tab == tab
@@ -3858,11 +3486,6 @@ class BuilderActivity : Activity() {
                                 notice(getString(R.string.omni_no_project_open), palette.warning)
                             )
                         }
-                    }
-
-                    setOnLongClickListener {
-                        openPalette()
-                        true
                     }
                 },
                 if (wide) {
@@ -4157,29 +3780,23 @@ class BuilderActivity : Activity() {
         content.addView(making)
 
         if (folder.isEmpty()) {
-            content.addView(label(getString(R.string.omni_files_config)))
-            val settings = FlowLayout(this, gap(2), gap(2)).apply {
-                setPadding(0, gap(1), 0, gap(1))
-            }
-            settings.addView(tool(getString(R.string.omni_manifest_title), palette.accent) {
-                go(Screen.Manifest(root))
-            })
-            settings.addView(tool(getString(R.string.omni_depends_title), palette.accent) {
-                go(Screen.Depends(root))
-            })
-            content.addView(settings)
-
             content.addView(label(getString(R.string.omni_files_tools)))
             val tools = FlowLayout(this, gap(2), gap(2)).apply {
                 setPadding(0, gap(1), 0, gap(1))
             }
-            tools.addView(tool(getString(R.string.omni_health_title), palette.accent) {
-                go(Screen.Health(root))
-            })
-            tools.addView(tool(getString(R.string.omni_search_title), palette.accent) {
-                go(Screen.Search(root))
-            })
+            val troubled = troubleSeen[root] == true
+            tools.addView(
+                tool(
+                    if (troubled) {
+                        getString(R.string.omni_health_marked, getString(R.string.omni_health_title))
+                    } else {
+                        getString(R.string.omni_health_title)
+                    },
+                    if (troubled) palette.warning else palette.accent,
+                ) { go(Screen.Health(root)) }
+            )
             content.addView(tools)
+            lookForTrouble(root)
         }
         content.addView(quiet(getString(R.string.omni_trash_note)))
     }
@@ -4296,295 +3913,6 @@ class BuilderActivity : Activity() {
 
         content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
             go(Screen.Files(root, ""))
-        })
-    }
-
-    private fun renderDepends(root: String) {
-
-        val answer = runCatching { JSONObject(Builder.nativeDependencies(root)) }.getOrNull()
-        val held = answer?.optJSONObject("dependencies")
-        if (answer == null || !answer.optBoolean("read", false) || held == null) {
-            answer?.let { showRefusal(Refusal.parse(it), content) }
-            content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-                go(Screen.Files(root, ""))
-            })
-            return
-        }
-
-        val each = held.optJSONArray("each")
-        if (each == null || each.length() == 0) {
-            content.addView(notice(getString(R.string.omni_depends_none), palette.muted))
-        } else {
-            content.addView(
-                notice(
-                    getString(
-                        R.string.omni_depends_summary,
-                        each.length(),
-                        held.optInt("classes"),
-                        size(held.optLong("bytes")),
-                    ),
-                    palette.ok,
-                )
-            )
-            for (index in 0 until each.length()) {
-                val one = each.optJSONObject(index) ?: continue
-                val card = card()
-                card.addView(
-                    keyValue(
-                        one.optString("name"),
-                        joined(one, "packages"),
-                        size(one.optLong("bytes")),
-                        palette.foreground,
-                    )
-                )
-                val brings = listOfNotNull(
-                    one.optInt("classes").takeIf { it > 0 }
-                        ?.let { getString(R.string.omni_depends_classes, it) },
-                    one.optInt("resources").takeIf { it > 0 }
-                        ?.let { getString(R.string.omni_depends_resources, it) },
-                    one.optInt("assets").takeIf { it > 0 }
-                        ?.let { getString(R.string.omni_depends_assets, it) },
-                    joined(one, "native").ifEmpty { null },
-                    if (one.optBoolean("manifest", false)) {
-                        getString(R.string.omni_manifest_title)
-                    } else {
-                        null
-                    },
-                )
-                card.addView(quiet(brings.joinToString("  ·  ")))
-                one.optString("note").ifEmpty { null }?.let {
-                    card.addView(notice(it, palette.warning))
-                }
-                card.addView(
-                    subtle(getString(R.string.omni_action_delete), palette.error) {
-                        results.removeAllViews()
-                        val done = runCatching {
-                            JSONObject(Builder.nativeDependencyRemove(root, one.optString("name")))
-                        }.getOrNull()
-                        if (done != null && done.optBoolean("removed", false)) {
-                            render(false)
-                        } else {
-                            done?.let { showRefusal(Refusal.parse(it), results) }
-                        }
-                    }
-                )
-                content.addView(card)
-            }
-        }
-
-        val clashes = held.optJSONArray("clashes")
-        if (clashes != null && clashes.length() > 0) {
-            content.addView(heading(getString(R.string.omni_depends_clashes)))
-            content.addView(
-                notice(getString(R.string.omni_depends_clash_note), palette.error)
-            )
-            val listed = card()
-            for (index in 0 until clashes.length()) {
-                val one = clashes.optJSONObject(index) ?: continue
-                listed.addView(
-                    keyValue(
-                        one.optString("class"),
-                        one.optString("first") + "  +  " + one.optString("second"),
-                        "",
-                        palette.error,
-                    )
-                )
-            }
-            content.addView(listed)
-        }
-
-        content.addView(quiet(getString(R.string.omni_depends_note, held.optString("folder"))))
-        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-            go(Screen.Files(root, ""))
-        })
-    }
-
-    private fun renderManifest(root: String) {
-
-        val answer = runCatching { JSONObject(Builder.nativeManifestFacts(root)) }.getOrNull()
-        val facts = answer?.optJSONObject("manifest")
-        if (answer == null || !answer.optBoolean("read", false) || facts == null) {
-            answer?.let { showRefusal(Refusal.parse(it), content) }
-            content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-                go(Screen.Files(root, ""))
-            })
-            return
-        }
-
-        fun change(field: String, value: String) {
-            results.removeAllViews()
-            val done = runCatching {
-                JSONObject(Builder.nativeManifestSet(root, field, value))
-            }.getOrNull()
-            if (done != null && done.optBoolean("changed", false)) {
-                render(false)
-                results.addView(notice(getString(R.string.omni_manifest_saved), palette.ok))
-            } else {
-                done?.let { showRefusal(Refusal.parse(it), results) }
-            }
-        }
-
-        val identity = card()
-        val face = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, gap(1), 0, gap(2))
-            isClickable = true
-            readAs(Button::class.java.name)
-            background = touchable(pill(Color.TRANSPARENT, gap(2).toFloat()), palette.accent)
-            setOnClickListener { chooseImage(root) }
-        }
-        face.addView(
-            thumbnail(File(root, "$PROJECT_RES/$PROJECT_ICON").absolutePath, gap(11)),
-            LinearLayout.LayoutParams(gap(11), gap(11)).apply { marginEnd = gap(3) },
-        )
-        face.addView(
-            TextView(this).apply {
-                text = getString(R.string.omni_form_image)
-                setTextColor(palette.foreground)
-                typeface = Type.strong
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            },
-            LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f),
-        )
-        face.addView(
-            TextView(this).apply {
-                text = getString(R.string.omni_action_change)
-                setTextColor(palette.accent)
-                typeface = Type.strong
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                letterSpacing = 0.08f
-            }
-        )
-        identity.addView(face)
-        identity.addView(
-            keyValue(
-                getString(R.string.omni_form_package),
-                facts.optString("package"),
-                "",
-                palette.muted,
-            )
-        )
-        identity.addView(
-            row(
-                getString(R.string.omni_form_label),
-                facts.optString("label"),
-                getString(R.string.omni_action_change),
-                palette.accent,
-            ) {
-                askForName(getString(R.string.omni_form_label), facts.optString("label")) {
-                    change("label", it)
-                }
-            }
-        )
-        identity.addView(
-            row(
-                getString(R.string.omni_form_version_name),
-                facts.optString("versionName"),
-                getString(R.string.omni_action_change),
-                palette.accent,
-            ) {
-                askForName(
-                    getString(R.string.omni_form_version_name),
-                    facts.optString("versionName"),
-                ) { change("versionName", it) }
-            }
-        )
-        identity.addView(
-            row(
-                getString(R.string.omni_form_version_code),
-                facts.optString("versionCode"),
-                getString(R.string.omni_action_change),
-                palette.accent,
-            ) {
-                askForName(
-                    getString(R.string.omni_form_version_code),
-                    facts.optString("versionCode"),
-                ) { change("versionCode", it) }
-            }
-        )
-        content.addView(identity)
-
-        content.addView(label(getString(R.string.omni_form_min_sdk)))
-        content.addView(
-            chips(
-                ANDROID_RELEASES.map { it.second },
-                { index ->
-                    ANDROID_RELEASES[index].first.toString() == facts.optString("minSdkVersion")
-                },
-            ) { index -> change("minSdkVersion", ANDROID_RELEASES[index].first.toString()) }
-        )
-
-        content.addView(label(getString(R.string.omni_form_target_sdk)))
-        content.addView(
-            chips(
-                ANDROID_RELEASES.map { it.second },
-                { index ->
-                    ANDROID_RELEASES[index].first.toString() == facts.optString("targetSdkVersion")
-                },
-            ) { index -> change("targetSdkVersion", ANDROID_RELEASES[index].first.toString()) }
-        )
-
-        content.addView(heading(getString(R.string.omni_manifest_permissions)))
-        val asked = facts.optJSONArray("permissions")
-        val holder = card()
-        if (asked == null || asked.length() == 0) {
-            holder.addView(quiet(getString(R.string.omni_manifest_none)))
-        } else {
-            for (index in 0 until asked.length()) {
-                val name = asked.getString(index)
-                if (index > 0) {
-                    holder.addView(rule(), MATCH_PARENT, 1)
-                }
-                holder.addView(
-                    row(name, "", getString(R.string.omni_action_delete), palette.error) {
-                        results.removeAllViews()
-                        val done = runCatching {
-                            JSONObject(Builder.nativeManifestPermission(root, name, false))
-                        }.getOrNull()
-                        if (done != null && done.optBoolean("changed", false)) {
-                            render(false)
-                        } else {
-                            done?.let { showRefusal(Refusal.parse(it), results) }
-                        }
-                    }
-                )
-            }
-        }
-        content.addView(holder)
-
-        content.addView(
-            chips(COMMON_PERMISSIONS.map { it.substringAfterLast('.') }, { false }) { index ->
-                results.removeAllViews()
-                val done = runCatching {
-                    JSONObject(
-                        Builder.nativeManifestPermission(root, COMMON_PERMISSIONS[index], true)
-                    )
-                }.getOrNull()
-                if (done != null && done.optBoolean("changed", false)) {
-                    render(false)
-                } else {
-                    done?.let { showRefusal(Refusal.parse(it), results) }
-                }
-            }
-        )
-        content.addView(subtle(getString(R.string.omni_manifest_other), palette.accent) {
-            askForName(getString(R.string.omni_manifest_other), "android.permission.") { name ->
-                results.removeAllViews()
-                val done = runCatching {
-                    JSONObject(Builder.nativeManifestPermission(root, name, true))
-                }.getOrNull()
-                if (done != null && done.optBoolean("changed", false)) {
-                    render(false)
-                } else {
-                    done?.let { showRefusal(Refusal.parse(it), results) }
-                }
-            }
-        })
-
-        content.addView(quiet(getString(R.string.omni_manifest_note)))
-        content.addView(subtle(getString(R.string.omni_action_open), palette.muted) {
-            go(Screen.Editor(root, "AndroidManifest.xml"))
         })
     }
 
@@ -4757,62 +4085,6 @@ class BuilderActivity : Activity() {
             said.addView(quiet(one.optString("remedy")))
             results.addView(said)
         }
-    }
-
-    private fun renderSearch(root: String) {
-
-        val field = EditText(this).apply {
-            setText(searchFor)
-            hint = getString(R.string.omni_search_hint)
-            setHintTextColor(palette.muted)
-            setTextColor(palette.foreground)
-            typeface = Type.data
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-            setSingleLine()
-            imeOptions = EditorInfo.IME_ACTION_SEARCH
-            background = sheet(palette.raised, palette.divider)
-            setPadding(gap(3), gap(3), gap(3), gap(3))
-        }
-        content.addView(field)
-
-        content.addView(
-            chips(
-                listOf(
-                    getString(R.string.omni_search_case),
-                    getString(R.string.omni_search_word),
-                ),
-                { index -> if (index == 0) searchCase else searchWord },
-            ) { index ->
-                if (index == 0) searchCase = !searchCase else searchWord = !searchWord
-            }
-        )
-
-        fun look() {
-            searchFor = field.text.toString()
-            results.removeAllViews()
-            if (searchFor.isEmpty()) {
-                return
-            }
-            working({
-                Builder.nativeSearchProject(root, searchFor, searchCase, searchWord)
-            }) finished@{ answer ->
-                val document = runCatching { JSONObject(answer) }.getOrNull() ?: return@finished
-                if (!document.optBoolean("searched", false)) {
-                    showRefusal(Refusal.parse(document), results)
-                    return@finished
-                }
-                showFound(root, document.optJSONObject("result"))
-            }
-        }
-
-        field.setOnEditorActionListener { _, _, _ ->
-            look()
-            true
-        }
-        content.addView(primary(getString(R.string.omni_search_go)) { look() })
-        content.addView(subtle(getString(R.string.omni_action_back), palette.muted) {
-            go(Screen.Files(root, ""))
-        })
     }
 
     private fun showFound(root: String, result: JSONObject?) {
@@ -6056,73 +5328,6 @@ class BuilderActivity : Activity() {
         content.addView(quiet(getString(R.string.omni_trash_note)))
     }
 
-    private fun renderShell(root: String?) {
-        val home = filesDir.absolutePath
-        val folder = root ?: home
-        val view = shellView?.also { it.repaint(palette) }
-            ?: TerminalView(this, palette) { bytes -> sendToTheShell(bytes) }
-        (view.parent as? ViewGroup)?.removeView(view)
-        shellView = view
-        shellFolder = folder
-
-        val frame = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            background = sheet(palette.background, palette.divider)
-            setPadding(gap(1), gap(1), gap(1), gap(1))
-        }
-        frame.addView(view, LinearLayout.LayoutParams(MATCH_PARENT, gap(74)))
-        content.addView(frame)
-        content.addView(shellKeys(view))
-
-        view.whenResized { rows, columns ->
-            if (shellHandle >= 0) {
-                runCatching { Builder.nativeShellResize(shellHandle, rows, columns) }
-            }
-        }
-        view.setOnClickListener {
-            view.requestFocus()
-            val keyboard = getSystemService(InputMethodManager::class.java)
-            keyboard?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
-        }
-
-        if (shellHandle < 0) {
-            openTheShell(folder, home, view)
-        } else {
-            view.accept(byteArrayOf(), 0)
-        }
-    }
-
-    private fun openTheShell(folder: String, home: String, view: TerminalView) {
-        File(home, "tmp").mkdirs()
-        val handle = runCatching {
-            Builder.nativeShellOpen(folder, home, view.screen.rows, view.screen.columns)
-        }.getOrDefault(-1)
-        if (handle < 0) {
-            results.addView(notice(getString(R.string.omni_shell_refused), palette.error))
-            return
-        }
-        shellHandle = handle
-        OmniLog.event(LogLevel.INFO, "shell", "A shell was opened.")
-        val reader = Thread {
-            val room = ByteArray(8192)
-            while (!Thread.currentThread().isInterrupted) {
-                val got = runCatching { Builder.nativeShellRead(handle, room, 60) }
-                    .getOrDefault(-1)
-                if (got < 0) {
-                    break
-                }
-                if (got > 0) {
-                    val copy = room.copyOf(got)
-                    runOnUiThread { shellView?.accept(copy, copy.size) }
-                }
-            }
-            runOnUiThread { closeTheShell() }
-        }
-        reader.isDaemon = true
-        shellReader = reader
-        reader.start()
-    }
-
     private fun sendToTheShell(bytes: ByteArray) {
         if (shellHandle < 0 || bytes.isEmpty()) {
             return
@@ -6145,52 +5350,6 @@ class BuilderActivity : Activity() {
             runCatching { Builder.nativeShellClose(handle) }
             OmniLog.event(LogLevel.INFO, "shell", "The shell was closed.")
         }
-    }
-
-    private fun shellKeys(view: TerminalView): View {
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, gap(2), 0, gap(1))
-        }
-        val keys = listOf<Pair<String, () -> Unit>>(
-            "ESC" to { sendToTheShell(byteArrayOf(0x1B)) },
-            "TAB" to { sendToTheShell(byteArrayOf(0x09)) },
-            "CTRL" to { shellControl = !shellControl },
-            "^C" to { runCatching { Builder.nativeShellInterrupt(shellHandle) }.let { } },
-            "/" to { sendToTheShell("/".toByteArray()) },
-            "-" to { sendToTheShell("-".toByteArray()) },
-            "|" to { sendToTheShell("|".toByteArray()) },
-            "↑" to { sendToTheShell("\u001B[A".toByteArray()) },
-            "↓" to { sendToTheShell("\u001B[B".toByteArray()) },
-        )
-        for ((label, press) in keys) {
-            row.addView(
-                TextView(this).apply {
-                    text = label
-                    typeface = Type.data
-                    setTextColor(palette.foreground)
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-                    gravity = Gravity.CENTER
-                    setPadding(gap(1), gap(2), gap(1), gap(2))
-                    isClickable = true
-                    readAs(Button::class.java.name)
-                    background = touchable(pill(palette.raised, gap(2).toFloat()), palette.accent)
-                    setOnClickListener {
-                        press()
-                        view.requestFocus()
-                    }
-                },
-                LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply {
-                    marginEnd = gap(1) / 2
-                },
-            )
-        }
-        val holder = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        holder.addView(row)
-        holder.addView(
-            quiet(getString(R.string.omni_shell_note, shellFolder ?: filesDir.absolutePath))
-        )
-        return holder
     }
 
     private fun renderTrash() {
@@ -6488,86 +5647,6 @@ class BuilderActivity : Activity() {
             }
         )
         content.addView(quiet(getString(R.string.omni_defaults_seal)))
-
-        content.addView(heading(getString(R.string.omni_debugging_title)))
-        val debugging = card()
-        val held = Debugging.granted(this)
-        debugging.addView(
-            keyValue(
-                getString(R.string.omni_debugging_permission),
-                if (held) {
-                    getString(R.string.omni_debugging_held)
-                } else {
-                    getString(R.string.omni_debugging_missing)
-                },
-                "",
-                if (held) palette.ok else palette.warning,
-            )
-        )
-        if (!held) {
-            debugging.addView(quiet(getString(R.string.omni_debugging_how)))
-            debugging.addView(
-                EditText(this).apply {
-                    setText(Debugging.COMMAND)
-                    setTextColor(palette.foreground)
-                    setBackgroundColor(Color.TRANSPARENT)
-                    typeface = Type.data
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-                    setTextIsSelectable(true)
-                    keyListener = null
-                    setPadding(gap(2))
-                }
-            )
-            debugging.addView(
-                subtle(getString(R.string.omni_action_copy), palette.accent) {
-                    val board = getSystemService(ClipboardManager::class.java)
-                    board?.setPrimaryClip(ClipData.newPlainText("adb", Debugging.COMMAND))
-                    results.addView(
-                        notice(getString(R.string.omni_debugging_copied), palette.ok)
-                    )
-                }
-            )
-        } else {
-            val keeping = Preferences.keepsWirelessDebugging(this)
-            debugging.addView(
-                row(
-                    getString(R.string.omni_debugging_keep),
-                    if (Debugging.wirelessOn(this)) {
-                        val port = Debugging.port(this)
-                        if (port > 0) {
-                            getString(R.string.omni_debugging_on_at, port)
-                        } else {
-                            getString(R.string.omni_debugging_on)
-                        }
-                    } else {
-                        getString(R.string.omni_debugging_off)
-                    },
-                    if (keeping) {
-                        getString(R.string.omni_action_stop)
-                    } else {
-                        getString(R.string.omni_action_start)
-                    },
-                    palette.accent,
-                ) {
-                    val next = !keeping
-                    Preferences.keepWirelessDebugging(this, next)
-                    val done = Debugging.turnWirelessOn(this, next)
-                    render(false)
-                    results.addView(
-                        notice(
-                            if (done) {
-                                getString(R.string.omni_debugging_changed)
-                            } else {
-                                getString(R.string.omni_debugging_refused)
-                            },
-                            if (done) palette.ok else palette.error,
-                        )
-                    )
-                }
-            )
-            debugging.addView(quiet(getString(R.string.omni_debugging_note)))
-        }
-        content.addView(debugging)
 
         content.addView(
             row(
