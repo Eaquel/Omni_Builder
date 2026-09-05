@@ -727,6 +727,220 @@ pub mod json {
             self.buf.push('"');
         }
     }
+
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Json {
+        Null,
+        Bool(bool),
+        Number(f64),
+        Text(String),
+        List(Vec<Json>),
+        Object(Vec<(String, Json)>),
+    }
+
+    impl Json {
+        pub fn get(&self, key: &str) -> Option<&Json> {
+            match self {
+                Json::Object(held) => held
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, one)| one),
+                _ => None,
+            }
+        }
+
+        pub fn text(&self) -> Option<&str> {
+            match self {
+                Json::Text(held) => Some(held.as_str()),
+                _ => None,
+            }
+        }
+
+        pub fn integer(&self) -> Option<i64> {
+            match self {
+                Json::Number(held) if held.is_finite() => Some(*held as i64),
+                _ => None,
+            }
+        }
+
+        pub fn boolean(&self) -> Option<bool> {
+            match self {
+                Json::Bool(held) => Some(*held),
+                _ => None,
+            }
+        }
+
+        pub fn list(&self) -> Option<&[Json]> {
+            match self {
+                Json::List(held) => Some(held.as_slice()),
+                _ => None,
+            }
+        }
+
+        pub fn strings(&self) -> Vec<String> {
+            self.list()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|one| one.text().map(|held| held.to_string()))
+                .collect()
+        }
+    }
+
+    struct Scan<'a> {
+        held: &'a [u8],
+        at: usize,
+    }
+
+    impl Scan<'_> {
+        fn skip(&mut self) {
+            while self.at < self.held.len() && self.held[self.at].is_ascii_whitespace() {
+                self.at += 1;
+            }
+        }
+
+        fn value(&mut self, deep: usize) -> Option<Json> {
+            if deep > 64 {
+                return None;
+            }
+            self.skip();
+            let here = *self.held.get(self.at)?;
+            match here {
+                b'{' => self.object(deep),
+                b'[' => self.array(deep),
+                b'"' => self.text().map(Json::Text),
+                b't' => self.word("true").then_some(Json::Bool(true)),
+                b'f' => self.word("false").then_some(Json::Bool(false)),
+                b'n' => self.word("null").then_some(Json::Null),
+                _ => self.number(),
+            }
+        }
+
+        fn word(&mut self, wanted: &str) -> bool {
+            if self.held[self.at..].starts_with(wanted.as_bytes()) {
+                self.at += wanted.len();
+                return true;
+            }
+            false
+        }
+
+        fn object(&mut self, deep: usize) -> Option<Json> {
+            self.at += 1;
+            let mut out = Vec::new();
+            loop {
+                self.skip();
+                match self.held.get(self.at)? {
+                    b'}' => {
+                        self.at += 1;
+                        return Some(Json::Object(out));
+                    }
+                    b',' => {
+                        self.at += 1;
+                        continue;
+                    }
+                    b'"' => {}
+                    _ => return None,
+                }
+                let name = self.text()?;
+                self.skip();
+                if *self.held.get(self.at)? != b':' {
+                    return None;
+                }
+                self.at += 1;
+                let held = self.value(deep + 1)?;
+                out.push((name, held));
+            }
+        }
+
+        fn array(&mut self, deep: usize) -> Option<Json> {
+            self.at += 1;
+            let mut out = Vec::new();
+            loop {
+                self.skip();
+                match self.held.get(self.at)? {
+                    b']' => {
+                        self.at += 1;
+                        return Some(Json::List(out));
+                    }
+                    b',' => {
+                        self.at += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+                out.push(self.value(deep + 1)?);
+            }
+        }
+
+        fn text(&mut self) -> Option<String> {
+            self.at += 1;
+            let mut out = String::new();
+            loop {
+                let here = *self.held.get(self.at)?;
+                self.at += 1;
+                match here {
+                    b'"' => return Some(out),
+                    b'\\' => {
+                        let escape = *self.held.get(self.at)?;
+                        self.at += 1;
+                        match escape {
+                            b'"' => out.push('"'),
+                            b'\\' => out.push('\\'),
+                            b'/' => out.push('/'),
+                            b'b' => out.push('\u{08}'),
+                            b'f' => out.push('\u{0C}'),
+                            b'n' => out.push('\n'),
+                            b'r' => out.push('\r'),
+                            b't' => out.push('\t'),
+                            b'u' => {
+                                let digits = self.held.get(self.at..self.at + 4)?;
+                                self.at += 4;
+                                let text = std::str::from_utf8(digits).ok()?;
+                                let point = u32::from_str_radix(text, 16).ok()?;
+                                out.push(char::from_u32(point)?);
+                            }
+                            _ => return None,
+                        }
+                    }
+                    _ => {
+                        let start = self.at - 1;
+                        let mut stop = self.at;
+                        while stop < self.held.len()
+                            && self.held[stop] != b'"'
+                            && self.held[stop] != b'\\'
+                        {
+                            stop += 1;
+                        }
+                        out.push_str(std::str::from_utf8(self.held.get(start..stop)?).ok()?);
+                        self.at = stop;
+                    }
+                }
+            }
+        }
+
+        fn number(&mut self) -> Option<Json> {
+            let start = self.at;
+            while self.at < self.held.len()
+                && matches!(
+                    self.held[self.at],
+                    b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+                )
+            {
+                self.at += 1;
+            }
+            let text = std::str::from_utf8(self.held.get(start..self.at)?).ok()?;
+            text.parse::<f64>().ok().map(Json::Number)
+        }
+    }
+
+    pub fn read(text: &str) -> Option<Json> {
+        let mut scan = Scan {
+            held: text.as_bytes(),
+            at: 0,
+        };
+        let held = scan.value(0)?;
+        scan.skip();
+        (scan.at >= scan.held.len()).then_some(held)
+    }
 }
 
 pub mod diag {
@@ -1829,7 +2043,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "Projenin kökünde bildirim yok."),
         ("The project holds more files than this build lists.", "Proje, bu yapının listelediğinden çok dosya taşıyor."),
         ("The project's manifest could not be read.", "Projenin bildirimi okunamadı."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Körleme açık üs üzerine kuruludur ve burada hiçbir şey körlemesiz imzalamaz."),
+                ("The project's settings could not be read.", "Projenin ayarları okunamadı."),
+        ("The project's settings could not be written.", "Projenin ayarları yazılamadı."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Körleme açık üs üzerine kuruludur ve burada hiçbir şey körlemesiz imzalamaz."),
         ("The resource folder could not be made.", "Kaynak klasörü oluşturulamadı."),
         ("The resource table could not be built.", "Kaynak tablosu kurulamadı."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Cihazdaki çalışma ortamında modül sistemi yoktur: her sınıf, kendisine verilen sınıf yükleyicisi tarafından bulunur. Burada bütün işi paketler ve içe aktarmalar yapar."),
@@ -2876,7 +3092,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "Das Projekt hat in seiner Wurzel kein Manifest."),
         ("The project holds more files than this build lists.", "Das Projekt enthält mehr Dateien, als dieser Build auflistet."),
         ("The project's manifest could not be read.", "Das Manifest des Projekts konnte nicht gelesen werden."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Die Blendung baut auf dem öffentlichen Exponenten auf, und hier signiert nichts ohne Blendung."),
+                ("The project's settings could not be read.", "Die Einstellungen des Projekts konnten nicht gelesen werden."),
+        ("The project's settings could not be written.", "Die Einstellungen des Projekts konnten nicht geschrieben werden."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Die Blendung baut auf dem öffentlichen Exponenten auf, und hier signiert nichts ohne Blendung."),
         ("The resource folder could not be made.", "Der Ressourcenordner konnte nicht angelegt werden."),
         ("The resource table could not be built.", "Die Ressourcentabelle konnte nicht gebaut werden."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "Die Laufzeit auf einem Gerät hat kein Modulsystem: jede Klasse wird von dem Klassenlader gefunden, dem sie gegeben wurde. Die ganze Arbeit machen hier Pakete und Importe."),
@@ -3923,7 +4141,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "El proyecto no tiene manifiesto en su raíz."),
         ("The project holds more files than this build lists.", "El proyecto contiene más archivos de los que lista esta compilación."),
         ("The project's manifest could not be read.", "No se pudo leer el manifiesto del proyecto."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "El cegado se construye sobre el exponente público, y aquí nada firma sin cegado."),
+                ("The project's settings could not be read.", "No se pudieron leer los ajustes del proyecto."),
+        ("The project's settings could not be written.", "No se pudieron escribir los ajustes del proyecto."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "El cegado se construye sobre el exponente público, y aquí nada firma sin cegado."),
         ("The resource folder could not be made.", "No se pudo crear la carpeta de recursos."),
         ("The resource table could not be built.", "No se pudo construir la tabla de recursos."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "El entorno de ejecución de un dispositivo no tiene sistema de módulos: cada clase la encuentra el cargador de clases que la recibió. Aquí todo el trabajo lo hacen los paquetes y las importaciones."),
@@ -4970,7 +5190,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "Le projet n'a pas de manifeste à sa racine."),
         ("The project holds more files than this build lists.", "Le projet contient plus de fichiers que ce que cette compilation liste."),
         ("The project's manifest could not be read.", "Le manifeste du projet n'a pas pu être lu."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "L'exposant public est ce sur quoi repose l'aveuglement, et rien ici ne signe sans aveuglement."),
+                ("The project's settings could not be read.", "Les réglages du projet n'ont pas pu être lus."),
+        ("The project's settings could not be written.", "Les réglages du projet n'ont pas pu être écrits."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "L'exposant public est ce sur quoi repose l'aveuglement, et rien ici ne signe sans aveuglement."),
         ("The resource folder could not be made.", "Le dossier de ressources n'a pas pu être créé."),
         ("The resource table could not be built.", "La table des ressources n'a pas pu être construite."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "L'exécution sur un appareil n'a pas de système de modules : chaque classe est trouvée par le chargeur de classes auquel elle a été confiée. Les paquets et les imports font ici tout le travail."),
@@ -6020,7 +6242,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "Il progetto non ha un manifesto alla sua radice."),
         ("The project holds more files than this build lists.", "Il progetto contiene più file di quanti questa compilazione ne elenchi."),
         ("The project's manifest could not be read.", "Non è stato possibile leggere il manifesto del progetto."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "L'esponente pubblico è ciò su cui si regge l'accecamento, e nulla qui firma senza accecamento."),
+                ("The project's settings could not be read.", "Non è stato possibile leggere le impostazioni del progetto."),
+        ("The project's settings could not be written.", "Non è stato possibile scrivere le impostazioni del progetto."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "L'esponente pubblico è ciò su cui si regge l'accecamento, e nulla qui firma senza accecamento."),
         ("The resource folder could not be made.", "Non è stato possibile creare la cartella delle risorse."),
         ("The resource table could not be built.", "Non è stato possibile costruire la tabella delle risorse."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "L'esecuzione su un dispositivo non ha un sistema di moduli: ogni classe è trovata dal caricatore di classi a cui è stata affidata. Qui i pacchetti e le importazioni fanno tutto il lavoro."),
@@ -7070,7 +7294,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "O projeto não tem manifesto na sua raiz."),
         ("The project holds more files than this build lists.", "O projeto contém mais arquivos do que esta compilação lista."),
         ("The project's manifest could not be read.", "Não foi possível ler o manifesto do projeto."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "O expoente público é aquilo em que o cegamento se apoia, e nada aqui assina sem cegamento."),
+                ("The project's settings could not be read.", "Não foi possível ler as definições do projeto."),
+        ("The project's settings could not be written.", "Não foi possível escrever as definições do projeto."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "O expoente público é aquilo em que o cegamento se apoia, e nada aqui assina sem cegamento."),
         ("The resource folder could not be made.", "Não foi possível criar a pasta de recursos."),
         ("The resource table could not be built.", "Não foi possível construir a tabela de recursos."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "A execução num dispositivo não tem sistema de módulos: cada classe é encontrada pelo carregador de classes a que foi entregue. Aqui os pacotes e as importações fazem todo o trabalho."),
@@ -8117,7 +8343,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "У проекта нет манифеста в корне."),
         ("The project holds more files than this build lists.", "Проект содержит больше файлов, чем перечисляет эта сборка."),
         ("The project's manifest could not be read.", "Манифест проекта не удалось прочитать."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Открытая экспонента — то, на чём построено ослепление, а ничто здесь не подписывает без ослепления."),
+                ("The project's settings could not be read.", "Настройки проекта не удалось прочитать."),
+        ("The project's settings could not be written.", "Настройки проекта не удалось записать."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "Открытая экспонента — то, на чём построено ослепление, а ничто здесь не подписывает без ослепления."),
         ("The resource folder could not be made.", "Папку ресурсов не удалось создать."),
         ("The resource table could not be built.", "Таблицу ресурсов не удалось построить."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "У среды выполнения на устройстве нет системы модулей: каждый класс находит тот загрузчик классов, которому его дали. Здесь всю работу делают пакеты и импорты."),
@@ -9164,7 +9392,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "ليس للمشروع بيان في جذره."),
         ("The project holds more files than this build lists.", "يحمل المشروع ملفات أكثر مما يسرده هذا البناء."),
         ("The project's manifest could not be read.", "تعذّرت قراءة بيان المشروع."),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "الأس العام هو ما تقوم عليه التعمية، ولا شيء هنا يوقّع بلا تعمية."),
+                ("The project's settings could not be read.", "تعذّرت قراءة إعدادات المشروع."),
+        ("The project's settings could not be written.", "تعذّرت كتابة إعدادات المشروع."),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "الأس العام هو ما تقوم عليه التعمية، ولا شيء هنا يوقّع بلا تعمية."),
         ("The resource folder could not be made.", "تعذّر إنشاء مجلد الموارد."),
         ("The resource table could not be built.", "تعذّر بناء جدول الموارد."),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "ليس لوقت التشغيل على جهاز نظام وحدات: كل صنف يجده محمّل الأصناف الذي أُعطي له. والحزم والاستيرادات تقوم هنا بالعمل كله."),
@@ -10211,7 +10441,9 @@ pub mod speech {
         ("The project has no manifest at its root.", "项目根目录没有清单。"),
         ("The project holds more files than this build lists.", "项目所含的文件多于此构建所列出的。"),
         ("The project's manifest could not be read.", "无法读取项目的清单。"),
-        ("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "盲化正是建立在公开指数之上的，而此处不做无盲化的签名。"),
+                ("The project's settings could not be read.", "读不到这个项目的设置。"),
+        ("The project's settings could not be written.", "写不了这个项目的设置。"),
+("The public exponent is what the blinding is built on, and nothing here signs without blinding.", "盲化正是建立在公开指数之上的，而此处不做无盲化的签名。"),
         ("The resource folder could not be made.", "无法创建资源文件夹。"),
         ("The resource table could not be built.", "无法构建资源表。"),
         ("The runtime on a device has no module system: every class is found by the class loader that was given it. Packages and imports do all the work here.", "设备上的运行时没有模块系统：每个类都由拿到它的类加载器找到。这里的活全由包和导入来做。"),
@@ -32521,6 +32753,344 @@ public final class {class_name} extends ContentProvider {{
     }
 }
 
+pub mod settings {
+    use crate::diag::{Diagnostic, Severity};
+    use crate::json::{Json, Writer};
+    use crate::FailureClass;
+
+    pub const FILE_NAME: &str = "Builder.json";
+
+    fn fail(code: &str, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::new(
+            code,
+            Severity::Error,
+            FailureClass::UserError,
+            "core.settings",
+            message,
+        )
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Dependency {
+        pub name: String,
+        pub version: String,
+        pub file: String,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Settings {
+        pub package: String,
+        pub label: String,
+        pub version_name: String,
+        pub version_code: u32,
+        pub min_sdk: u32,
+        pub target_sdk: u32,
+        pub compile_sdk: u32,
+        pub languages: Vec<String>,
+        pub locales: Vec<String>,
+        pub abis: Vec<String>,
+        pub dependencies: Vec<Dependency>,
+        pub shrink: bool,
+        pub seal_resources: bool,
+        pub key_alias: String,
+    }
+
+    impl Default for Settings {
+        fn default() -> Settings {
+            Settings {
+                package: String::new(),
+                label: String::new(),
+                version_name: crate::scaffold::FIRST_VERSION_NAME.to_string(),
+                version_code: crate::scaffold::FIRST_VERSION_CODE,
+                min_sdk: crate::scaffold::OLDEST_SUPPORTED,
+                target_sdk: crate::scaffold::NEWEST_DESCRIBED,
+                compile_sdk: crate::scaffold::NEWEST_DESCRIBED,
+                languages: vec!["java".to_string()],
+                locales: Vec::new(),
+                abis: vec![crate::scaffold::ARM64.to_string()],
+                dependencies: Vec::new(),
+                shrink: true,
+                seal_resources: false,
+                key_alias: String::new(),
+            }
+        }
+    }
+
+    impl Settings {
+        pub fn from_spec(spec: &crate::scaffold::Spec) -> Settings {
+            Settings {
+                package: spec.package.clone(),
+                label: spec.label.clone(),
+                version_name: spec.version_name.clone(),
+                version_code: spec.version_code,
+                min_sdk: spec.min_sdk,
+                target_sdk: spec.target_sdk,
+                compile_sdk: spec.target_sdk,
+                languages: spec.languages.clone(),
+                locales: spec.locales.clone(),
+                abis: spec.abis.clone(),
+                ..Settings::default()
+            }
+        }
+
+        pub fn to_json(&self) -> String {
+            let mut w = Writer::new();
+            w.begin_object(None);
+            w.field_str("package", &self.package);
+            w.field_str("label", &self.label);
+
+            w.begin_object(Some("version"));
+            w.field_str("name", &self.version_name);
+            w.field_u64("code", u64::from(self.version_code));
+            w.end_object();
+
+            w.begin_object(Some("sdk"));
+            w.field_u64("min", u64::from(self.min_sdk));
+            w.field_u64("target", u64::from(self.target_sdk));
+            w.field_u64("compile", u64::from(self.compile_sdk));
+            w.end_object();
+
+            w.begin_array(Some("languages"));
+            for one in &self.languages {
+                w.element_str(one);
+            }
+            w.end_array();
+
+            w.begin_array(Some("locales"));
+            for one in &self.locales {
+                w.element_str(one);
+            }
+            w.end_array();
+
+            w.begin_array(Some("abis"));
+            for one in &self.abis {
+                w.element_str(one);
+            }
+            w.end_array();
+
+            w.begin_array(Some("dependencies"));
+            for one in &self.dependencies {
+                w.begin_object(None);
+                w.field_str("name", &one.name);
+                w.field_str("version", &one.version);
+                w.field_str("file", &one.file);
+                w.end_object();
+            }
+            w.end_array();
+
+            w.begin_object(Some("build"));
+            w.field_bool("shrink", self.shrink);
+            w.field_bool("sealResources", self.seal_resources);
+            w.end_object();
+
+            w.begin_object(Some("signing"));
+            w.field_str("alias", &self.key_alias);
+            w.end_object();
+
+            w.end_object();
+            w.finish()
+        }
+
+        pub fn from_json(text: &str) -> Result<Settings, Diagnostic> {
+            let held = crate::json::read(text).ok_or_else(|| {
+                fail("EB060", "The project's settings could not be read.")
+                    .with_context(format!("Path: {FILE_NAME}"))
+            })?;
+            let mut out = Settings::default();
+            let word =
+                |at: &Json, key: &str| at.get(key).and_then(|one| one.text()).map(str::to_string);
+            let count = |at: &Json, key: &str| at.get(key).and_then(|one| one.integer());
+
+            if let Some(found) = word(&held, "package") {
+                out.package = found;
+            }
+            if let Some(found) = word(&held, "label") {
+                out.label = found;
+            }
+            if let Some(version) = held.get("version") {
+                if let Some(found) = word(version, "name") {
+                    out.version_name = found;
+                }
+                if let Some(found) = count(version, "code") {
+                    out.version_code = found.max(1) as u32;
+                }
+            }
+            if let Some(sdk) = held.get("sdk") {
+                if let Some(found) = count(sdk, "min") {
+                    out.min_sdk = found.max(1) as u32;
+                }
+                if let Some(found) = count(sdk, "target") {
+                    out.target_sdk = found.max(1) as u32;
+                }
+                if let Some(found) = count(sdk, "compile") {
+                    out.compile_sdk = found.max(1) as u32;
+                }
+            }
+            for (key, into) in [("languages", 0usize), ("locales", 1), ("abis", 2)] {
+                let Some(found) = held.get(key) else {
+                    continue;
+                };
+                let named = found.strings();
+                match into {
+                    0 => out.languages = named,
+                    1 => out.locales = named,
+                    _ => out.abis = named,
+                }
+            }
+            if let Some(listed) = held.get("dependencies").and_then(|one| one.list()) {
+                out.dependencies = listed
+                    .iter()
+                    .filter_map(|one| {
+                        Some(Dependency {
+                            name: one.get("name")?.text()?.to_string(),
+                            version: one
+                                .get("version")
+                                .and_then(|held| held.text())
+                                .unwrap_or_default()
+                                .to_string(),
+                            file: one
+                                .get("file")
+                                .and_then(|held| held.text())
+                                .unwrap_or_default()
+                                .to_string(),
+                        })
+                    })
+                    .collect();
+            }
+            if let Some(build) = held.get("build") {
+                if let Some(found) = build.get("shrink").and_then(|one| one.boolean()) {
+                    out.shrink = found;
+                }
+                if let Some(found) = build.get("sealResources").and_then(|one| one.boolean()) {
+                    out.seal_resources = found;
+                }
+            }
+            if let Some(signing) = held.get("signing") {
+                if let Some(found) = word(signing, "alias") {
+                    out.key_alias = found;
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    pub fn path_in(root: &str) -> std::path::PathBuf {
+        std::path::Path::new(root).join(FILE_NAME)
+    }
+
+    pub fn held(root: &str) -> Result<Option<Settings>, Diagnostic> {
+        let path = path_in(root);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Ok(None);
+        };
+        Settings::from_json(&text).map(Some)
+    }
+
+    pub fn write(root: &str, settings: &Settings) -> Result<(), Diagnostic> {
+        let path = path_in(root);
+        std::fs::write(&path, format!("{}\n", settings.to_json())).map_err(|why| {
+            fail("EB061", "The project's settings could not be written.")
+                .with_context(format!("Path: {FILE_NAME}"))
+                .with_context(format!("Cause: {why}"))
+        })
+    }
+
+    pub fn over_manifest(manifest: &str, settings: &Settings) -> String {
+        let mut out = manifest.to_string();
+        if !settings.package.is_empty() {
+            out = set_attribute(&out, "manifest", "package", &settings.package);
+        }
+        if !settings.version_name.is_empty() {
+            out = set_attribute(
+                &out,
+                "manifest",
+                "android:versionName",
+                &settings.version_name,
+            );
+        }
+        out = set_attribute(
+            &out,
+            "manifest",
+            "android:versionCode",
+            &settings.version_code.to_string(),
+        );
+        out = set_attribute(
+            &out,
+            "uses-sdk",
+            "android:minSdkVersion",
+            &settings.min_sdk.to_string(),
+        );
+        out = set_attribute(
+            &out,
+            "uses-sdk",
+            "android:targetSdkVersion",
+            &settings.target_sdk.to_string(),
+        );
+        out
+    }
+
+    fn set_attribute(source: &str, element: &str, name: &str, value: &str) -> String {
+        let opening = format!("<{element}");
+        let Some(found) = source.find(&opening) else {
+            return source.to_string();
+        };
+        let after = found + opening.len();
+        let Some(stop) = source[after..].find('>') else {
+            return source.to_string();
+        };
+        let head = &source[after..after + stop];
+        let written = format!(" {name}=\"{value}\"");
+        let Some(at) = find_attribute(head, name) else {
+            let mut out = String::with_capacity(source.len() + written.len());
+            out.push_str(&source[..after]);
+            out.push_str(&written);
+            out.push_str(&source[after..]);
+            return out;
+        };
+        let mut out = String::with_capacity(source.len() + written.len());
+        out.push_str(&source[..after]);
+        out.push_str(&head[..at.0]);
+        out.push_str(written.trim_start());
+        out.push_str(&head[at.1..]);
+        out.push_str(&source[after + stop..]);
+        out
+    }
+
+    fn find_attribute(head: &str, name: &str) -> Option<(usize, usize)> {
+        let mut at = 0usize;
+        while let Some(found) = head[at..].find(name) {
+            let start = at + found;
+            let before = start.checked_sub(1).map(|one| head.as_bytes()[one]);
+            if !matches!(
+                before,
+                None | Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+            ) {
+                at = start + name.len();
+                continue;
+            }
+            let rest = &head[start + name.len()..];
+            let trimmed = rest.trim_start();
+            if !trimmed.starts_with('=') {
+                at = start + name.len();
+                continue;
+            }
+            let quoted = trimmed[1..].trim_start();
+            let mark = quoted.as_bytes().first().copied()?;
+            if mark != b'"' && mark != b'\'' {
+                return None;
+            }
+            let closing = quoted[1..].find(mark as char)? + 1;
+            let consumed = (rest.len() - trimmed.len())
+                + 1
+                + (trimmed[1..].len() - quoted.len())
+                + closing
+                + 1;
+            return Some((start, start + name.len() + consumed));
+        }
+        None
+    }
+}
+
 pub mod scaffold {
     use crate::diag::{Diagnostic, Severity};
     use crate::json::Writer;
@@ -32988,8 +33558,14 @@ pub mod scaffold {
                 .with_context(format!("Reason: {why}"))
         })?;
 
+        let settings = crate::settings::Settings::from_spec(spec);
+        crate::settings::write(root, &settings)?;
+
         let mut folders = Vec::new();
-        let mut files = vec!["AndroidManifest.xml".to_string()];
+        let mut files = vec![
+            "AndroidManifest.xml".to_string(),
+            crate::settings::FILE_NAME.to_string(),
+        ];
 
         for (language, folder, _, _) in LANGUAGES {
             if !spec.languages.iter().any(|chosen| chosen == language) {
@@ -39296,6 +39872,10 @@ pub mod builder {
     pub fn sealed_project(root: &str, fingerprint: Option<&str>) -> Result<Project, Diagnostic> {
         crate::progress::enter_checked("project")?;
         let manifest = crate::scaffold::read_manifest(root)?;
+        let manifest = match crate::settings::held(root)? {
+            Some(settings) => crate::settings::over_manifest(&manifest, &settings),
+            None => manifest,
+        };
 
         let brought = brought_by_libraries(root)?;
         let manifest = merged_manifest(&manifest, &brought.manifests)?;
@@ -49175,6 +49755,127 @@ public class Written {
     }
 
     #[test]
+    fn a_new_project_is_given_settings_with_every_key_already_there() {
+        let directory = temp_directory("omni-settings-made");
+        let root = directory.join("Made");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt.made".to_string(),
+                label: "Made".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let written = std::fs::read_to_string(root.join(super::settings::FILE_NAME))
+            .expect("the settings are written beside the manifest");
+        for key in [
+            "package",
+            "label",
+            "version",
+            "sdk",
+            "languages",
+            "locales",
+            "abis",
+            "dependencies",
+            "build",
+            "signing",
+        ] {
+            assert!(
+                written.contains(&format!("\"{key}\"")),
+                "{key} is missing: {written}"
+            );
+        }
+
+        let read = super::settings::Settings::from_json(&written).expect("they read back");
+        assert_eq!(read.package, "com.tr.yt.made");
+        assert_eq!(read.min_sdk, 30);
+        assert_eq!(read.target_sdk, 36);
+        assert!(read.dependencies.is_empty(), "nothing is added by default");
+        assert!(read.shrink);
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn the_settings_win_over_what_the_manifest_says() {
+        let directory = temp_directory("omni-settings-win");
+        let root = directory.join("Wins");
+        let folder = root.to_str().unwrap().to_string();
+        super::scaffold::create(
+            &folder,
+            &super::scaffold::Spec {
+                package: "com.tr.yt.wins".to_string(),
+                label: "Wins".to_string(),
+                languages: vec!["java".to_string()],
+                min_sdk: 30,
+                target_sdk: 36,
+                ..Default::default()
+            },
+        )
+        .expect("the project must be made");
+
+        let mut settings = super::settings::held(&folder)
+            .expect("they read")
+            .expect("they are there");
+        settings.version_name = "9.9.9".to_string();
+        settings.version_code = 77;
+        settings.min_sdk = 31;
+        settings.target_sdk = 37;
+        super::settings::write(&folder, &settings).expect("they write");
+
+        let manifest = std::fs::read_to_string(root.join("AndroidManifest.xml")).unwrap();
+        assert!(manifest.contains("android:versionCode=\"1\""), "{manifest}");
+
+        let project = super::builder::from_project(&folder).expect("it reads");
+        assert!(
+            project.manifest.contains("android:versionCode=\"77\""),
+            "the settings decide the version code: {}",
+            project.manifest
+        );
+        assert!(
+            project.manifest.contains("android:versionName=\"9.9.9\""),
+            "{}",
+            project.manifest
+        );
+        assert!(
+            project.manifest.contains("android:minSdkVersion=\"31\""),
+            "{}",
+            project.manifest
+        );
+        assert!(
+            project.manifest.contains("android:targetSdkVersion=\"37\""),
+            "{}",
+            project.manifest
+        );
+        assert!(
+            std::fs::read_to_string(root.join("AndroidManifest.xml"))
+                .unwrap()
+                .contains("android:versionCode=\"1\""),
+            "the file on disk is left as the developer wrote it"
+        );
+
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn settings_that_will_not_read_are_refused_rather_than_ignored() {
+        let directory = temp_directory("omni-settings-bad");
+        let root = directory.join("Bad");
+        std::fs::create_dir_all(&root).unwrap();
+        let folder = root.to_str().unwrap().to_string();
+        std::fs::write(root.join(super::settings::FILE_NAME), "{ this is not json").unwrap();
+        let error = super::settings::held(&folder).expect_err("it is refused");
+        assert_eq!(error.code, "EB060");
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
     fn a_project_of_several_files_becomes_a_package_that_verifies() {
         const MAIN: &str = r#"
 package com.tr.yt.several;
@@ -55947,6 +56648,7 @@ public final class MainActivity extends Activity {
             names,
             vec![
                 "AndroidManifest.xml",
+                "Builder.json",
                 "Java",
                 "Kotlin",
                 "Native",
@@ -58266,7 +58968,7 @@ public final class MainActivity extends Activity {
         here.sort();
         assert_eq!(
             here,
-            vec!["AndroidManifest.xml", "Java", "Res"],
+            vec!["AndroidManifest.xml", "Builder.json", "Java", "Res"],
             "the root holds the manifest, the folders for the languages chosen, and the \
              resource folder"
         );
