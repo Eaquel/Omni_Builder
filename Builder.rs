@@ -495,6 +495,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
             "Splitting is by count and not by call graph: a class lands in the dex the order reached it in rather than beside the classes it calls.",
             "No invokedynamic and no method handles, because nothing upstream produces one.",
             "No local variable or parameter names in the debug information: a stack trace carries a line number and not the name of what was on it.",
+            "The JVM reads a byte array and a boolean array with one instruction and Dalvik has two, so the array's type is carried alongside the stack: through fields, calls, allocations, casts, parameters, locals and the shuffles. Where it cannot be carried that far the byte instruction is written, which the platform verifier accepts for either.",
         ],
     },
     Subsystem {
@@ -28646,12 +28647,70 @@ pub mod dalvik {
 
         made: &'a mut Synthesised,
 
-        kinds: Vec<Kept>,
+        kinds: Vec<Slot>,
+        locals: std::collections::BTreeMap<u16, Held>,
 
         scratch: u16,
 
-        kinds_at: std::collections::BTreeMap<usize, Vec<Kept>>,
+        kinds_at: std::collections::BTreeMap<usize, Vec<Slot>>,
         max_outputs: u16,
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Held {
+        dimensions: u8,
+        element: u8,
+    }
+
+    impl Held {
+        fn of(descriptor: &str) -> Option<Held> {
+            let held = descriptor.as_bytes();
+            let mut deep = 0usize;
+            while held.get(deep) == Some(&b'[') {
+                deep += 1;
+            }
+            if deep == 0 || deep > 255 {
+                return None;
+            }
+            held.get(deep).map(|element| Held {
+                dimensions: deep as u8,
+                element: *element,
+            })
+        }
+
+        const fn inner(self) -> Option<Held> {
+            if self.dimensions > 1 {
+                Some(Held {
+                    dimensions: self.dimensions - 1,
+                    element: self.element,
+                })
+            } else {
+                None
+            }
+        }
+
+        const fn holds(self, element: u8) -> bool {
+            self.dimensions == 1 && self.element == element
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    struct Slot {
+        kept: Kept,
+        array: Option<Held>,
+    }
+
+    impl Slot {
+        const fn of(kept: Kept) -> Slot {
+            Slot { kept, array: None }
+        }
+
+        fn holding(descriptor: &str) -> Slot {
+            Slot {
+                kept: Kept::of(descriptor),
+                array: Held::of(descriptor),
+            }
+        }
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -28712,6 +28771,7 @@ pub mod dalvik {
                 depth: 0,
                 made,
                 kinds: Vec::new(),
+                locals: std::collections::BTreeMap::new(),
                 scratch: low + code.max_locals + code.max_stack,
                 kinds_at: std::collections::BTreeMap::new(),
                 max_outputs: 0,
@@ -28727,15 +28787,35 @@ pub mod dalvik {
         }
 
         fn puts(&mut self, kept: Kept) {
-            match kept {
+            self.puts_slot(Slot::of(kept));
+        }
+
+        fn puts_slot(&mut self, slot: Slot) {
+            match slot.kept {
                 Kept::Wide | Kept::Half => {
-                    self.kinds.push(Kept::Wide);
-                    self.kinds.push(Kept::Half);
+                    self.kinds.push(Slot::of(Kept::Wide));
+                    self.kinds.push(Slot::of(Kept::Half));
                     self.depth += 2;
                 }
-                other => {
-                    self.kinds.push(other);
+                _ => {
+                    self.kinds.push(slot);
                     self.depth += 1;
+                }
+            }
+        }
+
+        fn slot_at(&self, from_top: u16) -> Option<Slot> {
+            let at = self.kinds.len().checked_sub(usize::from(from_top))?;
+            self.kinds.get(at).copied()
+        }
+
+        pub fn note_local(&mut self, local: u16, descriptor: &str) {
+            match Held::of(descriptor) {
+                Some(held) => {
+                    self.locals.insert(local, held);
+                }
+                None => {
+                    self.locals.remove(&local);
                 }
             }
         }
@@ -28802,7 +28882,7 @@ pub mod dalvik {
                         .with_context(format!("Register {register}")));
                     }
                     self.push(Insn::raw(vec![0x000d | (register << 8)]));
-                    self.kinds = vec![Kept::Reference];
+                    self.kinds = vec![Slot::of(Kept::Reference)];
                     self.depth = 1;
                 }
                 let opcode = bytes[at];
@@ -29176,7 +29256,7 @@ pub mod dalvik {
                         1,
                         Operand::Field(reference),
                     ));
-                    self.puts(holds);
+                    self.puts_slot(Slot::holding(&descriptor));
                 }
                 0xb3 => {
                     let from = self.slot(width);
@@ -29199,7 +29279,7 @@ pub mod dalvik {
                         Operand::Field(reference),
                     ));
                     self.put_back(to, holds, into);
-                    self.puts(holds);
+                    self.puts_slot(Slot::holding(&descriptor));
                 }
                 _ => {
                     let value = self.slot(width);
@@ -29614,7 +29694,7 @@ pub mod dalvik {
                     _ => 0x000a,
                 };
                 self.push(Insn::raw(vec![fetch | (to << 8)]));
-                self.puts(Kept::of(&returns));
+                self.puts_slot(Slot::holding(&returns));
             }
             Ok(())
         }
@@ -29706,16 +29786,30 @@ pub mod dalvik {
                 0x4b..=0x4e => self.store_local(u16::from(opcode) - 0x4b, 0x07, 1)?,
 
                 0x2e..=0x35 => {
+                    let held = self.slot_at(2).and_then(|one| one.array);
                     let (dalvik, holds) = match opcode {
-                        0x2e => (0x0044u16, Kept::Number),
-                        0x2f => (0x0045, Kept::Wide),
+                        0x2e => (0x0044u16, Slot::of(Kept::Number)),
+                        0x2f => (0x0045, Slot::of(Kept::Wide)),
 
-                        0x30 => (0x0044, Kept::Number),
-                        0x31 => (0x0045, Kept::Wide),
-                        0x32 => (0x0046, Kept::Reference),
-                        0x33 => (0x0047, Kept::Number),
-                        0x34 => (0x0049, Kept::Number),
-                        _ => (0x004a, Kept::Number),
+                        0x30 => (0x0044, Slot::of(Kept::Number)),
+                        0x31 => (0x0045, Slot::of(Kept::Wide)),
+                        0x32 => (
+                            0x0046,
+                            Slot {
+                                kept: Kept::Reference,
+                                array: held.and_then(Held::inner),
+                            },
+                        ),
+                        0x33 => (
+                            if held.is_some_and(|one| one.holds(b'Z')) {
+                                0x0047
+                            } else {
+                                0x0048
+                            },
+                            Slot::of(Kept::Number),
+                        ),
+                        0x34 => (0x0049, Slot::of(Kept::Number)),
+                        _ => (0x004a, Slot::of(Kept::Number)),
                     };
                     let array = self.slot(2);
                     let index = self.slot(1);
@@ -29725,7 +29819,7 @@ pub mod dalvik {
                         dalvik | (to << 8),
                         (array & 0xff) | ((index & 0xff) << 8),
                     ]));
-                    self.puts(holds);
+                    self.puts_slot(holds);
                 }
                 0x4f..=0x56 => {
                     let (dalvik, width) = match opcode {
@@ -29734,7 +29828,11 @@ pub mod dalvik {
                         0x51 => (0x004b, 1),
                         0x52 => (0x004c, 2),
                         0x53 => (0x004d, 1),
-                        0x54 => (0x004e, 1),
+                        0x54 => {
+                            let held = self.slot_at(3).and_then(|one| one.array);
+                            let boolean = held.is_some_and(|one| one.holds(b'Z'));
+                            (if boolean { 0x004e } else { 0x004f }, 1)
+                        }
                         0x55 => (0x0050, 1),
                         _ => (0x0051, 1),
                     };
@@ -29973,11 +30071,15 @@ pub mod dalvik {
                     };
                     let register = self.slot(1);
                     if opcode == 0xc0 {
+                        let held = Held::of(&descriptor);
                         self.push(Insn::pointing(
                             vec![0x001f | (register << 8), 0],
                             1,
                             Operand::Type(descriptor),
                         ));
+                        if let Some(top) = self.kinds.last_mut() {
+                            top.array = held;
+                        }
                     } else {
                         self.shrink(1)?;
                         let to = self.stack_base + self.depth;
@@ -30148,21 +30250,21 @@ pub mod dalvik {
             }
 
             let base = self.stack_base + self.depth - reach;
-            let split = |kinds: &[Kept], from: u16, slots: u16| -> Option<Vec<(Kept, u16)>> {
+            let split = |kinds: &[Slot], from: u16, slots: u16| -> Option<Vec<(Slot, u16)>> {
                 let mut out = Vec::new();
                 let mut at = from;
                 while at < from + slots {
                     let held = kinds[usize::from(at)];
-                    if held == Kept::Half {
+                    if held.kept == Kept::Half {
                         return None;
                     }
                     out.push((held, base + at));
-                    at += if held == Kept::Wide { 2 } else { 1 };
+                    at += if held.kept == Kept::Wide { 2 } else { 1 };
                 }
                 (at == from + slots).then_some(out)
             };
 
-            let held: Vec<Kept> = self.kinds[self.kinds.len() - usize::from(reach)..].to_vec();
+            let held: Vec<Slot> = self.kinds[self.kinds.len() - usize::from(reach)..].to_vec();
             let (Some(under), Some(over)) = (split(&held, 0, below), split(&held, below, above))
             else {
                 return Err(
@@ -30178,22 +30280,22 @@ pub mod dalvik {
             if below == 0 && twice {
                 let mut to = base + above;
                 for (kept, from) in &over {
-                    self.push(move_register(kept.moved_by(), to, *from));
-                    to += if *kept == Kept::Wide { 2 } else { 1 };
+                    self.push(move_register(kept.kept.moved_by(), to, *from));
+                    to += if kept.kept == Kept::Wide { 2 } else { 1 };
                 }
                 for (kept, _) in &over {
-                    self.puts(*kept);
+                    self.puts_slot(*kept);
                 }
                 return Ok(());
             }
 
             let mut kept_at = self.scratch;
-            let mut keep = |out: &mut Vec<Insn>, values: &[(Kept, u16)]| -> Vec<(Kept, u16)> {
+            let mut keep = |out: &mut Vec<Insn>, values: &[(Slot, u16)]| -> Vec<(Slot, u16)> {
                 let mut done = Vec::new();
                 for (kept, from) in values {
-                    out.push(move_register(kept.moved_by(), kept_at, *from));
+                    out.push(move_register(kept.kept.moved_by(), kept_at, *from));
                     done.push((*kept, kept_at));
-                    kept_at += if *kept == Kept::Wide { 2 } else { 1 };
+                    kept_at += if kept.kept == Kept::Wide { 2 } else { 1 };
                 }
                 done
             };
@@ -30201,7 +30303,7 @@ pub mod dalvik {
             let under_kept = keep(&mut moves, &under);
             let over_kept = keep(&mut moves, &over);
 
-            let mut order: Vec<(Kept, u16)> = Vec::new();
+            let mut order: Vec<(Slot, u16)> = Vec::new();
             order.extend(over_kept.iter().copied());
             order.extend(under_kept.iter().copied());
             if twice {
@@ -30210,8 +30312,8 @@ pub mod dalvik {
 
             let mut to = base;
             for (kept, from) in &order {
-                moves.push(move_register(kept.moved_by(), to, *from));
-                to += if *kept == Kept::Wide { 2 } else { 1 };
+                moves.push(move_register(kept.kept.moved_by(), to, *from));
+                to += if kept.kept == Kept::Wide { 2 } else { 1 };
             }
             for one in moves {
                 self.push(one);
@@ -30219,7 +30321,7 @@ pub mod dalvik {
 
             self.shrink(reach)?;
             for (kept, _) in &order {
-                self.puts(*kept);
+                self.puts_slot(*kept);
             }
             Ok(())
         }
@@ -30251,19 +30353,35 @@ pub mod dalvik {
             let local = self.low + local;
             let to = self.stack_base + self.depth;
             self.push(move_register(kind, to, local));
-            self.puts(match kind {
+            let kept = match kind {
                 0x07 => Kept::Reference,
                 0x04 => Kept::Wide,
                 _ => {
                     debug_assert_eq!(width, 1);
                     Kept::Number
                 }
-            });
+            };
+            let array = if kept == Kept::Reference {
+                self.locals.get(&local).copied()
+            } else {
+                None
+            };
+            self.puts_slot(Slot { kept, array });
         }
 
         fn store_local(&mut self, local: u16, kind: u8, width: u16) -> Result<(), Diagnostic> {
             let local = self.low + local;
             let from = self.slot(width);
+            if kind == 0x07 {
+                match self.slot_at(1).and_then(|one| one.array) {
+                    Some(held) => {
+                        self.locals.insert(local, held);
+                    }
+                    None => {
+                        self.locals.remove(&local);
+                    }
+                }
+            }
             self.shrink(width)?;
             self.push(move_register(kind, local, from));
             Ok(())
@@ -30478,7 +30596,7 @@ pub mod dalvik {
                 Operand::Type(descriptor.to_string()),
             ));
             self.put_back(to, Kept::Reference, into);
-            self.puts(Kept::Reference);
+            self.puts_slot(Slot::holding(descriptor));
             Ok(())
         }
 
@@ -31368,6 +31486,7 @@ pub mod dalvik {
                 0x01
             };
             translator.push(move_register(opcode, local, at));
+            translator.note_local(local, parameter);
             at += width_of(parameter);
             local += width_of(parameter);
         }
@@ -48402,6 +48521,109 @@ public class Written {
             }
         }
         out
+    }
+
+    #[test]
+    fn a_byte_array_is_read_by_the_instruction_that_reads_bytes() {
+        let source = r#"
+public final class Arrays {
+
+    private final byte[] bytes = new byte[4];
+    private final boolean[] flags = new boolean[4];
+
+    public int sum(byte[] given) {
+        int total = 0;
+        for (int at = 0; at < given.length; at = at + 1) {
+            total = total + given[at];
+        }
+        bytes[0] = given[0];
+        return total;
+    }
+
+    public boolean any(boolean[] given) {
+        boolean found = false;
+        for (int at = 0; at < given.length; at = at + 1) {
+            if (given[at]) {
+                found = true;
+            }
+        }
+        flags[0] = given[0];
+        return found;
+    }
+}
+"#;
+        let classpath = crate::compilers::java::Classpath::new();
+        let mut classes = Vec::new();
+        for (name, bytes) in
+            crate::compilers::java::compile(source.trim_start(), &classpath).expect("it compiles")
+        {
+            let class = crate::jvm::read(&bytes)
+                .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("it translates"));
+        }
+
+        let opcodes = |wanted: &str| -> Vec<u8> {
+            classes
+                .iter()
+                .flat_map(|one| one.direct_methods.iter().chain(one.virtual_methods.iter()))
+                .filter(|one| one.reference.name == wanted)
+                .flat_map(|one| one.instructions.iter())
+                .filter_map(|one| one.units.first().map(|unit| (unit & 0xff) as u8))
+                .collect()
+        };
+
+        let over_bytes = opcodes("sum");
+        assert!(
+            over_bytes.contains(&0x48),
+            "a byte array is read with aget-byte: {over_bytes:02x?}"
+        );
+        assert!(
+            over_bytes.contains(&0x4f),
+            "a byte array is written with aput-byte: {over_bytes:02x?}"
+        );
+        assert!(
+            !over_bytes.contains(&0x47) && !over_bytes.contains(&0x4e),
+            "nothing here touches a byte array as if it held booleans: {over_bytes:02x?}"
+        );
+
+        let over_flags = opcodes("any");
+        assert!(
+            over_flags.contains(&0x47),
+            "a boolean array is read with aget-boolean: {over_flags:02x?}"
+        );
+        assert!(
+            over_flags.contains(&0x4e),
+            "a boolean array is written with aput-boolean: {over_flags:02x?}"
+        );
+        assert!(
+            !over_flags.contains(&0x48) && !over_flags.contains(&0x4f),
+            "nothing here touches a boolean array as if it held bytes: {over_flags:02x?}"
+        );
+
+        let sealed = crate::seal::source("com.tr.yt.brick", &"ab".repeat(32));
+        let mut guarded = Vec::new();
+        for (name, bytes) in
+            crate::compilers::java::compile(&sealed, &classpath).expect("the seal compiles")
+        {
+            let class = crate::jvm::read(&bytes)
+                .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
+            guarded.extend(crate::dalvik::translate_class(&class).expect("it translates"));
+        }
+        let over_seal: Vec<u8> = guarded
+            .iter()
+            .flat_map(|one| one.direct_methods.iter().chain(one.virtual_methods.iter()))
+            .filter(|one| one.reference.name == "written")
+            .flat_map(|one| one.instructions.iter())
+            .filter_map(|one| one.units.first().map(|unit| (unit & 0xff) as u8))
+            .collect();
+        assert!(
+            !over_seal.is_empty(),
+            "the seal reads the bytes it was given"
+        );
+        assert!(
+            over_seal.contains(&0x48) && !over_seal.contains(&0x47),
+            "the seal compiled into every package reads its bytes as bytes: {over_seal:02x?}"
+        );
     }
 
     #[test]
