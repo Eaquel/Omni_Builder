@@ -34,6 +34,8 @@ KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/omni/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
 RESOURCES = ROOT / "Builder/Source/Main/res"
 COMPILERS = ROOT / "Compilers"
+GUARD = ROOT / "Guard.rs"
+ANDROID = ROOT / "Android.rs"
 
 CONFORMANCE = {
     "OMNI_REQUIRE_APKSIGNER": "1",
@@ -131,15 +133,25 @@ def check_layout() -> str:
         ROOT / "Builder/Source/Main/Native/CMakeLists.txt",
         ROOT / "Builder/build.gradle.kts",
         ROOT / "Builder/proguard-rules.pro",
+        GUARD,
+        ANDROID,
     ]
     missing = [str(path.relative_to(ROOT)) for path in required if not path.is_file()]
     if missing:
         raise AssertionError("missing: " + ", ".join(missing))
 
     compilers = sorted(path.name for path in COMPILERS.glob("*.rs"))
-    expected = ["Android.rs", "Cpp.rs", "Java.rs", "Kotlin.rs", "Rust.rs"]
+    expected = ["Cpp.rs", "Kotlin.rs", "Rust.rs"]
     if compilers != expected:
         raise AssertionError(f"Compilers holds {compilers}, expected {expected}")
+
+    java = sorted(path.name for path in (COMPILERS / "Java").glob("*.rs"))
+    wanted_java = ["Java.rs", "Java_Diagnostic.rs", "Java_Fixer.rs"]
+    if java != wanted_java:
+        raise AssertionError(f"Compilers/Java holds {java}, expected {wanted_java}")
+
+    if (ROOT / "Examples").exists():
+        raise AssertionError("Examples is gone from this tree")
 
     if (ROOT / "Omni.rs").exists() or (ROOT / "Plugins").exists():
         raise AssertionError("the old Omni.rs / Plugins layout is still here")
@@ -169,7 +181,8 @@ def check_comments() -> str:
         ROOT / "Builder/Source/Main/Native/Builder.hpp",
     ]
     watched += sorted(COMPILERS.glob("*.rs"))
-    watched += sorted((ROOT / "Examples").rglob("*.java"))
+    watched += sorted((COMPILERS / "Java").glob("*.rs"))
+    watched += [GUARD, ANDROID]
 
     found: list[str] = []
     for path in watched:
@@ -569,7 +582,7 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
     def plain(text: str) -> str:
         return re.sub(r"\\\n\s*", "", text).replace('\\"', '"').replace("\\'", "'").strip()
 
-    for path in [CORE] + sorted(COMPILERS.glob("*.rs")):
+    for path in [CORE, GUARD, ANDROID] + sorted(COMPILERS.glob("*.rs")) + sorted((COMPILERS / "Java").glob("*.rs")):
         text = path.read_text(encoding="utf-8")
         for found in re.finditer(r'"(E[A-Z]\d{3})"', text):
             opened = text.rfind("(", max(0, found.start() - 400), found.start())
@@ -605,8 +618,8 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
                     lines.add(plain(said.group(2)))
                 break
 
-        if path == CORE:
-            policy = text[text.index("pub mod guard {"):text.index("\npub mod axml {")]
+        if path == GUARD:
+            policy = text
             for rule in re.finditer(
                 r'\(\s*"E[A-Z]\d{3}",\s*"[a-z-]+",\s*"((?:[^"\\]|\\.)*)",\s*\)', policy, re.S
             ):
@@ -640,6 +653,22 @@ def spoken_surface() -> tuple[set[str], set[str], list[str]]:
                     continue
                 if "{" not in part:
                     lines.add(part)
+
+    fixer = (COMPILERS / "Java" / "Java_Fixer.rs").read_text(encoding="utf-8")
+    opened = fixer.index("pub const REPAIR_TITLES: &[&str] = &[")
+    closed = fixer.index("\n];", opened)
+    for said in re.finditer(r'"((?:[^"\\]|\\.)*)"\s*,', fixer[opened + 36:closed]):
+        lines.add(plain(said.group(1)))
+
+    catalogue = (COMPILERS / "Java" / "Java_Diagnostic.rs").read_text(encoding="utf-8")
+    opened = catalogue.index("pub const CATALOGUE: &[(&str, &str)] = &[")
+    closed = catalogue.index("\n];", opened)
+    for said in re.finditer(
+        r'\(\s*"EJ\d{3}"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)\s*,',
+        catalogue[opened:closed],
+        re.S,
+    ):
+        lines.add(plain(said.group(1)))
 
     return lines, words, woven
 
