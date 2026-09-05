@@ -64,6 +64,11 @@
     <string name="omni_action_more">Daha fazla</string>
     <string name="omni_files_root">Proje</string>
     <string name="omni_files_empty">Bu klasör boş.</string>
+    <string name="omni_files_selected">%1$d seçili</string>
+    <string name="omni_files_copy_over">Karşıya kopyala</string>
+    <string name="omni_files_move_over">Karşıya taşı</string>
+    <string name="omni_files_clear_picks">Temizle</string>
+    <string name="omni_files_carried">%1$d öge taşındı</string>
     <string name="omni_files_split">BÖL</string>
     <string name="omni_defaults_title">Yeni projeler</string>
     <string name="omni_defaults_seal">Bu yapının ürettiği her paket, onu imzalayan anahtara karşı bir mühür taşır. Yeniden paketlenmiş bir kopya başka bir sertifika sunar ve mühür başlamayı reddeder.</string>

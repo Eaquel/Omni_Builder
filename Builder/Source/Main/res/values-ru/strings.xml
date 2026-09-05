@@ -64,6 +64,11 @@
     <string name="omni_action_more">Ещё</string>
     <string name="omni_files_root">Проект</string>
     <string name="omni_files_empty">Эта папка пуста.</string>
+    <string name="omni_files_selected">выбрано %1$d</string>
+    <string name="omni_files_copy_over">Копировать напротив</string>
+    <string name="omni_files_move_over">Переместить напротив</string>
+    <string name="omni_files_clear_picks">Снять</string>
+    <string name="omni_files_carried">перенесено %1$d</string>
     <string name="omni_files_split">РАЗДЕЛИТЬ</string>
     <string name="omni_defaults_title">Новые проекты</string>
     <string name="omni_defaults_seal">Каждый пакет, собранный здесь, несёт печать, привязанную к ключу, которым он подписан. Переупакованная копия предъявляет другой сертификат, и печать отказывается запускаться.</string>

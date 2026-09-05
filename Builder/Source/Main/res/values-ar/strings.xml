@@ -64,6 +64,11 @@
     <string name="omni_action_more">المزيد</string>
     <string name="omni_files_root">المشروع</string>
     <string name="omni_files_empty">هذا المجلد فارغ.</string>
+    <string name="omni_files_selected">%1$d محدد</string>
+    <string name="omni_files_copy_over">انسخ إلى المقابل</string>
+    <string name="omni_files_move_over">انقل إلى المقابل</string>
+    <string name="omni_files_clear_picks">ألغِ التحديد</string>
+    <string name="omni_files_carried">نُقل %1$d</string>
     <string name="omni_files_split">تقسيم</string>
     <string name="omni_defaults_title">مشاريع جديدة</string>
     <string name="omni_defaults_seal">كل حزمة تُبنى هنا تحمل ختمًا مرتبطًا بالمفتاح الذي وقّعها. النسخة المعاد تغليفها تقدّم شهادة أخرى، فيرفض الختم البدء.</string>

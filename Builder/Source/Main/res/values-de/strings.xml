@@ -64,6 +64,11 @@
     <string name="omni_action_more">Mehr</string>
     <string name="omni_files_root">Projekt</string>
     <string name="omni_files_empty">Dieser Ordner ist leer.</string>
+    <string name="omni_files_selected">%1$d gewählt</string>
+    <string name="omni_files_copy_over">Hinüber kopieren</string>
+    <string name="omni_files_move_over">Hinüber verschieben</string>
+    <string name="omni_files_clear_picks">Aufheben</string>
+    <string name="omni_files_carried">%1$d hinübergebracht</string>
     <string name="omni_files_split">TEILEN</string>
     <string name="omni_defaults_title">Neue Projekte</string>
     <string name="omni_defaults_seal">Jedes Paket, das hier entsteht, trägt ein Siegel gegen den Schlüssel, der es signiert hat. Eine neu verpackte Kopie zeigt ein anderes Zertifikat, und das Siegel verweigert den Start.</string>

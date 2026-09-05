@@ -509,18 +509,6 @@ object Builder {
 
     external fun nativeSpeak(tag: String): String
 
-    external fun nativeShellOpen(folder: String, home: String, rows: Int, columns: Int): Int
-
-    external fun nativeShellRead(handle: Int, into: ByteArray, wait: Int): Int
-
-    external fun nativeShellWrite(handle: Int, from: ByteArray): Int
-
-    external fun nativeShellResize(handle: Int, rows: Int, columns: Int)
-
-    external fun nativeShellClose(handle: Int)
-
-    external fun nativeShellInterrupt(handle: Int)
-
     external fun nativeVerifySelf(packagePath: String, expectedCertificate: String?): String
 
     external fun nativeCreateKey(directory: String, spec: String, keyPassword: CharArray): String
@@ -2211,6 +2199,7 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
         FONT,
         TABLE,
         SORT,
+        TICK,
     }
 
     private companion object {
@@ -2530,6 +2519,13 @@ internal class Mark(private val shape: Shape, private val colour: Int) : Drawabl
                 path.lineTo(11f, 18.5f)
                 canvas.drawPath(path, paint)
             }
+            Shape.TICK -> {
+                paint.style = Paint.Style.STROKE
+                path.moveTo(6.5f, 12.5f)
+                path.lineTo(10.5f, 16.5f)
+                path.lineTo(17.5f, 8f)
+                canvas.drawPath(path, paint)
+            }
             Shape.SORT -> {
                 paint.style = Paint.Style.STROKE
                 path.moveTo(4.5f, 7f)
@@ -2818,10 +2814,7 @@ class BuilderActivity : Activity() {
     private var secondFolder: String? = null
     private var filesOrder = Order.NAME
     private var filesReversed = false
-    private var shellHandle = -1
-    private var shellReader: Thread? = null
-    private var shellFolder: String? = null
-    private var shellControl = false
+    private val pickedIn = mutableMapOf<String, MutableSet<String>>()
 
     private var keyAlias = DEFAULT_KEY_ALIAS
     private var keyCommonName = DEFAULT_KEY_COMMON_NAME
@@ -3162,7 +3155,6 @@ class BuilderActivity : Activity() {
     override fun onDestroy() {
         keepTheDraft()
         stopTheBuild()
-        closeTheShell()
         runCatching { unregisterReceiver(installAnswer) }
         OmniLog.flushSession()
         super.onDestroy()
@@ -4148,6 +4140,80 @@ class BuilderActivity : Activity() {
     private fun joined(folder: String, name: String): String =
         if (folder.isEmpty()) name else "$folder/$name"
 
+    private fun picks(folder: String): MutableSet<String> =
+        pickedIn.getOrPut(folder) { mutableSetOf() }
+
+    private fun carryOver(root: String, from: String, into: String, moving: Boolean) {
+        val chosen = picks(from).toList()
+        if (chosen.isEmpty()) {
+            return
+        }
+        var done = 0
+        var refused: Refusal? = null
+        for (path in chosen) {
+            val name = path.substringAfterLast('/')
+            val target = joined(into, name)
+            if (target == path) {
+                continue
+            }
+            val answer = runCatching {
+                if (moving) {
+                    Builder.nativeRenamePath(root, path, target)
+                } else {
+                    Builder.nativeCopyPath(root, path, target)
+                }
+            }.getOrNull()
+            val read = answer?.let { runCatching { JSONObject(it) }.getOrNull() }
+            if (read != null && read.optBoolean("done", false)) {
+                done += 1
+            } else if (refused == null && read != null) {
+                refused = Refusal.parse(read)
+            }
+        }
+        picks(from).clear()
+        render(false)
+        if (refused != null) {
+            showRefusal(refused, results)
+        } else {
+            results.addView(
+                notice(getString(R.string.omni_files_carried, done), palette.ok)
+            )
+        }
+    }
+
+    private fun transferRow(root: String, from: String, into: String): View {
+        val many = picks(from).size
+        val row = FlowLayout(this, gap(2), gap(2)).apply {
+            setPadding(0, gap(1), 0, gap(1))
+        }
+        row.addView(
+            TextView(this).apply {
+                text = getString(R.string.omni_files_selected, many)
+                typeface = Type.label
+                setTextColor(palette.muted)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                setPadding(gap(2), gap(2), gap(2), gap(2))
+            }
+        )
+        row.addView(
+            tool(getString(R.string.omni_files_copy_over), palette.accent) {
+                carryOver(root, from, into, false)
+            }
+        )
+        row.addView(
+            tool(getString(R.string.omni_files_move_over), palette.warning) {
+                carryOver(root, from, into, true)
+            }
+        )
+        row.addView(
+            tool(getString(R.string.omni_files_clear_picks), palette.muted) {
+                picks(from).clear()
+                render(false)
+            }
+        )
+        return row
+    }
+
     private fun filePane(
         root: String,
         folder: String,
@@ -4181,6 +4247,9 @@ class BuilderActivity : Activity() {
             tree.addView(fileRow(root, folder, entry, entries, other))
         }
         holder.addView(tree)
+        if (other != null && picks(folder).isNotEmpty()) {
+            holder.addView(transferRow(root, folder, other))
+        }
         return holder
     }
 
@@ -4381,15 +4450,42 @@ class BuilderActivity : Activity() {
                 true
             }
 
+            val chosen = picks(folder).contains(entry.path)
             addView(
-                if (picture) {
-                    thumbnail(absolute, gap(9))
-                } else {
-                    View(context).apply {
-                        background = pill(palette.raised, gap(2).toFloat())
-                        val (shape, tint) = markFor(entry)
-                        foreground = Mark(shape, tint)
-                        importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                FrameLayout(context).apply {
+                    addView(
+                        if (picture) {
+                            thumbnail(absolute, gap(9))
+                        } else {
+                            View(context).apply {
+                                background = pill(palette.raised, gap(2).toFloat())
+                                val (shape, tint) = markFor(entry)
+                                foreground = Mark(shape, tint)
+                                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                            }
+                        },
+                        FrameLayout.LayoutParams(gap(9), gap(9)),
+                    )
+                    if (chosen) {
+                        addView(
+                            View(context).apply {
+                                background = pill(Ink.hot(palette.accent, 0.55f), gap(2).toFloat())
+                                foreground = Mark(Mark.Shape.TICK, palette.background)
+                                importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
+                            },
+                            FrameLayout.LayoutParams(gap(9), gap(9)),
+                        )
+                    }
+                    contentDescription = name
+                    isClickable = true
+                    isFocusable = true
+                    readAs(Button::class.java.name)
+                    setOnClickListener {
+                        val held = picks(folder)
+                        if (!held.remove(entry.path)) {
+                            held.add(entry.path)
+                        }
+                        render(false)
                     }
                 },
                 LinearLayout.LayoutParams(gap(9), gap(9)).apply { marginEnd = gap(3) },
@@ -5326,30 +5422,6 @@ class BuilderActivity : Activity() {
         }
         content.addView(shelf)
         content.addView(quiet(getString(R.string.omni_trash_note)))
-    }
-
-    private fun sendToTheShell(bytes: ByteArray) {
-        if (shellHandle < 0 || bytes.isEmpty()) {
-            return
-        }
-        val said = if (shellControl) {
-            shellControl = false
-            byteArrayOf((bytes[0].toInt().toChar().uppercaseChar().code and 0x1F).toByte())
-        } else {
-            bytes
-        }
-        runCatching { Builder.nativeShellWrite(shellHandle, said) }
-    }
-
-    private fun closeTheShell() {
-        val handle = shellHandle
-        shellHandle = -1
-        shellReader?.interrupt()
-        shellReader = null
-        if (handle >= 0) {
-            runCatching { Builder.nativeShellClose(handle) }
-            OmniLog.event(LogLevel.INFO, "shell", "The shell was closed.")
-        }
     }
 
     private fun renderTrash() {

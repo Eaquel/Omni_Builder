@@ -64,6 +64,11 @@
     <string name="omni_action_more">Más</string>
     <string name="omni_files_root">Proyecto</string>
     <string name="omni_files_empty">Esta carpeta está vacía.</string>
+    <string name="omni_files_selected">%1$d elegidos</string>
+    <string name="omni_files_copy_over">Copiar al otro</string>
+    <string name="omni_files_move_over">Mover al otro</string>
+    <string name="omni_files_clear_picks">Quitar</string>
+    <string name="omni_files_carried">%1$d llevados</string>
     <string name="omni_files_split">DIVIDIR</string>
     <string name="omni_defaults_title">Proyectos nuevos</string>
     <string name="omni_defaults_seal">Cada paquete que se construye aquí lleva un sello contra la clave que lo firmó. Una copia reempaquetada presenta otro certificado, y el sello se niega a arrancar.</string>

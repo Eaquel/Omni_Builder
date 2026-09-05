@@ -64,6 +64,11 @@
     <string name="omni_action_more">更多</string>
     <string name="omni_files_root">项目</string>
     <string name="omni_files_empty">这个文件夹是空的。</string>
+    <string name="omni_files_selected">已选 %1$d</string>
+    <string name="omni_files_copy_over">复制到对面</string>
+    <string name="omni_files_move_over">移动到对面</string>
+    <string name="omni_files_clear_picks">取消</string>
+    <string name="omni_files_carried">已搬运 %1$d</string>
     <string name="omni_files_split">分屏</string>
     <string name="omni_defaults_title">新建项目</string>
     <string name="omni_defaults_seal">这里构建的每个包都带有与签名密钥绑定的封印。重新打包的副本会出示另一份证书，封印将拒绝启动。</string>

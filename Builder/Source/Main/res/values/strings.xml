@@ -64,6 +64,11 @@
     <string name="omni_action_more">More</string>
     <string name="omni_files_root">Project</string>
     <string name="omni_files_empty">This folder is empty.</string>
+    <string name="omni_files_selected">%1$d chosen</string>
+    <string name="omni_files_copy_over">Copy across</string>
+    <string name="omni_files_move_over">Move across</string>
+    <string name="omni_files_clear_picks">Clear</string>
+    <string name="omni_files_carried">%1$d carried across</string>
     <string name="omni_files_split">SPLIT</string>
     <string name="omni_defaults_title">New projects</string>
     <string name="omni_defaults_seal">Every package this builds carries a seal against the key that signed it. A repackaged copy presents a different certificate, and the seal refuses to start.</string>

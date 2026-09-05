@@ -64,6 +64,11 @@
     <string name="omni_action_more">Altro</string>
     <string name="omni_files_root">Progetto</string>
     <string name="omni_files_empty">Questa cartella è vuota.</string>
+    <string name="omni_files_selected">%1$d scelti</string>
+    <string name="omni_files_copy_over">Copia di là</string>
+    <string name="omni_files_move_over">Sposta di là</string>
+    <string name="omni_files_clear_picks">Azzera</string>
+    <string name="omni_files_carried">%1$d portati</string>
     <string name="omni_files_split">DIVIDI</string>
     <string name="omni_defaults_title">Nuovi progetti</string>
     <string name="omni_defaults_seal">Ogni pacchetto prodotto qui porta un sigillo legato alla chiave che lo ha firmato. Una copia riconfezionata presenta un altro certificato, e il sigillo rifiuta di avviarsi.</string>
