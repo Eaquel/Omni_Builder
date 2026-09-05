@@ -30230,6 +30230,7 @@ public class Screen extends Activity implements View.OnClickListener {
             fields: Vec::new(),
             methods: vec![crate::jvm::Member {
                 access_flags: 0x0001,
+                constant: None,
                 name: "boom".to_string(),
                 descriptor: "()V".to_string(),
                 code: Some(crate::jvm::Code {

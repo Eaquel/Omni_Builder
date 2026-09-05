@@ -490,7 +490,7 @@ pub const SUBSYSTEMS: &[Subsystem] = &[
         name: "DEX writer",
         status: Status::Partial,
         directive_section: 21,
-        summary: "Writes a classes.dex: sorted string, type, prototype, field and method pools, class definitions with their interfaces and annotations, static and instance fields, direct and virtual methods, code items with their exception handlers and register counts, and debug information carrying the line a bytecode address came from. More references than one dex can name become more than one dex. dexdump reads what this writes and the Core reads it back.",
+        summary: "Writes a classes.dex: sorted string, type, prototype, field and method pools, class definitions with their interfaces and annotations, static and instance fields with the values a class declares for them, direct and virtual methods, code items with their exception handlers and register counts, and debug information carrying the line a bytecode address came from. More references than one dex can name become more than one dex. dexdump reads what this writes and the Core reads it back.",
         missing: &[
             "Splitting is by count and not by call graph: a class lands in the dex the order reached it in rather than beside the classes it calls.",
             "No invokedynamic and no method handles, because nothing upstream produces one.",
@@ -27183,6 +27183,7 @@ pub mod dexwrite {
         pub reference: FieldRef,
         pub access_flags: u32,
         pub annotations: Vec<crate::jvm::Annotation>,
+        pub value: Option<crate::jvm::Element>,
     }
 
     #[derive(Clone, Debug)]
@@ -27351,6 +27352,7 @@ pub mod dexwrite {
         pub(super) const ENUM: u8 = 0x1b;
         pub(super) const ARRAY: u8 = 0x1c;
         pub(super) const ANNOTATION: u8 = 0x1d;
+        pub(super) const NULL: u8 = 0x1e;
         pub(super) const BOOLEAN: u8 = 0x1f;
     }
 
@@ -27447,6 +27449,20 @@ pub mod dexwrite {
             }
         }
         Ok(())
+    }
+
+    fn write_nothing(descriptor: &str, out: &mut Vec<u8>) {
+        match descriptor.chars().next() {
+            Some('L') | Some('[') => out.push(value::NULL),
+            Some('Z') => out.push(value::BOOLEAN),
+            Some('B') => out.extend_from_slice(&[value::BYTE, 0]),
+            Some('C') => out.extend_from_slice(&[value::CHAR, 0]),
+            Some('S') => out.extend_from_slice(&[value::SHORT, 0]),
+            Some('J') => out.extend_from_slice(&[value::LONG, 0]),
+            Some('F') => out.extend_from_slice(&[value::FLOAT, 0]),
+            Some('D') => out.extend_from_slice(&[value::DOUBLE, 0]),
+            _ => out.extend_from_slice(&[value::INT, 0]),
+        }
     }
 
     fn write_annotation(
@@ -27613,6 +27629,9 @@ pub mod dexwrite {
             for one in &field.annotations {
                 needs.annotation(one);
             }
+            if let Some(held) = &field.value {
+                needs.element(held);
+            }
         }
         for method in class.methods() {
             needs.method(&method.reference);
@@ -27751,6 +27770,9 @@ pub mod dexwrite {
             for field in class.fields() {
                 for one in &field.annotations {
                     learn_annotation(&mut pools, one);
+                }
+                if let Some(held) = &field.value {
+                    learn_element(&mut pools, held);
                 }
             }
             for method in class.methods() {
@@ -28315,6 +28337,32 @@ pub mod dexwrite {
             code_offsets.push(here);
         }
 
+        let mut static_value_offsets = vec![0u32; classes.len()];
+        for (index, class) in classes.iter().enumerate() {
+            let mut held = Vec::with_capacity(class.static_fields.len());
+            for field in &class.static_fields {
+                held.push((
+                    pools.index_of_field(&field.reference)?,
+                    field.reference.descriptor.as_str(),
+                    field.value.as_ref(),
+                ));
+            }
+            held.sort_by_key(|(at, _, _)| *at);
+            let Some(last) = held.iter().rposition(|(_, _, value)| value.is_some()) else {
+                continue;
+            };
+            let mut body = Vec::new();
+            uleb128(&mut body, (last + 1) as u32);
+            for (_, descriptor, value) in held.iter().take(last + 1) {
+                match value {
+                    Some(one) => write_element(&pools, one, &mut body)?,
+                    None => write_nothing(descriptor, &mut body),
+                }
+            }
+            static_value_offsets[index] = (data_off + data.len()) as u32;
+            data.extend_from_slice(&body);
+        }
+
         let mut class_data_offsets = Vec::with_capacity(classes.len());
         for (index, class) in classes.iter().enumerate() {
             class_data_offsets.push((data_off + data.len()) as u32);
@@ -28412,6 +28460,13 @@ pub mod dexwrite {
         if !pools.fields.is_empty() {
             map.push((0x0004, pools.fields.len() as u32, field_ids_off as u32));
         }
+        if let Some(first) = static_value_offsets.iter().copied().find(|at| *at != 0) {
+            map.push((
+                0x2005,
+                static_value_offsets.iter().filter(|at| **at != 0).count() as u32,
+                first,
+            ));
+        }
         if let Some(first) = first_type_list {
             map.push((0x1001, type_lists, first));
         }
@@ -28496,7 +28551,7 @@ pub mod dexwrite {
             }
             out.extend_from_slice(&directory_offsets[index].to_le_bytes());
             out.extend_from_slice(&class_data_offsets[index].to_le_bytes());
-            out.extend_from_slice(&0u32.to_le_bytes());
+            out.extend_from_slice(&static_value_offsets[index].to_le_bytes());
         }
 
         debug_assert_eq!(out.len(), data_off);
@@ -30918,6 +30973,7 @@ pub mod dalvik {
 
                 access_flags: 0x0002 | 0x0010 | 0x1000,
                 annotations: Vec::new(),
+                value: None,
             });
         }
 
@@ -31322,6 +31378,7 @@ pub mod dalvik {
                     descriptor: field.descriptor.clone(),
                 },
                 access_flags: u32::from(field.access_flags),
+                value: field.constant.clone(),
                 annotations: {
                     let mut held = field.annotations.clone();
                     held.extend(what_the_platform_is_told(
@@ -31829,30 +31886,39 @@ public final class {class_name} extends ContentProvider {{
         return new String(out);
     }}
 
-    public static boolean signedByTheSameHand(Context context) {{
+    public static String whoSignedIt(Context context) {{
         try {{
             PackageManager packages = context.getPackageManager();
             PackageInfo info = packages.getPackageInfo(
                 context.getPackageName(), PackageManager.GET_SIGNING_CERTIFICATES);
             SigningInfo signing = info.signingInfo;
             if (signing == null) {{
-                return false;
+                return "the package manager reported no signing information";
             }}
             Signature[] held = signing.getApkContentsSigners();
             if (held == null || held.length == 0) {{
-                return false;
+                return "the package manager reported no signer";
             }}
+            StringBuilder seen = new StringBuilder();
             for (int at = 0; at < held.length; at++) {{
                 MessageDigest digest = MessageDigest.getInstance("SHA-256");
-                String seen = written(digest.digest(held[at].toByteArray()));
-                if (MADE_BY.equals(seen)) {{
-                    return true;
+                String one = written(digest.digest(held[at].toByteArray()));
+                if (MADE_BY.equals(one)) {{
+                    return null;
                 }}
+                if (at > 0) {{
+                    seen.append(", ");
+                }}
+                seen.append(one);
             }}
-            return false;
+            return seen.toString();
         }} catch (Exception why) {{
-            return false;
+            return why.getClass().getName() + ": " + why.getMessage();
         }}
+    }}
+
+    public static boolean signedByTheSameHand(Context context) {{
+        return whoSignedIt(context) == null;
     }}
 
     public static boolean builtForDebugging(Context context) {{
@@ -31865,16 +31931,32 @@ public final class {class_name} extends ContentProvider {{
     }}
 
     public static boolean intact(Context context) {{
-        return signedByTheSameHand(context)
-            && namedAsItWasBuilt(context)
-            && !builtForDebugging(context);
+        return whyItIsNot(context) == null;
+    }}
+
+    public static String whyItIsNot(Context context) {{
+        if (!namedAsItWasBuilt(context)) {{
+            return "built as {package}, running as " + context.getPackageName();
+        }}
+        if (builtForDebugging(context)) {{
+            return "the package is marked debuggable";
+        }}
+        String signer = whoSignedIt(context);
+        if (signer != null) {{
+            return "built by " + MADE_BY + ", signed by " + signer;
+        }}
+        return null;
     }}
 
     @Override
     public boolean onCreate() {{
         Context context = getContext();
-        if (context != null && !intact(context)) {{
-            Log.e(TAG, "This package is not the one that was built and signed here.");
+        if (context == null) {{
+            return true;
+        }}
+        String why = whyItIsNot(context);
+        if (why != null) {{
+            Log.e(TAG, "This package is not the one that was built and signed here: " + why);
             Process.killProcess(Process.myPid());
         }}
         return true;
@@ -39883,6 +39965,8 @@ pub mod jvm {
         pub name: String,
         pub descriptor: String,
 
+        pub constant: Option<Element>,
+
         pub code: Option<Code>,
 
         pub signature: Option<String>,
@@ -40537,6 +40621,24 @@ pub mod jvm {
         out
     }
 
+    fn held_constant(constants: &[Constant], index: u16, descriptor: &str) -> Option<Element> {
+        let held = constants.get(usize::from(index))?;
+        Some(match held {
+            Constant::Integer(number) => match descriptor.chars().next() {
+                Some('Z') => Element::Boolean(*number != 0),
+                Some('B') => Element::Byte(*number as i8),
+                Some('C') => Element::Char(*number as u16),
+                Some('S') => Element::Short(*number as i16),
+                _ => Element::Int(*number),
+            },
+            Constant::Float(bits) => Element::Float(*bits),
+            Constant::Long(number) => Element::Long(*number),
+            Constant::Double(bits) => Element::Double(*bits),
+            Constant::String(at) => Element::Text(constant_utf8(constants, *at, "constant").ok()?),
+            _ => return None,
+        })
+    }
+
     fn read_members(
         reader: &mut Reader<'_>,
         constants: &[Constant],
@@ -40553,6 +40655,7 @@ pub mod jvm {
             let attribute_count = reader.u16()?;
 
             let mut code = None;
+            let mut constant = None;
             let mut signature = None;
             let mut throws: Vec<String> = Vec::new();
             let mut annotations: Vec<Annotation> = Vec::new();
@@ -40574,6 +40677,14 @@ pub mod jvm {
                     let content = reader.slice_at(start as u64, 2)?;
                     let index = u16::from_be_bytes([content[0], content[1]]);
                     signature = constant_utf8(constants, index, "signature").ok();
+                }
+
+                if named == "ConstantValue" && length == 2 {
+                    let content = reader.slice_at(start as u64, 2)?;
+                    let index = u16::from_be_bytes([content[0], content[1]]);
+                    let descriptor = constant_utf8(constants, descriptor_index, "descriptor")
+                        .unwrap_or_default();
+                    constant = held_constant(constants, index, &descriptor);
                 }
 
                 if named == "RuntimeVisibleAnnotations" || named == "RuntimeInvisibleAnnotations" {
@@ -40631,6 +40742,7 @@ pub mod jvm {
                     descriptor_index,
                     &format!("{what} descriptor"),
                 )?,
+                constant,
                 code,
                 signature,
                 throws,
@@ -48627,6 +48739,58 @@ public final class Arrays {
     }
 
     #[test]
+    fn a_constant_a_class_declares_reaches_the_package_it_is_written_into() {
+        let classpath = crate::compilers::java::Classpath::new();
+        let fingerprint = "ab".repeat(32).to_uppercase();
+        let sealed = crate::seal::source("com.tr.yt.brick", &fingerprint);
+        let mut classes = Vec::new();
+        for (name, bytes) in crate::compilers::java::compile(&sealed, &classpath).expect("compiles")
+        {
+            let class = crate::jvm::read(&bytes)
+                .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
+            let held = class
+                .fields
+                .iter()
+                .find(|one| one.name == "MADE_BY")
+                .expect("the seal declares what made it");
+            assert_eq!(
+                held.constant,
+                Some(crate::jvm::Element::Text(fingerprint.clone())),
+                "the class file carries the value"
+            );
+            classes.extend(crate::dalvik::translate_class(&class).expect("it translates"));
+        }
+
+        let dex = crate::dexwrite::write(&classes, &[]).expect("it writes");
+        crate::dex::integrity(&dex).expect("the file is whole");
+
+        let at = |where_at: usize| -> u32 {
+            u32::from_le_bytes(dex[where_at..where_at + 4].try_into().unwrap())
+        };
+        let how_many = at(0x60) as usize;
+        let class_defs = at(0x64) as usize;
+        assert!(how_many > 0, "there is a class");
+        let mut with_values = 0;
+        for index in 0..how_many {
+            if at(class_defs + index * 32 + 28) != 0 {
+                with_values += 1;
+            }
+        }
+        assert_eq!(with_values, 1, "the class points at the values it declares");
+
+        if let Some(said) = dexdump_text(&dex) {
+            assert!(
+                said.contains(&fingerprint),
+                "dexdump reads the value back: {said}"
+            );
+            assert!(
+                said.contains("OmniSeal"),
+                "dexdump reads the tag back: {said}"
+            );
+        }
+    }
+
+    #[test]
     fn a_package_carries_as_many_dex_files_as_it_takes() {
         let classpath = crate::compilers::java::Classpath::new();
         let mut classes = Vec::new();
@@ -49614,6 +49778,7 @@ public final class MainActivity extends Activity {
             fields: Vec::new(),
             methods: vec![crate::jvm::Member {
                 access_flags: 0x0009,
+                constant: None,
                 name: "run".to_string(),
                 descriptor: descriptor.to_string(),
                 code: Some(crate::jvm::Code {
@@ -53922,6 +54087,7 @@ public final class MainActivity extends Activity {
         )];
         class.instance_fields = vec![
             super::dexwrite::Field {
+                value: None,
                 reference: super::dexwrite::FieldRef {
                     class: descriptor.to_string(),
                     name: "count".to_string(),
@@ -53938,9 +54104,11 @@ public final class MainActivity extends Activity {
                 },
                 access_flags: 0x2,
                 annotations: Vec::new(),
+                value: None,
             },
         ];
         class.static_fields = vec![super::dexwrite::Field {
+            value: None,
             reference: super::dexwrite::FieldRef {
                 class: descriptor.to_string(),
                 name: "TAG".to_string(),
