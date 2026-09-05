@@ -29710,6 +29710,35 @@ pub mod dalvik {
             Ok(())
         }
 
+        fn invoked_by(&self, opcode: u8, class: &str, name: &str, descriptor: &str) -> u16 {
+            match opcode {
+                0xb8 => 0x0071,
+                0xb9 => 0x0072,
+                _ if name == "<init>" || name == "<clinit>" => 0x0070,
+                _ if self.declares_it_privately(class, name, descriptor) => 0x0070,
+                0xb7 if self.reaches_up_to(class) => 0x006f,
+                0xb7 => 0x0070,
+                _ => 0x006e,
+            }
+        }
+
+        fn reaches_up_to(&self, class: &str) -> bool {
+            let named = class.replace('.', "/");
+            let same = |held: &str| held.replace('.', "/") == named;
+            self.class.superclass.as_deref().is_some_and(same)
+                || self.class.interfaces.iter().any(|one| same(one))
+        }
+
+        fn declares_it_privately(&self, class: &str, name: &str, descriptor: &str) -> bool {
+            const PRIVATE: u16 = 0x0002;
+            if class.replace('.', "/") != self.class.name.replace('.', "/") {
+                return false;
+            }
+            self.class.methods.iter().any(|one| {
+                one.access_flags & PRIVATE != 0 && one.name == name && one.descriptor == descriptor
+            })
+        }
+
         fn call(&mut self, opcode: u8, index: u16, start: usize) -> Result<(), Diagnostic> {
             let (class, name, descriptor) = self.member_at(index, start)?;
             let Some((parameters, returns)) = split_descriptor(&descriptor) else {
@@ -29720,12 +29749,7 @@ pub mod dalvik {
             let argument_words: u16 =
                 parameters.iter().map(|one| width_of(one)).sum::<u16>() + u16::from(opcode != 0xb8);
 
-            let dalvik = match opcode {
-                0xb6 => 0x006eu16,
-                0xb7 => 0x0070,
-                0xb8 => 0x0071,
-                _ => 0x0072,
-            };
+            let dalvik = self.invoked_by(opcode, &class, &name, &descriptor);
 
             let reference = MethodRef {
                 class: format!("L{class};"),
@@ -48736,6 +48760,98 @@ public final class Arrays {
             over_seal.contains(&0x48) && !over_seal.contains(&0x47),
             "the seal compiled into every package reads its bytes as bytes: {over_seal:02x?}"
         );
+    }
+
+    #[test]
+    fn a_call_up_and_a_call_inward_are_told_apart() {
+        let source = r#"
+public final class Family {
+
+    static class Elder {
+        String greet() {
+            return "hello";
+        }
+    }
+
+    static final class Young extends Elder {
+
+        @Override
+        String greet() {
+            return super.greet() + hush();
+        }
+
+        private String hush() {
+            return "!";
+        }
+    }
+}
+"#;
+        let classpath = crate::compilers::java::Classpath::new();
+        let mut classes = Vec::new();
+        for (name, bytes) in
+            crate::compilers::java::compile(source.trim_start(), &classpath).expect("it compiles")
+        {
+            let class = crate::jvm::read(&bytes)
+                .unwrap_or_else(|error| panic!("{name} does not read back: {error:?}"));
+            classes.extend(crate::dalvik::translate_class(&class).expect("it translates"));
+        }
+
+        let young = classes
+            .iter()
+            .find(|one| one.descriptor.ends_with("Young;"))
+            .expect("the younger class is there");
+
+        assert!(
+            young
+                .virtual_methods
+                .iter()
+                .any(|one| one.reference.name == "greet"),
+            "the method that is overridden is a virtual one"
+        );
+        assert!(
+            young
+                .direct_methods
+                .iter()
+                .any(|one| one.reference.name == "hush"),
+            "the method that is private is a direct one"
+        );
+
+        let greet = young
+            .virtual_methods
+            .iter()
+            .find(|one| one.reference.name == "greet")
+            .expect("it is written out");
+        let calls: Vec<(String, u8)> = greet
+            .instructions
+            .iter()
+            .filter_map(|one| match &one.operand {
+                crate::dexwrite::Operand::Method(reference) => Some((
+                    reference.name.clone(),
+                    (one.units.first().copied().unwrap_or_default() & 0xff) as u8,
+                )),
+                _ => None,
+            })
+            .collect();
+
+        assert!(
+            calls.contains(&("greet".to_string(), 0x6f)),
+            "a call up into the superclass is invoke-super: {calls:02x?}"
+        );
+        assert!(
+            !calls.contains(&("greet".to_string(), 0x70)),
+            "a call up into the superclass is not invoke-direct: {calls:02x?}"
+        );
+        assert!(
+            calls.contains(&("hush".to_string(), 0x70)),
+            "a call to a private method is invoke-direct: {calls:02x?}"
+        );
+        assert!(
+            !calls.contains(&("hush".to_string(), 0x6e)),
+            "a call to a private method is not invoke-virtual: {calls:02x?}"
+        );
+
+        let dex = crate::dexwrite::write(&classes, &[]).expect("it writes");
+        crate::dex::integrity(&dex).expect("the file is whole");
     }
 
     #[test]
